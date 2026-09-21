@@ -2137,8 +2137,85 @@ def _load_flow_files(paths) -> list[dict]:
         except Exception as exc:
             print(f"[warn] --flows: {fp} の step 構造が不正（skip）: {exc}")
             continue
+        # action 名の妥当性を **読み込み時** に検証する。ScanFlow.from_dict は任意の action
+        # 文字列を受けるため、`navigat` のような綴り誤りは replay 時まで気づかれず、しかも
+        # _match_pre_attack_flow が navigate step を見つけられず flow が黙って選ばれない
+        # （前提未適用のまま警告も出ない）＝偽陰性になる（Codex #170 P2）。未知 action を含む
+        # flow はここで skip し、理由を明示する。
+        _VALID_FLOW_ACTIONS = {"navigate", "fill", "submit", "click", "wait"}
+        unknown = sorted({
+            str(s.get("action", "")) for s in candidate["steps"]
+            if isinstance(s, dict) and str(s.get("action", "")) not in _VALID_FLOW_ACTIONS
+        })
+        if unknown:
+            print(
+                f"[warn] --flows: {fp} に未知の action {unknown} が含まれます（skip）。"
+                f"有効: {sorted(_VALID_FLOW_ACTIONS)}"
+            )
+            continue
         flows.append(candidate)
-    return flows
+
+    # 同一の最終 navigate 先を持つ flow が複数あると、_match_pre_attack_flow は最初の1つしか
+    # 返さず残りが黙って無視され、そのページが誤った state で検査される（Codex #170 P2）。
+    # 「全 flow を再生する」という宣言に合わせ、同一 destination の flow は前提 step（最終
+    # navigate 以外）を file 順に連結し、最後に共有の navigate を1回置いた 1 本へ統合する。
+    return _merge_flows_by_destination(flows)
+
+
+def _final_navigate_url(steps: list) -> str | None:
+    """steps の最後の navigate action の URL を返す（無ければ None）。"""
+    for step in reversed(steps):
+        if isinstance(step, dict) and str(step.get("action", "")) == "navigate":
+            return str(step.get("url", ""))
+    return None
+
+
+def _merge_flows_by_destination(flows: list[dict]) -> list[dict]:
+    """最終 navigate 先が同一の flow を、前提 step を連結した 1 本へ統合する（#170 P2）。
+
+    destination を持たない flow や一意な destination の flow はそのまま保持する。順序は
+    最初の出現順を維持する。純粋関数（I/O なし）。
+    """
+    order: list[str] = []
+    groups: dict[str, list[dict]] = {}
+    passthrough: list[dict] = []
+    for flow in flows:
+        dest = _final_navigate_url(flow.get("steps", []))
+        if not dest:
+            passthrough.append(flow)
+            continue
+        if dest not in groups:
+            groups[dest] = []
+            order.append(dest)
+        groups[dest].append(flow)
+
+    merged: list[dict] = []
+    for dest in order:
+        group = groups[dest]
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        # 各 flow の「最終 navigate 以外」を file 順に連結し、末尾に共有 navigate を1回置く。
+        combined_steps: list = []
+        for flow in group:
+            steps = flow.get("steps", [])
+            last_nav_idx = None
+            for i in range(len(steps) - 1, -1, -1):
+                s = steps[i]
+                if isinstance(s, dict) and str(s.get("action", "")) == "navigate":
+                    last_nav_idx = i
+                    break
+            combined_steps.extend(
+                s for i, s in enumerate(steps) if i != last_nav_idx
+            )
+        combined_steps.append({"action": "navigate", "url": dest})
+        names = "+".join(str(f.get("name", "")) for f in group)
+        print(
+            f"[info] --flows: 同一遷移先 {dest} の flow を {len(group)} 本統合しました "
+            f"（{names}）。前提 step を順に再生します。"
+        )
+        merged.append({"name": names, "steps": combined_steps})
+    return merged + passthrough
 
 
 # setup 提案が出してよい flag の明示許可リスト（#170 P2）。すべて値を取らない boolean

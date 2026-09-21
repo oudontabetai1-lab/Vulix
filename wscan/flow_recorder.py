@@ -100,7 +100,14 @@ class FlowRecorder:
                         // CSS.escape で id を安全化（`user:name` 等の CSS 特殊文字が
                         // querySelector で pseudo-class 等と誤解釈され throw するのを防ぐ・#170 P2）。
                         const esc = (window.CSS && CSS.escape) ? CSS.escape(el.id) : el.id;
-                        const sel = el.id ? '#' + esc : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase());
+                        const escv = (v) => (window.CSS && CSS.escape) ? CSS.escape(v) : v;
+                        let sel = el.id ? '#' + esc : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase());
+                        // radio/checkbox は name を共有するのが普通で、[name="plan"] だけだと
+                        // グループ内のどの選択肢か判別できず replay が誤って先頭を click する。
+                        // id が無い場合は value を弁別子に加えて一意化する（#170 P2）。
+                        if (!el.id && el.name && (el.type === 'radio' || el.type === 'checkbox') && el.value) {{
+                            sel = '[name="' + el.name + '"][value="' + escv(el.value) + '"]';
+                        }}
                         // checkbox/radio は value ではなく checked 状態が本質。fill は value を
                         // 代入するだけで checked を変えず、規約同意等の前提を再現できない。click で
                         // 相互作用そのものを記録・再現する（#170 P2）。

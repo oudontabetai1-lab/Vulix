@@ -94,3 +94,46 @@ def test_roundtrip_recorded_fill_uses_selector(tmp_path):
     assert ok is True
     # fill が [selector, field, value] を JS へ渡し、selector で要素解決する。
     assert captured["arg"] == ["#user", "", "secret"]
+
+
+def test_load_flow_files_skips_unknown_action(tmp_path, capsys):
+    # action 綴り誤り（navigat）を含む flow は読み込み時に skip される（Codex #170 P2）。
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps([{"action": "navigat", "url": "http://t.test/cart"}]))
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps([{"action": "navigate", "url": "http://t.test/ok"}]))
+    flows = _load_flow_files([str(bad), str(good)])
+    names = {f["name"] for f in flows}
+    assert "good" in names and "bad" not in names
+    assert "未知の action" in capsys.readouterr().out
+
+
+def test_load_flow_files_merges_same_destination(tmp_path):
+    # 同一の最終 navigate 先を持つ2 flow は前提 step を連結した 1 本へ統合される（Codex #170 P2）。
+    a = tmp_path / "cart.json"
+    a.write_text(json.dumps([
+        {"action": "click", "selector": "#add-to-cart"},
+        {"action": "navigate", "url": "http://t.test/checkout"},
+    ]))
+    b = tmp_path / "coupon.json"
+    b.write_text(json.dumps([
+        {"action": "fill", "selector": "#code", "value": "SAVE10"},
+        {"action": "navigate", "url": "http://t.test/checkout"},
+    ]))
+    flows = _load_flow_files([str(a), str(b)])
+    assert len(flows) == 1                      # 1 本へ統合
+    steps = flows[0]["steps"]
+    actions = [s["action"] for s in steps]
+    # 両 flow の前提 step が保持され、共有 navigate は末尾に1回だけ。
+    assert actions.count("navigate") == 1
+    assert steps[-1] == {"action": "navigate", "url": "http://t.test/checkout"}
+    assert {"click", "fill"} <= set(actions)
+
+
+def test_merge_flows_preserves_unique_and_destinationless(tmp_path):
+    from main import _merge_flows_by_destination, _final_navigate_url
+    f_no_dest = {"name": "n", "steps": [{"action": "click", "selector": "#x"}]}
+    f_uniq = {"name": "u", "steps": [{"action": "navigate", "url": "http://t/only"}]}
+    out = _merge_flows_by_destination([f_uniq, f_no_dest])
+    assert f_uniq in out and f_no_dest in out    # 一意 dest と dest 無しはそのまま
+    assert _final_navigate_url(f_no_dest["steps"]) is None
