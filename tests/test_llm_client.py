@@ -344,10 +344,6 @@ class GeminiRemediationRegressionTests(unittest.TestCase):
         self.assertIn("Gemini が生成", text)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class LLMObservabilityTests(unittest.TestCase):
     """complete_text が LLM 呼び出しを本文なしで記録する（0065）。"""
 
@@ -436,3 +432,7 @@ class RecordLLMCallHelperTests(unittest.TestCase):
         pg = types.SimpleNamespace()  # request_logger 属性なし
         record_llm_call(pg, provider="ollama", role="planner", model="m",
                         timeout_seconds=None, elapsed_seconds=1.0, status="empty")  # 例外を出さない
+
+
+if __name__ == "__main__":
+    unittest.main()

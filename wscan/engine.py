@@ -6572,12 +6572,16 @@ class ScanEngine:
             except Exception:
                 pass
 
-        self._phase_report()
-        # A-1: post-scan AI analysis (if enabled)
+        # A-1: post-scan AI analysis を _phase_report（evidence.json への observability 集計を含む）
+        # より前に実行する。後にすると report-role の LLM 呼び出しが llm_calls.jsonl に追記される
+        # 一方で evidence.json の llm_calls 総数は集計前の値で固定され、両者が食い違う（Codex #172 P2）。
+        # _ai_analysis_report は report 成果物に依存せず ai_analysis.md 等を自前で書くため前倒し可。
+        ai_text = ""
         if self.enable_ai_analysis:
             ai_text = await self._ai_analysis_report()
-            if ai_text and self.monitor:
-                await self.monitor.emit("ai_analysis", {"text": ai_text})
+        self._phase_report()
+        if ai_text and self.monitor:
+            await self.monitor.emit("ai_analysis", {"text": ai_text})
 
     def _save_evidence(self):
         findings_dicts = [f.to_dict() for f in self.all_findings]

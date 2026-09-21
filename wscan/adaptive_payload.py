@@ -573,7 +573,11 @@ class AdaptivePayloadEngine:
         import time as _time
         from .llm_client import record_llm_call
         _t0 = _time.monotonic()
+        _resolved_model = ""
         with self.pg.use_role("adaptive"):
+            # role モデルは context 内でのみ解決される（*_model は _active_role 依存の property）。
+            # 監査に実際に使ったモデルを残すため context 内で捕捉する（Codex #172 P2）。
+            _resolved_model = getattr(self.pg, f"{provider}_model", "") or ""
             if provider == "claude":
                 raw = await self._stream_claude(prompt)
             elif provider == "openai":
@@ -583,11 +587,14 @@ class AdaptivePayloadEngine:
             else:
                 raw = await self._stream_ollama(prompt)
         # LLM 呼び出し観測性（0065）。mutate_payload は complete_text 非経由の自前ストリーミング。
-        # 各 _stream_*/_call_gemini は失敗を握って None を返すため ok/empty のみ区別（本文なし）。
+        # timeout_seconds は各 backend の実効 timeout（openai/ollama=90s, gemini=60s, claude は
+        # SDK stream で明示 deadline 無し=None・Codex #172 P2）。失敗種別の transient/permanent
+        # 細分は self-streaming 経路の status 露出を要する follow-up で対応する。
+        _adaptive_timeout = {"openai": 90.0, "ollama": 90.0, "gemini": 60.0}.get(provider)
         record_llm_call(
             self.pg, provider=provider, role="adaptive",
-            model=getattr(self.pg, f"{provider}_model", "") or "",
-            timeout_seconds=None, elapsed_seconds=_time.monotonic() - _t0,
+            model=_resolved_model,
+            timeout_seconds=_adaptive_timeout, elapsed_seconds=_time.monotonic() - _t0,
             status=("ok" if raw else "empty"),
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(raw) if isinstance(raw, str) else 0,

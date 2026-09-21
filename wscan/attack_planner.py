@@ -563,7 +563,12 @@ Consider stored / second-order attacks carefully:
         import time as _time
         from .llm_client import record_llm_call
         _t0 = _time.monotonic()
+        _resolved_model = ""
         with self.payload_gen.use_role("planner"):
+            # role モデルは context 内でのみ解決される（claude_model 等は _active_role 依存の
+            # property）。監査に「実際に使ったモデル」を残すため context 内で捕捉する。context を
+            # 抜けた後に読むと provider 既定に戻ってしまう（Codex #172 P2）。
+            _resolved_model = getattr(self.payload_gen, f"{provider}_model", "") or ""
             if provider == "claude":
                 raw = await self._call_claude(prompt)
             elif provider == "openai":
@@ -573,11 +578,14 @@ Consider stored / second-order attacks carefully:
             else:
                 raw = await self._call_ollama(prompt)
         # LLM 呼び出し観測性（0065）。planner は complete_text 非経由の自前実装なので個別記録する。
-        # 各 _call_* は失敗を握って None を返すため、ここでは ok/empty のみ区別（本文なし・elapsed 記録）。
+        # timeout_seconds は各 provider の実効 HTTP timeout（claude は SDK stream で明示 deadline を
+        # 持たないため None・Codex #172 P2）。失敗種別の transient/permanent 細分は self-streaming
+        # 経路の status 露出（#173 の streaming-deadline と同経路）を要する follow-up で対応する。
+        _planner_timeout = {"openai": 90.0, "ollama": 90.0, "gemini": 90.0}.get(provider)
         record_llm_call(
             self.payload_gen, provider=provider, role="planner",
-            model=getattr(self.payload_gen, f"{provider}_model", "") or "",
-            timeout_seconds=None, elapsed_seconds=_time.monotonic() - _t0,
+            model=_resolved_model,
+            timeout_seconds=_planner_timeout, elapsed_seconds=_time.monotonic() - _t0,
             status=("ok" if raw else "empty"),
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(raw) if isinstance(raw, str) else 0,
