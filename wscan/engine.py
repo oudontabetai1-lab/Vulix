@@ -6572,16 +6572,39 @@ class ScanEngine:
             except Exception:
                 pass
 
-        # A-1: post-scan AI analysis を _phase_report（evidence.json への observability 集計を含む）
-        # より前に実行する。後にすると report-role の LLM 呼び出しが llm_calls.jsonl に追記される
-        # 一方で evidence.json の llm_calls 総数は集計前の値で固定され、両者が食い違う（Codex #172 P2）。
-        # _ai_analysis_report は report 成果物に依存せず ai_analysis.md 等を自前で書くため前倒し可。
-        ai_text = ""
+        # core report/evidence を先に永続化する。AI 分析(_ai_analysis_report)は集約1+finding毎
+        # 最大10リクエスト×60s×retries で数十分かかりうるため、先に決定論スキャンの成果物を確実に
+        # 残し、途中中断でも core report を失わない（Codex #172 P2）。
+        self._phase_report()
+        # A-1: post-scan AI analysis（永続化後に実行）。その report-role 呼び出しは evidence.json の
+        # llm_calls 集計後に llm_calls.jsonl へ追記されるため、完了後に集計値だけ refresh して
+        # 監査ファイルと総数を一致させる（core report/report ファイルはそのまま）。
         if self.enable_ai_analysis:
             ai_text = await self._ai_analysis_report()
-        self._phase_report()
-        if ai_text and self.monitor:
-            await self.monitor.emit("ai_analysis", {"text": ai_text})
+            self._refresh_evidence_observability()
+            if ai_text and self.monitor:
+                await self.monitor.emit("ai_analysis", {"text": ai_text})
+
+    def _refresh_evidence_observability(self) -> None:
+        """AI 分析後に evidence.json の observability（llm_calls 総数）だけ更新する（Codex #172 P2）。
+
+        core report/evidence は _phase_report で先に永続化済み。post-scan AI 呼び出しは集計後に
+        llm_calls.jsonl へ追記されるため、その分を反映して総数を実態に合わせる。失敗しても
+        既存の成果物は壊さない（ベストエフォート）。
+        """
+        import json
+        path = self.output_dir / "evidence.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        try:
+            data["observability"] = self._observability_report_data()
+            path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
 
     def _save_evidence(self):
         findings_dicts = [f.to_dict() for f in self.all_findings]

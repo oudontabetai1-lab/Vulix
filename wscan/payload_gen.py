@@ -181,7 +181,13 @@ class PayloadGenerator:
             if api_key:
                 try:
                     import anthropic
-                    self._anthropic_client = anthropic.Anthropic(api_key=api_key)
+                    # SDK 内蔵 retry を無効化する。有効だと接続失敗/throttle/5xx を SDK が
+                    # 透過的に再試行し、complete_text 監査の retries（外側ループ由来）が実際の
+                    # 試行回数を過少計上する。retry は complete_text 側で一元管理し監査値を
+                    # 正本にする（Codex #172 P2）。
+                    self._anthropic_client = anthropic.Anthropic(
+                        api_key=api_key, max_retries=0
+                    )
                 except ImportError:
                     pass
         return self._anthropic_client

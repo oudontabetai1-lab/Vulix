@@ -434,5 +434,41 @@ class RecordLLMCallHelperTests(unittest.TestCase):
                         timeout_seconds=None, elapsed_seconds=1.0, status="empty")  # 例外を出さない
 
 
+class RemediationRoleAndRetryTests(unittest.TestCase):
+    """remediation の report role 付与と Anthropic SDK retry 無効化（Codex #172 P2）。"""
+
+    def test_remediation_call_uses_report_role(self):
+        from wscan import remediation, llm_client
+        from wscan.payload_gen import PayloadGenerator
+        # provider="none" は use_role が role を設定しない仕様なので実 provider を使う。
+        pg = PayloadGenerator(provider="ollama")
+        captured = {}
+
+        async def _fake_complete(payload_gen, prompt, **kw):
+            captured["role"] = payload_gen.current_role()
+            return "fix text"
+
+        with patch.object(llm_client, "complete_text", _fake_complete):
+            result = asyncio.run(remediation._call_llm_raw(pg, "prompt"))
+        self.assertEqual(result, "fix text")
+        self.assertEqual(captured["role"], "report")   # report role で属性付け
+
+    def test_anthropic_client_disables_sdk_retries(self):
+        from wscan.payload_gen import PayloadGenerator
+        pg = PayloadGenerator(provider="claude")
+        fake_anthropic = types.ModuleType("anthropic")
+        seen = {}
+
+        def _Anthropic(**kwargs):
+            seen.update(kwargs)
+            return object()
+
+        fake_anthropic.Anthropic = _Anthropic
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}, clear=False), \
+             patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            pg._get_anthropic_client()
+        self.assertEqual(seen.get("max_retries"), 0)   # SDK retry を無効化し監査を正本に
+
+
 if __name__ == "__main__":
     unittest.main()
