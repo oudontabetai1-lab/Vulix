@@ -1,6 +1,6 @@
 # Vulix — self-learning browser security exploration engine
 
-**Vulix**（VULIX = Vulnerability Understanding, Learning & Intelligent eXploration）は、対象アプリと対話しながら状態を理解し、観測結果で次の行動を決める **security exploration engine** です（[ADR-0022](docs/) による再定義。旧称 WScan）。Playwright による実ブラウザ操作、決定論スキャナ、LLM を組み合わせ、用途に応じて、再現性と確証を重視する **通常モード (`scan`)**、LLM の独自解釈と探索力を重視する **Agent モード (`agent`)**、両者を両立する **Hybrid モード（ダッシュボード）**を使い分けます。Hybrid は Agent を URL 偵察だけに使うのではなく、Agent が見つけた脆弱性仮説も最終レポートへラベル付きで併記します。
+**Vulix**（VULIX = Vulnerability Understanding, Learning & Intelligent eXploration）は、対象アプリと対話しながら状態を理解し、観測結果で次の行動を決める **security exploration engine** です（設計判断 ADR-0022 による再定義。旧称 WScan）。Playwright による実ブラウザ操作、決定論スキャナ、LLM を組み合わせ、用途に応じて、再現性と確証を重視する **通常モード (`scan`)**、LLM の独自解釈と探索力を重視する **Agent モード (`agent`)**、両者を両立する **Hybrid モード（ダッシュボード）**を使い分けます。Hybrid は Agent を URL 偵察だけに使うのではなく、Agent が見つけた脆弱性仮説も最終レポートへラベル付きで併記します。
 
 > **exploration engine への進化は段階的**です。現行の実装・CLI（`python3 main.py …`・内部パッケージ `wscan/`）はそのまま利用でき、Vulix ブランドと新しいエンジン語彙（Observer/Mapper/Planner/Executor/Evaluator/Learner）へ加算的に移行します。
 
