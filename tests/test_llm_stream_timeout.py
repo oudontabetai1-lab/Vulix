@@ -116,3 +116,22 @@ def test_stream_ollama_bounded_by_overall_deadline():
         elapsed = _time.monotonic() - start
     # deadline(0.1s) 付近で打ち切られる。チャンクが届き続けても無限には回らない。
     assert elapsed < 2.0
+
+
+def test_triage_passes_llm_timeout_to_payload_generator():
+    # triage の LLM 呼び出しにも設定済み timeout が渡る（Codex #173 P2）。
+    import wscan.payload_gen as pg_mod
+    from wscan.triage import TriageEngine
+    captured = {}
+
+    class _FakePG:
+        def __init__(self, **kw):
+            captured.update(kw)
+        async def _check_llm_available(self):
+            return False   # ここで _llm_analyse は "" を返し short-circuit
+
+    eng = TriageEngine("http://t.test", llm_provider="ollama", llm_timeout_seconds=17)
+    with patch.object(pg_mod, "PayloadGenerator", _FakePG):
+        out = asyncio.run(eng._llm_analyse())
+    assert out == ""
+    assert captured.get("llm_timeout_seconds") == 17

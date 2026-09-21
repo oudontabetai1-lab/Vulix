@@ -1640,6 +1640,10 @@ Examples:
     triage.add_argument(
         "--claude-model", default=_CFG.get("claude_model", "claude-haiku-4-5-20251001"), metavar="MODEL",
     )
+    triage.add_argument(
+        "--llm-timeout", type=_positive_float, default=None, metavar="SECS",
+        help="triage の LLM 1回（one-shot）応答上限秒。未指定は config llm.timeout_seconds。",
+    )
     for role in ("planner", "payload", "adaptive", "triage", "report"):
         triage.add_argument(
             f"--{role}-model",
@@ -3336,6 +3340,7 @@ async def run_triage(args):
         claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
         openai_base_url=_effective_llm_base_url(args),
         role_models=getattr(args, "role_models", {}),
+        llm_timeout_seconds=(getattr(args, "llm_timeout", None) or _CFG.get("llm_timeout_seconds", 30)),
     )
 
     report = await engine.run()
