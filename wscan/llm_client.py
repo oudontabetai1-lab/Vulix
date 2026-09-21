@@ -196,8 +196,16 @@ async def complete_text(
         retry_after = None
         try:
             if provider == "claude":
+                # complete_text は自前で retry ループを持つため、SDK 内蔵 retry を per-call で
+                # 無効化して監査 retries を正本にする（共有 client の retry は streaming caller の
+                # ために既定のまま残す・Codex #172 P2）。
+                _claude = (
+                    anthropic_client.with_options(max_retries=0)
+                    if hasattr(anthropic_client, "with_options")
+                    else anthropic_client
+                )
                 response = await asyncio.to_thread(
-                    anthropic_client.messages.create,
+                    _claude.messages.create,
                     model=pg.claude_model,
                     max_tokens=max_tokens,
                     temperature=temperature,

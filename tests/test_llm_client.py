@@ -453,7 +453,9 @@ class RemediationRoleAndRetryTests(unittest.TestCase):
         self.assertEqual(result, "fix text")
         self.assertEqual(captured["role"], "report")   # report role で属性付け
 
-    def test_anthropic_client_disables_sdk_retries(self):
+    def test_shared_anthropic_client_keeps_default_retries(self):
+        # 共有 client は SDK 既定 retry を保つ（streaming caller が依存）。complete_text だけが
+        # per-call で無効化する（Codex #172 P2 の回帰修正）。
         from wscan.payload_gen import PayloadGenerator
         pg = PayloadGenerator(provider="claude")
         fake_anthropic = types.ModuleType("anthropic")
@@ -467,7 +469,30 @@ class RemediationRoleAndRetryTests(unittest.TestCase):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}, clear=False), \
              patch.dict("sys.modules", {"anthropic": fake_anthropic}):
             pg._get_anthropic_client()
-        self.assertEqual(seen.get("max_retries"), 0)   # SDK retry を無効化し監査を正本に
+        self.assertNotIn("max_retries", seen)   # 共有 client では無効化しない
+
+    def test_complete_text_disables_sdk_retries_per_call(self):
+        # complete_text の Claude 経路は with_options(max_retries=0) で per-call 無効化する。
+        seen = {}
+
+        class _Resp:
+            content = [types.SimpleNamespace(text="ok")]
+
+        class _Msgs:
+            def create(self, **kw):
+                return _Resp()
+
+        class _Client:
+            def __init__(self): self.messages = _Msgs()
+            def with_options(self, **kw):
+                seen.update(kw)
+                return self
+
+        pg = _payload_generator("claude", _get_anthropic_client=lambda: _Client(),
+                                claude_model="claude-test")
+        out = asyncio.run(complete_text(pg, "prompt"))
+        self.assertEqual(out, "ok")
+        self.assertEqual(seen.get("max_retries"), 0)   # per-call で無効化
 
 
 if __name__ == "__main__":

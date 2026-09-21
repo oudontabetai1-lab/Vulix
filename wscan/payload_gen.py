@@ -181,13 +181,12 @@ class PayloadGenerator:
             if api_key:
                 try:
                     import anthropic
-                    # SDK 内蔵 retry を無効化する。有効だと接続失敗/throttle/5xx を SDK が
-                    # 透過的に再試行し、complete_text 監査の retries（外側ループ由来）が実際の
-                    # 試行回数を過少計上する。retry は complete_text 側で一元管理し監査値を
-                    # 正本にする（Codex #172 P2）。
-                    self._anthropic_client = anthropic.Anthropic(
-                        api_key=api_key, max_retries=0
-                    )
+                    # 共有 client は SDK 既定の retry を保つ。streaming caller（planner/adaptive の
+                    # _call_claude/_stream_claude）は外側 retry を持たず SDK retry に依存するため、
+                    # ここで無効化すると transient 失敗で即 None になり回帰する（Codex #172 P2）。
+                    # complete_text は自前 retry を持つので、その呼び出し時だけ per-call で
+                    # with_options(max_retries=0) にして監査 retries を正本化する。
+                    self._anthropic_client = anthropic.Anthropic(api_key=api_key)
                 except ImportError:
                     pass
         return self._anthropic_client
