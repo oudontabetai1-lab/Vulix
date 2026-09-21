@@ -88,19 +88,21 @@ class PayloadGenerator:
         self._openai_model = openai_model
         self._gemini_model = gemini_model
         self._claude_model = claude_model
-        self.llm_timeout_seconds = float(llm_timeout_seconds)
         self.llm_max_retries = max(0, int(llm_max_retries))
-        # planner / adaptive 変異の自前ストリーミング経路の1回上限（complete_text の one-shot とは別）。
-        # 既定 90s は従来のハードコード値を維持（回帰なし）。config/CLI/ダッシュボードから変更可（0065）。
-        # 不正値（0/負/NaN/inf・serve API 等 argparse を通らない経路）は既定 90 へ安全に倒す。
+        # one-shot / streaming の1回上限。不正値（0/負/NaN/inf・serve API 等 argparse を通らない
+        # 経路の null/非数値）は既定へ安全に倒す（呼び出し側の eager float() で scan 開始前に落ちない
+        # よう、正規化はここに集約する・Codex #173 P2）。既定は従来のハードコード値を維持（回帰なし）。
         import math as _math
-        try:
-            _stream = float(llm_stream_timeout_seconds)
-            if not _math.isfinite(_stream) or _stream <= 0:
-                _stream = 90.0
-        except (TypeError, ValueError):
-            _stream = 90.0
-        self.llm_stream_timeout_seconds = _stream
+
+        def _norm_timeout(value, default: float) -> float:
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                return default
+            return v if (_math.isfinite(v) and v > 0) else default
+
+        self.llm_timeout_seconds = _norm_timeout(llm_timeout_seconds, 30.0)
+        self.llm_stream_timeout_seconds = _norm_timeout(llm_stream_timeout_seconds, 90.0)
         self.default_payloads = default_payloads or {}
         self.prompt_templates = prompt_templates or {}
         self.role_models = {

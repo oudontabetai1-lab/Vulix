@@ -590,8 +590,11 @@ class AdaptivePayloadEngine:
 
     async def _stream_ollama(self, prompt: str) -> Optional[str]:
         import httpx
+        import asyncio
         full = ""
-        try:
+
+        async def _run() -> None:
+            nonlocal full
             async with httpx.AsyncClient(timeout=self.pg.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
@@ -604,7 +607,7 @@ class AdaptivePayloadEngine:
                     },
                 ) as resp:
                     if resp.status_code != 200:
-                        return None
+                        return
                     async for line in resp.aiter_lines():
                         if not line:
                             continue
@@ -619,6 +622,15 @@ class AdaptivePayloadEngine:
                                 break
                         except json.JSONDecodeError:
                             pass
+        try:
+            # httpx の scalar timeout は read/connect 等の**操作単位**の無通信 timeout で、
+            # チャンクが届き続ける限り全体は無制限に延びる。llm_stream_timeout_seconds を
+            # 「1応答の上限」として効かせるため streaming 全体を wait_for で有界化する
+            # （超過時は cancel され async context が stream を閉じる・Codex #173 P2）。
+            await asyncio.wait_for(_run(), timeout=self.pg.llm_stream_timeout_seconds)
+            return full or None
+        except asyncio.TimeoutError:
+            console.print("[yellow][AdaptiveAI] Ollama stream overall timeout[/yellow]")
             return full or None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] Ollama error: {e}[/yellow]")
@@ -630,8 +642,12 @@ class AdaptivePayloadEngine:
         if not api_key:
             return None
         import httpx
+        import asyncio
         full = ""
-        try:
+        status_holder = {"bad": None}
+
+        async def _run() -> None:
+            nonlocal full
             async with httpx.AsyncClient(timeout=self.pg.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
@@ -646,8 +662,8 @@ class AdaptivePayloadEngine:
                     },
                 ) as resp:
                     if resp.status_code != 200:
-                        console.print(f"[yellow][AdaptiveAI] OpenAI error {resp.status_code}[/yellow]")
-                        return None
+                        status_holder["bad"] = resp.status_code
+                        return
                     async for line in resp.aiter_lines():
                         if not line or not line.startswith("data:"):
                             continue
@@ -667,6 +683,16 @@ class AdaptivePayloadEngine:
                                 full += chunk
                         except (json.JSONDecodeError, IndexError, KeyError):
                             pass
+        try:
+            # scalar timeout は操作単位のため、streaming 全体を wait_for で有界化する
+            # （llm_stream_timeout_seconds を1応答の上限として効かせる・Codex #173 P2）。
+            await asyncio.wait_for(_run(), timeout=self.pg.llm_stream_timeout_seconds)
+            if status_holder["bad"] is not None:
+                console.print(f"[yellow][AdaptiveAI] OpenAI error {status_holder['bad']}[/yellow]")
+                return None
+            return full or None
+        except asyncio.TimeoutError:
+            console.print("[yellow][AdaptiveAI] OpenAI stream overall timeout[/yellow]")
             return full or None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] OpenAI error: {e}[/yellow]")
@@ -682,9 +708,13 @@ class AdaptivePayloadEngine:
         # モデルを async 文脈（use_role("adaptive") 内）でここで確定してから executor へ渡す。
         _model = getattr(self.pg, "claude_model", "claude-haiku-4-5-20251001")
         try:
+            _timeout = self.pg.llm_stream_timeout_seconds
+
             def _stream_sync():
                 nonlocal full
-                with client.messages.stream(
+                # SDK が per-request timeout 上書きに対応していれば httpx 側でも縛る（Codex #173 P1）。
+                _c = client.with_options(timeout=_timeout) if hasattr(client, "with_options") else client
+                with _c.messages.stream(
                     model=_model,
                     max_tokens=1000,
                     messages=[{"role": "user", "content": prompt}],
@@ -696,7 +726,17 @@ class AdaptivePayloadEngine:
                 return full
 
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _stream_sync)
+            # Claude ストリームは executor スレッドで走り、これまで stream timeout を全く消費して
+            # いなかった（stall しても無限待ち・Codex #173 P1）。run_in_executor を wait_for で
+            # 有界化し、超過時は async 側を返して scan を止めない（スレッドは SDK 側 timeout で
+            # 最終的に終了する）。stream timeout を SDK にも渡せる場合は渡して httpx 側でも縛る。
+            await asyncio.wait_for(
+                loop.run_in_executor(None, _stream_sync),
+                timeout=self.pg.llm_stream_timeout_seconds,
+            )
+            return full or None
+        except asyncio.TimeoutError:
+            console.print("[yellow][AdaptiveAI] Claude stream timeout[/yellow]")
             return full or None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] Claude error: {e}[/yellow]")

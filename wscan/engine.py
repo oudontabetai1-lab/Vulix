@@ -7116,8 +7116,11 @@ class ScanEngine:
         from . import llm_client
 
         with self.payload_gen.use_role("report"):
+            # report 分析も one-shot。固定 60s ではなく設定済みの one-shot timeout を使う
+            # （--llm-timeout / config llm.timeout_seconds を尊重・Codex #173 P2）。
             text = await llm_client.complete_text(
-                self.payload_gen, prompt, max_tokens=1500, timeout=60
+                self.payload_gen, prompt, max_tokens=1500,
+                timeout=self.payload_gen.llm_timeout_seconds,
             )
         return text or ""
 

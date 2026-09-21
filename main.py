@@ -3007,11 +3007,13 @@ async def run_serve(args):
                 claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
                 openai_base_url=_scan_base,
                 role_models=cfg.get("role_models", {}) or {},
-                llm_timeout_seconds=float(
-                    cfg.get("llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30))
+                # eager float() は WS/API が null/非数値を送ると scan 開始前に例外化する。
+                # 生値を渡し、PayloadGenerator 側の正規化（不正→既定）に一元的に委ねる（Codex #173 P2）。
+                llm_timeout_seconds=cfg.get(
+                    "llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30)
                 ),
-                llm_stream_timeout_seconds=float(
-                    cfg.get("llm_stream_timeout_seconds", _CFG.get("llm_stream_timeout_seconds", 90))
+                llm_stream_timeout_seconds=cfg.get(
+                    "llm_stream_timeout_seconds", _CFG.get("llm_stream_timeout_seconds", 90)
                 ),
                 llm_max_retries=_serve_ints["llm_max_retries"],
                 auth_user=cfg.get("auth_user", "") or "",
