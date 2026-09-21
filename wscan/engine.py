@@ -5307,6 +5307,16 @@ class ScanEngine:
         for fi, dom, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
             self._profile(f"  field: {field_name} @ {page.url}")
+            # dialog dismiss timeout でページ回復が要求されていれば、次フィールドの攻撃前に
+            # 作り直す。verify だけでなく attack フェーズでも消費しないと、未解消ダイアログが
+            # 後続 payload/フォーム/navigate をブロックし続けカスケードする（Codex #171 P1）。
+            # self.browser は concurrent 時 worker を返し、worker も recover_page を継承する。
+            _br = self.browser
+            if getattr(_br, "_needs_page_recovery", False) and hasattr(_br, "recover_page"):
+                try:
+                    await _br.recover_page()
+                except Exception:
+                    pass
             key = (f"{page.url}||url_param||{field_name}" if is_url_param
                    else f"{page.url}||{fi}||{field_name}")
             # Guard scanned_forms with a lock so concurrent workers don't

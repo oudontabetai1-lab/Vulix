@@ -44,6 +44,9 @@ _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _PAGE_CONTENT_TIMEOUT = 30.0
 # dialog.dismiss() は native timeout を持たないため asyncio.wait_for で有界化する上限（F06/0059）。
 _DIALOG_DISMISS_TIMEOUT = 3.0
+# recover_page の new_page/ヘッダ attach 上限。wedge した接続を使い回すため無界で待たず、
+# _phase_verify/attack が必ず次へ進めるよう有界にする（超過＝回復失敗として False・Codex #171 P1）。
+_PAGE_RECOVERY_TIMEOUT = 10.0
 
 
 async def _bounded_page_content(page) -> str:
@@ -684,8 +687,12 @@ class BrowserManager:
         if self._context is None:
             return False
         old = self.page
+        # new_page も wedge した接続を使うため無界では待たない。有界化して、ページ生成自体が
+        # 固まっても _phase_verify/attack が必ず次へ進めるようにする（超過は回復失敗＝False・#171 P1）。
         try:
-            new_page = await self._context.new_page()
+            new_page = await asyncio.wait_for(
+                self._context.new_page(), timeout=_PAGE_RECOVERY_TIMEOUT
+            )
         except Exception:
             return False
         self.page = new_page
@@ -693,6 +700,18 @@ class BrowserManager:
             await self._wire_current_page()
         except Exception:
             pass
+        # CDP scoped-header モードでは _wire_current_page の scoped 経路が即 return し、新ページへ
+        # Fetch.enable を同期で張らない（背景 task 任せ）。recover_page が attach 完了前に返ると、
+        # 次の認証ナビゲーションがヘッダを欠き、本物の finding を unreproduced と誤判定しうる。
+        # create_worker と同様に明示 attach を await する（同じ接続を使うため有界化・#171 P1）。
+        if self._header_intercept_mode == "cdp":
+            try:
+                await asyncio.wait_for(
+                    self._attach_header_interception(self.page),
+                    timeout=_PAGE_RECOVERY_TIMEOUT,
+                )
+            except Exception:
+                pass
         self.reset_dialog()
         if old is not None:
             try:
@@ -3010,6 +3029,12 @@ class WorkerBrowser(BrowserManager):
         self.dialog_fired: bool = False
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""
+        # 継承した _on_dialog/recover_page が worker でも動くよう回復関連フィールドを持たせる
+        # （BrowserManager.__init__ を bypass するため明示コピー・Codex #171 P1）。scoped header
+        # 方針とモードは共有 context のものを引き継ぐ。
+        self._needs_page_recovery: bool = False
+        self._use_scoped_headers: bool = getattr(real_browser, "_use_scoped_headers", False)
+        self._header_intercept_mode: str = getattr(real_browser, "_header_intercept_mode", "none")
 
     async def close(self):
         """Close only this worker's page (not the whole browser)."""

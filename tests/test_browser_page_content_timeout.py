@@ -192,6 +192,7 @@ class _RecoverCtx:
 def _make_recover_bm(old, new):
     bm = BrowserManager.__new__(BrowserManager)
     bm._use_scoped_headers = False
+    bm._header_intercept_mode = "none"
     bm.timeout = 30000
     bm.network = _types.SimpleNamespace(on_request=lambda *a, **k: None)
     bm.dialog_fired = True
@@ -223,3 +224,42 @@ def test_recover_page_without_context_is_noop():
     bm._needs_page_recovery = True
     assert asyncio.run(bm.recover_page()) is False
     assert bm._needs_page_recovery is False
+
+
+class _HangingCtx:
+    """new_page がハングする context（wedge した接続を模す・Codex #171 P1 C4）。"""
+    async def new_page(self):
+        await asyncio.sleep(5)   # patched _PAGE_RECOVERY_TIMEOUT より十分長い
+        return _RecoverablePage()
+
+
+def test_recover_page_bounds_hanging_new_page():
+    bm = BrowserManager.__new__(BrowserManager)
+    bm._use_scoped_headers = False
+    bm._header_intercept_mode = "none"
+    bm.timeout = 30000
+    bm._needs_page_recovery = True
+    bm.page = _RecoverablePage()
+    bm._context = _HangingCtx()
+    with patch.object(browser_mod, "_PAGE_RECOVERY_TIMEOUT", 0.05):
+        start = time.monotonic()
+        ok = asyncio.run(bm.recover_page())
+        elapsed = time.monotonic() - start
+    assert ok is False           # new_page がハング → 有界時間で回復失敗を返す
+    assert elapsed < 2.0         # 5秒待たない
+
+
+def test_recover_page_cdp_mode_awaits_header_attach():
+    # CDP scoped header モードでは新ページへ明示 attach を await する（#171 P1 C3）。
+    old, new = _RecoverablePage(), _RecoverablePage()
+    bm = _make_recover_bm(old, new)
+    bm._header_intercept_mode = "cdp"
+    attached = {}
+
+    async def _fake_attach(page):
+        attached["page"] = page
+
+    bm._attach_header_interception = _fake_attach
+    ok = asyncio.run(bm.recover_page())
+    assert ok is True
+    assert attached.get("page") is new   # 新ページに対して attach を await した
