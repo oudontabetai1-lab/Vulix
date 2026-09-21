@@ -343,16 +343,20 @@ def test_match_pre_attack_flow_uses_normalized_url():
     # 1) fragment 差は同一ページとして選択される（生 rstrip では取りこぼしていた）。
     eng.flows = [_flow("http://t.test/admin#settings", "frag")]
     page = types.SimpleNamespace(url="http://t.test/admin")
-    assert eng._match_pre_attack_flow(page).name == "frag"
+    assert [f.name for f in eng._match_pre_attack_flows(page)] == ["frag"]
 
     # 2) query 値差（末尾スラッシュ）は別 target＝誤選択しない。
     eng.flows = [_flow("http://t.test/view?next=/", "wrong")]
     page2 = types.SimpleNamespace(url="http://t.test/view?next=")
-    assert eng._match_pre_attack_flow(page2) is None
+    assert eng._match_pre_attack_flows(page2) == []
 
     # 3) 素の一致は従来どおり選択（path 末尾スラッシュ差は正規化）。
     eng.flows = [_flow("http://t.test/admin/", "base")]
-    assert eng._match_pre_attack_flow(page).name == "base"
+    assert [f.name for f in eng._match_pre_attack_flows(page)] == ["base"]
+
+    # 4) 同一遷移先の複数 flow は全て（file 順に）返す（統合せず順次再生する・#170 P2）。
+    eng.flows = [_flow("http://t.test/admin", "a"), _flow("http://t.test/admin/", "b")]
+    assert [f.name for f in eng._match_pre_attack_flows(page)] == ["a", "b"]
 
 
 def test_urls_same_page_ignores_fragment_only():
