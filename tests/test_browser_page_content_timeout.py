@@ -142,3 +142,84 @@ def test_on_dialog_dismisses_when_fast():
     asyncio.run(bm._on_dialog(dialog))
     assert dialog.dismissed
     assert bm.dialog_fired
+
+
+# --- ページ回復（recover_page / dialog wedge フラグ）Codex #171 P1 --------------
+
+import types as _types
+
+
+def test_on_dialog_flags_page_recovery_when_dismiss_hangs():
+    # dismiss が返らなかったら、後続の再利用前に作り直すフラグを立てる。
+    bm = _make_dialog_bm()
+    bm._needs_page_recovery = False
+    dialog = _HangingDialog()
+    with patch.object(browser_mod, "_DIALOG_DISMISS_TIMEOUT", 0.05):
+        asyncio.run(bm._on_dialog(dialog))
+    assert bm._needs_page_recovery is True
+
+
+def test_on_dialog_fast_dismiss_does_not_flag_recovery():
+    bm = _make_dialog_bm()
+    bm._needs_page_recovery = False
+    asyncio.run(bm._on_dialog(_FastDialog()))
+    assert bm._needs_page_recovery is False
+
+
+class _RecoverablePage:
+    def __init__(self):
+        self.closed = False
+        self.events = []
+
+    def set_default_timeout(self, t):
+        self._to = t
+
+    def on(self, event, cb):
+        self.events.append(event)
+
+    async def close(self):
+        self.closed = True
+
+
+class _RecoverCtx:
+    def __init__(self, new_page):
+        self._new_page = new_page
+
+    async def new_page(self):
+        return self._new_page
+
+
+def _make_recover_bm(old, new):
+    bm = BrowserManager.__new__(BrowserManager)
+    bm._use_scoped_headers = False
+    bm.timeout = 30000
+    bm.network = _types.SimpleNamespace(on_request=lambda *a, **k: None)
+    bm.dialog_fired = True
+    bm.dialog_message = "xss"
+    bm.dialog_screenshot_b64 = "shot"
+    bm._needs_page_recovery = True
+    bm.page = old
+    bm._context = _RecoverCtx(new)
+    return bm
+
+
+def test_recover_page_recreates_and_rewires_and_clears_flag():
+    old, new = _RecoverablePage(), _RecoverablePage()
+    bm = _make_recover_bm(old, new)
+    ok = asyncio.run(bm.recover_page())
+    assert ok is True
+    assert bm.page is new                 # 新ページへ差し替え
+    assert old.closed is True             # 旧ページは close
+    assert bm._needs_page_recovery is False
+    assert bm.dialog_fired is False       # reset_dialog 済み
+    # 再配線（request/response/dialog ハンドラ）が張られている
+    assert {"request", "response", "dialog"} <= set(new.events)
+
+
+def test_recover_page_without_context_is_noop():
+    bm = BrowserManager.__new__(BrowserManager)
+    bm._context = None
+    bm.page = None
+    bm._needs_page_recovery = True
+    assert asyncio.run(bm.recover_page()) is False
+    assert bm._needs_page_recovery is False

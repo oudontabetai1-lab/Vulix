@@ -558,6 +558,10 @@ class BrowserManager:
         self.dialog_fired: bool = False
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
+        # dialog.dismiss() や有界化した操作が timeout したとき、後続の再利用前に
+        # ページを作り直す必要があることを示すフラグ（recover_page で解消・Codex #171 P1）。
+        self._needs_page_recovery: bool = False
+        self._use_scoped_headers: bool = False
         self.last_login_url: str = ""
         self.last_login_success: bool = False
         self.last_navigation_error: str = ""
@@ -641,8 +645,17 @@ class BrowserManager:
                 # main/worker page は明示 attach するため、イベント購読に失敗しても
                 # スキャンを止めない。popup はヘッダなしのフェイルクローズになる。
                 pass
+        # recover_page で同じ配線を再現できるよう scoped-header 方針を保持する。
+        self._use_scoped_headers = use_scoped_headers
         self.page = await self._context.new_page()
-        if use_scoped_headers:
+        await self._wire_current_page()
+
+    async def _wire_current_page(self) -> None:
+        """self.page に既定 timeout・ネットワーク傍受・dialog ハンドラを配線する。
+
+        初回セットアップと recover_page（timeout/ダイアログ wedge 後の再生成）で共有する。
+        """
+        if self._use_scoped_headers:
             # 最初のナビゲーションより前に Fetch.enable の完了を保証する。
             await self._activate_scoped_header_interception(self.page)
             if self._header_intercept_mode == "cdp":
@@ -656,6 +669,39 @@ class BrowserManager:
 
         # Set up dialog handler (for XSS detection)
         self.page.on("dialog", self._on_dialog)
+
+    async def recover_page(self) -> bool:
+        """timeout/未応答ダイアログで wedge した可能性のある現在ページを破棄して作り直す。
+
+        `asyncio.wait_for` による有界化は Python coroutine を cancel するだけで、CDP 側の
+        dismiss/goto/content 等は走り続けうる（`_on_dialog` の注記参照）。未解消ダイアログや
+        走行中の操作が残ると、同一 `self.page` を再利用する後続の navigate/content/フォーム
+        操作が再びブロックされ、有界化の意味が失われる（Codex #171 P1）。そこで timeout 後は
+        呼び出し側がこのメソッドでページを作り直し、共有状態をリセットする。ベストエフォート
+        （context 不在や再生成失敗ではフラグだけ落として続行）。再生成できたら True。
+        """
+        self._needs_page_recovery = False
+        if self._context is None:
+            return False
+        old = self.page
+        try:
+            new_page = await self._context.new_page()
+        except Exception:
+            return False
+        self.page = new_page
+        try:
+            await self._wire_current_page()
+        except Exception:
+            pass
+        self.reset_dialog()
+        if old is not None:
+            try:
+                # 旧ページの close 自体が wedge しうる（未応答ダイアログ）ため有界化する。
+                await asyncio.wait_for(old.close(), timeout=_DIALOG_DISMISS_TIMEOUT)
+            except Exception:
+                # close が返らない/失敗しても新ページは既に差し替え済みなので続行する。
+                pass
+        return True
 
     async def _on_response(self, response: Response):
         self.network.on_response(response)
@@ -1212,7 +1258,10 @@ class BrowserManager:
         except Exception:
             # timeout（未応答）や、並行 worker がページを navigate/close 済みのケースを含む。
             # dialog 発火の signal 自体は evidence として有効なので握りつぶして続行する。
-            pass
+            # ただし dismiss が返らなかった場合はダイアログが開いたまま同一ページの後続操作を
+            # ブロックし得るため、再利用前にページを作り直すようフラグを立てる（呼び出し側の
+            # 検査/検証ループが recover_page を呼ぶ・Codex #171 P1）。
+            self._needs_page_recovery = True
 
     async def update_extra_headers(self, headers: dict) -> None:
         """Replace extra HTTP headers used by the refresh task."""

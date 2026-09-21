@@ -216,3 +216,78 @@ class VerificationStateTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeRecoverBrowser:
+    """recover_page 呼び出しを数える最小 browser（Codex #171 P1/P2 検証用）。"""
+    def __init__(self, timeout_ms=0):
+        self.timeout = timeout_ms
+        self.recover_calls = 0
+        self._needs_page_recovery = False
+
+    async def recover_page(self):
+        self.recover_calls += 1
+        self._needs_page_recovery = False
+        return True
+
+
+class PhaseVerifyRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recover_page_called_after_verify_timeout(self):
+        # _verify_one が timeout したら、次 finding の前に共有ページを作り直す（#171 P1）。
+        import asyncio
+        from unittest.mock import patch
+        import wscan.engine as engine_mod
+
+        class _Eng:
+            _phase_verify = ScanEngine._phase_verify
+            _profile = ScanEngine._profile
+            _VERIFIABLE_CHECKS = {"sqli"}
+            def __init__(self, findings, browser):
+                self.all_findings = findings
+                self.monitor = None
+                self.wave_errors = []
+                self.browser = browser
+            async def _verify_one(self, finding):
+                await asyncio.sleep(10)   # budget 超過＝返らない相当
+                return "reproduced"
+
+        f = _finding("hang")
+        browser = _FakeRecoverBrowser(timeout_ms=0)   # req_to=0 → budget=_VERIFY_ONE_TIMEOUT_S
+        eng = _Eng([f], browser)
+        with patch.object(engine_mod, "_VERIFY_ONE_TIMEOUT_S", 0.05):
+            await eng._phase_verify()
+        self.assertEqual(f.verification_state, "skipped")
+        self.assertGreaterEqual(browser.recover_calls, 1)   # timeout 後に回復
+
+    async def test_verify_budget_derives_from_request_timeout(self):
+        # 固定 180s ではなく request timeout ×6 を確保するので、小さく patch した
+        # _VERIFY_ONE_TIMEOUT_S を超える所要でも browser.timeout 由来の budget 内なら
+        # 完了して skipped にならない（#171 P2）。
+        import asyncio
+        from unittest.mock import patch
+        import wscan.engine as engine_mod
+
+        class _Eng:
+            _phase_verify = ScanEngine._phase_verify
+            _profile = ScanEngine._profile
+            _VERIFIABLE_CHECKS = {"sqli"}
+            def __init__(self, findings, browser):
+                self.all_findings = findings
+                self.monitor = None
+                self.wave_errors = []
+                self.browser = browser
+            async def _verify_one(self, finding):
+                await asyncio.sleep(0.1)   # 0.05 は超えるが 600 budget 内
+                return "reproduced"
+
+        f = _finding("slow")
+        browser = _FakeRecoverBrowser(timeout_ms=100000)  # 100s → budget=max(0.05,600)=600
+        eng = _Eng([f], browser)
+        with patch.object(engine_mod, "_VERIFY_ONE_TIMEOUT_S", 0.05):
+            await eng._phase_verify()
+        self.assertEqual(f.verification_state, "reproduced")   # budget 由来で cancel されない
+        self.assertEqual(browser.recover_calls, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

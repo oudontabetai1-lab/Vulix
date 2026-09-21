@@ -6280,9 +6280,25 @@ class ScanEngine:
             )
 
         self._profile(f"verify: {len(to_verify)} findings to verify")
+        # verify 1 件あたりの上限。固定 180s だと利用者設定の --timeout（上限なし）を無視し、
+        # 遅い対象では正当な検証（navigate+baseline+apply+fire+content の複数リクエスト）が
+        # cancel されて skipped 化し、confirmed からも通知からも漏れる（Codex #171 P2）。
+        # request timeout があれば数ステップ分（×6）を確保しつつ、従来の 180s を下限に保つ。
+        _browser = getattr(self, "browser", None)
+        _req_to = ((getattr(_browser, "timeout", 0) or 0) / 1000.0) if _browser else 0.0
+        verify_budget = (
+            max(_VERIFY_ONE_TIMEOUT_S, 6.0 * _req_to) if _req_to else _VERIFY_ONE_TIMEOUT_S
+        )
         for i, finding in enumerate(to_verify):
             skipped = False
             state = ""
+            # 直前の finding が未応答ダイアログや timeout で wedge した場合、共有ページを
+            # 作り直してから次を検証する（走行中の操作・未解消ダイアログの干渉を断つ・#171 P1）。
+            if _browser is not None and getattr(_browser, "_needs_page_recovery", False):
+                try:
+                    await _browser.recover_page()
+                except Exception:
+                    pass
             self._profile(
                 f"  verify #{i+1}/{len(to_verify)}: {getattr(finding, 'check_type', '?')} "
                 f"@ {getattr(finding, 'url', '?')}"
@@ -6295,13 +6311,20 @@ class ScanEngine:
                 # timeout は下の except（TimeoutError も Exception）で "skipped"＝未検証
                 # （要手動確認）に倒す：finding は消さず、CONFIRMED にも上げない。
                 state = await asyncio.wait_for(
-                    self._verify_one(finding), timeout=_VERIFY_ONE_TIMEOUT_S
+                    self._verify_one(finding), timeout=verify_budget
                 )
             except Exception as exc:
                 # 想定外の例外（破損 provenance の復元失敗など）や上記 timeout で verify
                 # フェーズ全体を止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
                 # 黙って検出力を落とさないよう wave_errors に記録する。
                 skipped = True
+                # timeout 時は内側の Playwright 操作が走り続け得るため、次 finding の前に
+                # ページを作り直して共有状態を隔離する（走行中 navigate/dialog の干渉防止・#171 P1）。
+                if _browser is not None and hasattr(_browser, "recover_page"):
+                    try:
+                        await _browser.recover_page()
+                    except Exception:
+                        pass
                 errors = getattr(self, "wave_errors", None)
                 if errors is None:
                     self.wave_errors = errors = []
