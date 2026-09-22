@@ -274,6 +274,30 @@ def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
     return ""
 
 
+def _promote_redirect_scope(
+    effective_origin: str,
+    target_url: str,
+    target_urls: list,
+    access_urls: list,
+) -> tuple[str, bool]:
+    """手動巡回の実効 origin を昇格すべき origin と、その役割を返す（純粋・Codex #153 P1）。
+
+    戻り値 ``(scope, is_attack)``。``scope`` が非空なら追加すべき ``scheme://netloc``。
+    攻撃対象 scope（target_url/target_urls）に一致すれば ``is_attack=True``、access-only
+    scope に一致すれば ``False``。access-only の IdP/支援 origin が https へリダイレクト
+    しても攻撃対象へ昇格させないため、設定時の役割を保つ。該当なしは ``("", False)``。
+    """
+    for cfg in (target_url, *target_urls):
+        scope = _redirect_scope_to_add(effective_origin, cfg)
+        if scope and scope not in target_urls:
+            return scope, True
+    for cfg in access_urls:
+        scope = _redirect_scope_to_add(effective_origin, cfg)
+        if scope and scope not in access_urls:
+            return scope, False
+    return "", False
+
+
 import yaml
 from rich.console import Console
 from rich.rule import Rule
@@ -3010,18 +3034,36 @@ class ScanEngine:
                     f"  [dim cyan][Manual Crawl][/dim cyan] {len(manual_seed.urls)} URL, "
                     f"{len(manual_seed.cookies)} Cookie を読み込みました: {self.manual_crawl_path}"
                 )
-                # 同一ホストへの scheme・ポート変更後の実効 origin を攻撃スコープへ昇格する。
-                # 訪問だけでなく、手動巡回で捕捉したフォーム・パラメータも検査対象にする。
-                # primary（target_url）だけでなく**設定済みの全ターゲット/アクセス scope**と
-                # 突き合わせる：副 target が https へリダイレクトすると実効 origin が primary と
-                # 別ホストになり、primary 比較だけだと scope に入らず副 target が未スキャンになる
-                # （Codex #153・追加ターゲットのリダイレクト追従）。無関係 origin は
+                # 同一ホストへの scheme・ポート変更後の実効 origin を、設定時の scope 役割を
+                # 保ったまま昇格する。訪問だけでなく手動巡回で捕捉したフォーム・パラメータも
+                # 検査対象にするが、**攻撃対象 scope に一致したときだけ target_urls（攻撃可）へ**、
+                # access-only scope に一致したときは access_urls（訪問のみ）へ加える。access-only の
+                # IdP/支援 origin が https へリダイレクトしても攻撃対象へ昇格させない（Codex #153 P1）。
+                # primary（target_url）だけでなく設定済みの全 scope と突き合わせる：副 target が
+                # https へリダイレクトすると実効 origin が primary と別ホストになり、primary 比較だけ
+                # だと scope に入らず副 target が未スキャンになる。無関係 origin は
                 # _redirect_scope_to_add が host 一致を要求するので広げない。
-                for _cfg in (self.target_url, *self.target_urls, *self.access_urls):
-                    _eff_scope = _redirect_scope_to_add(manual_seed.effective_origin, _cfg)
-                    if _eff_scope and _eff_scope not in self.target_urls:
-                        self.target_urls.append(_eff_scope)
-                        break
+                _added_scope, _is_attack = _promote_redirect_scope(
+                    manual_seed.effective_origin,
+                    self.target_url,
+                    self.target_urls,
+                    self.access_urls,
+                )
+                if _added_scope:
+                    (self.target_urls if _is_attack else self.access_urls).append(_added_scope)
+                # 昇格した origin には認証ヘッダを送れるよう header scope も更新する。init 時に
+                # 算出済みの _header_scope_origins と、_phase_crawl 前に BrowserManager へ渡した
+                # コピーの双方を同期しないと headers_for_url()／リクエスト interceptor が新 origin を
+                # 弾き、未認証でクロール・攻撃してしまう（Codex #153 P1）。
+                if _added_scope:
+                    self._header_scope_origins = allowed_header_origins(
+                        self.target_url,
+                        self.target_urls,
+                        self.access_urls,
+                        self.login_url,
+                    )
+                    if self.browser is not None:
+                        self.browser.header_scope_origins = set(self._header_scope_origins)
                 for _murl in manual_seed.urls:
                     if (
                         _murl not in self.visited_urls

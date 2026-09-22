@@ -608,6 +608,12 @@ class ManualCrawlSession:
 
         def on_navigate(frame) -> None:
             if frame == page.main_frame:
+                # http→https→IdP のように起動時 goto が最終 IdP URL しか返さず start_url が
+                # 旧 scheme に固定されたケースで、認証後に同一ホストの https へ戻ってきたら
+                # その scheme/port 昇格を start_url に採用する（別ホストの IdP は採用しない）。
+                # これをしないと以降の navigate/snapshot が cross-origin 扱いで target を取りこぼす
+                # （Codex #153 P2・同一ホスト origin 昇格の遅延採用）。
+                self._maybe_adopt_origin_upgrade(page.url)
                 # 追従タブ/popup が別オリジン（SSO/決済等）へ遷移したとき、その URL（クエリ含む）を
                 # artifact に残さない。requestfinished と同じ same-origin 判定を記録前に適用（Codex #153 P2）。
                 if _same_origin(page.url, self.start_url):
@@ -628,6 +634,20 @@ class ManualCrawlSession:
         page.on("requestfinished", on_request_finished)
         page.on("close", lambda *_: self._track_page_task(self._handle_page_closed(page)))
         self._bound_pages.append(page)
+
+    def _maybe_adopt_origin_upgrade(self, url: str) -> None:
+        """同一ホストの scheme/port 昇格を start_url へ採用する（Codex #153 P2）。
+
+        起動時 goto が cross-origin IdP へ抜けて start_url が旧 origin に固定された後、
+        認証後に同一ホストの別 scheme/port（例: http→https）へ戻ったときだけ採用する。
+        別ホスト（IdP 等）・非 http(s)・既に同一 origin のときは何もしない（純粋条件）。
+        """
+        if not url.startswith(("http://", "https://")) or not self.start_url:
+            return
+        if _same_origin(url, self.start_url):
+            return
+        if _origin_tuple(url)[1] == _origin_tuple(self.start_url)[1]:
+            self.start_url = url
 
     async def _activate_page(self, page, source: str) -> None:
         """新規ページを記録対象・入力対象・配信対象へ原子的に切り替える。"""

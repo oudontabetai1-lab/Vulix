@@ -168,6 +168,34 @@ class ManualCrawlSeedTests(unittest.TestCase):
         self.assertEqual(_redirect_scope_to_add("http://example.test/", "http://example.test/"), "")
         self.assertEqual(_redirect_scope_to_add("", "http://example.test/"), "")
 
+    def test_promote_redirect_scope_preserves_role(self):
+        # 攻撃対象 target のリダイレクトは attack scope、access-only のリダイレクトは
+        # 訪問のみ scope として役割を保つ（Codex #153 P1）。
+        from wscan.engine import _promote_redirect_scope
+        # target_url の https 昇格 → attack。
+        self.assertEqual(
+            _promote_redirect_scope("https://app.test/", "http://app.test/", [], []),
+            ("https://app.test", True))
+        # 追加 target のリダイレクト → attack。
+        self.assertEqual(
+            _promote_redirect_scope(
+                "https://api.test/", "http://app.test/", ["http://api.test/"], []),
+            ("https://api.test", True))
+        # access-only（IdP 等）の https 昇格 → 攻撃対象へ昇格させず access scope のみ。
+        self.assertEqual(
+            _promote_redirect_scope(
+                "https://idp.test/", "http://app.test/", [], ["http://idp.test/"]),
+            ("https://idp.test", False))
+        # 別ホストは昇格なし。
+        self.assertEqual(
+            _promote_redirect_scope("https://evil.test/", "http://app.test/", [], []),
+            ("", False))
+        # 既に登録済みなら重複追加しない。
+        self.assertEqual(
+            _promote_redirect_scope(
+                "https://app.test/", "http://app.test/", ["https://app.test"], []),
+            ("", False))
+
     def test_load_manual_crawl_seed_normalizes_same_origin_urls(self):
         data = {
             "seed_urls": [
@@ -468,6 +496,28 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         # cross-origin の TOTP 入力 step は丸ごと省略（selector 含め残さない）。
         self.assertEqual(session.steps, [])
         self.assertFalse(any("evil.test" in json.dumps(s) for s in session.steps))
+
+    def test_adopt_origin_upgrade_same_host_scheme(self):
+        # http→https→IdP で start_url が http に固定された後、認証後に同一ホストの https へ
+        # 戻ったらその昇格を採用する（Codex #153 P2）。
+        page = _FakePage("http://example.test/")
+        session = self._session(page, _FakeContext([page]))
+        session._maybe_adopt_origin_upgrade("https://example.test/dashboard")
+        self.assertEqual(session.start_url, "https://example.test/dashboard")
+
+    def test_adopt_origin_upgrade_ignores_cross_host_idp(self):
+        page = _FakePage("http://example.test/")
+        session = self._session(page, _FakeContext([page]))
+        session._maybe_adopt_origin_upgrade("https://sso.evil.test/authorize?code=SECRET")
+        self.assertEqual(session.start_url, "http://example.test/")  # 別ホストは採用しない
+
+    def test_adopt_origin_upgrade_noop_when_same_origin_or_non_http(self):
+        page = _FakePage("http://example.test/")
+        session = self._session(page, _FakeContext([page]))
+        session._maybe_adopt_origin_upgrade("http://example.test/other")  # 同一 origin
+        self.assertEqual(session.start_url, "http://example.test/")
+        session._maybe_adopt_origin_upgrade("about:blank")  # 非 http(s)
+        self.assertEqual(session.start_url, "http://example.test/")
 
     async def test_fill_totp_reports_missing_configuration(self):
         page = _FakePage("http://example.test/mfa")
