@@ -344,5 +344,175 @@ class GeminiRemediationRegressionTests(unittest.TestCase):
         self.assertIn("Gemini が生成", text)
 
 
+class LLMObservabilityTests(unittest.TestCase):
+    """complete_text が LLM 呼び出しを本文なしで記録する（0065）。"""
+
+    def _run_openai_ok(self, **pg_over):
+        pg = _payload_generator("openai", **pg_over)
+        resp = _Response(200, {"choices": [{"message": {"content": "HELLO"}}]})
+        _client, context = _mock_async_client([resp])
+        with patch("wscan.llm_client.httpx.AsyncClient", return_value=context):
+            return asyncio.run(complete_text(pg, "PROMPTBODY"))
+
+    def test_logs_call_metadata_without_body(self):
+        logger = MagicMock()
+        result = self._run_openai_ok(request_logger=logger, current_role=lambda: "payload")
+        self.assertEqual(result, "HELLO")
+        logger.log_llm_call.assert_called_once()
+        kw = logger.log_llm_call.call_args.kwargs
+        self.assertEqual(kw["provider"], "openai")
+        self.assertEqual(kw["role"], "payload")
+        self.assertEqual(kw["status"], "ok")
+        self.assertEqual(kw["model"], "gpt-test")
+        self.assertEqual(kw["prompt_chars"], len("PROMPTBODY"))
+        self.assertEqual(kw["response_chars"], len("HELLO"))
+        self.assertGreaterEqual(kw["elapsed_seconds"], 0.0)
+        # 本文（prompt/response）は kwargs に一切含めない。
+        blob = repr(kw)
+        self.assertNotIn("PROMPTBODY", blob)
+        self.assertNotIn("HELLO", blob)
+
+    def test_records_transient_status_on_retryable_failure(self):
+        logger = MagicMock()
+        pg = _payload_generator("openai", request_logger=logger,
+                                current_role=lambda: "payload", llm_max_retries=0)
+        resp = _Response(503, {})
+        _client, context = _mock_async_client([resp])
+        with patch("wscan.llm_client.httpx.AsyncClient", return_value=context):
+            asyncio.run(complete_text(pg, "p"))
+        logger.log_llm_call.assert_called_once()
+        self.assertEqual(logger.log_llm_call.call_args.kwargs["status"], "transient")
+
+    def test_records_exception_type_without_message(self):
+        # 失敗時は例外の種別名だけを監査行へ渡す（transport と応答処理失敗を区別・Codex #172 P2）。
+        request = httpx.Request("POST", "https://example.test/?key=SECRETKEY")
+        cases = [
+            ([httpx.ConnectError("SECRETKEY", request=request)], "ConnectError"),
+            ([_Response(200, {})], "KeyError"),
+        ]
+        for responses, expected in cases:
+            with self.subTest(expected=expected):
+                logger = MagicMock()
+                pg = _payload_generator("openai", request_logger=logger,
+                                        current_role=lambda: "payload", llm_max_retries=0)
+                _client, context = _mock_async_client(responses)
+                with patch("wscan.llm_client.httpx.AsyncClient", return_value=context):
+                    asyncio.run(complete_text(pg, "p"))
+                kw = logger.log_llm_call.call_args.kwargs
+                self.assertEqual(kw["exception_type"], expected)
+                self.assertNotIn("SECRETKEY", repr(kw))
+
+    def test_no_request_logger_does_not_crash(self):
+        # request_logger 未配線（既存の SimpleNamespace）でも従来どおり動く（回帰）。
+        self.assertEqual(self._run_openai_ok(), "HELLO")
+
+
+class RequestLoggerLLMTests(unittest.TestCase):
+    def test_log_llm_call_writes_jsonl_without_body(self):
+        import json
+        import tempfile
+        from wscan.request_logger import RequestLogger
+        with tempfile.TemporaryDirectory() as d:
+            rl = RequestLogger(d)
+            rl.log_llm_call(provider="claude", role="adaptive", model="m",
+                            timeout_seconds=30.0, elapsed_seconds=1.5, status="ok",
+                            retries=0, prompt_chars=100, response_chars=20, caller="complete_text")
+            self.assertEqual(rl.llm_call_count, 1)
+            rec = json.loads(rl.llm_path.read_text(encoding="utf-8").strip())
+        self.assertEqual(rec["provider"], "claude")
+        self.assertEqual(rec["status"], "ok")
+        self.assertEqual(rec["prompt_chars"], 100)
+        self.assertNotIn("prompt", rec)      # 本文キーは持たない
+        self.assertNotIn("response", rec)
+
+    def test_log_llm_call_disabled_is_noop(self):
+        import tempfile
+        from wscan.request_logger import RequestLogger
+        with tempfile.TemporaryDirectory() as d:
+            rl = RequestLogger(d, enabled=False)
+            rl.log_llm_call(provider="ollama", status="ok")
+            self.assertFalse(rl.llm_path.exists())
+            self.assertEqual(rl.llm_call_count, 0)
+
+
+class RecordLLMCallHelperTests(unittest.TestCase):
+    def test_record_llm_call_forwards_to_logger(self):
+        from wscan.llm_client import record_llm_call
+        logger = MagicMock()
+        pg = types.SimpleNamespace(request_logger=logger)
+        record_llm_call(pg, provider="ollama", role="planner", model="m",
+                        timeout_seconds=None, elapsed_seconds=2.0, status="ok",
+                        prompt_chars=10, response_chars=5, caller="attack_planner._llm_plan")
+        logger.log_llm_call.assert_called_once()
+        self.assertEqual(logger.log_llm_call.call_args.kwargs["role"], "planner")
+
+    def test_record_llm_call_without_logger_is_noop(self):
+        from wscan.llm_client import record_llm_call
+        pg = types.SimpleNamespace()  # request_logger 属性なし
+        record_llm_call(pg, provider="ollama", role="planner", model="m",
+                        timeout_seconds=None, elapsed_seconds=1.0, status="empty")  # 例外を出さない
+
+
+class RemediationRoleAndRetryTests(unittest.TestCase):
+    """remediation の report role 付与と Anthropic SDK retry 無効化（Codex #172 P2）。"""
+
+    def test_remediation_call_uses_report_role(self):
+        from wscan import remediation, llm_client
+        from wscan.payload_gen import PayloadGenerator
+        # provider="none" は use_role が role を設定しない仕様なので実 provider を使う。
+        pg = PayloadGenerator(provider="ollama")
+        captured = {}
+
+        async def _fake_complete(payload_gen, prompt, **kw):
+            captured["role"] = payload_gen.current_role()
+            return "fix text"
+
+        with patch.object(llm_client, "complete_text", _fake_complete):
+            result = asyncio.run(remediation._call_llm_raw(pg, "prompt"))
+        self.assertEqual(result, "fix text")
+        self.assertEqual(captured["role"], "report")   # report role で属性付け
+
+    def test_shared_anthropic_client_keeps_default_retries(self):
+        # 共有 client は SDK 既定 retry を保つ（streaming caller が依存）。complete_text だけが
+        # per-call で無効化する（Codex #172 P2 の回帰修正）。
+        from wscan.payload_gen import PayloadGenerator
+        pg = PayloadGenerator(provider="claude")
+        fake_anthropic = types.ModuleType("anthropic")
+        seen = {}
+
+        def _Anthropic(**kwargs):
+            seen.update(kwargs)
+            return object()
+
+        fake_anthropic.Anthropic = _Anthropic
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}, clear=False), \
+             patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            pg._get_anthropic_client()
+        self.assertNotIn("max_retries", seen)   # 共有 client では無効化しない
+
+    def test_complete_text_disables_sdk_retries_per_call(self):
+        # complete_text の Claude 経路は with_options(max_retries=0) で per-call 無効化する。
+        seen = {}
+
+        class _Resp:
+            content = [types.SimpleNamespace(text="ok")]
+
+        class _Msgs:
+            def create(self, **kw):
+                return _Resp()
+
+        class _Client:
+            def __init__(self): self.messages = _Msgs()
+            def with_options(self, **kw):
+                seen.update(kw)
+                return self
+
+        pg = _payload_generator("claude", _get_anthropic_client=lambda: _Client(),
+                                claude_model="claude-test")
+        out = asyncio.run(complete_text(pg, "prompt"))
+        self.assertEqual(out, "ok")
+        self.assertEqual(seen.get("max_retries"), 0)   # per-call で無効化
+
+
 if __name__ == "__main__":
     unittest.main()

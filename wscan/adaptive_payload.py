@@ -570,7 +570,14 @@ class AdaptivePayloadEngine:
 
         provider = self.pg.provider
         raw: Optional[str] = None
+        import time as _time
+        from .llm_client import record_llm_call
+        _t0 = _time.monotonic()
+        _resolved_model = ""
         with self.pg.use_role("adaptive"):
+            # role モデルは context 内でのみ解決される（*_model は _active_role 依存の property）。
+            # 監査に実際に使ったモデルを残すため context 内で捕捉する（Codex #172 P2）。
+            _resolved_model = getattr(self.pg, f"{provider}_model", "") or ""
             if provider == "claude":
                 raw = await self._stream_claude(prompt)
             elif provider == "openai":
@@ -579,6 +586,23 @@ class AdaptivePayloadEngine:
                 raw = await self._call_gemini(prompt)
             else:
                 raw = await self._stream_ollama(prompt)
+        # LLM 呼び出し観測性（0065）。mutate_payload は complete_text 非経由の自前ストリーミング。
+        # timeout_seconds は各 backend の実効 timeout（openai/ollama=90s, gemini=60s, claude は
+        # SDK stream で明示 deadline 無し=None・Codex #172 P2）。失敗種別の transient/permanent
+        # 細分は self-streaming 経路の status 露出を要する follow-up で対応する。
+        _adaptive_timeout = {"openai": 90.0, "ollama": 90.0, "gemini": 60.0}.get(provider)
+        record_llm_call(
+            self.pg, provider=provider, role="adaptive",
+            model=_resolved_model,
+            timeout_seconds=_adaptive_timeout, elapsed_seconds=_time.monotonic() - _t0,
+            status=("ok" if raw else "empty"),
+            # Claude は Anthropic SDK が透過 retry しうるため実回数不明＝None。OpenAI/Gemini/Ollama の
+            # 自前 helper は httpx 1 回きりで retry ループを持たないので 0 と確定できる（Codex #172 P2）。
+            retries=(None if provider == "claude" else 0),
+            prompt_chars=len(prompt) if isinstance(prompt, str) else None,
+            response_chars=len(raw) if isinstance(raw, str) else 0,
+            caller="adaptive_payload.mutate_payload",
+        )
 
         if not raw:
             return []

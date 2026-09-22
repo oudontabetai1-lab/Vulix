@@ -560,7 +560,15 @@ Consider stored / second-order attacks carefully:
 
         raw: Optional[str] = None
         provider = self.payload_gen.provider
+        import time as _time
+        from .llm_client import record_llm_call
+        _t0 = _time.monotonic()
+        _resolved_model = ""
         with self.payload_gen.use_role("planner"):
+            # role モデルは context 内でのみ解決される（claude_model 等は _active_role 依存の
+            # property）。監査に「実際に使ったモデル」を残すため context 内で捕捉する。context を
+            # 抜けた後に読むと provider 既定に戻ってしまう（Codex #172 P2）。
+            _resolved_model = getattr(self.payload_gen, f"{provider}_model", "") or ""
             if provider == "claude":
                 raw = await self._call_claude(prompt)
             elif provider == "openai":
@@ -569,6 +577,23 @@ Consider stored / second-order attacks carefully:
                 raw = await self._call_gemini(prompt)
             else:
                 raw = await self._call_ollama(prompt)
+        # LLM 呼び出し観測性（0065）。planner は complete_text 非経由の自前実装なので個別記録する。
+        # timeout_seconds は各 provider の実効 HTTP timeout（claude は SDK stream で明示 deadline を
+        # 持たないため None・Codex #172 P2）。失敗種別の transient/permanent 細分は self-streaming
+        # 経路の status 露出（#173 の streaming-deadline と同経路）を要する follow-up で対応する。
+        _planner_timeout = {"openai": 90.0, "ollama": 90.0, "gemini": 90.0}.get(provider)
+        record_llm_call(
+            self.payload_gen, provider=provider, role="planner",
+            model=_resolved_model,
+            timeout_seconds=_planner_timeout, elapsed_seconds=_time.monotonic() - _t0,
+            status=("ok" if raw else "empty"),
+            # Claude は Anthropic SDK が透過 retry しうるため実回数不明＝None。OpenAI/Gemini/Ollama の
+            # 自前 helper は httpx 1 回きりで retry ループを持たないので 0 と確定できる（Codex #172 P2）。
+            retries=(None if provider == "claude" else 0),
+            prompt_chars=len(prompt) if isinstance(prompt, str) else None,
+            response_chars=len(raw) if isinstance(raw, str) else 0,
+            caller="attack_planner._llm_plan",
+        )
 
         if not raw:
             return None

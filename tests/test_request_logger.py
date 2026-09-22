@@ -7,6 +7,7 @@ from wscan.browser import NetworkCapture
 from wscan.monitor import MonitorServer
 from wscan.request_logger import (
     RequestLogger,
+    _count_existing_records,
     _redact_headers,
     clear_sensitive_headers,
     register_sensitive_headers,
@@ -164,6 +165,31 @@ class RequestLoggerTests(unittest.TestCase):
             self.assertFalse(logger.payload_path.exists())
 
 
+class CountExistingRecordsTests(unittest.TestCase):
+    def test_truncated_utf8_tail_is_skipped_not_raised(self):
+        # 中断で末尾に不完全な UTF-8 が残っても初期化を落とさない（Codex #172 P2）。
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "payloads.jsonl"
+            p.write_bytes(b'{"a": 1}\n{"b": "\xe3\x81')
+            self.assertEqual(_count_existing_records(p), 1)
+
+
+class UnterminatedTailTests(unittest.TestCase):
+    def test_append_after_unterminated_tail_stays_valid_jsonl(self):
+        # 改行無しで終わる再利用ファイルへの追記が前行と連結しない（Codex #172 P2）。
+        for tail in (b'{"a": 1}', b'{"b": "\xe3\x81'):
+            with self.subTest(tail=tail), tempfile.TemporaryDirectory() as d:
+                (Path(d) / "llm_calls.jsonl").write_bytes(tail)
+                logger = RequestLogger(d)
+                before = logger.llm_call_count
+                logger.log_llm_call(provider="ollama", status="ok")
+                logger.log_llm_call(provider="ollama", status="ok")
+                lines = (Path(d) / "llm_calls.jsonl").read_text(errors="replace").splitlines()
+                parsed = [json.loads(x) for x in lines[1:]]
+                self.assertEqual([r["status"] for r in parsed], ["ok", "ok"])
+                self.assertEqual(logger.llm_call_count, before + 2)
+
+
 class ScannerPayloadLoggingTests(unittest.IsolatedAsyncioTestCase):
     def _scanner(self, engine):
         from wscan.scanners.base import BaseScanner
@@ -207,6 +233,34 @@ class ScannerPayloadLoggingTests(unittest.IsolatedAsyncioTestCase):
             # Exactly one entry — emit_payload_test no longer writes to the file,
             # so going through the monitor must not double-log.
             self.assertEqual(len(rows), 1)
+
+
+class ResumeCounterTests(unittest.TestCase):
+    def test_counters_init_from_existing_jsonl_on_reuse(self):
+        # 既存 output dir を append 再利用（resume で --output=--resume 同一）したとき、
+        # カウンタを既存 JSONL の有効行数から初期化する（Codex #172 P2）。
+        with tempfile.TemporaryDirectory() as d:
+            l1 = RequestLogger(d)
+            l1.log_http({"request": {"method": "GET", "url": "http://t.test/"},
+                         "response": {"status": 200}})
+            l1.log_llm_call(provider="claude", role="planner", model="m", status="ok")
+            l1.log_llm_call(provider="claude", role="adaptive", model="m", status="ok")
+            self.assertEqual(l1.http_count, 1)
+            self.assertEqual(l1.llm_call_count, 2)
+            # 壊れた行は数えない。
+            with (Path(d) / "llm_calls.jsonl").open("a", encoding="utf-8") as fp:
+                fp.write("not-json\n")
+
+            l2 = RequestLogger(d)  # 同一 dir を再オープン（append）
+            self.assertEqual(l2.http_count, 1)
+            self.assertEqual(l2.llm_call_count, 2)  # 壊れた行は無視
+            l2.log_llm_call(provider="claude", role="report", model="m", status="ok")
+            self.assertEqual(l2.llm_call_count, 3)
+
+    def test_counters_zero_for_fresh_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            logger = RequestLogger(d)
+            self.assertEqual((logger.http_count, logger.payload_count, logger.llm_call_count), (0, 0, 0))
 
 
 if __name__ == "__main__":
