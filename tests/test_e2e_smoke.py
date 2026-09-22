@@ -31,6 +31,12 @@ from wscan.engine import ScanEngine
 # 実ブラウザの crawl→attack→verify を通しで縛る上限。tiny fixture なので通常は数十秒で終わる。
 # 真の hang（返らない verifier 等）はこの上限超過で **失敗** になり、CI が赤くなる。
 SMOKE_TIMEOUT_S = 180
+# 上限超過時、engine.run() の finally（verify/browser cleanup）が停止すると wait_for の
+# cancel 待ちが返らず、テストが workflow の 20 分 timeout まで走り得る（Codex #175 P2）。
+# scan をデーモンスレッドで走らせ join に **cleanup も含めた** hard deadline を与える：
+# 内側 wait_for が SMOKE_TIMEOUT_S で graceful cancel を試み、cleanup が停止しても外側 join が
+# この猶予後に必ず返って **失敗** させる（leak した daemon スレッドは interpreter 終了で消える）。
+CLEANUP_GRACE_S = 30
 
 
 def _e2e_enabled() -> bool:
@@ -91,30 +97,50 @@ class E2ESmokeTests(unittest.TestCase):
         _wait_for_server(cls._port)
 
         cls._tmp = tempfile.TemporaryDirectory()
-        engine = ScanEngine(
-            f"http://127.0.0.1:{cls._port}/",
-            checks=["xss"],
-            llm_provider="none",
-            headless=True,
-            output_dir=cls._tmp.name,
-            open_report=False,
-            enable_waf_detection=False,
-            enable_ai_analysis=False,
-            enable_payload_learning=False,
-            enable_adaptive_payloads=False,
-            enable_sitemap_crawl=False,
-            depth=1,
-            fast_mode=True,
-            max_payloads=6,
-            request_delay=0,
-            use_planner=False,
-            sarif=False,
-            timeout=8,
-            navigation_retries=0,
-        )
-        # 通しで完走することが第一目的。hang したら wait_for が TimeoutError→テスト失敗。
-        asyncio.run(asyncio.wait_for(engine.run(), timeout=SMOKE_TIMEOUT_S))
-        cls._findings = list(engine.all_findings)
+
+        result: dict = {}
+
+        def _worker() -> None:
+            engine = ScanEngine(
+                f"http://127.0.0.1:{cls._port}/",
+                checks=["xss"],
+                llm_provider="none",
+                headless=True,
+                output_dir=cls._tmp.name,
+                open_report=False,
+                enable_waf_detection=False,
+                enable_ai_analysis=False,
+                enable_payload_learning=False,
+                enable_adaptive_payloads=False,
+                enable_sitemap_crawl=False,
+                depth=1,
+                fast_mode=True,
+                max_payloads=6,
+                request_delay=0,
+                use_planner=False,
+                sarif=False,
+                timeout=8,
+                navigation_retries=0,
+            )
+            try:
+                # 内側 wait_for は responsive な hang を graceful に cancel し findings-so-far を残す。
+                asyncio.run(asyncio.wait_for(engine.run(), timeout=SMOKE_TIMEOUT_S))
+                result["findings"] = list(engine.all_findings)
+            except BaseException as exc:  # noqa: BLE001 — テストへ再送出するため全捕捉
+                result["error"] = exc
+
+        # 通しで完走することが第一目的。hang したら join が hard deadline で返りテスト失敗。
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+        worker.join(SMOKE_TIMEOUT_S + CLEANUP_GRACE_S)
+        if worker.is_alive():
+            raise AssertionError(
+                f"E2E smoke: cancel/cleanup 含め "
+                f"{SMOKE_TIMEOUT_S + CLEANUP_GRACE_S}s の hard deadline 超過（通し hang の疑い）"
+            )
+        if "error" in result:
+            raise result["error"]
+        cls._findings = result.get("findings", [])
 
     @classmethod
     def tearDownClass(cls):
@@ -125,10 +151,23 @@ class E2ESmokeTests(unittest.TestCase):
             cls._tmp.cleanup()
 
     def test_scan_completed_and_detected_reflected_xss(self):
-        # 完走（setUpClass が hang せず到達）＋ 反射 XSS(/search?q=) を1件以上検出。
+        # 完走（setUpClass が hang せず到達）＋ **狙った** 反射 XSS を検出。fixture には別 XSS シンク
+        # （/dom の field=next・/feedback の field=message）もあるため、check_type=="xss" だけで通すと
+        # /search?q= の crawl/scan が退行しても緑のままになる。search フローの field=q に限定する
+        # （field q はこの反射 XSS 固有。finding.url はフォーム掲載ページ / か反射先 /search）（Codex #175 P1）。
+        from urllib.parse import urlparse
         self.assertTrue(self._findings, "E2E smoke: スキャンが 0 findings（通し経路の回帰の疑い）")
-        xss = [f for f in self._findings if getattr(f, "check_type", "") == "xss"]
-        self.assertTrue(xss, "E2E smoke: vuln_app の反射 XSS を検出できなかった")
+        target = [
+            f for f in self._findings
+            if getattr(f, "check_type", "") == "xss"
+            and getattr(f, "field_name", "") == "q"
+            and urlparse(getattr(f, "url", "")).path in ("/", "/search")
+        ]
+        self.assertTrue(
+            target,
+            "E2E smoke: vuln_app の反射 XSS(search フロー・field=q) を検出できなかった。"
+            f" 検出 XSS: {[(getattr(f,'url',''), getattr(f,'field_name','')) for f in self._findings if getattr(f,'check_type','')=='xss']}",
+        )
 
 
 if __name__ == "__main__":
