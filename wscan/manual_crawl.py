@@ -41,6 +41,12 @@ def _origin_tuple(u: str):
     p = urlparse(u)
     scheme = (p.scheme or "").lower()
     host = (p.hostname or "").lower()
+    # Chromium は page.url の IDN ホストを Punycode（ASCII）へ正規化する。Unicode のまま比較すると
+    # 同一サイトの遷移/request/snapshot/cookie が全て cross-origin 扱いになる（Codex #153 P2）。
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        pass
     port = p.port or {"https": 443, "http": 80}.get(scheme)
     return scheme, host, port
 
@@ -395,7 +401,26 @@ class ManualCrawlSession:
         self._frame_callback = None
         self._frame_tasks: set[asyncio.Task] = set()
 
-    async def start(
+    async def start(self, *args, **kwargs) -> dict:
+        """記録セッションを開始する。起動途中のどの例外でも資格情報とブラウザを解放する。
+
+        Playwright 未導入・proxy 正規化・_bind_page 失敗等、ブラウザ生成の前後を問わず失敗すると
+        TOTP secret が残り、running=True のまま以降の start を塞ぐことがあった（Codex #153 P2）。
+        実行中セッションは片付けないよう、running 判定だけは cleanup 対象の外で先に行う。
+        """
+        if self.running:
+            raise RuntimeError("manual crawl session is already running")
+        try:
+            return await self._start_impl(*args, **kwargs)
+        except BaseException:
+            try:
+                await self._cleanup_browser()  # TOTP 資格情報の消去も含む
+            finally:
+                self.running = False
+                self.streaming = False
+            raise
+
+    async def _start_impl(
         self,
         start_url: str,
         output_path: str,
@@ -661,12 +686,25 @@ class ManualCrawlSession:
         if not self.running:
             return
         async with self._lock:
+            previous = self._page
             try:
                 await self._bind_page(page)
                 self._page = page
                 if self.streaming:
                     await self._stop_screencast(clear_callback=False)
-                    await self._start_screencast(page)
+                    try:
+                        await self._start_screencast(page)
+                    except Exception:
+                        # 新ページの screencast 開始に失敗（一過性 popup が閉じた等）したら切替を確定せず、
+                        # 直前のページと配信へ戻す。さもないと画面が凍結したまま、見えないページへ入力が
+                        # 送られる（Codex #153 P2）。
+                        self._page = previous
+                        if previous is not None and not previous.is_closed():
+                            try:
+                                await self._start_screencast(previous)
+                            except Exception:
+                                pass
+                        raise
             except Exception as exc:
                 self.last_error = f"page switch failed: {exc}"
         # バインド/有効化直後に snapshot（初期ページと同様）。popup の初期 document が context の page

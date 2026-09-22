@@ -290,7 +290,14 @@ def _promote_redirect_scope(
     scope に一致すれば ``False``。access-only の IdP/支援 origin が https へリダイレクト
     しても攻撃対象へ昇格させないため、設定時の役割を保つ。該当なしは ``("", False)``。
     """
-    for cfg in (target_url, *target_urls):
+    # primary の攻撃 scope は init で origin（scheme://netloc）へ正規化されている。生の target_url の
+    # パス（http://host/app）を引き継ぐと https 昇格後の scope が /app に縮み、同 origin の他パスの
+    # manual seed/リンクを弾いてカバレッジが減る（Codex #153 P1）。primary は origin で評価し、
+    # パスを保つのは本当にパス限定の追加 target / access scope だけにする。
+    from urllib.parse import urlparse as _up
+    _pp = _up(target_url or "")
+    primary = f"{_pp.scheme}://{_pp.netloc}" if _pp.scheme and _pp.netloc else target_url
+    for cfg in (primary, *target_urls):
         scope = _redirect_scope_to_add(effective_origin, cfg)
         if scope and scope not in target_urls:
             return scope, True

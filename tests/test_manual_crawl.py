@@ -55,6 +55,9 @@ class _FakePage:
     def on(self, event, callback):
         self.handlers[event] = callback
 
+    def is_closed(self):
+        return False
+
 
 class _FakeCdp:
     def __init__(self):
@@ -177,6 +180,19 @@ class ManualCrawlSeedTests(unittest.TestCase):
         self.assertEqual(
             _redirect_scope_to_add("https://secondary.test/", "http://secondary.test/app/"),
             "https://secondary.test/app")
+
+    def test_primary_with_path_promotes_origin_wide_scope(self):
+        # primary は init で origin に正規化される。パス付き primary の https 昇格も origin 全体（Codex #153 P1）。
+        from wscan.engine import _promote_redirect_scope
+        self.assertEqual(
+            _promote_redirect_scope("https://host.test/app/", "http://host.test/app",
+                                    ["http://host.test"], []),
+            ("https://host.test", True))
+        # パス限定の追加 target はパスを保つ。
+        self.assertEqual(
+            _promote_redirect_scope("https://sec.test/app/", "http://host.test/",
+                                    ["http://host.test", "http://sec.test/app"], []),
+            ("https://sec.test/app", True))
 
     def test_promote_redirect_scope_preserves_role(self):
         # 攻撃対象 target のリダイレクトは attack scope、access-only のリダイレクトは
@@ -714,6 +730,47 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session._cdp)  # 死んだ CDP を残さない
         self.assertTrue(session._context.cdps[-1].detached)  # detach 済み
 
+    async def test_popup_screencast_failure_restores_previous_stream(self):
+        # popup の screencast 開始に失敗したら切替を確定せず、直前ページと配信へ戻す（Codex #153 P2）。
+        old_page = _FakePage()
+        popup = _FakePage("http://example.test/popup")
+
+        class _PopupFailCdp(_FakeCdp):
+            def __init__(self, fail):
+                super().__init__()
+                self.fail = fail
+
+            async def send(self, method, params=None):
+                self.sent.append((method, params))
+                if method == "Page.startScreencast" and self.fail:
+                    raise RuntimeError("popup closed")
+
+        class _Ctx(_FakeContext):
+            async def new_cdp_session(self, page):
+                self.cdp_targets.append(page)
+                cdp = _PopupFailCdp(fail=page is popup)
+                self.cdps.append(cdp)
+                return cdp
+
+        session = self._session(old_page, _Ctx([old_page, popup]))
+        session.snapshot = AsyncMock()
+        await session._activate_page(popup, "new_page")
+        self.assertIs(session._page, old_page)
+        self.assertIs(session._context.cdp_targets[-1], old_page)  # 旧ページの配信を再開
+        self.assertIsNotNone(session._cdp)
+        self.assertIn("page switch failed", session.last_error)
+
+    async def test_start_failure_clears_totp_and_allows_restart(self):
+        # ブラウザ生成前の失敗（proxy 正規化の例外等）でも TOTP を消し running を戻す（Codex #153 P2）。
+        from unittest.mock import patch
+        session = ManualCrawlSession()
+        with patch("wscan.manual_crawl.normalize_proxy_server", side_effect=ValueError("bad proxy")):
+            with self.assertRaises(ValueError):
+                await session.start("http://example.test/", "out.json",
+                                    totp_secret="GEZDGNBVGY3TQOJQ", totp_uri="otpauth://x")
+        self.assertEqual((session.totp_secret, session.totp_uri), ("", ""))
+        self.assertFalse(session.running)
+
     async def test_cross_origin_popup_url_not_recorded(self):
         # 追従した cross-origin popup（SSO/決済等）の URL・forms は artifact に残さない
         # （same-origin のみ記録・Codex #153 P2）。screencast 追従（切替）自体は行う。
@@ -771,3 +828,10 @@ class CookieHostMatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_same_origin_normalizes_idn_hosts():
+    # Chromium の Punycode 化した page.url と Unicode の start_url を同一 origin と判定する（Codex #153 P2）。
+    from wscan.manual_crawl import _same_origin
+    assert _same_origin("https://xn--r8jz45g.jp/a", "https://例え.jp/")
+    assert not _same_origin("https://xn--r8jz45g.jp/a", "https://例.jp/")
