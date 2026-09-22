@@ -711,9 +711,11 @@ class AdaptivePayloadEngine:
             def _create_sync():
                 # 非 streaming の create を使う。streaming(executor) は wait_for で cancel できず、
                 # チャンクが届き続けると executor スレッドが deadline 超過後も居残り、worker 枯渇や
-                # asyncio.run 終了時の hang を招く（Codex #173 P1）。単一 create なら SDK に渡した
-                # timeout が1リクエストを確実に縛るため、スレッドは timeout 内に終了する。
-                _c = client.with_options(timeout=_timeout) if hasattr(client, "with_options") else client
+                # asyncio.run 終了時の hang を招く（Codex #173 P1）。単一 create ＋ max_retries=0 なら
+                # SDK が retryable エラーで再試行して deadline を超えることもなく、渡した timeout が
+                # 1リクエストを確実に縛るため、スレッドは timeout 内に終了する。
+                _c = (client.with_options(timeout=_timeout, max_retries=0)
+                      if hasattr(client, "with_options") else client)
                 resp = _c.messages.create(
                     model=_model,
                     max_tokens=1000,

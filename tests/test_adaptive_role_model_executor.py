@@ -45,10 +45,12 @@ class _FakeMessages:
 
 
 class _FakeClient:
-    def __init__(self, sink):
+    def __init__(self, sink, opts=None):
         self.messages = _FakeMessages(sink)
+        self._opts = opts if opts is not None else []
 
     def with_options(self, **kw):
+        self._opts.append(kw)
         return self
 
 
@@ -68,3 +70,17 @@ def test_stream_claude_uses_adaptive_role_model_across_executor():
 
     asyncio.run(run())
     assert used_models == ["ADAPTIVE-MODEL"], used_models
+
+
+def test_stream_claude_disables_sdk_retries_for_deadline_call():
+    # deadline を wait_for で縛るため、SDK 内 retry を max_retries=0 で無効化する（Codex #173 P1）。
+    opts = []
+    pg = PayloadGenerator(provider="claude", claude_model="M")
+    pg._get_anthropic_client = lambda: _FakeClient([], opts=opts)
+    engine = AdaptivePayloadEngine(pg)
+
+    async def run():
+        await engine._stream_claude("hi")
+
+    asyncio.run(run())
+    assert opts and opts[0].get("max_retries") == 0, opts

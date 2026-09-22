@@ -588,9 +588,11 @@ Consider stored / second-order attacks carefully:
 
             def _create_sync():
                 # 非 streaming の create。streaming(executor) は wait_for で cancel できずチャンク
-                # 継続時にスレッドが deadline 後も居残る（Codex #173 P1）。単一 create なら SDK に
-                # 渡した timeout が1リクエストを縛るためスレッドは timeout 内に終了する。
-                _c = client.with_options(timeout=_timeout) if hasattr(client, "with_options") else client
+                # 継続時にスレッドが deadline 後も居残る（Codex #173 P1）。単一 create ＋
+                # max_retries=0 なら SDK が retryable エラーで再試行して deadline を超えることも
+                # なく、渡した timeout が1リクエストを縛るためスレッドは timeout 内に終了する。
+                _c = (client.with_options(timeout=_timeout, max_retries=0)
+                      if hasattr(client, "with_options") else client)
                 resp = _c.messages.create(
                     model=_model,
                     max_tokens=2000,
