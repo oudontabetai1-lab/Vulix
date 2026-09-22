@@ -221,8 +221,13 @@ class HttpMethodsScanner(BaseScanner):
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         # origin ルートに加えてページ自身のパスも検査する（パス単位の WebDAV/メソッド設定を
-        # 見逃さない）。query/fragment は落として同一パスを 1 回だけ検査する。
-        page_target = f"{origin}{parsed.path}" if parsed.path and parsed.path != "/" else origin
+        # 見逃さない）。fragment だけ落とす。query は保持する（/index.php?route=dav のように query で
+        # リソースを振り分けるアプリで別リソースを probe し tested 扱いにしない・Codex #157 P2）。
+        _path = parsed.path or "/"
+        page_target = (
+            origin if _path == "/" and not parsed.query
+            else f"{origin}{_path}" + (f"?{parsed.query}" if parsed.query else "")
+        )
 
         findings: list[Finding] = []
         target_failed = False
@@ -293,6 +298,24 @@ class HttpMethodsScanner(BaseScanner):
             )
         return findings
 
+    # 告知のみ（悪用可能性そのものではない）low finding 用の CVSS。check 既定(6.5 Medium)を継承すると
+    # severity=low と矛盾するため明示上書きする（Codex #157 P2）。
+    _LOW_CVSS_VECTOR = "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"
+    _LOW_CVSS_SCORE = 3.7
+
+    def _transient_incomplete(self, r, probe_state, probe: str) -> bool:
+        """一時応答(408/429/5xx)は観測できていない＝カバレッジ欠落。失敗扱いにし resume 対象へ残す。
+
+        telemetry だけ残して正常完了すると、その probe でしか見えない finding を見逃したまま
+        checkpoint 完了になる（OPTIONS/TRACE/PROPFIND 共通・Codex #157 P2）。
+        """
+        if r.status_code not in (408, 429, 500, 502, 503, 504):
+            return False
+        if probe_state is not None:
+            probe_state["failed"] = True
+        self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:{probe}:HTTP {r.status_code}")
+        return True
+
     async def _check_options(self, client, target, origin, probe_state=None) -> list[Finding]:
         try:
             r = await client.request("OPTIONS", target)
@@ -302,13 +325,8 @@ class HttpMethodsScanner(BaseScanner):
                 probe_state["failed"] = True
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:options")
             return []
-        # 一時応答(408/429/5xx)は Allow を観測できていない＝カバレッジ欠落。telemetry だけ残して
-        # 正常完了すると危険 Allow を見逃したまま checkpoint 完了になる（Codex #157 P2）。失敗扱いにし
-        # resume 対象へ残す。OPTIONS は危険メソッド/WebDAV を観測する主 probe なので特に重要。
-        if r.status_code in (408, 429, 500, 502, 503, 504):
-            if probe_state is not None:
-                probe_state["failed"] = True
-            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:options:HTTP {r.status_code}")
+        # OPTIONS は危険メソッド/WebDAV を観測する主 probe。一時応答は未観測として resume へ残す。
+        if self._transient_incomplete(r, probe_state, "options"):
             return []
         # 危険メソッド/WebDAV の判定は Allow（そのエンドポイントが実際に受理するメソッド）だけに
         # 基づく。Access-Control-Allow-Methods は cross-origin ポリシーの告知でありメソッド対応の
@@ -328,6 +346,7 @@ class HttpMethodsScanner(BaseScanner):
                     f"(Allow: {r.headers.get('allow', '')})。不要なメソッドは無効化してください。"
                 ),
                 pair=pair, severity="low", confidence="likely",
+                cvss_score=self._LOW_CVSS_SCORE, cvss_vector=self._LOW_CVSS_VECTOR,
                 evidence_type="http_dangerous_methods",
                 evidence_details={"allow": sorted(allowed), "dangerous": sorted(danger)},
                 reproduction_steps=[
@@ -352,6 +371,7 @@ class HttpMethodsScanner(BaseScanner):
                     "不要なら WebDAV を無効化してください。"
                 ),
                 pair=pair, severity="low", confidence="likely",
+                cvss_score=self._LOW_CVSS_SCORE, cvss_vector=self._LOW_CVSS_VECTOR,
                 evidence_type="http_webdav_enabled",
                 evidence_details={"dav": r.headers.get("dav", ""), "allow": sorted(allowed)},
                 reproduction_steps=[
@@ -373,6 +393,8 @@ class HttpMethodsScanner(BaseScanner):
             if probe_state is not None:
                 probe_state["failed"] = True
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:trace")
+            return []
+        if self._transient_incomplete(r, probe_state, "trace"):
             return []
         strength = trace_reflection_strength(
             r.status_code, dict(r.headers), r.text[:4000], token)
@@ -422,6 +444,8 @@ class HttpMethodsScanner(BaseScanner):
                 probe_state["failed"] = True
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:propfind")
             return []
+        if self._transient_incomplete(r, probe_state, "propfind"):
+            return []
         # 207 Multi-Status（WebDAV 応答）を強シグナルとする。
         if r.status_code != 207:
             return []
@@ -441,6 +465,7 @@ class HttpMethodsScanner(BaseScanner):
                 "不要なら WebDAV を無効化してください。"
             ),
             pair=pair, severity="low", confidence="confirmed",
+            cvss_score=self._LOW_CVSS_SCORE, cvss_vector=self._LOW_CVSS_VECTOR,
             evidence_type="http_webdav_enabled",
             evidence_details={"propfind_status": 207},
             reproduction_steps=[

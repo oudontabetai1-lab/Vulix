@@ -529,6 +529,55 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(hm.PageDocumentUnavailable):
                 await scanner.scan_page("http://app.test/")
 
+    async def test_transient_trace_or_propfind_raises_for_retry(self):
+        # OPTIONS 成功でも TRACE/PROPFIND が一時応答なら、その probe 固有のカバレッジ（XST/PROPFIND WebDAV）
+        # が欠けるので未検査扱いで resume へ回す（Codex #157 P2）。
+        for method in ("TRACE", "PROPFIND"):
+            with self.subTest(method=method):
+                engine, scanner = self._scanner()
+                responses = {
+                    "OPTIONS": _FakeResp(200, {"allow": "GET"}),
+                    "TRACE": _FakeResp(405, {}, ""),
+                    "PROPFIND": _FakeResp(405, {}, ""),
+                }
+                responses[method] = _FakeResp(503, {}, "")
+                with mock.patch.object(hm.httpx, "AsyncClient", return_value=_FakeClient(responses)):
+                    with self.assertRaises(hm.PageDocumentUnavailable):
+                        await scanner.scan_page("http://app.test/")
+
+    async def test_page_target_preserves_query(self):
+        # query でリソースを振り分けるアプリの page target は query を保持し fragment だけ落とす（Codex #157 P2）。
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(404, {}, ""),
+        }
+        engine, scanner = self._scanner()
+
+        async def _rec(**kw):
+            return object()
+        scanner.record_finding = _rec
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://app.test/index.php?route=dav#frag")
+        urls = {u for _, u, _ in client.requested}
+        self.assertIn("http://app.test/index.php?route=dav", urls)
+        self.assertNotIn("http://app.test/index.php", urls)
+
+    async def test_low_findings_carry_low_cvss(self):
+        # 告知のみの low finding は check 既定 CVSS(6.5) ではなく low 帯の CVSS を明示する（Codex #157 P2）。
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, PUT, PROPFIND", "dav": "1"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(207, {}, "<multistatus/>"),
+        }
+        rec = await self._run(responses)
+        lows = [r for r in rec if r["severity"] == "low"]
+        self.assertTrue(lows)
+        for r in lows:
+            self.assertLess(r["cvss_score"], 4.0)
+            self.assertTrue(r["cvss_vector"].startswith("CVSS:3.1/"))
+
     async def test_all_requests_failing_raises_for_retry(self):
         # DNS/接続/TLS 等で全 probe が request 時に失敗＝応答ゼロ（未検査）→ PageDocumentUnavailable を投げ
         # engine に error(resume 再試行)扱いさせる（[] で tested 完了→恒久 skip させない・Codex #157）。
