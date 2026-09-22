@@ -441,6 +441,23 @@ class AgentScanResult:
 
 # ── LLM ファクトリ ──────────────────────────────────────────────────────────
 
+def _page_state_fingerprint(state) -> str:
+    """観測したページ状態の短い fingerprint（loop 検知用・永続化するのはハッシュのみ）。
+
+    DOM 表現（無ければ title）から作る。取得できなければ空文字＝従来どおり URL＋action で判定。
+    """
+    text = ""
+    try:
+        dom = getattr(state, "dom_state", None)
+        rep = getattr(dom, "llm_representation", None)
+        text = rep() if callable(rep) else ""
+    except Exception:
+        text = ""
+    if not text:
+        text = str(getattr(state, "title", "") or "")
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16] if text else ""
+
+
 def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11434",
                base_url: str = ""):
     """
@@ -2239,6 +2256,7 @@ class AgentBrowserScanner:
                     # 実行済みであるとは主張しない。
                     executed_actions=(),
                     blocked_count=locals().get("blocked_count", 0),
+                    page_state=_page_state_fingerprint(state),
                 )
             except Exception:
                 pass

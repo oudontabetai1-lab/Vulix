@@ -463,12 +463,14 @@ def test_observed_probe_urls_only_enqueue_new_endpoints(tmp_path):
     assert {(item.target, item.check_type) for item in new_work} == {
         (url, check) for url in (
             "http://fixture.test/admin", "http://fixture.test/search?q=x&debug=1",
+            # query の順序違いは別 endpoint として probe する（Codex #154 P1）。
+            "http://fixture.test/search?debug=1&q=x",
             "http://fixture.test/view?page=admin", "http://fixture.test/view?page=home"
         ) for check in ("xss", "sqli")
     }
     assert set(scanner._runtime_observed_urls) <= set(scanner._memory.visited_urls)
     scanner._enqueue_observed_probe_work()
-    assert len(scanner._harness.state.work_queue) == 9
+    assert len(scanner._harness.state.work_queue) == 11  # 1 + 5 endpoint × 2 check
 
 
 def test_parse_reviewer_gap_lines():

@@ -10,6 +10,7 @@ import hashlib
 import json
 import secrets
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -17,7 +18,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable
 
-from wscan.request_logger import redact_text, redact_url
+from wscan.request_logger import _KEYS_ALT, redact_text, redact_url
 
 
 STATE_FILENAME = "agent_state.json"
@@ -30,6 +31,20 @@ _INTERNAL_ID_KEYS = frozenset({"candidate_id"})
 # resume 時に「要再発見」と判定して originating probe を再キューさせ、truncated prefix を実行
 # 対象と誤認しないようにする（Codex #154 P1）。redaction と同じ「実行不能」シグナルとして扱う。
 TRUNCATION_MARKER = "<wscan-truncated>"
+
+# 切り詰め境界で閉じ引用符が切れた機微 JSON 値（`"password": "SUPERS`）。
+_RE_JSON_TAIL = re.compile(rf'(?i)("(?:[^"\\]*(?:{_KEYS_ALT})[^"\\]*)"\s*:\s*)"(?:\\.|[^"\\])*$')
+
+
+def _redact_bounded(text: str, limit: int = 1000) -> str:
+    """機微値を**切り詰めより先に**伏せてから limit 字に収める（純粋・Codex #154 P1）。
+
+    先に切ると JSON 秘密の閉じ引用符が境界の外に出て redact_text が一致せず、値の先頭が永続化される。
+    巨大な敵対文字列を丸ごと regex に渡さないよう limit×8 字の先頭だけを伏字化し、その範囲でも
+    閉じない値は境界で開いたままの機微フィールドとして末尾ごと伏せる。
+    """
+    head = redact_text(text[: limit * 8])[:limit]
+    return _RE_JSON_TAIL.sub(lambda m: m.group(1) + '"<redacted>', head)
 
 
 class AgentRunStatus(str, Enum):
@@ -221,12 +236,15 @@ def _redact_action(value) -> str:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     except (TypeError, ValueError):
         text = str(value)
-    return redact_text(text)[:1000]
+    return _redact_bounded(text)
 
 
-def step_signature(url: str, actions: Iterable[str]) -> str:
+def step_signature(url: str, actions: Iterable[str], page_state: str = "") -> str:
+    # page_state（観測 DOM の fingerprint）も含める。URL 固定の SPA ウィザード/カルーセル/ページ送りで
+    # 同じ indexed click が DOM を進めているのに loop と誤判定し予算を残して打ち切るのを防ぐ（Codex #154 P2）。
     payload = json.dumps(
-        {"url": redact_url(str(url or "").rstrip("/")), "actions": list(actions)},
+        {"url": redact_url(str(url or "").rstrip("/")), "actions": list(actions),
+         "page_state": str(page_state or "")},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -398,8 +416,7 @@ class AgentHarness:
         for item in self.state.work_queue:
             if item.work_id == work_id:
                 item.status = status
-                raw_summary = self._redact_runtime(str(summary))[:1000]
-                item.summary = redact_text(raw_summary)
+                item.summary = _redact_bounded(self._redact_runtime(str(summary)))
                 self.checkpoint()
                 return
         raise KeyError(work_id)
@@ -423,6 +440,7 @@ class AgentHarness:
         proposed_actions: Iterable,
         executed_actions: Iterable,
         blocked_count: int = 0,
+        page_state: str = "",
     ) -> AgentStepRecord:
         if episode_id != self._last_episode_id:
             self._same_signature_count = 0
@@ -439,7 +457,7 @@ class AgentHarness:
         executed = tuple(
             self._redact_runtime(_redact_action(action)) for action in executed_actions
         )
-        signature = step_signature(safe_url, executed or proposed)
+        signature = step_signature(safe_url, executed or proposed, page_state)
         if signature == self._last_signature:
             self._same_signature_count += 1
         else:
@@ -484,12 +502,12 @@ class AgentHarness:
         self.state.tested_targets = _unique([
             *self.state.tested_targets,
             *(
-                redact_text(self._redact_runtime(str(item)))[:1000]
+                _redact_bounded(self._redact_runtime(str(item)))
                 for item in tested_targets
             ),
         ])
         self.state.coverage_gaps = _unique(
-            redact_text(self._redact_runtime(str(item)))[:1000]
+            _redact_bounded(self._redact_runtime(str(item)))
             for item in coverage_gaps
         )
         if hypotheses_count is not None:
@@ -548,7 +566,7 @@ class AgentHarness:
                 return value
             # request_logger の一般 redaction regex に巨大な敵対文字列を直接渡さない。
             redacted_full = self._redact_runtime(value)
-            text = redact_text(redacted_full[:1000])
+            text = _redact_bounded(redacted_full)
             # 切り詰めが起きた場合は番兵を付す。resume 時に truncated prefix を実行値と誤認せず
             # originating probe を再キューさせる（Codex #154 P1）。
             if len(redacted_full) > 1000:
@@ -594,9 +612,12 @@ class AgentHarness:
             self.state.status = AgentRunStatus.EVIDENCE_INCOMPLETE
             # manifest だけ失敗した場合、直前の checkpoint は COMPLETE を書き込んでいる。
             # downgrade を durable checkpoint にも反映しないと agent_state.json が COMPLETE のまま
-            # 残り、resume が失敗を回収できない（Codex #154 P2）。再 checkpoint で状態を揃える。
-            # manifest 失敗で _evidence_failed が立つと通常の checkpoint は state 書き込みを拒否
-            # するため、この downgrade 回収だけは force で許可する（Codex #154 P2）。
+            # 残り、resume が失敗を回収できない（Codex #154 P2）。
+        if not checkpoint_ok or not manifest_ok:
+            # 最終 state を durable に揃える。trace/以前の checkpoint 失敗で _evidence_failed が立つと
+            # 通常 checkpoint は拒否され、manifest が書けても agent_state.json が古い status のまま残り、
+            # resume が完了扱いで上書きし得る（Codex #154 P1）。manifest 失敗時も同様。downgrade 回収
+            # だけは force で許可する。
             self.checkpoint(force=True)
         return self.state.status
 

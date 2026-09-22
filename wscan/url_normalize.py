@@ -26,16 +26,22 @@ def _looks_url_valued(value: str) -> bool:
 
 
 def _normalized_query(query: str) -> str:
-    """注入らしい値だけを空化し key ソートした query（query / fragment query 共通・純粋）。"""
-    pairs = set()
+    """注入らしい値だけを空化した query（query / fragment query 共通・純粋）。
+
+    **観測順を保持**する。key ソートすると ``?action=transfer&stage=confirm`` と
+    ``?stage=confirm&action=transfer`` のように順序で操作を選ぶアプリで別ページが同一 identity になり、
+    後者を「既知」として probe せず偽の完全カバレッジになる（Codex #154 P1）。
+    """
+    pairs: list = []
     for key, value in parse_qsl(query, keep_blank_values=True):
         # ponytail: メタ文字・64文字超・URL 値の簡易判定。必要なら routing の明示契約へ。
         if (len(value) > 64
                 or any(char in _INJECTION_META_CHARS or char.isspace() for char in value)
                 or _looks_url_valued(value)):
             value = ""
-        pairs.add((key, value))
-    return urlencode(sorted(pairs))
+        if (key, value) not in pairs:
+            pairs.append((key, value))
+    return urlencode(pairs)
 
 
 def endpoint_identity(url: str) -> str:

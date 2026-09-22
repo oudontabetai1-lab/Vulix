@@ -339,3 +339,35 @@ def test_short_secret_preserves_candidate_id_through_resume_and_verification(tmp
     resumed.mark_dynamic_verification(candidate_id, True)
     state = json.loads((tmp_path / "agent_state.json").read_text())
     assert state["hypotheses"][0]["dynamic_verified"] is True
+
+
+def test_redaction_happens_before_truncation(tmp_path):
+    # 境界を跨ぐ JSON 秘密の先頭を永続化しない（Codex #154 P1）。
+    harness = AgentHarness(tmp_path, spec())
+    item = harness.enqueue(AgentRole.EXPLORER, "http://fixture.test")
+    harness.next_work()
+    summary = "x" * 985 + '{"password": "SUPERSECRETVALUE"}'
+    harness.finish_work(item.work_id, WorkStatus.COMPLETE, summary=summary)
+    assert "SUPERS" not in (tmp_path / "agent_state.json").read_text()
+
+
+def test_trace_failure_persists_evidence_incomplete_state(tmp_path):
+    # trace 等で _evidence_failed が立ち manifest は書ける場合も、最終 state を durable に揃える（Codex #154 P1）。
+    harness = AgentHarness(tmp_path, spec())
+    harness._evidence_failed = True
+    harness.state.evidence_errors.append("trace_write:OSError")
+    status = harness.finalize(success=True, coverage_complete=True)
+    assert status == AgentRunStatus.EVIDENCE_INCOMPLETE
+    assert json.loads(harness.state_path.read_text())["status"] == "evidence_incomplete"
+
+
+def test_loop_detection_considers_page_state(tmp_path):
+    # URL 固定でも DOM が進んでいれば loop としない（Codex #154 P2）。
+    harness = AgentHarness(tmp_path, spec(max_steps=20), repeat_threshold=3)
+    for step, state in enumerate(("s1", "s2", "s3", "s4"), start=1):
+        record = harness.record_step(
+            episode_id="A", local_step=step, url="http://fixture.test/wizard",
+            proposed_actions=[{"click": {"index": 3}}], executed_actions=[], page_state=state,
+        )
+        assert not record.repeated
+    assert harness.state.stop_reason != "loop_detected"

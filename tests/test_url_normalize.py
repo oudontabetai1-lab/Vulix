@@ -317,7 +317,11 @@ def test_endpoint_identity_ignores_payloads_order_duplicates_and_fragment():
     from wscan.url_normalize import endpoint_identity
 
     assert endpoint_identity("https://a/search?q=<script>&tag=1") == endpoint_identity(
-        "https://a/search?tag=1&q=%3Cscript%3E&q=1%27#anchor"
+        "https://a/search?q=%3Cscript%3E&q=1%27&tag=1#anchor"
+    )
+    # 観測順は保持する（順序で操作を選ぶアプリを同一 identity に潰さない・Codex #154 P1）。
+    assert endpoint_identity("https://a/wf?action=transfer&stage=confirm") != endpoint_identity(
+        "https://a/wf?stage=confirm&action=transfer"
     )
     assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/admin?q=x")
     assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/search?q=x&debug=1")
