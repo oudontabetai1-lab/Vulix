@@ -1534,6 +1534,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         total = int(observability.get("total", 0) or 0)
         categories = observability.get("by_category", {}) or {}
         samples = observability.get("samples", []) or []
+        llm_calls = int(observability.get("llm_calls", 0) or 0)
         category_html = "".join(
             f"<li><code>{self._escape(category)}</code>: {count}</li>"
             for category, count in sorted(categories.items())
@@ -1552,6 +1553,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         <div class="section observability-section">
             <h2>Observability（観測性メトリクス）</h2>
             <p>劣化・脱落した probe/wave: <strong>{total}</strong> 件</p>
+            <p>LLM 呼び出し: <strong>{llm_calls}</strong> 件（詳細は llm_calls.jsonl）</p>
             {warning}
             <h3 style="margin-top:14px">by_category</h3>
             <ul>{category_html}</ul>

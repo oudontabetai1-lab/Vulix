@@ -6593,6 +6593,7 @@ class ScanEngine:
         既存の成果物は壊さない（ベストエフォート）。
         """
         import json
+        import os
         path = self.output_dir / "evidence.json"
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -6600,9 +6601,14 @@ class ScanEngine:
             return
         try:
             data["observability"] = self._observability_report_data()
-            path.write_text(
+            # アトミックに置換する。write_text は書き込み前に既存の有効な evidence.json を
+            # truncate するため、途中中断/ディスク満杯で core evidence を空/破損させ得る（Codex #172 P2）。
+            # 一時ファイルへ書き切ってから os.replace で入れ替える（失敗時も元ファイルは無傷）。
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            os.replace(tmp, path)
         except Exception:
             pass
 

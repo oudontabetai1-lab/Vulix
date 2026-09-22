@@ -596,6 +596,8 @@ class AdaptivePayloadEngine:
             model=_resolved_model,
             timeout_seconds=_adaptive_timeout, elapsed_seconds=_time.monotonic() - _t0,
             status=("ok" if raw else "empty"),
+            # SDK が内部で透過 retry しうるため実回数不明。0 と誤報せず None を記録（Codex #172 P2）。
+            retries=None,
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(raw) if isinstance(raw, str) else 0,
             caller="adaptive_payload.mutate_payload",

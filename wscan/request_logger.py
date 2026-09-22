@@ -162,20 +162,22 @@ class RequestLogger:
         self.payload_count = 0
         self.llm_call_count = 0
 
-    def _append(self, path: Path, record: dict) -> None:
+    def _append(self, path: Path, record: dict) -> bool:
+        """1 行追記する。実際に永続化できたら True（カウンタ整合の判定に使う・Codex #172 P2）。"""
         if not self.enabled:
-            return
+            return False
         try:
             line = json.dumps(record, ensure_ascii=False)
         except Exception:
-            return
+            return False
         with self._lock:
             try:
                 with open(path, "a", encoding="utf-8") as fp:
                     fp.write(line + "\n")
+                return True
             except Exception:
                 # ログ保存はベストエフォート。失敗してもスキャンは継続する。
-                pass
+                return False
 
     def log_http(self, pair: Optional[dict]) -> None:
         """NetworkCapture が組み立てた request/response ペアを記録する。"""
@@ -244,5 +246,7 @@ class RequestLogger:
             "exception_type": exception_type,
             "caller": caller,
         }
-        self._append(self.llm_path, record)
-        self.llm_call_count += 1
+        # 実際に永続化できた行だけ数える。失敗時に加算すると evidence.json の総数が
+        # llm_calls.jsonl の実行数と食い違う（Codex #172 P2）。
+        if self._append(self.llm_path, record):
+            self.llm_call_count += 1
