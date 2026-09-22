@@ -99,3 +99,19 @@ def test_stream_claude_enforces_deadline_without_grace():
     t = time.monotonic()
     assert asyncio.run(engine._stream_claude("hi")) is None
     assert time.monotonic() - t < 1.5
+
+
+def test_payload_generator_aclose_closes_cached_async_client():
+    # 反復スキャンで AsyncAnthropic の接続プールを放置しない（Codex #173 P2）。
+    closed = []
+
+    class _C:
+        async def close(self):
+            closed.append(True)
+
+    pg = PayloadGenerator(provider="claude", claude_model="M")
+    pg._async_anthropic_client = _C()
+    asyncio.run(pg.aclose())
+    asyncio.run(pg.aclose())  # 冪等
+    assert closed == [True]
+    assert pg._async_anthropic_client is None

@@ -214,6 +214,13 @@ class PayloadGenerator:
                 return None
         return self._async_anthropic_client
 
+    async def aclose(self) -> None:
+        """キャッシュした AsyncAnthropic の接続プールを閉じる（スキャン終了時・冪等）。"""
+        client = getattr(self, "_async_anthropic_client", None)
+        self._async_anthropic_client = None
+        if client is not None and hasattr(client, "close"):
+            await client.close()
+
     async def _check_llm_available(self) -> bool:
         if self._llm_available is not None:
             return self._llm_available

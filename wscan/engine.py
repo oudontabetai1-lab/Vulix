@@ -2698,7 +2698,18 @@ class ScanEngine:
                     await self.header_manager.stop_background_refresh()
                 except Exception:
                     pass
-                await self._browser.close()
+                try:
+                    await self._browser.close()
+                finally:
+                    # planner/adaptive 用の AsyncAnthropic を決定的に閉じる。serve の反復スキャンで
+                    # 接続プールが放置され transport/FD が蓄積するのを防ぐ（Codex #173 P2）。
+                    # 以降の report 分析は sync client 経路なので、ここで閉じてよい。
+                    _aclose = getattr(self.payload_gen, "aclose", None)
+                    if _aclose is not None:
+                        try:
+                            await _aclose()
+                        except Exception:
+                            pass
 
             # Agent Finding は認可済みスコープ内だけ、決定論 Finding の生成・検証を
             # 変えずに追加する。source の異なる同一 Finding は意図的に併記する。
