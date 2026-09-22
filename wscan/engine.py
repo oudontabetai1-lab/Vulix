@@ -4981,6 +4981,25 @@ class ScanEngine:
             )
         return None
 
+    @staticmethod
+    def _flow_fingerprint(flow) -> str:
+        """flow 内容（steps）の fingerprint（純粋）。同名でも内容が変われば別物として扱う。"""
+        import hashlib
+        import json as _json
+        payload = _json.dumps(flow.to_dict().get("steps", []), ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    def _checkpoint_mark_flow_ran(self, url: str, flow) -> None:
+        """この URL で当該 flow（内容 fingerprint）が完走したことを永続化する（Codex #170 P2）。"""
+        fp = self._flow_fingerprint(flow)
+        self._checkpoint_mark_done(url, "(flow-ran)", 0, f"(flow-ran:{fp})")
+
+    def _checkpoint_flow_ran(self, url: str, flow) -> bool:
+        """当該 flow が過去 run でこの URL に対し完走済みか。resume で新規/変更された --flows を
+        「完全 checkpoint 済み」として捨て、露出フォームを取りこぼすのを防ぐ（Codex #170 P2）。"""
+        fp = self._flow_fingerprint(flow)
+        return self._checkpoint_is_done(url, "(flow-ran)", 0, f"(flow-ran:{fp})")
+
     def _checkpoint_has_flow_exposed_marker(self, url: str) -> bool:
         """この URL で過去 run の flow が入力を露出した marker が checkpoint にあるか（#170 P2）。
 
@@ -5116,7 +5135,8 @@ class ScanEngine:
         if (matched_flows and not page.forms and not page.url_params
                 and not self._page_level_checks_pending(page)
                 and not self._checkpoint_has_field_units(page.url)
-                and not self._checkpoint_has_flow_exposed_marker(page.url)):
+                and not self._checkpoint_has_flow_exposed_marker(page.url)
+                and all(self._checkpoint_flow_ran(page.url, f) for f in matched_flows)):
             # crawl スナップショットが入力ゼロでも、前回 flow が露出した入力を検査した痕跡
             # （field 単位）があれば skip しない：refresh が入力を再露出し、中断された field
             # 検査を再開できるようにする（Codex #170 P2）。field 単位が無ければ従来どおり
@@ -5179,6 +5199,7 @@ class ScanEngine:
                         ),
                     )
                     return
+                self._checkpoint_mark_flow_ran(page.url, matched_flow)
             # flow の最終遷移が login/error ページへ redirect（200）されると navigate は True でも
             # target に居ない。page-level 検査の前に着地先 URL を検証し、復帰できなければ未認証/
             # 誤ページを "tested" と誤記録しないよう記録して skip する（Codex #167 P1）。

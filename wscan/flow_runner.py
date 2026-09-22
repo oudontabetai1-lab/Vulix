@@ -19,15 +19,29 @@ wait      : pause for ``timeout`` seconds (useful after AJAX transitions)
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.markup import escape
 
 if TYPE_CHECKING:
     from wscan.browser import BrowserManager
 
 console = Console()
+
+# wait/click timeout の上限（秒）。無限大（1e309/"Infinity"）や巨大値で asyncio.sleep が返らず
+# スキャン全体が停止するのを防ぐ（Codex #170 P2）。
+MAX_STEP_TIMEOUT_S = 600.0
+
+
+def _parse_timeout(value) -> float:
+    """有限・非負・上限以内の timeout だけを受理する（純粋）。不正値は ValueError（flow を skip させる）。"""
+    t = float(value)
+    if not math.isfinite(t) or t < 0 or t > MAX_STEP_TIMEOUT_S:
+        raise ValueError(f"flow step timeout must be finite and within 0..{MAX_STEP_TIMEOUT_S:g}s: {value!r}")
+    return t
 
 
 class FlowStepError(Exception):
@@ -66,7 +80,7 @@ class FlowStep:
             field=d.get("field", ""),
             value=d.get("value", ""),
             selector=d.get("selector", ""),
-            timeout=float(d.get("timeout", 5.0)),
+            timeout=_parse_timeout(d.get("timeout", 5.0)),
         )
 
 
@@ -170,7 +184,7 @@ class FlowRunner:
             self._assert_landing_in_scope()
 
         if step.action == "navigate":
-            console.print(f"  [dim]{label} navigate → {step.url}[/dim]")
+            console.print(f"  [dim]{label} navigate → {escape(step.url)}[/dim]")
             # navigate は 4xx/timeout で False を返す（例外は投げない）。破棄すると失敗した
             # 遷移を成功扱いし、前提未達のまま後続/攻撃へ進む（F10・Codex #167 P1）。
             if not await self.browser.navigate(step.url):
@@ -185,6 +199,13 @@ class FlowRunner:
             filled = await self.browser.page.evaluate(
                 """([sel, f, v]) => {
                     const find = (s) => { try { return document.querySelector(s); } catch (e) { return null; } };
+                    const setNative = (el, prop, val) => {
+                        let proto = Object.getPrototypeOf(el), desc = null;
+                        while (proto && !(desc = Object.getOwnPropertyDescriptor(proto, prop))) {
+                            proto = Object.getPrototypeOf(proto);
+                        }
+                        if (desc && desc.set) desc.set.call(el, val); else el[prop] = val;
+                    };
                     let el = null;
                     if (sel) {
                         el = find(sel);
@@ -210,10 +231,13 @@ class FlowRunner:
                                        || low === '0' || low === 'no' || low === 'unchecked');
                         const truthyExplicit = (low === 'true' || low === '1'
                                                 || low === 'checked' || low === 'yes');
-                        el.checked = !falsy;
+                        // React 等の controlled input は value tracker を持ち、el.checked/el.value の
+                        // 直接代入だと onChange が「変化なし」と判断して state を更新しない。prototype の
+                        // native setter 経由で設定してから event を送る（Codex #170 P2）。
+                        setNative(el, 'checked', !falsy);
                         ambiguous = !falsy && !truthyExplicit;
                     } else {
-                        el.value = v;
+                        setNative(el, 'value', v);
                     }
                     ['input', 'change', 'blur'].forEach(e =>
                         el.dispatchEvent(new Event(e, {bubbles: true}))
@@ -237,12 +261,14 @@ class FlowRunner:
                 for p in ("password", "passwd", "pass", "pwd", "secret")
             )
             display_val = "***" if masked else step.value
-            console.print(f"  [dim]{label} fill [{ident}] = {display_val[:40]}[/dim]")
+            # 記録値/selector に Rich markup（`[/admin]` 等）が含まれても MarkupError で fill 成功後に
+            # 前提失敗扱いにならないよう escape する（Codex #170 P2）。
+            console.print(f"  [dim]{label} fill \\[{escape(ident)}] = {escape(display_val[:40])}[/dim]")
             if ambiguous:
                 # 旧記録の checkbox/radio は真の checked を値から復元できない。checked と仮定した
                 # ことを明示し、現行 record（click 記録）での再取得を促す（黙って反転させない）。
                 console.print(
-                    f"  [yellow]{label} fill [{ident}]: 旧記録の checkbox/radio は値から "
+                    f"  [yellow]{label} fill \\[{escape(ident)}]: 旧記録の checkbox/radio は値から "
                     f"checked 状態を復元できません（checked と仮定）。現行の record は click で "
                     f"記録するため再記録を推奨[/yellow]"
                 )
@@ -250,7 +276,17 @@ class FlowRunner:
         elif step.action == "submit":
             console.print(f"  [dim]{label} submit[/dim]")
             clicked = await self.browser.page.evaluate(
-                """() => {
+                """(sel) => {
+                    // record が Enter 送信等で保存した form selector があればその form を送信する。
+                    // requestSubmit は submit event を発火するので SPA の submit handler も動く（Codex #170 P2）。
+                    if (sel) {
+                        let form = null;
+                        try { form = document.querySelector(sel); } catch (e) { form = null; }
+                        if (form && form.tagName !== 'FORM') form = form.closest('form');
+                        if (!form) return false;
+                        if (form.requestSubmit) form.requestSubmit(); else form.submit();
+                        return true;
+                    }
                     // Prefer clicking the submit button (handles JS frameworks)
                     const btn = document.querySelector(
                         'button[type="submit"],input[type="submit"]'
@@ -259,7 +295,8 @@ class FlowRunner:
                     const form = document.querySelector('form');
                     if (form) { form.submit(); return true; }
                     return false;
-                }"""
+                }""",
+                step.selector,
             )
             if not clicked:
                 # 送信ボタン/フォームが無いのに成功扱いすると後続を誤って進める（F10 同型）。
@@ -274,7 +311,7 @@ class FlowRunner:
 
         elif step.action == "click":
             sel = step.selector or step.field
-            console.print(f"  [dim]{label} click [{sel}][/dim]")
+            console.print(f"  [dim]{label} click \\[{escape(sel)}][/dim]")
             await self.browser.page.click(sel, timeout=int(step.timeout * 1000))
             try:
                 await self.browser.page.wait_for_load_state(

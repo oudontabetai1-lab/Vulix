@@ -17,8 +17,9 @@ class _FakePage:
         self.submit_ok = submit_ok
 
     async def evaluate(self, js, arg=None):
-        # fill は [field, value] を渡す。submit は引数なし。
-        return self.fill_ok if arg is not None else self.submit_ok
+        # fill は [selector, field, value] を渡す。submit は form selector（空可）を渡す。
+        self.last_arg = arg
+        return self.submit_ok if "requestSubmit" in js else self.fill_ok
 
     async def wait_for_load_state(self, *a, **k):
         return None
@@ -38,6 +39,30 @@ class _FakeBrowser:
 def _run(browser, steps):
     flow = ScanFlow(name="t", steps=steps)
     return asyncio.run(FlowRunner(browser).run(flow))
+
+
+def test_non_finite_or_huge_timeouts_are_rejected():
+    # 1e309/"Infinity"/負値/上限超は flow 構築時に拒否し、asyncio.sleep(inf) でスキャンを停止させない（Codex #170 P2）。
+    import pytest
+    for bad in (1e309, "Infinity", "nan", -1, 10_000):
+        with pytest.raises(ValueError):
+            FlowStep.from_dict({"action": "wait", "timeout": bad})
+    assert FlowStep.from_dict({"action": "wait", "timeout": "2.5"}).timeout == 2.5
+
+
+def test_fill_value_with_rich_markup_does_not_fail_flow():
+    # 記録値に Rich markup（`[/admin]`）があっても fill 成功後に MarkupError で前提失敗扱いにしない（Codex #170 P2）。
+    browser = _FakeBrowser(_FakePage(fill_ok=True))
+    ok = _run(browser, [FlowStep(action="fill", selector="[name=x]", value="[/admin]")])
+    assert ok is True
+
+
+def test_submit_passes_recorded_form_selector():
+    # Enter 送信で記録された form selector を submit に渡す（Codex #170 P2）。
+    page = _FakePage(submit_ok=True)
+    ok = _run(_FakeBrowser(page), [FlowStep(action="submit", selector="#login")])
+    assert ok is True
+    assert page.last_arg == "#login"
 
 
 def test_fill_missing_field_fails_and_stops_dependent_steps():
@@ -447,7 +472,9 @@ def _build_eng_for_flow_skip(page_check_done: bool):
     # flow navigate の scope 検証（#170 P2）用スタブ。テストの flow URL は in-scope。
     eng._is_access_allowed_url = lambda url: True
     eng._is_url_excluded = lambda url: False
-    eng._checkpoint_is_done = lambda url, field, *a, **k: (field == "(page)") and page_check_done
+    # page_check_done は「前回 run で page-level も当該 flow（flow-ran marker）も完了済み」を表す。
+    eng._checkpoint_is_done = lambda url, field, *a, **k: (
+        field in ("(page)", "(flow-ran)") and page_check_done)
     eng._checkpoint_mark_done = lambda *a, **k: None
     eng._record_scan_matrix = lambda *a, **k: None
     eng._record_finding = lambda *a, **k: None
@@ -490,6 +517,41 @@ def test_pre_attack_flow_skipped_when_no_input_page_fully_checkpointed():
         asyncio.run(eng._attack_one_page(page, {}))
 
     assert ran["flow"] is False  # 残作業なし → flow 再生しない
+
+
+def test_new_or_changed_flow_replays_on_fully_checkpointed_page():
+    """resume で --flows を追加/変更した場合、旧 checkpoint が page-level 完了でも新しい flow は
+    完走記録（内容 fingerprint）が無いので skip せず再生する（Codex #170 P2）。"""
+    from wscan.checkpoint import CheckpointState
+    from wscan.engine import ScanEngine
+    ran = {"flow": False}
+    eng = _build_eng_for_flow_skip(page_check_done=True)
+    eng.enable_checkpoint = True
+    cp = CheckpointState()
+    old_flow = ScanFlow(name="setup", steps=[FlowStep(action="navigate", url="http://t.test/old")])
+    fp_old = ScanEngine._flow_fingerprint(old_flow)
+    cp.mark_done("http://t.test/cart", "(flow-ran)", 0, f"(flow-ran:{fp_old})")
+    eng.checkpoint = cp
+    eng._checkpoint_is_done = lambda url, field, *a, **k: (
+        field == "(page)" or cp.is_done(url, field, a[0] if a else 0, a[1] if len(a) > 1 else ""))
+    page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
+
+    class _Runner:
+        def __init__(self, browser, **kwargs):
+            pass
+
+        async def run(self, flow):
+            ran["flow"] = True
+            return True
+
+    with patch("wscan.engine.FlowRunner", _Runner):
+        async def _noop_refresh(page):
+            return None
+        eng._refresh_page_after_flow = _noop_refresh
+        eng._urls_same_page = lambda a, b: True
+        asyncio.run(eng._attack_one_page(page, {}))
+
+    assert ran["flow"] is True  # 現 flow の完走記録なし → 再生
 
 
 def test_pre_attack_flow_runs_when_no_input_page_has_pending_check():
@@ -557,7 +619,7 @@ def test_checkpoint_sentinel_units_do_not_block_flow_skip():
     cp.mark_done("http://t.test/cart", "(api-template)", 0, "mass_assignment")  # sentinel
     cp.mark_done("http://t.test/cart", "(page)", 0, "security_headers")          # sentinel
     eng.checkpoint = cp
-    eng._checkpoint_is_done = lambda url, field, *a, **k: field == "(page)"
+    eng._checkpoint_is_done = lambda url, field, *a, **k: field in ("(page)", "(flow-ran)")
     page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
 
     class _Runner:

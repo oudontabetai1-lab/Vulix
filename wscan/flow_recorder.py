@@ -88,8 +88,12 @@ class FlowRecorder:
                 # ない／最終 target チェックで弾かれる（Codex #170 P2）。
                 if not _initial_load["seen"]:
                     _initial_load["seen"] = True
-                    if url != start_url and steps and steps[0].get("action") == "navigate":
-                        steps[0]["url"] = url  # 初期 redirect の実着地を初期 step に反映
+                    if url != start_url:
+                        # steps[0]（start_url への navigate）は残す。redirect 応答が SSO callback/
+                        # magic link の Set-Cookie 等の前提 state を作るため、置換すると replay が
+                        # それを受け取れない（Codex #170 P2）。実着地は別 navigate として追記し、
+                        # _match_pre_attack_flows の最終 navigate 照合に使わせる。
+                        steps.append({"action": "navigate", "url": url})
                     return
                 steps.append({"action": "navigate", "url": url})
 
@@ -101,6 +105,7 @@ class FlowRecorder:
             _tok = secrets.token_hex(12)
             _fn_fill = f"__wscan_fill_{_tok}__"
             _fn_click = f"__wscan_click_{_tok}__"
+            _fn_submit = f"__wscan_submit_{_tok}__"
             _fn_notify = f"__wscan_notify_{_tok}__"
 
             await page.expose_function(_fn_fill, lambda selector, value: steps.append(
@@ -108,6 +113,9 @@ class FlowRecorder:
             ))
             await page.expose_function(_fn_click, lambda selector: steps.append(
                 {"action": "click", "selector": selector}
+            ))
+            await page.expose_function(_fn_submit, lambda selector: steps.append(
+                {"action": "submit", "selector": selector}
             ))
             # ページ側の警告（file input skip 等）を **記録プロセスの stdout** へ出す。ページの
             # console.warn だけだと DevTools 非表示の headed recorder では操作者に届かない（Codex #170 P2）。
@@ -173,7 +181,16 @@ class FlowRecorder:
                         // 代入するだけで checked を変えず、規約同意等の前提を再現できない。click で
                         // 相互作用そのものを記録・再現する（#170 P2）。
                         if (el.type === 'checkbox' || el.type === 'radio') {{
-                            if (typeof window['{_fn_click}'] === 'function') {{
+                            // 見た目用 label で操作される**非表示**の input は replay の page.click
+                            // （actionability 検査付き）が timeout する。checked 状態を明示トークンで
+                            // fill 記録し、replay は要素のクリック可否に依存せず状態を復元する（Codex #170 P2）。
+                            const cs = window.getComputedStyle(el);
+                            const hidden = !el.getClientRects().length || cs.visibility === 'hidden';
+                            if (hidden) {{
+                                if (typeof window['{_fn_fill}'] === 'function') {{
+                                    window['{_fn_fill}'](sel, el.checked ? 'true' : 'false');
+                                }}
+                            }} else if (typeof window['{_fn_click}'] === 'function') {{
                                 window['{_fn_click}'](sel);
                             }}
                         }} else if (el.type === 'file') {{
@@ -187,6 +204,16 @@ class FlowRecorder:
                         }} else if (typeof window['{_fn_fill}'] === 'function') {{
                             window['{_fn_fill}'](sel, el.value);
                         }}
+                    }}
+                }}, true);
+                // Enter キー等の暗黙送信も記録する。送信ボタンがある form の暗黙送信は既定ボタンへの
+                // click として click listener が記録済み（e.submitter が立つ）なので、submitter の
+                // 無い送信だけを記録して二重送信を避ける（Codex #170 P2）。
+                document.addEventListener('submit', function(e) {{
+                    const form = e.target;
+                    if (!form || form.tagName !== 'FORM' || e.submitter) return;
+                    if (typeof window['{_fn_submit}'] === 'function') {{
+                        window['{_fn_submit}'](__wscanPath(form));
                     }}
                 }}, true);
                 document.addEventListener('click', function(e) {{
