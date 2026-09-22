@@ -232,9 +232,13 @@ class AgentEngine:
 
         if getattr(result, "preserve_existing_artifacts", False) or (
             self.resume and self._existing_run_dir and result.error
+            and not result.findings
         ):
             result.preserve_existing_artifacts = True
-            # 既存 run の拒否・resume 失敗時は evidence/reproduction を保全する。
+            # 既存 run の拒否・**新たな finding を1件も得られなかった** resume 失敗時は、
+            # 既存 evidence/reproduction を保全する。resume 中に新規 probe を実行して checkpoint
+            # 済みの finding を回収した後で verifier/reviewer が落ちたケースは、回収した finding を
+            # 書き出すため保全せず下へ流す（さもないと stale な pre-resume 成果物が残る・Codex #154 P1）。
             console.print(
                 f"[bold red]Agent scan FAILED: {result.error}[/bold red]"
             )
@@ -290,8 +294,15 @@ class AgentEngine:
         from wscan.reproduction import write_reproduction_package
         # 認証（user/pass・TOTP・storage-state）を使った run の finding は認証セッション無しでは
         # 再現不能なので、reproduction に authorization_required を立てる（Codex #154 P2）。
+        # bearer は --bearer で extra_headers（Authorization 等）として渡るため、機微ヘッダの
+        # 有無も認証済み扱いに含める（さもないと bearer 認証 run が authorization_required=false に
+        # なる・Codex #154 P2）。
+        from wscan.request_logger import _is_sensitive_header
         authenticated_run = bool(
-            (self.auth_user and self.auth_pass) or self.totp_secret or self.storage_state
+            (self.auth_user and self.auth_pass)
+            or self.totp_secret
+            or self.storage_state
+            or any(_is_sensitive_header(name) for name in self.extra_headers)
         )
         write_reproduction_package(
             findings, self.output_dir, authenticated=authenticated_run

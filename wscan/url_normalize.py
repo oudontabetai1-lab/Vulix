@@ -4,7 +4,11 @@ from __future__ import annotations
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
 
-_INJECTION_META_CHARS = frozenset("<>\"'`;(){}|\\/%*")
+# `/` は **含めない**：``?next=/home`` と ``?next=/admin`` のような path/route 値まで空化すると
+# 別ルートを「既知」と誤判定し、_enqueue_observed_probe_work が probe を作らず偽 COMPLETE に
+# なる（Codex #154 P1）。真の注入マーカー（``<>"'`` 等）を含む値だけ空化して payload 変種を dedup
+# する。純粋な path 値（``/`` と英数のみ）は routing 値として保持する。
+_INJECTION_META_CHARS = frozenset("<>\"'`;(){}|\\%*")
 
 
 def endpoint_identity(url: str) -> str:

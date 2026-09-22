@@ -327,12 +327,27 @@ def test_endpoint_identity_ignores_payloads_order_duplicates_and_fragment():
     assert endpoint_identity("https://a/search?a%26b=x") != endpoint_identity("https://a/search?a=x&b=y")
 
 
-@pytest.mark.parametrize("value", ["<script>", "1'", '"', "`", ";", "(", ")", "{", "}", "|", "\\", "/", "%", "*", "two words", "x" * 65, "%3Cscript%3E"])
+@pytest.mark.parametrize("value", ["<script>", "1'", '"', "`", ";", "(", ")", "{", "}", "|", "\\", "%", "*", "two words", "x" * 65, "%3Cscript%3E"])
 def test_endpoint_identity_collapses_injection_values(value):
     from urllib.parse import urlencode
     from wscan.url_normalize import endpoint_identity
 
     assert endpoint_identity("/search?" + urlencode({"q": value})) == endpoint_identity("/search?q=1'")
+
+
+@pytest.mark.parametrize("value", ["/home", "/admin", "/a/b/c", "/"])
+def test_endpoint_identity_preserves_slash_routing_values(value):
+    # `/` を含む path/route 値は payload ではなく routing 値として保持する（Codex #154 P1）。
+    from urllib.parse import urlencode
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?" + urlencode({"next": value})) != endpoint_identity("/view?next=")
+
+
+def test_endpoint_identity_distinguishes_slash_routes():
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?next=/home") != endpoint_identity("/view?next=/admin")
 
 
 @pytest.mark.parametrize("value", ["admin", "home", "123", "x" * 64])

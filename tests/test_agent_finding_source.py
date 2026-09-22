@@ -151,6 +151,27 @@ Evidence: alert dialog was observed
             )
         )
 
+    def test_security_probe_denies_access_only_sharing_target_origin(self):
+        # access-only URL（/login 等）が primary target origin を共有しても probe 禁止。
+        # target scope より access scope を優先する（Codex #154 P1）。
+        target_urls = ["http://fixture.test"]
+        self.assertTrue(
+            security_probe_allowed("http://fixture.test/app", target_urls, [])
+        )
+        self.assertFalse(
+            security_probe_allowed(
+                "http://fixture.test/login", target_urls, [],
+                access_urls=["http://fixture.test/login"],
+            )
+        )
+        # access scope 外の同一 origin ページは従来どおり許可。
+        self.assertTrue(
+            security_probe_allowed(
+                "http://fixture.test/app", target_urls, [],
+                access_urls=["http://fixture.test/login"],
+            )
+        )
+
 
 class AgentReconHandoffTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod

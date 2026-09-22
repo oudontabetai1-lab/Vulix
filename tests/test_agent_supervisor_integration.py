@@ -81,10 +81,13 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
                 # Fresh episode repeats the same nonce-bound evidence.
                 nonce = re.search(r"WSCAN-NONCE:([^\s]+)", self.kwargs["extend_system_message"]).group(1)
                 field = "r" if '"field_name": "r"' in task else "q"
+                # verifier は候補と同じ payload を再現する（payload 一致が dynamic_verified の
+                # 条件・Codex #154 P2）。field ごとに候補 payload を反映する。
+                payload = "<svg/onload=alert(2)>" if field == "r" else "<svg/onload=alert(1)>"
                 return _History(
                     f"WSCAN-NONCE:{nonce}\nVULNERABILITY FOUND:\n"
                     "Type: xss\nSeverity: high\nURL: http://fixture.test/search\n"
-                    f"Field: {field}\nPayload: <svg/onload=alert(1)>\n"
+                    f"Field: {field}\nPayload: {payload}\n"
                     "Evidence: dialog observed again\nVERIFICATION COMPLETE"
                 )
             return _History("REVIEW COMPLETE")

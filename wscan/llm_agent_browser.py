@@ -198,6 +198,7 @@ def security_probe_allowed(
     target_urls: list[str],
     exclude_urls: list[str],
     *,
+    access_urls: Optional[list[str]] = None,
     field_name: str = "",
     exclude_fields: Optional[list[str]] = None,
 ) -> bool:
@@ -205,6 +206,10 @@ def security_probe_allowed(
     if not _url_matches_scope(url, _normalize_scope_urls(target_urls)):
         return False
     if _url_is_excluded(url, exclude_urls):
+        return False
+    # access-only URL（/login 等）は primary target origin を共有しても security probe 禁止。
+    # target scope より access scope を優先する（訪問/認証のみの契約を守る・Codex #154 P1）。
+    if access_urls and _url_matches_scope(url, _normalize_scope_urls(access_urls)):
         return False
     excluded_fields = {str(name).strip().lower() for name in (exclude_fields or [])}
     return not field_name or field_name.strip().lower() not in excluded_fields
@@ -1376,12 +1381,16 @@ class AgentBrowserScanner:
                             episode_text, nonce=episode_nonce
                         )
                         candidate = self._candidate_for_work(work)
+                        # payload も一致条件に含める：同一 field で verifier が別 payload を
+                        # 報告しても元候補を dynamic_verified にすると「その payload が独立再現
+                        # された」と誤主張する（Codex #154 P2）。不一致なら未確証側（安全）に倒す。
                         is_reproduced = bool(candidate) and any(
-                            (finding.check_type, finding.url, finding.field_name)
+                            (finding.check_type, finding.url, finding.field_name, finding.payload)
                             == (
                                 candidate.get("check_type"),
                                 candidate.get("url"),
                                 candidate.get("field_name"),
+                                candidate.get("payload"),
                             )
                             for finding in reproduced
                         )
@@ -1952,6 +1961,7 @@ class AgentBrowserScanner:
             url,
             self.target_urls,
             self.exclude_urls,
+            access_urls=self.access_urls,
             field_name=field_name,
             exclude_fields=self.exclude_fields,
         )
