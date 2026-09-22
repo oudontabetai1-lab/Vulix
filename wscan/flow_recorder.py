@@ -124,9 +124,22 @@ class FlowRecorder:
                         let sel = el.id ? '#' + esc : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase());
                         // radio/checkbox は name を共有するのが普通で、[name="plan"] だけだと
                         // グループ内のどの選択肢か判別できず replay が誤って先頭を click する。
-                        // id が無い場合は value を弁別子に加えて一意化する（#170 P2）。
-                        if (!el.id && el.name && (el.type === 'radio' || el.type === 'checkbox') && el.value) {{
-                            sel = '[name="' + el.name + '"][value="' + escv(el.value) + '"]';
+                        // id が無い場合、**明示 value 属性がグループ内で一意なとき**だけ
+                        // [name][value] で弁別する。value 属性が無い（DOM の el.value は既定 "on" で
+                        // 属性は不在＝そのセレクタは何にも一致しない）／同名グループで value が重複する
+                        // 場合は一意な要素パスへフォールバックする（Codex #170 P2）。
+                        if (!el.id && (el.type === 'radio' || el.type === 'checkbox')) {{
+                            const attrVal = el.getAttribute('value');
+                            let uniqueByValue = false;
+                            if (el.name && attrVal !== null) {{
+                                const group = document.querySelectorAll(
+                                    '[name="' + el.name + '"][value="' + escv(attrVal) + '"]'
+                                );
+                                uniqueByValue = (group.length === 1);
+                            }}
+                            sel = uniqueByValue
+                                ? '[name="' + el.name + '"][value="' + escv(attrVal) + '"]'
+                                : __wscanPath(el);
                         }}
                         // checkbox/radio は value ではなく checked 状態が本質。fill は value を
                         // 代入するだけで checked を変えず、規約同意等の前提を再現できない。click で

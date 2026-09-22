@@ -3615,9 +3615,13 @@ async def run_record(args):
             headless=getattr(args, "headless", False),
         )
         console.print(f"\n[bold green]✓ {len(steps)} ステップを保存しました:[/bold green] {args.output}")
+        # 出力パスに空白（例: "checkout flow.json"）があると、そのまま貼れるコマンドとして
+        # 表示したとき --flows が2引数に割れて _load_flow_files が両方欠落 skip し、前提 flow
+        # 無しで別状態をスキャンしてしまう。shlex.quote でシェル安全に引用する（Codex #170 P2）。
+        import shlex
         console.print(
             f"\n[dim]このフロー ファイルをスキャンで使用するには:[/dim]\n"
-            f"  python main.py scan <URL> --flows {args.output}"
+            f"  python main.py scan <URL> --flows {shlex.quote(str(args.output))}"
         )
     except Exception as exc:
         console.print(f"[red]記録中にエラーが発生しました: {exc}[/red]")

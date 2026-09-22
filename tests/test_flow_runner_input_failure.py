@@ -89,6 +89,8 @@ def test_attack_one_page_skips_when_pre_attack_flow_fails():
     from wscan.engine import ScanEngine
 
     eng = ScanEngine.__new__(ScanEngine)
+    eng._is_access_allowed_url = lambda url: True  # flow navigate scope 検証(#170 P2)用スタブ
+    eng._is_url_excluded = lambda url: False
 
     page_scanned = {"called": False}
 
@@ -156,6 +158,8 @@ def test_cookies_resynced_after_successful_pre_attack_flow():
 
     order = []
     eng = ScanEngine.__new__(ScanEngine)
+    eng._is_access_allowed_url = lambda url: True  # flow navigate scope 検証(#170 P2)用スタブ
+    eng._is_url_excluded = lambda url: False
 
     class _PageScanner:                # 未完了の page-level 単位＝実作業あり（flow を再生させる）
         HAS_PAGE_LEVEL = True
@@ -220,6 +224,8 @@ def test_pre_attack_flow_redirected_to_login_is_skipped():
             return []
 
     eng = ScanEngine.__new__(ScanEngine)
+    eng._is_access_allowed_url = lambda url: True  # flow navigate scope 検証(#170 P2)用スタブ
+    eng._is_url_excluded = lambda url: False
     eng.scanners = {"security_headers": _PageScanner()}
     eng._checkpoint_is_done = lambda *a, **k: False
     eng._checkpoint_mark_done = lambda *a, **k: None
@@ -278,6 +284,8 @@ def test_pre_attack_flow_fragment_change_is_on_target():
             return []
 
     eng = ScanEngine.__new__(ScanEngine)
+    eng._is_access_allowed_url = lambda url: True  # flow navigate scope 検証(#170 P2)用スタブ
+    eng._is_url_excluded = lambda url: False
     eng.scanners = {"security_headers": _PageScanner()}
     eng._checkpoint_is_done = lambda *a, **k: False
     eng._checkpoint_mark_done = lambda *a, **k: None
@@ -436,6 +444,9 @@ def _build_eng_for_flow_skip(page_check_done: bool):
     # _checkpoint_has_field_units（#170 P2）が参照する。checkpoint 無しの最小構成。
     eng.enable_checkpoint = False
     eng.checkpoint = None
+    # flow navigate の scope 検証（#170 P2）用スタブ。テストの flow URL は in-scope。
+    eng._is_access_allowed_url = lambda url: True
+    eng._is_url_excluded = lambda url: False
     eng._checkpoint_is_done = lambda *a, **k: page_check_done
     eng._checkpoint_mark_done = lambda *a, **k: None
     eng._record_scan_matrix = lambda *a, **k: None
@@ -532,3 +543,61 @@ def test_pre_attack_flow_runs_when_checkpoint_has_flow_exposed_field_units():
         asyncio.run(eng._attack_one_page(page, {}))
 
     assert ran["flow"] is True  # field 単位あり → skip せず再生
+
+
+def test_checkpoint_sentinel_units_do_not_block_flow_skip():
+    """checkpoint の sentinel 単位（(page)/(api-template)）は field 単位と誤カウントしない。
+    無関係な API 完了記録のせいで入力無しページの flow skip が阻害され、状態変更 flow を
+    無駄に再生しないこと（#170 P2 の回帰防止）。"""
+    from wscan.checkpoint import CheckpointState
+    ran = {"flow": False}
+    eng = _build_eng_for_flow_skip(page_check_done=True)
+    eng.enable_checkpoint = True
+    cp = CheckpointState()
+    cp.mark_done("http://t.test/cart", "(api-template)", 0, "mass_assignment")  # sentinel
+    cp.mark_done("http://t.test/cart", "(page)", 0, "security_headers")          # sentinel
+    eng.checkpoint = cp
+    eng._checkpoint_is_done = lambda *a, **k: True
+    page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
+
+    class _Runner:
+        def __init__(self, browser):
+            pass
+
+        async def run(self, flow):
+            ran["flow"] = True
+            return True
+
+    with patch("wscan.engine.FlowRunner", _Runner):
+        asyncio.run(eng._attack_one_page(page, {}))
+
+    assert ran["flow"] is False  # sentinel のみ → 本物の field 単位なし → skip される
+
+
+def test_pre_attack_flow_with_out_of_scope_navigate_is_refused():
+    """flow の中間 navigate が scope 外/除外なら、最終遷移が target でも実行しない（#170 P2）。"""
+    from wscan.engine import ScanEngine
+    ran = {"flow": False}
+    eng = _build_eng_for_flow_skip(page_check_done=False)  # pending あり → skip されない
+    # /evil.test は scope 外。
+    eng._is_access_allowed_url = lambda url: "evil.test" not in url
+    eng._is_url_excluded = lambda url: False
+    eng.flows = [ScanFlow(name="setup", steps=[
+        FlowStep(action="navigate", url="http://evil.test/steal"),
+        FlowStep(action="navigate", url="http://t.test/cart"),
+    ])]
+    page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
+
+    class _Runner:
+        def __init__(self, browser):
+            pass
+
+        async def run(self, flow):
+            ran["flow"] = True
+            return True
+
+    with patch("wscan.engine.FlowRunner", _Runner):
+        asyncio.run(eng._attack_one_page(page, {}))
+
+    assert ran["flow"] is False  # scope 外 navigate を含む flow は実行しない
+    eng._record_unscannable_url.assert_called_once()

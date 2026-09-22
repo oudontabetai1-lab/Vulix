@@ -4988,10 +4988,16 @@ class ScanEngine:
         """この URL に field/param 単位の完了記録があるか（checkpoint 参照のみ・純粋）。
 
         crawl スナップショットが入力ゼロでも、前回 run で pre-attack flow が露出したフォーム/
-        パラメータを検査済みなら field 単位（field_name != "(page)"）が残る。resume の flow skip
-        判定で「入力なし＝page-level のみ」と誤断して flow を捨て、中断された field 検査を取りこぼす
+        パラメータを検査済みなら **本物の** field 単位が残る。resume の flow skip 判定で
+        「入力なし＝page-level のみ」と誤断して flow を捨て、中断された field 検査を取りこぼす
         のを防ぐ signal（Codex #170 P2）。pending 単位は保存されないため、field 単位が1つでも
         あれば安全側に倒して flow を再生する（=残作業を再構成できる）。
+
+        checkpoint sentinel（``(page)``＝page-level、``(api-template)``＝API テンプレート）は
+        field_name が括弧付きの疑似名で、real な form/URL-param ではない。これらを field 単位と
+        誤カウントすると、入力ゼロ・page 済みの resume ページで無関係な API 完了記録のせいで skip
+        されず、状態変更 flow（add-to-cart 等）を無駄に再生して target 状態を汚す（Codex #170 P2）。
+        括弧で囲まれた sentinel 名は除外し、実フィールド/パラメータ名だけを数える。
         """
         if not self.enable_checkpoint or self.checkpoint is None:
             return False
@@ -4999,7 +5005,11 @@ class ScanEngine:
         target = normalize_url_for_key(url or "")
         for key in self.checkpoint.completed_units:
             parts = key.split("\x1f")
-            if len(parts) >= 2 and parts[0] == target and parts[1] and parts[1] != "(page)":
+            if len(parts) < 2 or parts[0] != target:
+                continue
+            field = parts[1]
+            # sentinel（"(page)"/"(api-template)" 等の括弧付き疑似名）は field 単位ではない。
+            if field and not (field.startswith("(") and field.endswith(")")):
                 return True
         return False
 
@@ -5088,6 +5098,35 @@ class ScanEngine:
             # 同一遷移先に一致する flow を **file 順に全て順次再生** する（1つでも失敗したら
             # そのページの検査を skip）。以前は最初の1つしか再生せず残りを黙って無視していた（#170 P2）。
             for matched_flow in matched_flows:
+                # scope 外/除外 URL への navigate を含む flow は実行しない。最終遷移が target へ
+                # 戻っても、記録された flow が中間 navigate で scope 設定を迂回して未認可の外部/
+                # 除外アプリを訪問・操作しうる（Codex #170 P2）。access_urls（login 等の訪問許可）は
+                # _is_access_allowed_url が許すため auth flow は通る。
+                _bad_nav = next(
+                    (
+                        s.url for s in matched_flow.steps
+                        if s.action == "navigate" and s.url
+                        and (
+                            not self._is_access_allowed_url(s.url)
+                            or self._is_url_excluded(s.url)
+                        )
+                    ),
+                    None,
+                )
+                if _bad_nav:
+                    console.print(
+                        f"  [yellow][Flow] Skip '{matched_flow.name}': "
+                        f"navigate to out-of-scope/excluded URL {_bad_nav} — "
+                        f"skipping checks on {page.url}[/yellow]"
+                    )
+                    self._record_unscannable_url(
+                        page.url,
+                        note=(
+                            f"Pre-attack flow '{matched_flow.name}' navigates to an "
+                            "out-of-scope or excluded URL; refused to run for scope safety"
+                        ),
+                    )
+                    return
                 console.print(
                     f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
                 )
