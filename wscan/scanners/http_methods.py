@@ -111,14 +111,40 @@ def redact_url(target: str) -> str:
     **永続化する証跡**にはこの redacted URL を使う（checkpoint/レポート/ダッシュボードへ
     資格情報を残さない）。解析不能時は安全側として userinfo らしき前置を素朴に除去する。
     """
+    from wscan.request_logger import redact_url as _canonical_redact_url
     try:
-        return str(httpx.URL(target).copy_with(username=None, password=None))
+        stripped = str(httpx.URL(target).copy_with(username=None, password=None))
     except Exception:
         # 念のためのフォールバック：scheme://userinfo@host... の userinfo を落とす。
-        return re.sub(r"^([a-zA-Z][\w+.-]*://)[^/@]*@", r"\1", target)
+        stripped = re.sub(r"^([a-zA-Z][\w+.-]*://)[^/@]*@", r"\1", target)
+    # page probe は query を保持するため、access_token 等の機微 query 値も正典の redaction で
+    # 伏せてから永続化する（Codex #157 P1）。
+    return _canonical_redact_url(stripped)
 
 
-def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), target_url: str = "") -> str:
+def url_query_secrets(target: str) -> list[str]:
+    """正典の URL redaction が伏せる query/fragment 値（原文）を返す（純粋・Codex #157 P1）。
+
+    TRACE 反射本文にも URL 由来の秘密（``?access_token=...``）が載り得るため、同じ値を本文でも伏せる。
+    """
+    from urllib.parse import parse_qsl, urlsplit
+    from wscan.request_logger import redact_url as _canonical_redact_url
+    try:
+        orig, red = urlsplit(target), urlsplit(_canonical_redact_url(target))
+    except Exception:
+        return []
+    out: list[str] = []
+    for a, b in ((orig.query, red.query), (orig.fragment, red.fragment)):
+        ra = parse_qsl(a, keep_blank_values=True)
+        rb = parse_qsl(b, keep_blank_values=True)
+        if len(ra) != len(rb):
+            continue
+        out.extend(va for (_, va), (_, vb) in zip(ra, rb) if va and va != vb)
+    return out
+
+
+def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), target_url: str = "",
+                      sent_secret_headers=()) -> str:
     """TRACE が反射した送信ヘッダのうち秘匿値をマスクする（純粋）。
 
     XST の証跡（どのヘッダが反射したか）は残しつつ、Authorization/Cookie 等の実値は残さない。
@@ -145,6 +171,7 @@ def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), targe
     # URL 由来と確定した資格情報は短くても伏せる。切り詰めは秘匿後に行う。
     values = [v for v in (sent_secret_values or []) if v and len(v) >= 4]
     values.extend(url_userinfo_secrets(target_url))
+    values.extend(url_query_secrets(target_url))
     import re as _re
     for val in values:
         variants.add(val)
@@ -157,6 +184,25 @@ def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), targe
         variants.add(_json.dumps(val)[1:-1])             # JSON 文字列本体のエスケープ
     for v in sorted({x for x in variants if x}, key=len, reverse=True):
         text = text.replace(v, "[REDACTED]")
+    # (3) 短い秘匿値（4 字未満）は本文全体の literal 置換だと誤伏字が広がるため、名前と組の文脈で
+    # 伏せる：Cookie は ``name=value`` 対、その他ヘッダは ``Name: value`` / ``"Name":"value"`` 形。
+    # JSON/HTML 等の行頭以外の直列化でも短い資格情報を残さない（Codex #157 P1）。
+    for hname, hval in (sent_secret_headers or ()):
+        hval = str(hval or "")
+        if not hval:
+            continue
+        if str(hname).lower() == "cookie":
+            for pair in hval.split(";"):
+                k, eq, v = pair.strip().partition("=")
+                if eq and v and len(v) < 4:
+                    text = _re.sub(
+                        _re.escape(k) + r"(\s*=\s*)" + _re.escape(v) + r"(?![\w-])",
+                        lambda m, k=k: f"{k}{m.group(1)}[REDACTED]", text)
+        elif len(hval) < 4:
+            text = _re.sub(
+                r"(?i)(" + _re.escape(str(hname)) + r"[\"']?\s*[:=]\s*[\"']?)" + _re.escape(hval)
+                + r"(?![\w-])",
+                lambda m: f"{m.group(1)}[REDACTED]", text)
     # (1) 行頭ヘッダ形の値を伏字化。
     out: list[str] = []
     for line in text.splitlines(keepends=True):
@@ -223,7 +269,8 @@ class HttpMethodsScanner(BaseScanner):
         # origin ルートに加えてページ自身のパスも検査する（パス単位の WebDAV/メソッド設定を
         # 見逃さない）。fragment だけ落とす。query は保持する（/index.php?route=dav のように query で
         # リソースを振り分けるアプリで別リソースを probe し tested 扱いにしない・Codex #157 P2）。
-        _path = parsed.path or "/"
+        # `;params`（/dav;jsessionid=...）も crawl したリソースの一部なので保持する（Codex #157 P2）。
+        _path = (parsed.path or "/") + (f";{parsed.params}" if parsed.params else "")
         page_target = (
             origin if _path == "/" and not parsed.query
             else f"{origin}{_path}" + (f"?{parsed.query}" if parsed.query else "")
@@ -408,7 +455,10 @@ class HttpMethodsScanner(BaseScanner):
         display = redact_url(target)  # 永続化用（userinfo を残さない・#157 P2）
         pair = {"request": {"url": display, "method": "TRACE"},
                 "response": {"status": r.status_code, "headers": dict(r.headers),
-                             "body": redact_trace_body(r.text, sent_secret_values=sent_secrets, target_url=target)}}
+                             "body": redact_trace_body(
+                                 r.text, sent_secret_values=sent_secrets, target_url=target,
+                                 sent_secret_headers=[(k, v) for k, v in client.headers.items()
+                                                      if is_sensitive_header(k)])}}
         confirmed = strength == "confirmed"
         evidence = (
             "TRACE メソッドが有効で送信ヘッダを反射します（Cross-Site Tracing / XST）。"

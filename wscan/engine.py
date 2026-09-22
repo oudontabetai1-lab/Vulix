@@ -294,6 +294,16 @@ def _scoped_cookie_header(cookies: list | None, url: str) -> str | None:
         cpath = str(c.get("path", "/") or "/")
         if not _cookie_path_matches(req_path, cpath):
             continue
+        # CHIPS（partitioned）Cookie は partitionKey の top-level site でだけ送られる。直接 probe の
+        # top-level は宛先自身なので、宛先の schemeful site に一致しない partition の Cookie は送らない
+        # （別 partition の資格情報で認証・TRACE で露出しない・Codex #157 P1）。
+        pkey = c.get("partitionKey")
+        if pkey:
+            kp = _up(pkey if "://" in str(pkey) else f"https://{pkey}")
+            khost = (kp.hostname or "").lower()
+            if not (khost and (kp.scheme or "").lower() == (parsed.scheme or "").lower()
+                    and (target_host == khost or target_host.endswith("." + khost))):
+                continue
         matched.append((cpath, f"{name}={c.get('value', '')}"))
     matched.sort(key=lambda pv: len(pv[0]), reverse=True)
     return "; ".join(pv[1] for pv in matched)

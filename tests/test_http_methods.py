@@ -104,6 +104,41 @@ class PureFunctionTests(unittest.TestCase):
         self.assertIn("[REDACTED]", out)
 
 
+class Review157Round2Tests(unittest.TestCase):
+    def test_short_secret_values_redacted_in_context(self):
+        # 4 字未満の資格情報も名前と組の文脈で伏せる（JSON/インライン直列化・Codex #157 P1）。
+        body = '{"headers": {"Cookie": "s=x; theme=dark", "X-API-Key": "abc"}} other x abc'
+        out = hm.redact_trace_body(body, sent_secret_headers=[("Cookie", "s=x; theme=dark"),
+                                                               ("X-API-Key", "abc")])
+        self.assertIn("s=[REDACTED]", out)
+        self.assertIn('"X-API-Key": "[REDACTED]"', out)
+        self.assertNotIn('"abc"', out)
+        self.assertIn("other x abc", out)  # 文脈外の一般語は伏せない
+
+    def test_query_secrets_redacted_in_url_and_trace_body(self):
+        # page probe の query に載る access_token を永続化 URL と TRACE 本文の双方で伏せる（Codex #157 P1）。
+        url = "http://app.test/dav?access_token=supersecret&route=dav"
+        self.assertNotIn("supersecret", hm.redact_url(url))
+        self.assertIn("route=dav", hm.redact_url(url))
+        out = hm.redact_trace_body("TRACE /dav?access_token=supersecret HTTP/1.1", target_url=url)
+        self.assertNotIn("supersecret", out)
+
+    def test_partitioned_cookie_only_for_matching_site(self):
+        # CHIPS cookie は宛先 site に一致する partition のものだけ送る（Codex #157 P1）。
+        from wscan.engine import _scoped_cookie_header
+        jar = [
+            {"name": "own", "value": "1", "domain": "app.test", "path": "/",
+             "partitionKey": "https://app.test"},
+            {"name": "other", "value": "2", "domain": "app.test", "path": "/",
+             "partitionKey": "https://embedder.test"},
+            {"name": "plain", "value": "3", "domain": "app.test", "path": "/"},
+        ]
+        header = _scoped_cookie_header(jar, "https://app.test/x")
+        self.assertIn("own=1", header)
+        self.assertIn("plain=3", header)
+        self.assertNotIn("other=2", header)
+
+
 class _FakeResp:
     def __init__(self, status_code, headers=None, text=""):
         self.status_code = status_code
@@ -563,6 +598,24 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         urls = {u for _, u, _ in client.requested}
         self.assertIn("http://app.test/index.php?route=dav", urls)
         self.assertNotIn("http://app.test/index.php", urls)
+
+    async def test_page_target_preserves_path_params(self):
+        # `;params` を落とさず crawl したリソースそのものを probe する（Codex #157 P2）。
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(404, {}, ""),
+        }
+        engine, scanner = self._scanner()
+
+        async def _rec(**kw):
+            return object()
+        scanner.record_finding = _rec
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://app.test/dav;mode=readonly")
+        urls = {u for _, u, _ in client.requested}
+        self.assertIn("http://app.test/dav;mode=readonly", urls)
 
     async def test_low_findings_carry_low_cvss(self):
         # 告知のみの low finding は check 既定 CVSS(6.5) ではなく low 帯の CVSS を明示する（Codex #157 P2）。
