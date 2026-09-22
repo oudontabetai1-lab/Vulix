@@ -155,6 +155,10 @@ class PayloadGenerator:
         roles = ["planner", "payload", "adaptive", "triage", "report"]
         return {role: self.get_model(role) for role in roles if self.get_model(role)}
 
+    def current_role(self) -> str:
+        """現在 active な role（use_role コンテキスト内）を返す。LLM 呼び出しログ記録用。既定は空文字（0065）。"""
+        return _active_role.get() or ""
+
     @contextmanager
     def use_role(self, role: str):
         """Expose a role-specific model in the current task context."""
@@ -177,6 +181,11 @@ class PayloadGenerator:
             if api_key:
                 try:
                     import anthropic
+                    # 共有 client は SDK 既定の retry を保つ。streaming caller（planner/adaptive の
+                    # _call_claude/_stream_claude）は外側 retry を持たず SDK retry に依存するため、
+                    # ここで無効化すると transient 失敗で即 None になり回帰する（Codex #172 P2）。
+                    # complete_text は自前 retry を持つので、その呼び出し時だけ per-call で
+                    # with_options(max_retries=0) にして監査 retries を正本化する。
                     self._anthropic_client = anthropic.Anthropic(api_key=api_key)
                 except ImportError:
                     pass

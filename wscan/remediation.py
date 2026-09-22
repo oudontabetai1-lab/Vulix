@@ -280,8 +280,15 @@ async def generate_fix(finding: "Finding", payload_gen: "PayloadGenerator") -> t
 async def _call_llm_raw(payload_gen: "PayloadGenerator", prompt: str) -> str | None:
     """LLM を呼び出して生テキストを返す (JSON パース不要)。"""
     from . import llm_client
+    from contextlib import nullcontext
 
-    return await llm_client.complete_text(payload_gen, prompt, max_tokens=400)
+    # remediation は report フェーズの生成呼び出し。role を付けないと llm_calls.jsonl で role が
+    # 空・caller が汎用 complete_text になり、report 由来の多数の呼び出しを他と区別できず
+    # role 別レイテンシ内訳が崩れる。report role で囲んで属性付けする（Codex #172 P2）。
+    use_role = getattr(payload_gen, "use_role", None)
+    ctx = use_role("report") if callable(use_role) else nullcontext()
+    with ctx:
+        return await llm_client.complete_text(payload_gen, prompt, max_tokens=400)
 
 
 def _get_static(check_type: str) -> str:

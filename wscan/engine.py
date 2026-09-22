@@ -1057,6 +1057,8 @@ class ScanEngine:
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
         )
+        # LLM 呼び出し観測性（0065）：complete_text がここから logger を getattr で拾う。
+        self.payload_gen.request_logger = self.request_logger
 
         # Central registry lives in wscan/scanners/__init__.py
         from .scanners import SCANNERS as _SCANNERS
@@ -1166,9 +1168,13 @@ class ScanEngine:
             category = note.split(":", 1)[0].strip() if ":" in note else "other"
             category = category or "other"
             by_category[category] = by_category.get(category, 0) + 1
+        # LLM 呼び出し総数を併記（llm_calls.jsonl の件数・0065）。詳細な role/status/latency 集計は
+        # RequestLogger に構造化カウンタを足す follow-up（step2）で。ここは可視化の第一歩の count のみ。
+        rl = getattr(self, "request_logger", None)
         return {
             "total": len(self.wave_errors),
             "by_category": by_category,
+            "llm_calls": getattr(rl, "llm_call_count", 0) if rl is not None else 0,
         }
 
     def coverage_summary(self) -> dict:
@@ -6628,12 +6634,52 @@ class ScanEngine:
             except Exception:
                 pass
 
+        # core report/evidence を先に永続化する。AI 分析(_ai_analysis_report)は集約1+finding毎
+        # 最大10リクエスト×60s×retries で数十分かかりうるため、先に決定論スキャンの成果物を確実に
+        # 残し、途中中断でも core report を失わない（Codex #172 P2）。
         self._phase_report()
-        # A-1: post-scan AI analysis (if enabled)
+        # A-1: post-scan AI analysis（永続化後に実行）。その report-role 呼び出しは evidence.json の
+        # llm_calls 集計後に llm_calls.jsonl へ追記されるため、完了後に集計値だけ refresh して
+        # 監査ファイルと総数を一致させる（core report/report ファイルはそのまま）。
         if self.enable_ai_analysis:
             ai_text = await self._ai_analysis_report()
+            self._refresh_evidence_observability()
             if ai_text and self.monitor:
                 await self.monitor.emit("ai_analysis", {"text": ai_text})
+
+    def _refresh_evidence_observability(self) -> None:
+        """AI 分析後に evidence.json と HTML の observability（llm_calls 総数）を実態へ更新する（Codex #172 P2）。
+
+        core report/evidence は _phase_report で先に永続化済み。post-scan AI 呼び出しは集計後に
+        llm_calls.jsonl へ追記されるため、その分を反映して総数を実態に合わせる。evidence.json は
+        原子的に置換し、HTML はテンプレートを再描画する（描画時に live 値を読むので集計値が
+        JSONL/evidence と一致する）。失敗しても既存の成果物は壊さない（ベストエフォート）。
+        """
+        import json
+        import os
+        path = self.output_dir / "evidence.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        try:
+            data["observability"] = self._observability_report_data()
+            # アトミックに置換する。write_text は書き込み前に既存の有効な evidence.json を
+            # truncate するため、途中中断/ディスク満杯で core evidence を空/破損させ得る（Codex #172 P2）。
+            # 一時ファイルへ書き切ってから os.replace で入れ替える（失敗時も元ファイルは無傷）。
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            os.replace(tmp, path)
+        except Exception:
+            pass
+        # HTML も再描画して observability の表示値を分析後の実数に一致させる（ブラウザは再オープン
+        # しない）。初回の core-report 永続化は済んでいるので、失敗しても成果物は残る。
+        try:
+            self._render_report_templates()
+        except Exception:
+            pass
 
     def _save_evidence(self):
         findings_dicts = [f.to_dict() for f in self.all_findings]
@@ -6756,8 +6802,13 @@ class ScanEngine:
             except Exception as _notify_err:
                 console.print(f"  [yellow][Notification] 完了通知失敗: {_notify_err}[/yellow]")
 
-    def _generate_report(self):
-        import webbrowser
+    def _render_report_templates(self):
+        """audit/executive/developer の HTML を現在の state から描画し audit のパスを返す。
+
+        observability(llm_calls 等) は描画時に live 値を読むため、post-scan AI 分析後に
+        再描画すれば HTML の集計値も実態と一致する。ブラウザ起動/monitor 登録は含めない
+        （初回描画・分析後 refresh の双方から呼ぶ・Codex #172 P2）。
+        """
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir)
         display_scan_matrix = self._scan_matrix_for_display()
@@ -6809,6 +6860,11 @@ class ScanEngine:
                 )
             except Exception:
                 pass
+        return report_path
+
+    def _generate_report(self):
+        import webbrowser
+        report_path = self._render_report_templates()
 
         # D: CI/CD API — レポートパスを monitor に登録
         if self.monitor:

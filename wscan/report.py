@@ -4,6 +4,7 @@ Generates a self-contained HTML security assessment report.
 """
 import datetime
 import json
+import os
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -358,7 +359,11 @@ class ReportGenerator:
                                     observability or {}, coverage or {})
             report_path = self.output_dir / "report.html"
 
-        report_path.write_text(html, encoding="utf-8")
+        # アトミックに置換する。post-analysis の再描画で write_text が既存の有効な report を
+        # truncate し、中断/ディスク満杯で空・部分 HTML を残さないようにする（Codex #172 P2）。
+        tmp = report_path.with_name(report_path.name + ".tmp")
+        tmp.write_text(html, encoding="utf-8")
+        os.replace(tmp, report_path)
         return report_path
 
     def _build_html(
@@ -1534,6 +1539,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         total = int(observability.get("total", 0) or 0)
         categories = observability.get("by_category", {}) or {}
         samples = observability.get("samples", []) or []
+        llm_calls = int(observability.get("llm_calls", 0) or 0)
         category_html = "".join(
             f"<li><code>{self._escape(category)}</code>: {count}</li>"
             for category, count in sorted(categories.items())
@@ -1552,6 +1558,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         <div class="section observability-section">
             <h2>Observability（観測性メトリクス）</h2>
             <p>劣化・脱落した probe/wave: <strong>{total}</strong> 件</p>
+            <p>LLM 呼び出し: <strong>{llm_calls}</strong> 件（詳細は llm_calls.jsonl）</p>
             {warning}
             <h3 style="margin-top:14px">by_category</h3>
             <ul>{category_html}</ul>
