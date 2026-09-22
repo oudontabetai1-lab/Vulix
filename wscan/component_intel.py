@@ -390,7 +390,15 @@ def match_cycle(cycles: list[dict], version: str) -> Optional[dict]:
         cyc = str(c.get("cycle", "")).strip()
         if not cyc:
             continue
-        if ver == cyc or ver.startswith(cyc + "."):
+        # 完全一致 / ドット区切りの子（1.1.1 に対する 1.1.1.x）に加え、ドットを挟まない
+        # letter-suffix リリース（OpenSSL の 1.1.1f 等）も cycle 1.1.1 に一致させる。数字が続く
+        # 場合（1.1.10 → cycle 1.1.1 でない）は除外する（Codex #155 P2）。
+        letter_suffix = (
+            ver.startswith(cyc)
+            and len(ver) > len(cyc)
+            and ver[len(cyc)].isalpha()
+        )
+        if ver == cyc or ver.startswith(cyc + ".") or letter_suffix:
             if len(cyc) > best_len:
                 best, best_len = c, len(cyc)
     return best

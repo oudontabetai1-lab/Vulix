@@ -59,6 +59,25 @@ _UNSUPPORTED = tuple(
     )
 )
 
+import re as _re
+
+# OSV は exact version でのみ advisory を正しく対応づけられる。CDN セレクタは jquery@3 /
+# jquery@3.4 / jquery@3.x のような非 exact も受けるため、これらを OSV へ送ると誤対応する。
+# major.minor.patch を先頭に持ち wildcard を含まないものだけ exact とみなす（Codex #155 P2）。
+_EXACT_VERSION_RE = _re.compile(r"^\d+\.\d+\.\d+")
+
+
+def _is_exact_version(version: str) -> bool:
+    v = str(version or "")
+    if any(ch in v for ch in "xX*"):
+        return False
+    return bool(_EXACT_VERSION_RE.match(v))
+
+
+# 悪性ページが任意個の unique な version 風 URL を宣言して外部 OSV 照会を増幅するのを防ぐ
+# per-page 上限（unique はキャッシュを迂回するため・Codex #155 P2）。
+_OSV_MAX_PER_PAGE = 50
+
 
 class OutdatedComponentScanner(BaseScanner):
     """技術バナー→endoflife.date で EOL コンポーネントを検出する（page 観測系・opt-in）。"""
@@ -279,7 +298,9 @@ class OutdatedComponentScanner(BaseScanner):
                     "product": comp.product, "version": comp.version, "source": comp.source,
                     "cve_count": info["total"], "cve_ids": ids,
                     "max_severity": info.get("max_severity", ""),
-                    "reference": f"{base_url.rstrip('/')}/vuln/search",
+                    # 人間が辿る参照リンクは公開 UI サイト（nvd.nist.gov）。API ホスト
+                    # （services.nvd.nist.gov）由来の /vuln/search は存在せず 404 になる（Codex #155 P3）。
+                    "reference": "https://nvd.nist.gov/vuln/search",
                 },
                 reproduction_steps=[
                     f"Detected {comp.product} {comp.version} ({comp.source}).",
@@ -368,6 +389,14 @@ class OutdatedComponentScanner(BaseScanner):
                 if (lib.name, lib.version) not in seen:
                     seen.add((lib.name, lib.version))
                     libs.append(lib)
+        # 非 exact version（CDN セレクタ由来の 3 / 3.4 / 3.x 等）は OSV へ送らない（誤対応防止・#155 P2）。
+        libs = [lib for lib in libs if _is_exact_version(lib.version)]
+        # per-page 上限で target 主導の外部照会増幅を抑止する（#155 P2）。
+        if len(libs) > _OSV_MAX_PER_PAGE:
+            self._record_scan_note(
+                f"osv_lookup_capped:{self.CHECK_TYPE}:{len(libs)}>{_OSV_MAX_PER_PAGE}"
+            )
+            libs = libs[:_OSV_MAX_PER_PAGE]
         if not libs:
             return []
         # 照会結果を engine 単位でキャッシュ（同一 (ecosystem,name,version) を複数ページで再照会しない）。
