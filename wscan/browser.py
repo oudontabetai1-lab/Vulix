@@ -44,9 +44,6 @@ _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _PAGE_CONTENT_TIMEOUT = 30.0
 # dialog.dismiss() は native timeout を持たないため asyncio.wait_for で有界化する上限（F06/0059）。
 _DIALOG_DISMISS_TIMEOUT = 3.0
-# recover_page の new_page/ヘッダ attach 上限。wedge した接続を使い回すため無界で待たず、
-# _phase_verify/attack が必ず次へ進めるよう有界にする（超過＝回復失敗として False・Codex #171 P1）。
-_PAGE_RECOVERY_TIMEOUT = 10.0
 
 
 async def _bounded_page_content(page) -> str:
@@ -561,9 +558,7 @@ class BrowserManager:
         self.dialog_fired: bool = False
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
-        # dialog.dismiss() や有界化した操作が timeout したとき、後続の再利用前に
-        # ページを作り直す必要があることを示すフラグ（recover_page で解消・Codex #171 P1）。
-        self._needs_page_recovery: bool = False
+        # 初回セットアップの scoped-header 方針（_wire_current_page が参照）。
         self._use_scoped_headers: bool = False
         self.last_login_url: str = ""
         self.last_login_success: bool = False
@@ -648,16 +643,12 @@ class BrowserManager:
                 # main/worker page は明示 attach するため、イベント購読に失敗しても
                 # スキャンを止めない。popup はヘッダなしのフェイルクローズになる。
                 pass
-        # recover_page で同じ配線を再現できるよう scoped-header 方針を保持する。
         self._use_scoped_headers = use_scoped_headers
         self.page = await self._context.new_page()
         await self._wire_current_page()
 
     async def _wire_current_page(self) -> None:
-        """self.page に既定 timeout・ネットワーク傍受・dialog ハンドラを配線する。
-
-        初回セットアップと recover_page（timeout/ダイアログ wedge 後の再生成）で共有する。
-        """
+        """self.page に既定 timeout・ネットワーク傍受・dialog ハンドラを配線する（初回セットアップ）。"""
         if self._use_scoped_headers:
             # 最初のナビゲーションより前に Fetch.enable の完了を保証する。
             await self._activate_scoped_header_interception(self.page)
@@ -672,55 +663,6 @@ class BrowserManager:
 
         # Set up dialog handler (for XSS detection)
         self.page.on("dialog", self._on_dialog)
-
-    async def recover_page(self) -> bool:
-        """timeout/未応答ダイアログで wedge した可能性のある現在ページを破棄して作り直す。
-
-        `asyncio.wait_for` による有界化は Python coroutine を cancel するだけで、CDP 側の
-        dismiss/goto/content 等は走り続けうる（`_on_dialog` の注記参照）。未解消ダイアログや
-        走行中の操作が残ると、同一 `self.page` を再利用する後続の navigate/content/フォーム
-        操作が再びブロックされ、有界化の意味が失われる（Codex #171 P1）。そこで timeout 後は
-        呼び出し側がこのメソッドでページを作り直し、共有状態をリセットする。ベストエフォート
-        （context 不在や再生成失敗ではフラグだけ落として続行）。再生成できたら True。
-        """
-        self._needs_page_recovery = False
-        if self._context is None:
-            return False
-        old = self.page
-        # new_page も wedge した接続を使うため無界では待たない。有界化して、ページ生成自体が
-        # 固まっても _phase_verify/attack が必ず次へ進めるようにする（超過は回復失敗＝False・#171 P1）。
-        try:
-            new_page = await asyncio.wait_for(
-                self._context.new_page(), timeout=_PAGE_RECOVERY_TIMEOUT
-            )
-        except Exception:
-            return False
-        self.page = new_page
-        try:
-            await self._wire_current_page()
-        except Exception:
-            pass
-        # CDP scoped-header モードでは _wire_current_page の scoped 経路が即 return し、新ページへ
-        # Fetch.enable を同期で張らない（背景 task 任せ）。recover_page が attach 完了前に返ると、
-        # 次の認証ナビゲーションがヘッダを欠き、本物の finding を unreproduced と誤判定しうる。
-        # create_worker と同様に明示 attach を await する（同じ接続を使うため有界化・#171 P1）。
-        if self._header_intercept_mode == "cdp":
-            try:
-                await asyncio.wait_for(
-                    self._attach_header_interception(self.page),
-                    timeout=_PAGE_RECOVERY_TIMEOUT,
-                )
-            except Exception:
-                pass
-        self.reset_dialog()
-        if old is not None:
-            try:
-                # 旧ページの close 自体が wedge しうる（未応答ダイアログ）ため有界化する。
-                await asyncio.wait_for(old.close(), timeout=_DIALOG_DISMISS_TIMEOUT)
-            except Exception:
-                # close が返らない/失敗しても新ページは既に差し替え済みなので続行する。
-                pass
-        return True
 
     async def _on_response(self, response: Response):
         self.network.on_response(response)
@@ -1277,10 +1219,7 @@ class BrowserManager:
         except Exception:
             # timeout（未応答）や、並行 worker がページを navigate/close 済みのケースを含む。
             # dialog 発火の signal 自体は evidence として有効なので握りつぶして続行する。
-            # ただし dismiss が返らなかった場合はダイアログが開いたまま同一ページの後続操作を
-            # ブロックし得るため、再利用前にページを作り直すようフラグを立てる（呼び出し側の
-            # 検査/検証ループが recover_page を呼ぶ・Codex #171 P1）。
-            self._needs_page_recovery = True
+            pass
 
     async def update_extra_headers(self, headers: dict) -> None:
         """Replace extra HTTP headers used by the refresh task."""
@@ -3029,12 +2968,6 @@ class WorkerBrowser(BrowserManager):
         self.dialog_fired: bool = False
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""
-        # 継承した _on_dialog/recover_page が worker でも動くよう回復関連フィールドを持たせる
-        # （BrowserManager.__init__ を bypass するため明示コピー・Codex #171 P1）。scoped header
-        # 方針とモードは共有 context のものを引き継ぐ。
-        self._needs_page_recovery: bool = False
-        self._use_scoped_headers: bool = getattr(real_browser, "_use_scoped_headers", False)
-        self._header_intercept_mode: str = getattr(real_browser, "_header_intercept_mode", "none")
 
     async def close(self):
         """Close only this worker's page (not the whole browser)."""

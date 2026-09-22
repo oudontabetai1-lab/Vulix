@@ -5307,16 +5307,6 @@ class ScanEngine:
         for fi, dom, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
             self._profile(f"  field: {field_name} @ {page.url}")
-            # dialog dismiss timeout でページ回復が要求されていれば、次フィールドの攻撃前に
-            # 作り直す。verify だけでなく attack フェーズでも消費しないと、未解消ダイアログが
-            # 後続 payload/フォーム/navigate をブロックし続けカスケードする（Codex #171 P1）。
-            # self.browser は concurrent 時 worker を返し、worker も recover_page を継承する。
-            _br = self.browser
-            if getattr(_br, "_needs_page_recovery", False) and hasattr(_br, "recover_page"):
-                try:
-                    await _br.recover_page()
-                except Exception:
-                    pass
             key = (f"{page.url}||url_param||{field_name}" if is_url_param
                    else f"{page.url}||{fi}||{field_name}")
             # Guard scanned_forms with a lock so concurrent workers don't
@@ -6302,13 +6292,6 @@ class ScanEngine:
         for i, finding in enumerate(to_verify):
             skipped = False
             state = ""
-            # 直前の finding が未応答ダイアログや timeout で wedge した場合、共有ページを
-            # 作り直してから次を検証する（走行中の操作・未解消ダイアログの干渉を断つ・#171 P1）。
-            if _browser is not None and getattr(_browser, "_needs_page_recovery", False):
-                try:
-                    await _browser.recover_page()
-                except Exception:
-                    pass
             self._profile(
                 f"  verify #{i+1}/{len(to_verify)}: {getattr(finding, 'check_type', '?')} "
                 f"@ {getattr(finding, 'url', '?')}"
@@ -6328,13 +6311,6 @@ class ScanEngine:
                 # フェーズ全体を止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
                 # 黙って検出力を落とさないよう wave_errors に記録する。
                 skipped = True
-                # timeout 時は内側の Playwright 操作が走り続け得るため、次 finding の前に
-                # ページを作り直して共有状態を隔離する（走行中 navigate/dialog の干渉防止・#171 P1）。
-                if _browser is not None and hasattr(_browser, "recover_page"):
-                    try:
-                        await _browser.recover_page()
-                    except Exception:
-                        pass
                 errors = getattr(self, "wave_errors", None)
                 if errors is None:
                     self.wave_errors = errors = []
