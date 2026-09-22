@@ -41,6 +41,20 @@ def _positive_float(value):
     return f
 
 
+def _cfg_timeout(value, default: float) -> float:
+    """YAML の timeout 値を正規化する（空/非数値/非有限/非正は既定・純粋）。
+
+    import 時の eager float() が空キー（None）や非数値で例外を投げ ``--help`` すら落ちるのを防ぐ
+    （Codex #173 P2）。
+    """
+    import math
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) and v > 0 else default
+
+
 def _load_config(path: Path = _CONFIG_PATH) -> dict:
     """
     Load config/wscan.yaml and return a flat dict of resolved values.
@@ -105,8 +119,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["openai_model"]            = str(l.get("openai_model", "gpt-4o-mini"))
     cfg["gemini_model"]            = str(l.get("gemini_model", "gemini-2.0-flash"))
     cfg["claude_model"]            = str(l.get("claude_model", "claude-haiku-4-5-20251001"))
-    cfg["llm_timeout_seconds"]     = float(l.get("timeout_seconds", 30))
-    cfg["llm_stream_timeout_seconds"] = float(l.get("stream_timeout_seconds", 90))
+    cfg["llm_timeout_seconds"]     = _cfg_timeout(l.get("timeout_seconds"), 30.0)
+    cfg["llm_stream_timeout_seconds"] = _cfg_timeout(l.get("stream_timeout_seconds"), 90.0)
     cfg["llm_max_retries"]         = int(l.get("max_retries", 2))
     # 外部 OpenAI 互換 LLM（tsuzumi2 等）のベース URL。config ファイルの値のみを
     # CLI/ダッシュボードの既定にする。env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)は

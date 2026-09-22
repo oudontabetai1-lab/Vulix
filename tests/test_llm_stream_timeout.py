@@ -158,3 +158,16 @@ def test_dashboard_auto_config_honors_llm_timeout(monkeypatch):
     assert seen["timeout"] == 75.0  # サーバ設定値
     c.post("/api/auto-config", json={"description": "x", "llm_config": {"llm_timeout_seconds": "12"}})
     assert seen["timeout"] == 12.0  # ダッシュボード選択値が優先
+
+
+
+def test_yaml_timeouts_tolerate_empty_or_invalid_values(tmp_path):
+    # 空キー(None)/非数値/非有限でも import 時に落ちず既定へ戻す（Codex #173 P2）。
+    import main
+    cfg_path = tmp_path / "wscan.yaml"
+    cfg_path.write_text("llm:\n  timeout_seconds:\n  stream_timeout_seconds: abc\n", encoding="utf-8")
+    cfg = main._load_config(cfg_path)
+    assert cfg["llm_timeout_seconds"] == 30.0
+    assert cfg["llm_stream_timeout_seconds"] == 90.0
+    assert main._cfg_timeout("inf", 90.0) == 90.0
+    assert main._cfg_timeout("120", 90.0) == 120.0

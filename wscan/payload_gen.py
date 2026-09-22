@@ -196,6 +196,24 @@ class PayloadGenerator:
                     pass
         return self._anthropic_client
 
+    def _get_async_anthropic_client(self):
+        """deadline 付き呼び出し用の AsyncAnthropic（キャッシュ）。
+
+        sync client を executor で回すと wait_for でスレッドを止められず、SDK の read timeout は
+        チャンク間隔にしか効かないため overall deadline にならない。async client なら wait_for の
+        cancel で HTTP リクエストごと打ち切れる（Codex #173 P2）。
+        """
+        if getattr(self, "_async_anthropic_client", None) is None:
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                return None
+            try:
+                import anthropic
+                self._async_anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
+            except ImportError:
+                return None
+        return self._async_anthropic_client
+
     async def _check_llm_available(self) -> bool:
         if self._llm_available is not None:
             return self._llm_available

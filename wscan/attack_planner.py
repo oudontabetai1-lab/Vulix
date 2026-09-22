@@ -577,7 +577,7 @@ Consider stored / second-order attacks carefully:
 
     async def _call_claude(self, prompt: str) -> Optional[str]:
         """Claude streaming attack plan — prints chunks live."""
-        client = self.payload_gen._get_anthropic_client()
+        client = self.payload_gen._get_async_anthropic_client()
         if not client:
             return None
         _model = getattr(self.payload_gen, "claude_model", "claude-haiku-4-5-20251001")
@@ -586,24 +586,19 @@ Consider stored / second-order attacks carefully:
             import asyncio
             _timeout = self.payload_gen.llm_stream_timeout_seconds
 
-            def _create_sync():
-                # 非 streaming の create。streaming(executor) は wait_for で cancel できずチャンク
-                # 継続時にスレッドが deadline 後も居残る（Codex #173 P1）。単一 create ＋
-                # max_retries=0 なら SDK が retryable エラーで再試行して deadline を超えることも
-                # なく、渡した timeout が1リクエストを縛るためスレッドは timeout 内に終了する。
-                _c = (client.with_options(timeout=_timeout, max_retries=0)
-                      if hasattr(client, "with_options") else client)
-                resp = _c.messages.create(
+            # AsyncAnthropic の単一 create を wait_for(_timeout) で縛る（猶予なし・executor 不使用で
+            # cancel が HTTP リクエストを打ち切る・Codex #173 P2）。max_retries=0 で SDK retry も抑止。
+            _c = (client.with_options(timeout=_timeout, max_retries=0)
+                  if hasattr(client, "with_options") else client)
+            resp = await asyncio.wait_for(
+                _c.messages.create(
                     model=_model,
                     max_tokens=2000,
                     messages=[{"role": "user", "content": prompt}],
-                )
-                return resp.content[0].text if getattr(resp, "content", None) else ""
-
-            loop = asyncio.get_event_loop()
-            text = await asyncio.wait_for(
-                loop.run_in_executor(None, _create_sync), timeout=_timeout + 5
+                ),
+                timeout=_timeout,
             )
+            text = resp.content[0].text if getattr(resp, "content", None) else ""
             if text:
                 sys.stdout.write(text)
                 sys.stdout.flush()

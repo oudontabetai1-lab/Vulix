@@ -699,36 +699,28 @@ class AdaptivePayloadEngine:
             return None
 
     async def _stream_claude(self, prompt: str) -> Optional[str]:
-        client = self.pg._get_anthropic_client()
+        client = self.pg._get_async_anthropic_client()
         if not client:
             return None
         import asyncio
-        # run_in_executor はワーカースレッドへ ContextVar を伝播しないため、role 解決済み
-        # モデルを async 文脈（use_role("adaptive") 内）でここで確定してから executor へ渡す。
+        # role 解決済みモデルは async 文脈（use_role("adaptive") 内）でそのまま読める。
         _model = getattr(self.pg, "claude_model", "claude-haiku-4-5-20251001")
         _timeout = self.pg.llm_stream_timeout_seconds
         try:
-            def _create_sync():
-                # 非 streaming の create を使う。streaming(executor) は wait_for で cancel できず、
-                # チャンクが届き続けると executor スレッドが deadline 超過後も居残り、worker 枯渇や
-                # asyncio.run 終了時の hang を招く（Codex #173 P1）。単一 create ＋ max_retries=0 なら
-                # SDK が retryable エラーで再試行して deadline を超えることもなく、渡した timeout が
-                # 1リクエストを確実に縛るため、スレッドは timeout 内に終了する。
-                _c = (client.with_options(timeout=_timeout, max_retries=0)
-                      if hasattr(client, "with_options") else client)
-                resp = _c.messages.create(
+            # AsyncAnthropic の単一 create を wait_for(_timeout) で縛る。executor スレッドを使わない
+            # ので deadline 超過時は cancel で HTTP リクエストごと打ち切られ、猶予も居残りも無い
+            # （Codex #173 P2）。max_retries=0 で SDK 内 retry による deadline 超過も防ぐ。
+            _c = (client.with_options(timeout=_timeout, max_retries=0)
+                  if hasattr(client, "with_options") else client)
+            resp = await asyncio.wait_for(
+                _c.messages.create(
                     model=_model,
                     max_tokens=1000,
                     messages=[{"role": "user", "content": prompt}],
-                )
-                return resp.content[0].text if getattr(resp, "content", None) else ""
-
-            loop = asyncio.get_event_loop()
-            # SDK timeout が発火する余裕(+5s)を持たせた overall deadline。SDK timeout で create が
-            # raise すればスレッドは終了する（live chunk 表示は無くなるが、有界性・確実性を優先）。
-            text = await asyncio.wait_for(
-                loop.run_in_executor(None, _create_sync), timeout=_timeout + 5
+                ),
+                timeout=_timeout,
             )
+            text = resp.content[0].text if getattr(resp, "content", None) else ""
             if text:
                 sys.stdout.write(text)
                 sys.stdout.flush()
@@ -746,10 +738,9 @@ class AdaptivePayloadEngine:
         if not api_key:
             return None
         import httpx
-        # Gemini の adaptive-mutation は従来 60s ハードコードだった。統一既定(90s)へ変えると
-        # 未応答時に30s長くブロックし後方互換を崩すため、60s を上限に保つ（設定でより短くは可・
-        # Codex #173 P2）。
-        _gemini_to = min(self.pg.llm_stream_timeout_seconds, 60.0)
+        # 設定済み stream timeout をそのまま尊重する（60s 上限で縛ると --llm-stream-timeout 120 等の
+        # 明示値が Gemini だけ無視される・Codex #173 P2）。
+        _gemini_to = self.pg.llm_stream_timeout_seconds
         try:
             async with httpx.AsyncClient(timeout=_gemini_to) as client:
                 url = (
