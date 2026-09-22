@@ -22,6 +22,14 @@ class _FakeStream:
         return iter(())
 
 
+class _FakeBlock:
+    text = "payload"
+
+
+class _FakeResponse:
+    content = [_FakeBlock()]
+
+
 class _FakeMessages:
     def __init__(self, sink):
         self._sink = sink
@@ -30,10 +38,18 @@ class _FakeMessages:
         self._sink.append(model)
         return _FakeStream()
 
+    def create(self, *, model, **kw):
+        # 非 streaming 化後（Codex #173 P1）: adaptive/planner は create を使う。
+        self._sink.append(model)
+        return _FakeResponse()
+
 
 class _FakeClient:
     def __init__(self, sink):
         self.messages = _FakeMessages(sink)
+
+    def with_options(self, **kw):
+        return self
 
 
 def test_stream_claude_uses_adaptive_role_model_across_executor():

@@ -703,41 +703,37 @@ class AdaptivePayloadEngine:
         if not client:
             return None
         import asyncio
-        full = ""
         # run_in_executor はワーカースレッドへ ContextVar を伝播しないため、role 解決済み
         # モデルを async 文脈（use_role("adaptive") 内）でここで確定してから executor へ渡す。
         _model = getattr(self.pg, "claude_model", "claude-haiku-4-5-20251001")
+        _timeout = self.pg.llm_stream_timeout_seconds
         try:
-            _timeout = self.pg.llm_stream_timeout_seconds
-
-            def _stream_sync():
-                nonlocal full
-                # SDK が per-request timeout 上書きに対応していれば httpx 側でも縛る（Codex #173 P1）。
+            def _create_sync():
+                # 非 streaming の create を使う。streaming(executor) は wait_for で cancel できず、
+                # チャンクが届き続けると executor スレッドが deadline 超過後も居残り、worker 枯渇や
+                # asyncio.run 終了時の hang を招く（Codex #173 P1）。単一 create なら SDK に渡した
+                # timeout が1リクエストを確実に縛るため、スレッドは timeout 内に終了する。
                 _c = client.with_options(timeout=_timeout) if hasattr(client, "with_options") else client
-                with _c.messages.stream(
+                resp = _c.messages.create(
                     model=_model,
                     max_tokens=1000,
                     messages=[{"role": "user", "content": prompt}],
-                ) as stream:
-                    for chunk in stream.text_stream:
-                        sys.stdout.write(chunk)
-                        sys.stdout.flush()
-                        full += chunk
-                return full
+                )
+                return resp.content[0].text if getattr(resp, "content", None) else ""
 
             loop = asyncio.get_event_loop()
-            # Claude ストリームは executor スレッドで走り、これまで stream timeout を全く消費して
-            # いなかった（stall しても無限待ち・Codex #173 P1）。run_in_executor を wait_for で
-            # 有界化し、超過時は async 側を返して scan を止めない（スレッドは SDK 側 timeout で
-            # 最終的に終了する）。stream timeout を SDK にも渡せる場合は渡して httpx 側でも縛る。
-            await asyncio.wait_for(
-                loop.run_in_executor(None, _stream_sync),
-                timeout=self.pg.llm_stream_timeout_seconds,
+            # SDK timeout が発火する余裕(+5s)を持たせた overall deadline。SDK timeout で create が
+            # raise すればスレッドは終了する（live chunk 表示は無くなるが、有界性・確実性を優先）。
+            text = await asyncio.wait_for(
+                loop.run_in_executor(None, _create_sync), timeout=_timeout + 5
             )
-            return full or None
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            return text or None
         except asyncio.TimeoutError:
-            console.print("[yellow][AdaptiveAI] Claude stream timeout[/yellow]")
-            return full or None
+            console.print("[yellow][AdaptiveAI] Claude timeout[/yellow]")
+            return None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] Claude error: {e}[/yellow]")
             return None
@@ -748,8 +744,12 @@ class AdaptivePayloadEngine:
         if not api_key:
             return None
         import httpx
+        # Gemini の adaptive-mutation は従来 60s ハードコードだった。統一既定(90s)へ変えると
+        # 未応答時に30s長くブロックし後方互換を崩すため、60s を上限に保つ（設定でより短くは可・
+        # Codex #173 P2）。
+        _gemini_to = min(self.pg.llm_stream_timeout_seconds, 60.0)
         try:
-            async with httpx.AsyncClient(timeout=self.pg.llm_stream_timeout_seconds) as client:
+            async with httpx.AsyncClient(timeout=_gemini_to) as client:
                 url = (
                     f"https://generativelanguage.googleapis.com/v1beta/models/"
                     f"{self.pg.gemini_model}:generateContent?key={api_key}"

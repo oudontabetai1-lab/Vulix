@@ -584,37 +584,33 @@ Consider stored / second-order attacks carefully:
         _thinking_header("Claude", _model)
         try:
             import asyncio
-            full = ""
             _timeout = self.payload_gen.llm_stream_timeout_seconds
 
-            def _stream_sync():
-                nonlocal full
-                # SDK が per-request timeout 上書きに対応していれば httpx 側でも縛る（Codex #173 P1）。
+            def _create_sync():
+                # 非 streaming の create。streaming(executor) は wait_for で cancel できずチャンク
+                # 継続時にスレッドが deadline 後も居残る（Codex #173 P1）。単一 create なら SDK に
+                # 渡した timeout が1リクエストを縛るためスレッドは timeout 内に終了する。
                 _c = client.with_options(timeout=_timeout) if hasattr(client, "with_options") else client
-                with _c.messages.stream(
+                resp = _c.messages.create(
                     model=_model,
                     max_tokens=2000,
                     messages=[{"role": "user", "content": prompt}],
-                ) as stream:
-                    for chunk in stream.text_stream:
-                        sys.stdout.write(chunk)
-                        sys.stdout.flush()
-                        full += chunk
-                return full
+                )
+                return resp.content[0].text if getattr(resp, "content", None) else ""
 
             loop = asyncio.get_event_loop()
-            # planner の Claude ストリームも stream timeout を消費していなかった（stall で無限待ち）。
-            # adaptive と同様に run_in_executor を wait_for で有界化し、超過時は async 側を返す
-            # （executor スレッドは SDK timeout で最終的に終了・Codex #173 P1）。
-            await asyncio.wait_for(
-                loop.run_in_executor(None, _stream_sync), timeout=_timeout
+            text = await asyncio.wait_for(
+                loop.run_in_executor(None, _create_sync), timeout=_timeout + 5
             )
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
             _thinking_footer()
-            return full if full else None
+            return text if text else None
         except asyncio.TimeoutError:
             _thinking_footer()
-            console.print("[yellow][AttackPlanner] Claude stream timeout[/yellow]")
-            return full if full else None
+            console.print("[yellow][AttackPlanner] Claude timeout[/yellow]")
+            return None
         except Exception as e:
             _thinking_footer()
             console.print(f"[yellow][AttackPlanner] Claude error: {e}[/yellow]")

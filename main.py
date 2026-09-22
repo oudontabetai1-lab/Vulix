@@ -1482,14 +1482,11 @@ Examples:
         ),
     )
     agent.add_argument("url", help="Target URL (e.g. https://example.com)")
-    agent.add_argument(
-        "--llm-timeout", type=_positive_float, default=None, metavar="SECS",
-        help="LLM 1回（one-shot）の応答上限秒。未指定は config llm.timeout_seconds。",
-    )
-    agent.add_argument(
-        "--llm-stream-timeout", type=_positive_float, default=None, metavar="SECS",
-        help="LLM streaming（planner・適応変異）の1回応答上限秒。未指定は config llm.stream_timeout_seconds。",
-    )
+    # 注: --llm-timeout / --llm-stream-timeout は agent サブコマンドには **敢えて足さない**。
+    # agent モードの LLM は browser-use の Chat クライアント（ChatAnthropic/ChatOpenAI/ChatOllama）が
+    # 駆動し、これらへの timeout 配線は browser-use のバージョン依存で本リポジトリからは確実に
+    # 検証できない。宣伝だけして無効な flag（inert）を避けるため非公開にする（Codex #173 P2:
+    # "Wire or remove" のうち remove を選択）。scan/triage の --llm-timeout は決定論経路で機能する。
     agent.add_argument(
         "--llm",
         choices=["claude", "openai", "openai_compatible", "ollama"],
