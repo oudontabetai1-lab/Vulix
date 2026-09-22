@@ -260,6 +260,8 @@ def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
     加えるべき origin（``scheme://netloc``）を返す（純粋・Codex #153）。該当しなければ ""。
 
     別ホストや同一 origin では "" を返し、scheme・ポート変更だけを反映する。
+    設定 scope がパス限定（例 ``http://host/app``）なら、そのパスを昇格後 scope にも引き継ぐ。
+    origin 全体へ広げると、operator が許可していない同ホストの全パスへ能動 probe が及ぶ（Codex #153 P1）。
     """
     if not effective_origin:
         return ""
@@ -270,7 +272,8 @@ def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
             and ep.scheme in ("http", "https")
             and tp.scheme in ("http", "https")
             and (ep.scheme, ep.netloc.lower()) != (tp.scheme, tp.netloc.lower())):
-        return f"{ep.scheme}://{ep.netloc}"
+        _path = tp.path.rstrip("/")
+        return f"{ep.scheme}://{ep.netloc}{_path}"
     return ""
 
 

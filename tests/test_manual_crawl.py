@@ -168,6 +168,16 @@ class ManualCrawlSeedTests(unittest.TestCase):
         self.assertEqual(_redirect_scope_to_add("http://example.test/", "http://example.test/"), "")
         self.assertEqual(_redirect_scope_to_add("", "http://example.test/"), "")
 
+    def test_redirect_scope_keeps_configured_path(self):
+        # パス限定の設定 scope は昇格後も同じパスに限定し、origin 全体へ広げない（Codex #153 P1）。
+        from wscan.engine import _redirect_scope_to_add
+        self.assertEqual(
+            _redirect_scope_to_add("https://secondary.test/app/login", "http://secondary.test/app"),
+            "https://secondary.test/app")
+        self.assertEqual(
+            _redirect_scope_to_add("https://secondary.test/", "http://secondary.test/app/"),
+            "https://secondary.test/app")
+
     def test_promote_redirect_scope_preserves_role(self):
         # 攻撃対象 target のリダイレクトは attack scope、access-only のリダイレクトは
         # 訪問のみ scope として役割を保つ（Codex #153 P1）。
@@ -518,6 +528,32 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.start_url, "http://example.test/")
         session._maybe_adopt_origin_upgrade("about:blank")  # 非 http(s)
         self.assertEqual(session.start_url, "http://example.test/")
+
+    async def test_origin_adoption_only_on_original_navigation_page(self):
+        # 遅延 origin 昇格は起動時ページだけ。popup が target ホストの別 scheme/port へ遷移しても
+        # start_url を乗っ取らない（Codex #153 P1）。
+        origin_page = _FakePage("http://example.test/")
+        popup = _FakePage("http://example.test/")
+        session = self._session(origin_page, _FakeContext([origin_page, popup]))
+        session._origin_page = origin_page
+        session._schedule_snapshot = lambda *a, **k: None
+        await session._bind_page(popup)
+        popup.url = "https://example.test:8443/other"
+        popup.handlers["framenavigated"](popup.main_frame)
+        self.assertEqual(session.start_url, "http://example.test/")
+        await session._bind_page(origin_page)
+        origin_page.url = "https://example.test/dashboard"
+        origin_page.handlers["framenavigated"](origin_page.main_frame)
+        self.assertEqual(session.start_url, "https://example.test/dashboard")
+
+    async def test_cleanup_clears_totp_credentials(self):
+        # stop/起動失敗の cleanup で実行時限りの TOTP 資格情報を消去する（Codex #153 P2）。
+        session = ManualCrawlSession()
+        session.totp_uri = "otpauth://totp/x?secret=GEZDGNBV"
+        session.totp_secret = "GEZDGNBVGY3TQOJQ"
+        session.totp_qr = "data:image/png;base64,AAAA"
+        await session._cleanup_browser()
+        self.assertEqual((session.totp_uri, session.totp_secret, session.totp_qr), ("", "", ""))
 
     async def test_fill_totp_reports_missing_configuration(self):
         page = _FakePage("http://example.test/mfa")

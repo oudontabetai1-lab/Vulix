@@ -351,6 +351,8 @@ class ManualCrawlSession:
 
     def __init__(self) -> None:
         self.start_url = ""
+        # 遅延 origin 昇格を採用してよい唯一のページ（起動時ナビゲーションのページ）。
+        self._origin_page = None
         self.output_path = ""
         self.headless = False
         self.proxy = ""
@@ -544,6 +546,7 @@ class ManualCrawlSession:
         # バックグラウンドで実行する。ユーザは既に開いているブラウザ
         # 画面で操作できる。
         initial_page = self._page
+        self._origin_page = initial_page
 
         async def _initial_goto() -> None:
             try:
@@ -608,12 +611,16 @@ class ManualCrawlSession:
 
         def on_navigate(frame) -> None:
             if frame == page.main_frame:
+                # 遅延 origin 昇格は**起動時ナビゲーションのページだけ**に限る。全 bound popup に
+                # 許すと、target ホストの別 scheme/port へ遷移した popup の URL が start_url になり
+                # same-origin 扱いで記録・攻撃 scope へ昇格され得る（Codex #153 P1）。
                 # http→https→IdP のように起動時 goto が最終 IdP URL しか返さず start_url が
                 # 旧 scheme に固定されたケースで、認証後に同一ホストの https へ戻ってきたら
                 # その scheme/port 昇格を start_url に採用する（別ホストの IdP は採用しない）。
                 # これをしないと以降の navigate/snapshot が cross-origin 扱いで target を取りこぼす
                 # （Codex #153 P2・同一ホスト origin 昇格の遅延採用）。
-                self._maybe_adopt_origin_upgrade(page.url)
+                if page is self._origin_page:
+                    self._maybe_adopt_origin_upgrade(page.url)
                 # 追従タブ/popup が別オリジン（SSO/決済等）へ遷移したとき、その URL（クエリ含む）を
                 # artifact に残さない。requestfinished と同じ same-origin 判定を記録前に適用（Codex #153 P2）。
                 if _same_origin(page.url, self.start_url):
@@ -971,6 +978,12 @@ class ManualCrawlSession:
         self._page = None
         self._pw = None
         self._bound_pages = []
+        self._origin_page = None
+        # TOTP は実行時限りの資格情報。stop/起動失敗後もセッションが MonitorServer から参照され
+        # 続けるため、Base32 secret や secret 入り otpauth URI をメモリに残さない（Codex #153 P2）。
+        self.totp_uri = ""
+        self.totp_secret = ""
+        self.totp_qr = ""
 
     async def stop(self) -> dict:
         if not self.running:
