@@ -29,7 +29,9 @@ def _count_existing_records(path: Path) -> int:
     （空・非 JSON 行は数えない）。
     """
     try:
-        with open(path, "r", encoding="utf-8") as fp:
+        # errors="replace": 中断で末尾に不完全な UTF-8 が残っても UnicodeDecodeError で
+        # 初期化を落とさず、その行を非 JSON として数えないだけにする（Codex #172 P2）。
+        with open(path, "r", encoding="utf-8", errors="replace") as fp:
             count = 0
             for line in fp:
                 line = line.strip()

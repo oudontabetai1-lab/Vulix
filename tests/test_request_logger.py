@@ -7,6 +7,7 @@ from wscan.browser import NetworkCapture
 from wscan.monitor import MonitorServer
 from wscan.request_logger import (
     RequestLogger,
+    _count_existing_records,
     _redact_headers,
     clear_sensitive_headers,
     register_sensitive_headers,
@@ -162,6 +163,15 @@ class RequestLoggerTests(unittest.TestCase):
             logger = RequestLogger(d, enabled=False)
             logger.log_payload("q", "x", "xss")
             self.assertFalse(logger.payload_path.exists())
+
+
+class CountExistingRecordsTests(unittest.TestCase):
+    def test_truncated_utf8_tail_is_skipped_not_raised(self):
+        # 中断で末尾に不完全な UTF-8 が残っても初期化を落とさない（Codex #172 P2）。
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "payloads.jsonl"
+            p.write_bytes(b'{"a": 1}\n{"b": "\xe3\x81')
+            self.assertEqual(_count_existing_records(p), 1)
 
 
 class ScannerPayloadLoggingTests(unittest.IsolatedAsyncioTestCase):

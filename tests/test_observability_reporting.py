@@ -162,3 +162,20 @@ def test_refresh_evidence_observability_rerenders_html_and_evidence():
         assert rendered["n"] == 1, "HTML を再描画していない"
         data = json.loads((Path(d) / "evidence.json").read_text(encoding="utf-8"))
         assert data["observability"]["llm_calls"] == 4
+
+
+def test_report_write_is_atomic_on_failure(monkeypatch):
+    # 再描画中の書き込み失敗で既存の有効な report.html を truncate しない（Codex #172 P2）。
+    with tempfile.TemporaryDirectory() as tmp:
+        gen = ReportGenerator(Path(tmp))
+        kw = dict(target="http://fixture.test", findings=[], visited_urls=[], checks=["xss"])
+        report_path = gen.generate(**kw)
+        original = report_path.read_text(encoding="utf-8")
+
+        def boom(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("wscan.report.os.replace", boom)
+        with pytest.raises(OSError):
+            gen.generate(**kw)
+        assert report_path.read_text(encoding="utf-8") == original

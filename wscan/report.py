@@ -4,6 +4,7 @@ Generates a self-contained HTML security assessment report.
 """
 import datetime
 import json
+import os
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -358,7 +359,11 @@ class ReportGenerator:
                                     observability or {}, coverage or {})
             report_path = self.output_dir / "report.html"
 
-        report_path.write_text(html, encoding="utf-8")
+        # アトミックに置換する。post-analysis の再描画で write_text が既存の有効な report を
+        # truncate し、中断/ディスク満杯で空・部分 HTML を残さないようにする（Codex #172 P2）。
+        tmp = report_path.with_name(report_path.name + ".tmp")
+        tmp.write_text(html, encoding="utf-8")
+        os.replace(tmp, report_path)
         return report_path
 
     def _build_html(
