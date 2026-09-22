@@ -255,26 +255,51 @@ def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
     return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
 
 
+def _idna_host(host: str) -> str:
+    """ホスト名を小文字＋IDNA（Punycode）へ正規化する（純粋）。Chromium は IDN を Punycode で保存する。"""
+    host = (host or "").lower()
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
 def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
-    """手動巡回の実効 origin が target と異なる同一ホストなら、攻撃スコープへ
-    加えるべき origin（``scheme://netloc``）を返す（純粋・Codex #153）。該当しなければ ""。
+    """手動巡回の実効 URL が target と異なる同一ホストなら、追加すべき scope を返す（純粋・Codex #153）。
+    該当しなければ ""。
 
     別ホストや同一 origin では "" を返し、scheme・ポート変更だけを反映する。
-    設定 scope がパス限定（例 ``http://host/app``）なら、そのパスを昇格後 scope にも引き継ぐ。
-    origin 全体へ広げると、operator が許可していない同ホストの全パスへ能動 probe が及ぶ（Codex #153 P1）。
+    設定 scope のパス・query 限定（例 ``http://host/app`` / ``http://host/action?op=save``）は昇格後
+    scope にも引き継ぐ。origin 全体へ広げると未許可パスへ能動 probe が及び、query を落とすと query 限定
+    target が access-only 扱いになって検査されない（Codex #153 P1）。ホストは IDNA で正規化して比較する
+    （Unicode 設定と Punycode 保存の不一致で昇格を落とさない・Codex #153 P2）。
     """
     if not effective_origin:
         return ""
     from urllib.parse import urlparse as _up
     ep, tp = _up(effective_origin), _up(target_url or "")
+    _default_port = {"https": 443, "http": 80}
     if (ep.hostname and tp.hostname
-            and ep.hostname.lower() == tp.hostname.lower()
-            and ep.scheme in ("http", "https")
-            and tp.scheme in ("http", "https")
-            and (ep.scheme, ep.netloc.lower()) != (tp.scheme, tp.netloc.lower())):
+            and ep.scheme in _default_port and tp.scheme in _default_port
+            and _idna_host(ep.hostname) == _idna_host(tp.hostname)
+            and (ep.scheme, ep.port or _default_port[ep.scheme])
+            != (tp.scheme, tp.port or _default_port[tp.scheme])):
         _path = tp.path.rstrip("/")
-        return f"{ep.scheme}://{ep.netloc}{_path}"
+        _query = f"?{tp.query}" if tp.query else ""
+        return f"{ep.scheme}://{ep.netloc}{_path}{_query}"
     return ""
+
+
+def _scope_path_contains(effective_url: str, scope_url: str) -> int:
+    """scope のパスが実効 URL のパスを含めばパス長（具体度）、含まなければ -1（純粋）。"""
+    from urllib.parse import urlparse as _up
+    sp = _up(scope_url or "").path.rstrip("/")
+    ep = _up(effective_url or "").path or "/"
+    if not sp:
+        return 0
+    if ep == sp or ep.startswith(sp + "/"):
+        return len(sp)
+    return -1
 
 
 def _promote_redirect_scope(
@@ -283,29 +308,34 @@ def _promote_redirect_scope(
     target_urls: list,
     access_urls: list,
 ) -> tuple[str, bool]:
-    """手動巡回の実効 origin を昇格すべき origin と、その役割を返す（純粋・Codex #153 P1）。
+    """手動巡回の実効 URL を昇格すべき scope と、その役割を返す（純粋・Codex #153 P1）。
 
-    戻り値 ``(scope, is_attack)``。``scope`` が非空なら追加すべき ``scheme://netloc``。
-    攻撃対象 scope（target_url/target_urls）に一致すれば ``is_attack=True``、access-only
-    scope に一致すれば ``False``。access-only の IdP/支援 origin が https へリダイレクト
-    しても攻撃対象へ昇格させないため、設定時の役割を保つ。該当なしは ``("", False)``。
+    戻り値 ``(scope, is_attack)``。攻撃対象 scope（target_url/target_urls）由来なら ``True``、
+    access-only scope 由来なら ``False``（access-only の IdP/支援 origin を攻撃対象へ昇格させない）。
+    同一ホストに攻撃・access の scope が別パスで並ぶ場合は、実効 URL のパスを**実際に含む**最も具体的な
+    設定 scope を選び、その役割を保つ（/login の access seed を /app の攻撃 scope に誤帰属させない）。
+    どのパスにも含まれない場合だけ従来どおり設定順（攻撃→access）の最初の同一ホスト scope を採る。
+    該当なしは ``("", False)``。
     """
     # primary の攻撃 scope は init で origin（scheme://netloc）へ正規化されている。生の target_url の
-    # パス（http://host/app）を引き継ぐと https 昇格後の scope が /app に縮み、同 origin の他パスの
-    # manual seed/リンクを弾いてカバレッジが減る（Codex #153 P1）。primary は origin で評価し、
-    # パスを保つのは本当にパス限定の追加 target / access scope だけにする。
+    # パスを引き継ぐと https 昇格後の scope が縮みカバレッジが減る（Codex #153 P1）ため origin で評価する。
     from urllib.parse import urlparse as _up
     _pp = _up(target_url or "")
     primary = f"{_pp.scheme}://{_pp.netloc}" if _pp.scheme and _pp.netloc else target_url
-    for cfg in (primary, *target_urls):
+    candidates = []  # (具体度, 設定順, scope, is_attack)
+    for order, (cfg, is_attack) in enumerate(
+        [(primary, True)] + [(u, True) for u in target_urls] + [(u, False) for u in access_urls]
+    ):
         scope = _redirect_scope_to_add(effective_origin, cfg)
-        if scope and scope not in target_urls:
-            return scope, True
-    for cfg in access_urls:
-        scope = _redirect_scope_to_add(effective_origin, cfg)
-        if scope and scope not in access_urls:
-            return scope, False
-    return "", False
+        if not scope or scope in (target_urls if is_attack else access_urls):
+            continue
+        candidates.append((_scope_path_contains(effective_origin, cfg), order, scope, is_attack))
+    if not candidates:
+        return "", False
+    contained = [c for c in candidates if c[0] >= 0]
+    pool = contained or candidates
+    best = sorted(pool, key=lambda c: (-c[0], c[1]))[0] if contained else min(pool, key=lambda c: c[1])
+    return best[2], best[3]
 
 
 import yaml

@@ -731,12 +731,27 @@ class ManualCrawlSession:
                 await self._stop_screencast(clear_callback=False)
             if fallback is None:
                 return
-            try:
-                await self._bind_page(fallback)
-                if self.streaming:
-                    await self._start_screencast(fallback)
-            except Exception as exc:
-                self.last_error = f"page fallback failed: {exc}"
+            # fallback への切替に失敗したら残りのページ（新しい順）を順に試す。全滅なら streaming を
+            # 明示的に終え、凍結画面のまま見えないページへ入力を送り続けない（Codex #153 P2）。
+            others = [p for p in reversed(pages) if p is not closed_page and p is not fallback]
+            attached = None
+            for cand in [fallback, *others]:
+                try:
+                    if hasattr(cand, "is_closed") and cand.is_closed():
+                        continue
+                    await self._bind_page(cand)
+                    if self.streaming:
+                        await self._start_screencast(cand)
+                    attached = cand
+                    break
+                except Exception as exc:
+                    self.last_error = f"page fallback failed: {exc}"
+            self._page = attached
+            fallback = attached
+            if attached is None and self.streaming:
+                self.streaming = False
+                self.last_error = (self.last_error or "page fallback failed") + \
+                    " — screencast を再開できないため streaming を終了しました"
         # フォールバック先も same-origin なら snapshot（forms 取りこぼし防止・Codex #153 P1）。lock 外。
         if fallback is not None:
             try:

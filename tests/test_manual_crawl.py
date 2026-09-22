@@ -194,6 +194,22 @@ class ManualCrawlSeedTests(unittest.TestCase):
                                     ["http://host.test", "http://sec.test/app"], []),
             ("https://sec.test/app", True))
 
+    def test_promotion_keeps_query_and_matches_configured_path(self):
+        # query 限定 target は query ごと昇格し、同一ホストの攻撃/access scope は実効 URL のパスを含む
+        # 方の役割を採る。IDN ホストも Punycode と一致させる（Codex #153 P1/P2）。
+        from wscan.engine import _promote_redirect_scope, _redirect_scope_to_add
+        self.assertEqual(
+            _redirect_scope_to_add("https://sec.test/action?op=save", "http://sec.test/action?op=save"),
+            "https://sec.test/action?op=save")
+        self.assertEqual(
+            _promote_redirect_scope("https://shared.test/login/form", "http://app.test/",
+                                    ["http://app.test", "http://shared.test/app"],
+                                    ["http://shared.test/login"]),
+            ("https://shared.test/login", False))
+        self.assertEqual(
+            _promote_redirect_scope("https://xn--r8jz45g.jp/", "http://例え.jp/", ["http://例え.jp"], []),
+            ("https://xn--r8jz45g.jp", True))
+
     def test_promote_redirect_scope_preserves_role(self):
         # 攻撃対象 target のリダイレクトは attack scope、access-only のリダイレクトは
         # 訪問のみ scope として役割を保つ（Codex #153 P1）。
@@ -759,6 +775,45 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(session._context.cdp_targets[-1], old_page)  # 旧ページの配信を再開
         self.assertIsNotNone(session._cdp)
         self.assertIn("page switch failed", session.last_error)
+
+    async def test_fallback_screencast_failure_retries_or_stops_streaming(self):
+        # active popup 終了後、fallback の screencast が失敗したら別ページを試し、全滅なら streaming を終える（Codex #153 P2）。
+        closed = _FakePage("http://example.test/popup")
+        bad = _FakePage("http://example.test/bad")
+        good = _FakePage("http://example.test/good")
+
+        class _Cdp(_FakeCdp):
+            def __init__(self, fail):
+                super().__init__()
+                self.fail = fail
+
+            async def send(self, method, params=None):
+                self.sent.append((method, params))
+                if method == "Page.startScreencast" and self.fail:
+                    raise RuntimeError("attach failed")
+
+        class _Ctx(_FakeContext):
+            def __init__(self, pages, failing):
+                super().__init__(pages)
+                self.failing = failing
+
+            async def new_cdp_session(self, page):
+                self.cdp_targets.append(page)
+                cdp = _Cdp(fail=page in self.failing)
+                self.cdps.append(cdp)
+                return cdp
+
+        session = self._session(closed, _Ctx([good, bad, closed], failing=[bad]))
+        session.snapshot = AsyncMock()
+        await session._handle_page_closed(closed)
+        self.assertIs(session._page, good)
+        self.assertTrue(session.streaming)
+
+        session2 = self._session(closed, _Ctx([good, bad, closed], failing=[good, bad]))
+        session2.snapshot = AsyncMock()
+        await session2._handle_page_closed(closed)
+        self.assertIsNone(session2._page)
+        self.assertFalse(session2.streaming)
 
     async def test_start_failure_clears_totp_and_allows_restart(self):
         # ブラウザ生成前の失敗（proxy 正規化の例外等）でも TOTP を消し running を戻す（Codex #153 P2）。
