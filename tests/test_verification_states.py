@@ -32,6 +32,7 @@ class _VerifyOneEngine:
 
 class _PhaseVerifyEngine:
     _phase_verify = ScanEngine._phase_verify
+    _profile = ScanEngine._profile  # WSCAN_PROFILE 計測（既定 no-op・F06/0059）
     _VERIFIABLE_CHECKS = {"sqli"}
 
     def __init__(self, findings, states):
@@ -179,6 +180,72 @@ class VerificationStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(skipped.verification_state, "skipped")
         self.assertIn("要手動確認", skipped.verification_note)
         self.assertEqual(len(engine.all_findings), 4)
+
+
+    async def test_phase_verify_bounds_hanging_verify_one(self):
+        # 1 件の _verify_one が返らなくても verify フェーズは有界時間で完了し、その finding は
+        # "skipped"（未検証・要手動確認）として保持される（reproduced に上げない・削除しない）。F06/0059。
+        import asyncio
+        from unittest.mock import patch
+        import wscan.engine as engine_mod
+
+        class _HangEngine:
+            _phase_verify = ScanEngine._phase_verify
+            _profile = ScanEngine._profile
+            _VERIFIABLE_CHECKS = {"sqli"}
+
+            def __init__(self, findings):
+                self.all_findings = findings
+                self.monitor = None
+                self.wave_errors = []
+
+            async def _verify_one(self, finding):
+                await asyncio.sleep(10)   # patch した上限より十分長い＝返らない相当
+                return "reproduced"
+
+        f = _finding("hang")
+        engine = _HangEngine([f])
+        with patch.object(engine_mod, "_VERIFY_ONE_TIMEOUT_S", 0.05):
+            await engine._phase_verify()
+
+        self.assertFalse(f.verified)
+        self.assertEqual(f.verification_state, "skipped")   # timeout→未検証で保持
+        self.assertEqual(len(engine.all_findings), 1)       # 削除しない
+        self.assertTrue(any("verify:" in e for e in engine.wave_errors))  # 記録は残す
+
+
+class VerifyBudgetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verify_budget_derives_from_request_timeout(self):
+        # verify 上限は固定 180s ではなく request timeout×6 を確保するので、小さく patch した
+        # _VERIFY_ONE_TIMEOUT_S を超える所要でも browser.timeout 由来の budget 内なら
+        # 完了して skipped にならない（#171 P2）。
+        import asyncio
+        from unittest.mock import patch
+        import wscan.engine as engine_mod
+
+        class _Eng:
+            _phase_verify = ScanEngine._phase_verify
+            _profile = ScanEngine._profile
+            _VERIFIABLE_CHECKS = {"sqli"}
+
+            def __init__(self, findings, browser):
+                self.all_findings = findings
+                self.monitor = None
+                self.wave_errors = []
+                self.browser = browser
+
+            async def _verify_one(self, finding):
+                await asyncio.sleep(0.1)   # 0.05 は超えるが 600 budget 内
+
+                return "reproduced"
+
+        import types as _t
+        f = _finding("slow")
+        browser = _t.SimpleNamespace(timeout=100000)   # 100s → budget=max(0.05,600)=600
+        eng = _Eng([f], browser)
+        with patch.object(engine_mod, "_VERIFY_ONE_TIMEOUT_S", 0.05):
+            await eng._phase_verify()
+        self.assertEqual(f.verification_state, "reproduced")   # budget 由来で cancel されない
 
 
 if __name__ == "__main__":
