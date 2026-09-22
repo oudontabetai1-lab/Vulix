@@ -5056,6 +5056,9 @@ async function runAutoConfig() {
           openai_base_url: ((document.getElementById('cfgLlm')?.value === 'openai_compatible')
             ? (document.getElementById('cfgLlmBaseUrl')?.value || '').trim() : ''),
           role_models: collectRoleModels(),
+          // auto-config も one-shot 呼び出し。選択中の timeout を渡す（正規化はサーバ側・Codex #173 P2）。
+          // 空欄は undefined にして送らず、サーバ設定値を上書きしない。
+          llm_timeout_seconds: document.getElementById('cfgLlmTimeoutInput')?.value || undefined,
         },
       }),
     });

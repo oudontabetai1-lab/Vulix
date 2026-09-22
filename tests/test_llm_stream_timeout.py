@@ -135,3 +135,26 @@ def test_triage_passes_llm_timeout_to_payload_generator():
         out = asyncio.run(eng._llm_analyse())
     assert out == ""
     assert captured.get("llm_timeout_seconds") == 17
+
+
+def test_dashboard_auto_config_honors_llm_timeout(monkeypatch):
+    # /api/auto-config は選択/設定済み one-shot timeout を PayloadGenerator に渡す（Codex #173 P2）。
+    from fastapi.testclient import TestClient
+    import wscan.auto_config as ac
+    from wscan.monitor import MonitorServer
+
+    seen = {}
+
+    async def fake_generate(gen, description):
+        seen["timeout"] = gen.llm_timeout_seconds
+        return {"ok": True}
+
+    monkeypatch.setattr(ac, "generate_from_description", fake_generate)
+    srv = MonitorServer(port=0, auth_token="")
+    srv.llm_cfg = {"provider": "ollama", "llm_timeout_seconds": 75}
+    c = TestClient(srv.app)
+
+    assert c.post("/api/auto-config", json={"description": "x"}).status_code == 200
+    assert seen["timeout"] == 75.0  # サーバ設定値
+    c.post("/api/auto-config", json={"description": "x", "llm_config": {"llm_timeout_seconds": "12"}})
+    assert seen["timeout"] == 12.0  # ダッシュボード選択値が優先

@@ -2800,6 +2800,7 @@ async def run_serve(args):
         "claude_model": _CFG.get("claude_model", _llm_section.get("claude_model", "claude-haiku-4-5-20251001")),
         "openai_base_url": _CFG.get("openai_base_url", _llm_section.get("openai_base_url", "")),
         "role_models":  _CFG.get("role_models", _llm_section.get("models", {}) or {}),
+        "llm_timeout_seconds": _CFG.get("llm_timeout_seconds", 30),
     }
     config = uvicorn.Config(app=monitor.app, host=host, port=port, log_level="error")
     server = uvicorn.Server(config)
