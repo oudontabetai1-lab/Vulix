@@ -171,6 +171,19 @@ Evidence: alert dialog was observed
                 access_urls=["http://fixture.test/login"],
             )
         )
+        # query/fragment 付きの login 変種も access-only として probe 禁止（正規化して照合・#154 P1）。
+        for variant in (
+            "http://fixture.test/login?next=/home",
+            "http://fixture.test/login#step2",
+            "http://fixture.test/login/",
+        ):
+            self.assertFalse(
+                security_probe_allowed(
+                    variant, target_urls, [],
+                    access_urls=["http://fixture.test/login"],
+                ),
+                variant,
+            )
 
 
 class AgentReconHandoffTests(unittest.IsolatedAsyncioTestCase):

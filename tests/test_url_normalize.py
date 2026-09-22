@@ -365,6 +365,21 @@ def test_endpoint_identity_distinguishes_routes():
     assert endpoint_identity("/search?q=<script>") == endpoint_identity("/search?q=1'")
 
 
+def test_route_aware_identity_normalizes_payload_in_fragment_query():
+    # SPA route fragment 内の query payload も正規化し、payload 変種で probe が膨張しないこと。
+    # route path 自体（/search vs /admin）は区別を保つ（Codex #154 P1）。
+    from wscan.url_normalize import route_aware_identity
+    # 注入 payload 変種は fragment 内でも同一 identity へ畳む（budget 膨張防止）。
+    assert route_aware_identity("http://h/app#/search?q=<script>") == \
+        route_aware_identity("http://h/app#/search?q=' OR 1=1")
+    # route path が違えば別 identity。
+    assert route_aware_identity("http://h/app#/search?q=<script>") != \
+        route_aware_identity("http://h/app#/admin?q=<script>")
+    # 通常の routing 値（slash 含む）は fragment 内でも保持する。
+    assert route_aware_identity("http://h/app#/go?next=/home") != \
+        route_aware_identity("http://h/app#/go?next=/admin")
+
+
 def test_route_aware_identity_distinguishes_hash_routes():
     # hash ルート SPA は fragment を保持して別 identity にする（Codex #154 P1・偽 COMPLETE 防止）。
     from wscan.url_normalize import route_aware_identity, endpoint_identity

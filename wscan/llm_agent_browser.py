@@ -30,7 +30,7 @@ import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from rich.console import Console
 from rich.rule import Rule
@@ -49,6 +49,7 @@ from .agent_harness import (
     AgentPhase,
     AgentRole,
     AgentRunSpec,
+    TRUNCATION_MARKER,
     WorkStatus,
 )
 
@@ -209,8 +210,14 @@ def security_probe_allowed(
         return False
     # access-only URL（/login 等）は primary target origin を共有しても security probe 禁止。
     # target scope より access scope を優先する（訪問/認証のみの契約を守る・Codex #154 P1）。
-    if access_urls and _url_matches_scope(url, _normalize_scope_urls(access_urls)):
-        return False
+    # full-URL scope は exact/`scope+"/"` 一致のみのため、query/fragment 付きの login 変種
+    # （`/login?next=/home`・`/login#step2`）が access scope に一致せず probe 許可されてしまう。
+    # access 判定では URL を scheme+netloc+path へ正規化してから照合する（Codex #154 P1）。
+    if access_urls:
+        _p = urlparse(url)
+        _access_probe = urlunparse((_p.scheme, _p.netloc, _p.path, "", "", ""))
+        if _url_matches_scope(_access_probe, _normalize_scope_urls(access_urls)):
+            return False
     excluded_fields = {str(name).strip().lower() for name in (exclude_fields or [])}
     return not field_name or field_name.strip().lower() not in excluded_fields
 
@@ -1452,6 +1459,14 @@ class AgentBrowserScanner:
                         for item in self._harness.state.work_queue
                     ):
                         self._harness.requeue_role(AgentRole.ADVERSARIAL_REVIEWER)
+                # resume では新 process の _memory が空。checkpoint の visited_urls を取り込み、
+                # 完了済み explorer の発見 URL を失わない。これをしないと result.memory が空で
+                # 返り、run_recon が Phase 2 へ primary target しか渡せない（Codex #154 P1）。
+                _known_visited = set(self._memory.visited_urls)
+                for _u in self._harness.state.visited_urls:
+                    if _u not in _known_visited:
+                        self._memory.visited_urls.append(_u)
+                        _known_visited.add(_u)
                 result.findings = [
                     _finding_from_checkpoint(item)
                     for item in self._harness.state.hypotheses
@@ -1534,6 +1549,19 @@ class AgentBrowserScanner:
         except ImportError:
             result.error = "browser-use がインストールされていません。pip install browser-use を実行してください。"
             if self._harness:
+                # probe/verifier/reviewer/action が遅延 ImportError を投げると generic except より
+                # 先にこの handler へ来る。probe が既に checkpoint した仮説を失わないよう、汎用経路と
+                # 同じく checkpoint から finding/coverage を回収してから finalize する（Codex #154 P1）。
+                result.findings = [
+                    _finding_from_checkpoint(item)
+                    for item in self._harness.state.hypotheses
+                ]
+                result.coverage_gaps = [
+                    f"{item.role.value}:{item.target}:{item.check_type or '-'}:{item.status.value}"
+                    for item in self._harness.state.work_queue
+                    if item.status != WorkStatus.COMPLETE
+                ]
+                result.steps_taken = self._harness.state.consumed_steps
                 result.harness_status = self._harness.finalize(
                     success=False, coverage_complete=False, error=result.error
                 ).value
@@ -1637,7 +1665,10 @@ class AgentBrowserScanner:
 
     def _work_target(self, work) -> str:
         target = self._runtime_work_targets.get(work.work_id, work.target)
-        return "" if "<redacted>" in target else target
+        # redaction・truncation いずれも「実行不能＝要再発見」シグナル（Codex #154 P1）。
+        if "<redacted>" in target or TRUNCATION_MARKER in target:
+            return ""
+        return target
 
     def _candidate_for_work(self, work) -> dict:
         candidate = self._runtime_hypotheses.get(work.target)
@@ -1655,11 +1686,13 @@ class AgentBrowserScanner:
         # "admin'--" が "<redacted>'--"）、url が無傷でも改変済み payload で検証してしまう
         # （Codex #154 P1）。いずれかが redacted なら候補無し扱いにし、_prepare_resume_work が
         # originating probe を再キューして原候補を復元する。
-        redacted = any(
-            "<redacted>" in str(candidate.get(key, ""))
+        # redaction に加え truncation（>1000字で切り詰め）も実行不能扱いにする。切り詰めた
+        # prefix で検証すると原候補と異なる payload を試し finding が別物になる（Codex #154 P1）。
+        unusable = any(
+            "<redacted>" in str(candidate.get(key, "")) or TRUNCATION_MARKER in str(candidate.get(key, ""))
             for key in ("url", "payload", "field_name")
         )
-        return {} if redacted else candidate
+        return {} if unusable else candidate
 
     def _prepare_resume_work(self) -> None:
         """checkpoint で実行情報を失った未完了 work だけ再発見対象へ戻す。"""
@@ -1787,7 +1820,28 @@ class AgentBrowserScanner:
         )
         if work.role == AgentRole.ADVERSARIAL_REVIEWER and has_reported_gap:
             return False
-        return marker in upper
+        # 完了マーカーは **肯定的な独立指令** として解釈する。単純な部分一致だと
+        # "I cannot output PROBE COMPLETE because inputs remain" のような否定文でも完了扱いに
+        # なり未完了なのに coverage 完了と誤報告する（Codex #154 P1）。マーカーが行の先頭または
+        # 末尾に立ち（"No coverage gaps found. REVIEW COMPLETE" のような肯定末尾も可）、かつ同一行の
+        # マーカーより前に行為否定語（cannot/unable 等）が無い行だけを肯定完了とみなす。
+        _NEG_BEFORE = (
+            "CANNOT", "CAN'T", "UNABLE", "WON'T", "COULDN'T", "DO NOT", "DON'T",
+            "DID NOT", "DIDN'T", "NOT ABLE", "NOT YET", "WITHOUT",
+        )
+        for line in upper.splitlines():
+            s = line.strip().lstrip("-*#>・ ").strip().rstrip(".!:）) ")
+            standalone = (
+                s == marker
+                or s.startswith(marker + " ")
+                or s.endswith(" " + marker)
+            )
+            if not standalone:
+                continue
+            before = s.split(marker, 1)[0]
+            if not any(neg in before for neg in _NEG_BEFORE):
+                return True
+        return False
 
     def _build_work_task(self, work, prior_texts: list[str]) -> str:
         """役割を分離した短い episode task を生成する。"""

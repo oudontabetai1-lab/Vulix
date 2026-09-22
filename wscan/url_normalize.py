@@ -23,6 +23,24 @@ def endpoint_identity(url: str) -> str:
     return urlunsplit(parsed._replace(query=urlencode(sorted(pairs)), fragment=""))
 
 
+def _normalize_fragment_query(fragment: str) -> str:
+    """route-like fragment 内の query payload を正規化する（純粋・Codex #154 P1）。
+
+    ``/search?q=' OR 1=1`` と ``/search?q=x`` が別 identity にならないよう、fragment の
+    ``?`` 以降を endpoint_identity と同じ規則で正規化（注入値の空化＋key ソート）する。
+    ``?`` を持たない fragment はそのまま返す。
+    """
+    path, sep, query = fragment.partition("?")
+    if not sep:
+        return fragment
+    pairs = set()
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if len(value) > 64 or any(char in _INJECTION_META_CHARS or char.isspace() for char in value):
+            value = ""
+        pairs.add((key, value))
+    return path + "?" + urlencode(sorted(pairs))
+
+
 def route_aware_identity(url: str) -> str:
     """endpoint_identity（注入値の空化＋query ソートで payload 変種を dedup）に、
     client-side route を示す fragment を **保持**して合成した identity（Codex #154 P1）。
@@ -35,7 +53,10 @@ def route_aware_identity(url: str) -> str:
     base = endpoint_identity(url)
     fragment = urlsplit(url).fragment
     if fragment and (fragment[:1] in ("/", "!") or "/" in fragment):
-        return f"{base}#{fragment}"
+        # fragment 内の query payload も正規化する。さもないと SPA route の payload 変種
+        # （`/app#/search?q=<payload>`）が毎回別 identity になり probe queue を再帰的に膨張させ
+        # global budget を食い潰す（Codex #154 P1）。route path 自体は保持する。
+        return f"{base}#{_normalize_fragment_query(fragment)}"
     return base
 
 

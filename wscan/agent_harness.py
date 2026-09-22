@@ -25,6 +25,11 @@ MANIFEST_FILENAME = "agent_manifest.json"
 SCHEMA_VERSION = 1
 _INTERNAL_ID_KEYS = frozenset({"candidate_id"})
 
+# 1000 字超で切り詰めた文字列に付す番兵。切り詰めた候補 URL/payload は元の実行値と異なるため、
+# resume 時に「要再発見」と判定して originating probe を再キューさせ、truncated prefix を実行
+# 対象と誤認しないようにする（Codex #154 P1）。redaction と同じ「実行不能」シグナルとして扱う。
+TRUNCATION_MARKER = "<wscan-truncated>"
+
 
 class AgentRunStatus(str, Enum):
     RUNNING = "running"
@@ -514,8 +519,13 @@ class AgentHarness:
             if _key in _INTERNAL_ID_KEYS:
                 return value
             # request_logger の一般 redaction regex に巨大な敵対文字列を直接渡さない。
-            text = self._redact_runtime(value)[:1000]
-            return redact_text(text)
+            redacted_full = self._redact_runtime(value)
+            text = redact_text(redacted_full[:1000])
+            # 切り詰めが起きた場合は番兵を付す。resume 時に truncated prefix を実行値と誤認せず
+            # originating probe を再キューさせる（Codex #154 P1）。
+            if len(redacted_full) > 1000:
+                text = f"{text}{TRUNCATION_MARKER}"
+            return text
         return value
 
     def finalize(
@@ -554,6 +564,10 @@ class AgentHarness:
         manifest_ok = self._write_manifest(coverage_complete=coverage_complete)
         if not manifest_ok:
             self.state.status = AgentRunStatus.EVIDENCE_INCOMPLETE
+            # manifest だけ失敗した場合、直前の checkpoint は COMPLETE を書き込んでいる。
+            # downgrade を durable checkpoint にも反映しないと agent_state.json が COMPLETE のまま
+            # 残り、resume が失敗を回収できない（Codex #154 P2）。再 checkpoint で状態を揃える。
+            self.checkpoint()
         return self.state.status
 
     def checkpoint(self) -> bool:
