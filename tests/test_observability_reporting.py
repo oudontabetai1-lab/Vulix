@@ -137,3 +137,28 @@ def test_report_contains_observability_total_categories_and_samples():
     assert "transport_error" in html
     assert "transport_error:xss:TimeoutError" in html
 
+
+
+def test_refresh_evidence_observability_rerenders_html_and_evidence():
+    # post-scan AI 分析後の refresh が evidence.json だけでなく HTML も再描画し、llm_calls の
+    # 表示値を分析後の実数へ更新する（初回描画は分析前の値だったため・Codex #172 P2）。
+    import json
+    with tempfile.TemporaryDirectory() as d:
+        engine = ScanEngine.__new__(ScanEngine)
+        engine.output_dir = Path(d)
+        engine.wave_errors = []
+        engine.request_logger = SimpleNamespace(llm_call_count=1)  # 分析前
+        # 初回描画相当: evidence.json を llm_calls=1 で書く。
+        (Path(d) / "evidence.json").write_text(
+            json.dumps({"observability": engine._observability_report_data()}),
+            encoding="utf-8",
+        )
+        rendered = {"n": 0}
+        engine._render_report_templates = lambda: rendered.__setitem__("n", rendered["n"] + 1)
+        # 分析後: llm_calls が増える。
+        engine.request_logger = SimpleNamespace(llm_call_count=4)
+        engine._refresh_evidence_observability()
+
+        assert rendered["n"] == 1, "HTML を再描画していない"
+        data = json.loads((Path(d) / "evidence.json").read_text(encoding="utf-8"))
+        assert data["observability"]["llm_calls"] == 4

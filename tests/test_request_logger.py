@@ -209,5 +209,33 @@ class ScannerPayloadLoggingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(rows), 1)
 
 
+class ResumeCounterTests(unittest.TestCase):
+    def test_counters_init_from_existing_jsonl_on_reuse(self):
+        # 既存 output dir を append 再利用（resume で --output=--resume 同一）したとき、
+        # カウンタを既存 JSONL の有効行数から初期化する（Codex #172 P2）。
+        with tempfile.TemporaryDirectory() as d:
+            l1 = RequestLogger(d)
+            l1.log_http({"request": {"method": "GET", "url": "http://t.test/"},
+                         "response": {"status": 200}})
+            l1.log_llm_call(provider="claude", role="planner", model="m", status="ok")
+            l1.log_llm_call(provider="claude", role="adaptive", model="m", status="ok")
+            self.assertEqual(l1.http_count, 1)
+            self.assertEqual(l1.llm_call_count, 2)
+            # 壊れた行は数えない。
+            with (Path(d) / "llm_calls.jsonl").open("a", encoding="utf-8") as fp:
+                fp.write("not-json\n")
+
+            l2 = RequestLogger(d)  # 同一 dir を再オープン（append）
+            self.assertEqual(l2.http_count, 1)
+            self.assertEqual(l2.llm_call_count, 2)  # 壊れた行は無視
+            l2.log_llm_call(provider="claude", role="report", model="m", status="ok")
+            self.assertEqual(l2.llm_call_count, 3)
+
+    def test_counters_zero_for_fresh_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            logger = RequestLogger(d)
+            self.assertEqual((logger.http_count, logger.payload_count, logger.llm_call_count), (0, 0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

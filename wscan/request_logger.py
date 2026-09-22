@@ -21,6 +21,29 @@ from typing import Optional
 # 巨大な post_data でログが肥大化するのを防ぐための上限（文字数）
 _MAX_POST_DATA = 20000
 
+
+def _count_existing_records(path: Path) -> int:
+    """既存 JSONL の有効レコード行数を数える（純粋・ベストエフォート・Codex #172 P2）。
+
+    append 再利用時にカウンタを既存行数から始めるため。壊れた行/欠損ファイルは 0 側に倒す
+    （空・非 JSON 行は数えない）。
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            count = 0
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    json.loads(line)
+                except Exception:
+                    continue
+                count += 1
+            return count
+    except OSError:
+        return 0
+
 # 監査ログは output/ 配下に保存され、ダッシュボードが（既定では認証なしで）
 # 配信しうる。認証情報がそのまま残ると閲覧者に漏れるため、書き込み前に
 # 機微なヘッダ値・ボディフィールドをマスクする。
@@ -158,9 +181,12 @@ class RequestLogger:
         # NetworkCapture（同期）と Monitor（async）双方から呼ばれうるので
         # ファイル追記をロックで直列化する。
         self._lock = threading.Lock()
-        self.http_count = 0
-        self.payload_count = 0
-        self.llm_call_count = 0
+        # 既存 output dir（resume で --output=--resume 同一等）を append で再利用すると、
+        # ファイルには前回行が残るのにカウンタを 0 開始すると evidence/HTML が今回分しか数えず
+        # JSONL 実数と食い違う。既存 JSONL の有効行数からカウンタを初期化する（Codex #172 P2）。
+        self.http_count = _count_existing_records(self.http_path)
+        self.payload_count = _count_existing_records(self.payload_path)
+        self.llm_call_count = _count_existing_records(self.llm_path)
 
     def _append(self, path: Path, record: dict) -> bool:
         """1 行追記する。実際に永続化できたら True（カウンタ整合の判定に使う・Codex #172 P2）。"""

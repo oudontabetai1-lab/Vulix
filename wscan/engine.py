@@ -6586,11 +6586,12 @@ class ScanEngine:
                 await self.monitor.emit("ai_analysis", {"text": ai_text})
 
     def _refresh_evidence_observability(self) -> None:
-        """AI 分析後に evidence.json の observability（llm_calls 総数）だけ更新する（Codex #172 P2）。
+        """AI 分析後に evidence.json と HTML の observability（llm_calls 総数）を実態へ更新する（Codex #172 P2）。
 
         core report/evidence は _phase_report で先に永続化済み。post-scan AI 呼び出しは集計後に
-        llm_calls.jsonl へ追記されるため、その分を反映して総数を実態に合わせる。失敗しても
-        既存の成果物は壊さない（ベストエフォート）。
+        llm_calls.jsonl へ追記されるため、その分を反映して総数を実態に合わせる。evidence.json は
+        原子的に置換し、HTML はテンプレートを再描画する（描画時に live 値を読むので集計値が
+        JSONL/evidence と一致する）。失敗しても既存の成果物は壊さない（ベストエフォート）。
         """
         import json
         import os
@@ -6609,6 +6610,12 @@ class ScanEngine:
                 json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             os.replace(tmp, path)
+        except Exception:
+            pass
+        # HTML も再描画して observability の表示値を分析後の実数に一致させる（ブラウザは再オープン
+        # しない）。初回の core-report 永続化は済んでいるので、失敗しても成果物は残る。
+        try:
+            self._render_report_templates()
         except Exception:
             pass
 
@@ -6733,8 +6740,13 @@ class ScanEngine:
             except Exception as _notify_err:
                 console.print(f"  [yellow][Notification] 完了通知失敗: {_notify_err}[/yellow]")
 
-    def _generate_report(self):
-        import webbrowser
+    def _render_report_templates(self):
+        """audit/executive/developer の HTML を現在の state から描画し audit のパスを返す。
+
+        observability(llm_calls 等) は描画時に live 値を読むため、post-scan AI 分析後に
+        再描画すれば HTML の集計値も実態と一致する。ブラウザ起動/monitor 登録は含めない
+        （初回描画・分析後 refresh の双方から呼ぶ・Codex #172 P2）。
+        """
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir)
         display_scan_matrix = self._scan_matrix_for_display()
@@ -6786,6 +6798,11 @@ class ScanEngine:
                 )
             except Exception:
                 pass
+        return report_path
+
+    def _generate_report(self):
+        import webbrowser
+        report_path = self._render_report_templates()
 
         # D: CI/CD API — レポートパスを monitor に登録
         if self.monitor:
