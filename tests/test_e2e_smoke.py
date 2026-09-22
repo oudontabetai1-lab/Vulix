@@ -1,0 +1,135 @@
+"""高速 E2E スモーク（CI ブロッキング）。
+
+full E2E（``test_end_to_end_scan.py``・1スキャン最大 900s）は重く nightly 専用だが、
+crawl→plan→attack→verify の実ブラウザ経路が「通しで完走し基本脆弱性を1件検出する」ことは
+**PR 毎に**確かめたい（F06/0059 のような通し停止・クラッシュ回帰を検知するため）。
+
+最小フィクスチャ ``vuln_app`` の反射 XSS（``/search?q=``）に対して XSS スキャンを1本走らせ、
+tight な上限内に完走し XSS を検出することだけを確認する軽量スモーク。
+
+CI では ``WSCAN_E2E=1`` + Chromium 有りで **ブロッキング** 実行する。Chromium が無い/起動不能な
+環境（通常の非E2E CI ステップ・開発者ローカル）では skip し、非E2E スイートを壊さない。
+インフラ都合（``playwright install`` の一時 403 等）で Chromium が入らなかった場合も skip に倒し、
+コード回帰だけをブロッキング対象にする。
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import socket
+import tempfile
+import threading
+import time
+import unittest
+
+import uvicorn
+
+from tests.fixtures.vuln_app import create_app
+from wscan.engine import ScanEngine
+
+# 実ブラウザの crawl→attack→verify を通しで縛る上限。tiny fixture なので通常は数十秒で終わる。
+# 真の hang（返らない verifier 等）はこの上限超過で **失敗** になり、CI が赤くなる。
+SMOKE_TIMEOUT_S = 180
+
+
+def _e2e_enabled() -> bool:
+    return os.environ.get("WSCAN_E2E", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _chromium_available() -> bool:
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return False
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:
+        return False
+
+
+_CHROMIUM_OK = _chromium_available()
+
+
+def _free_port() -> int:
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _wait_for_server(port: int, timeout: float = 10.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with contextlib.closing(socket.create_connection(("127.0.0.1", port), 0.25)):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError(f"smoke fixture server never came up on port {port}")
+
+
+@unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the E2E smoke")
+@unittest.skipUnless(
+    _CHROMIUM_OK,
+    "Playwright Chromium not launchable (run: playwright install chromium)",
+)
+class E2ESmokeTests(unittest.TestCase):
+    """vuln_app に対する最小の通し XSS 検出スモーク。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._port = _free_port()
+        cls._config = uvicorn.Config(
+            create_app(), host="127.0.0.1", port=cls._port, log_level="error"
+        )
+        cls._server = uvicorn.Server(cls._config)
+        cls._thread = threading.Thread(target=cls._server.run, daemon=True)
+        cls._thread.start()
+        _wait_for_server(cls._port)
+
+        cls._tmp = tempfile.TemporaryDirectory()
+        engine = ScanEngine(
+            f"http://127.0.0.1:{cls._port}/",
+            checks=["xss"],
+            llm_provider="none",
+            headless=True,
+            output_dir=cls._tmp.name,
+            open_report=False,
+            enable_waf_detection=False,
+            enable_ai_analysis=False,
+            enable_payload_learning=False,
+            enable_adaptive_payloads=False,
+            enable_sitemap_crawl=False,
+            depth=1,
+            fast_mode=True,
+            max_payloads=6,
+            request_delay=0,
+            use_planner=False,
+            sarif=False,
+            timeout=8,
+            navigation_retries=0,
+        )
+        # 通しで完走することが第一目的。hang したら wait_for が TimeoutError→テスト失敗。
+        asyncio.run(asyncio.wait_for(engine.run(), timeout=SMOKE_TIMEOUT_S))
+        cls._findings = list(engine.all_findings)
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls._server.should_exit = True
+            cls._thread.join(timeout=5)
+        finally:
+            cls._tmp.cleanup()
+
+    def test_scan_completed_and_detected_reflected_xss(self):
+        # 完走（setUpClass が hang せず到達）＋ 反射 XSS(/search?q=) を1件以上検出。
+        self.assertTrue(self._findings, "E2E smoke: スキャンが 0 findings（通し経路の回帰の疑い）")
+        xss = [f for f in self._findings if getattr(f, "check_type", "") == "xss"]
+        self.assertTrue(xss, "E2E smoke: vuln_app の反射 XSS を検出できなかった")
+
+
+if __name__ == "__main__":
+    unittest.main()
