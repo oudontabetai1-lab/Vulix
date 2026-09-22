@@ -242,14 +242,24 @@ def test_finalize_reports_incomplete_when_final_artifact_write_fails(
     harness = AgentHarness(tmp_path, spec())
     original_write = harness._atomic_write_json
 
-    def fail_selected(path, data):
+    def fail_selected(path, data, force=False):
         if path.name == failed_name:
             return False
-        return original_write(path, data)
+        return original_write(path, data, force=force)
 
     monkeypatch.setattr(harness, "_atomic_write_json", fail_selected)
     status = harness.finalize(success=True, coverage_complete=True)
     assert status == AgentRunStatus.EVIDENCE_INCOMPLETE
+
+
+def test_real_manifest_failure_downgrades_durable_checkpoint(tmp_path):
+    # 実際の manifest 書き込み失敗（_evidence_failed が立つ）後も downgrade checkpoint を永続化し、
+    # agent_state.json が complete のまま残らない（Codex #154 P2）。
+    harness = AgentHarness(tmp_path, spec())
+    harness.manifest_path.mkdir()  # os.replace が失敗する（ディレクトリ）
+    status = harness.finalize(success=True, coverage_complete=True)
+    assert status == AgentRunStatus.EVIDENCE_INCOMPLETE
+    assert json.loads(harness.state_path.read_text())["status"] == "evidence_incomplete"
 
 
 def test_loop_detection_is_scoped_to_each_episode(tmp_path):

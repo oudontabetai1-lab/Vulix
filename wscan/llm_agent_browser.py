@@ -1147,6 +1147,7 @@ class AgentBrowserScanner:
                         self.totp_secret,
                         *self.extra_headers.values(),
                     ),
+                    auth_secret_material=self._auth_secret_material(),
                 )
             except ValueError as exc:
                 result.error = str(exc)
@@ -1338,10 +1339,7 @@ class AgentBrowserScanner:
                         if work.role == AgentRole.EXPLORER
                         else AgentPhase.EXECUTING
                     )
-                    pending = sum(
-                        item.status in {WorkStatus.PLANNED, WorkStatus.INCONCLUSIVE}
-                        for item in self._harness.state.work_queue
-                    ) + 1
+                    pending = self._runnable_work_count() + 1
                     episode_budget = self._episode_budget(work, pending)
                     episode_kwargs = dict(agent_kwargs)
                     episode_kwargs["task"] = self._build_work_task(
@@ -1705,6 +1703,18 @@ class AgentBrowserScanner:
         )
         return {} if unusable else candidate
 
+    def _runnable_work_count(self) -> int:
+        """episode 予算の分母。next_work() と同じ基準（planned / 試行上限未満の inconclusive）で数える。
+
+        試行上限(2)に達した inconclusive は二度と実行されないので、分母に含めると後続 probe の
+        予算が恒久的に目減りする（Codex #154 P2）。
+        """
+        return sum(
+            item.status == WorkStatus.PLANNED
+            or (item.status == WorkStatus.INCONCLUSIVE and item.attempts < 2)
+            for item in self._harness.state.work_queue
+        )
+
     def _prepare_resume_work(self) -> None:
         """checkpoint で実行情報を失った未完了 work だけ再発見対象へ戻す。"""
         if not self._harness:
@@ -1735,10 +1745,14 @@ class AgentBrowserScanner:
             for item in list(self._harness.state.work_queue):
                 if item.role != AgentRole.PROBE_SPECIALIST:
                     continue
+                # hypothesis の url は harness の sanitize（redaction＋1000字切り詰め＋番兵）を経ている。
+                # probe target も同じ sanitize を通して比較しないと、長 URL の候補が元 probe に紐付かず
+                # 再キューされない（Codex #154 P1）。
+                target_keys = {item.target, self._harness._sanitize_value(item.target)}
                 related = any(
                     hypothesis.get("candidate_id") in verifier_candidates
                     and hypothesis.get("check_type") == item.check_type
-                    and hypothesis.get("url") == item.target
+                    and hypothesis.get("url") in target_keys
                     for hypothesis in self._harness.state.hypotheses
                 )
                 if related:
@@ -1750,8 +1764,26 @@ class AgentBrowserScanner:
         if needs_explorer:
             self._harness.requeue_role(AgentRole.EXPLORER)
 
+    def _auth_secret_material(self) -> str:
+        """resume 照合用の認証秘密（永続化しない）。harness が per-run salt 付き scrypt で照合する。"""
+        return json.dumps(
+            {
+                "auth_user": self.auth_user,
+                "auth_pass": self.auth_pass,
+                "totp_secret": self.totp_secret,
+                "headers": sorted(self.extra_headers.items()),
+            },
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+
     def _auth_context_hash(self) -> str:
-        """秘密値を永続化せず resume の認証同一性を固定する。"""
+        """秘密値を含めずに resume の非秘密な実行文脈の同一性を固定する。
+
+        パスワード・TOTP・ヘッダ値は無塩 SHA-256 で spec_hash（checkpoint/manifest に永続化）へ入れると
+        オフライン辞書攻撃が可能になるため、ここには入れず _auth_secret_material 経由で照合する（Codex #154 P2）。
+        """
+        from . import llm_endpoint
+
         storage_digest = ""
         if self.storage_state:
             try:
@@ -1763,16 +1795,19 @@ class AgentBrowserScanner:
         payload = json.dumps(
             {
                 "login_url": self.login_url,
-                "auth_user": self.auth_user,
-                "auth_pass": self.auth_pass,
-                "totp_secret": self.totp_secret,
-                "headers": sorted(self.extra_headers.items()),
+                "header_names": sorted(k.lower() for k in self.extra_headers),
                 "storage_state": storage_digest,
                 # LLM エンドポイントも resume 同一性に含める。provider/model 名だけだと、同じ
                 # model ラベルで別 OpenAI 互換/Ollama サーバへ resume され、無関係なモデルの成果を
                 # 結合しうる（--resume は元条件の一致を約束する・Codex #154 P2）。末尾スラッシュを
                 # 正規化して安定化する。
-                "llm_base_url": str(self.llm_base_url or "").strip().rstrip("/"),
+                # _build_llm と同じ解決（明示＞[互換のみ]env＞公式既定）で実効エンドポイントを hash する。
+                # 明示値だけだと env 設定の openai_compatible で別サーバへ resume し得る（Codex #154 P2）。
+                "llm_base_url": (
+                    llm_endpoint.resolve_instance_base(self.llm_provider, self.llm_base_url)
+                    if self.llm_provider in ("openai", "openai_compatible")
+                    else str(self.llm_base_url or "").strip().rstrip("/")
+                ),
                 "ollama_url": str(getattr(self, "ollama_url", "") or "").strip().rstrip("/"),
             },
             ensure_ascii=False,

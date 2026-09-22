@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import os
 import time
 import uuid
@@ -89,6 +90,20 @@ class AgentWorkItem:
         return cls(**values)
 
 
+def _auth_fingerprint(material: str, salt: str) -> str:
+    """認証秘密の resume 照合用フィンガープリント（純粋・Codex #154 P2）。
+
+    per-run salt 付き scrypt。salt は state に保存されるため辞書攻撃そのものは防げないが、scrypt の
+    コストで低エントロピー password のオフライン総当たりを高価にし、run 間の事前計算も無効化する。
+    秘密が無い run は空文字（照合は空同士で一致）。
+    """
+    if not material:
+        return ""
+    return hashlib.scrypt(
+        material.encode("utf-8"), salt=bytes.fromhex(salt or ""), n=2 ** 14, r=8, p=1, dklen=32,
+    ).hex()
+
+
 @dataclass(frozen=True)
 class AgentRunSpec:
     mode: str
@@ -137,6 +152,10 @@ class AgentRunState:
     checkpoint_generation: int = 0
     work_queue: list[AgentWorkItem] = field(default_factory=list)
     hypotheses: list[dict] = field(default_factory=list)
+    # 認証秘密の resume 同一性。per-run salt 付き scrypt（_auth_fingerprint）で、spec_hash には
+    # 秘密を入れない（無塩 SHA-256 だと artifact から低エントロピー password を辞書攻撃できる・Codex #154 P2）。
+    auth_salt: str = ""
+    auth_fingerprint: str = ""
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -226,6 +245,7 @@ class AgentHarness:
         resume: bool = False,
         repeat_threshold: int = 3,
         secret_values: Iterable[str] = (),
+        auth_secret_material: str = "",
     ) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -250,6 +270,12 @@ class AgentHarness:
                     "Agent resume spec mismatch: target/provider/model/checks/max_steps "
                     "must match the original run"
                 )
+            if self.state.auth_fingerprint != _auth_fingerprint(
+                auth_secret_material, self.state.auth_salt
+            ):
+                raise ValueError(
+                    "Agent resume auth mismatch: credentials/headers must match the original run"
+                )
             self._base_consumed = self.state.consumed_steps
             if self.remaining_steps <= 0:
                 raise ValueError("Agent resume has no remaining step budget")
@@ -264,8 +290,10 @@ class AgentHarness:
                 raise ValueError(
                     "Agent output already contains harness state; use --resume or a new output directory"
                 )
+            salt = secrets.token_hex(16)
             self.state = AgentRunState(
-                run_id=f"agent-{uuid.uuid4().hex}", spec_hash=spec.spec_hash
+                run_id=f"agent-{uuid.uuid4().hex}", spec_hash=spec.spec_hash,
+                auth_salt=salt, auth_fingerprint=_auth_fingerprint(auth_secret_material, salt),
             )
         self.checkpoint()
 
@@ -567,12 +595,14 @@ class AgentHarness:
             # manifest だけ失敗した場合、直前の checkpoint は COMPLETE を書き込んでいる。
             # downgrade を durable checkpoint にも反映しないと agent_state.json が COMPLETE のまま
             # 残り、resume が失敗を回収できない（Codex #154 P2）。再 checkpoint で状態を揃える。
-            self.checkpoint()
+            # manifest 失敗で _evidence_failed が立つと通常の checkpoint は state 書き込みを拒否
+            # するため、この downgrade 回収だけは force で許可する（Codex #154 P2）。
+            self.checkpoint(force=True)
         return self.state.status
 
-    def checkpoint(self) -> bool:
+    def checkpoint(self, force: bool = False) -> bool:
         self.state.checkpoint_generation += 1
-        return self._atomic_write_json(self.state_path, self.state.to_dict())
+        return self._atomic_write_json(self.state_path, self.state.to_dict(), force=force)
 
     def _load_state(self) -> AgentRunState:
         if not self.state_path.exists():
@@ -599,8 +629,8 @@ class AgentHarness:
         except (OSError, UnicodeError, ValueError) as exc:
             self._note_evidence_error(f"trace_write:{type(exc).__name__}")
 
-    def _atomic_write_json(self, path: Path, data: dict) -> bool:
-        if self._evidence_failed and path == self.state_path:
+    def _atomic_write_json(self, path: Path, data: dict, force: bool = False) -> bool:
+        if self._evidence_failed and path == self.state_path and not force:
             return False
         tmp_path = path.with_name(path.name + ".tmp")
         try:

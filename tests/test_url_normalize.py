@@ -420,3 +420,13 @@ def test_route_aware_identity_ignores_non_route_fragment():
     from wscan.url_normalize import route_aware_identity, endpoint_identity
 
     assert route_aware_identity("http://h/doc#section1") == endpoint_identity("http://h/doc#section1")
+
+
+def test_route_aware_identity_normalizes_url_payload_in_fragment_query():
+    # fragment query の URL 値（SSRF/open-redirect payload）も空化し、probe 変種で再帰 enqueue しない（Codex #154 P1）。
+    from wscan.url_normalize import route_aware_identity
+    assert route_aware_identity("http://h/app#/redirect?next=https://evil.com") == \
+        route_aware_identity("http://h/app#/redirect?next=//169.254.169.254/")
+    # routing 値（単一スラッシュ始まり）は保持。
+    assert route_aware_identity("http://h/app#/r?next=/home") != \
+        route_aware_identity("http://h/app#/r?next=/admin")

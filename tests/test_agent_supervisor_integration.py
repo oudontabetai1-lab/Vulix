@@ -268,6 +268,56 @@ def test_resume_requeues_only_dependencies_for_redacted_pending_candidate(tmp_pa
     assert statuses[verifier.work_id] == WorkStatus.PLANNED
 
 
+def test_resume_requeues_probe_for_truncated_candidate_url(tmp_path):
+    # 1000 字超の URL は hypothesis 側で切り詰め番兵付きになる。元 probe に紐付けて再キューし
+    # verifier を完遂できるようにする（Codex #154 P1）。
+    run_spec = AgentRunSpec(
+        mode="agent", target_url="http://fixture.test",
+        target_urls=("http://fixture.test",), access_urls=(),
+        exclude_urls=(), exclude_fields=(), checks=("xss",),
+        provider="ollama", model="exact", max_steps=20,
+    )
+    long_url = "http://fixture.test/" + "a" * 1200
+    harness = AgentHarness(tmp_path, run_spec)
+    probe = harness.enqueue(AgentRole.PROBE_SPECIALIST, long_url, check_type="xss")
+    harness.next_work()
+    harness.finish_work(probe.work_id, WorkStatus.COMPLETE)
+    harness.note_hypotheses([{
+        "candidate_id": "candidate-1", "check_type": "xss", "url": long_url,
+        "field_name": "q", "payload": "safe", "evidence": "observed",
+    }])
+    verifier = harness.enqueue(AgentRole.VERIFIER, "candidate-1", check_type="xss")
+
+    resumed = AgentBrowserScanner(
+        "http://fixture.test", checks=["xss"], max_steps=20,
+        harness_output_dir=tmp_path, resume=True,
+    )
+    resumed._harness = AgentHarness(tmp_path, run_spec, resume=True)
+    resumed._prepare_resume_work()
+    statuses = {item.work_id: item.status for item in resumed._harness.state.work_queue}
+    assert statuses[probe.work_id] == WorkStatus.PLANNED
+    assert statuses[verifier.work_id] == WorkStatus.PLANNED
+
+
+def test_runnable_work_count_excludes_exhausted_retries(tmp_path):
+    # 試行上限に達した inconclusive は episode 予算の分母に数えない（Codex #154 P2）。
+    run_spec = AgentRunSpec(
+        mode="agent", target_url="http://fixture.test",
+        target_urls=("http://fixture.test",), access_urls=(),
+        exclude_urls=(), exclude_fields=(), checks=("xss",),
+        provider="ollama", model="exact", max_steps=20,
+    )
+    harness = AgentHarness(tmp_path, run_spec)
+    exhausted = harness.enqueue(AgentRole.PROBE_SPECIALIST, "http://fixture.test/a", check_type="xss")
+    retry = harness.enqueue(AgentRole.PROBE_SPECIALIST, "http://fixture.test/b", check_type="xss")
+    harness.enqueue(AgentRole.PROBE_SPECIALIST, "http://fixture.test/c", check_type="xss")
+    exhausted.status, exhausted.attempts = WorkStatus.INCONCLUSIVE, 2
+    retry.status, retry.attempts = WorkStatus.INCONCLUSIVE, 1
+    scanner = AgentBrowserScanner("http://fixture.test", checks=["xss"], max_steps=20)
+    scanner._harness = harness
+    assert scanner._runnable_work_count() == 2
+
+
 @pytest.mark.asyncio
 async def test_successful_retry_uses_final_work_state(tmp_path):
     attempts = {"explorer": 0}

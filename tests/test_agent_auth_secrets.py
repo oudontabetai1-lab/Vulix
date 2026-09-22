@@ -52,6 +52,10 @@ def test_storage_state_auth_task_does_not_request_missing_placeholders():
 
 
 def test_resume_auth_fingerprint_covers_credentials_headers_and_storage(tmp_path):
+    # 非秘密（login_url/storage/header 名）は spec 用 context hash、秘密（user/pass/TOTP/header 値）は
+    # 永続化しない material を harness が per-run salt 付き scrypt で照合する（Codex #154 P2）。
+    from wscan.agent_harness import AgentHarness, AgentRunSpec
+
     storage = tmp_path / "storage.json"
     storage.write_text('{"cookies":[]}', encoding="utf-8")
     base = dict(
@@ -65,16 +69,43 @@ def test_resume_auth_fingerprint_covers_credentials_headers_and_storage(tmp_path
     )
     original = AgentBrowserScanner(**base)._auth_context_hash()
     assert len(original) == 64
+    assert AgentBrowserScanner(
+        **(base | {"login_url": "https://app.example.test/other-login"})
+    )._auth_context_hash() != original
+
+    def run_spec(ctx):
+        return AgentRunSpec("agent", "https://app.example.test", (), (), (), (), ("xss",),
+                            "none", "m", 5, auth_context_hash=ctx)
+
+    material = AgentBrowserScanner(**base)._auth_secret_material()
+    out = tmp_path / "run"
+    AgentHarness(out, run_spec(original), auth_secret_material=material)
+    persisted = (out / "agent_state.json").read_text()
+    for secret in ("account-a", "password-a", "totp-a", "Bearer a"):
+        assert secret not in persisted
+    # 同一認証なら resume 可。
+    AgentHarness(out, run_spec(original), resume=True, auth_secret_material=material)
     for change in (
         {"auth_user": "account-b"},
         {"auth_pass": "password-b"},
         {"totp_secret": "totp-b"},
         {"extra_headers": {"Authorization": "Bearer b"}},
-        {"login_url": "https://app.example.test/other-login"},
     ):
-        assert AgentBrowserScanner(**(base | change))._auth_context_hash() != original
+        scanner = AgentBrowserScanner(**(base | change))
+        with pytest.raises(ValueError, match="auth mismatch|spec mismatch"):
+            AgentHarness(out, run_spec(scanner._auth_context_hash()), resume=True,
+                         auth_secret_material=scanner._auth_secret_material())
     storage.write_text('{"cookies":[{"name":"session","value":"b"}]}', encoding="utf-8")
     assert AgentBrowserScanner(**base)._auth_context_hash() != original
+
+
+def test_auth_context_hash_uses_resolved_openai_compatible_endpoint(monkeypatch):
+    # env で解決される実効エンドポイントの変更も resume 同一性に反映する（Codex #154 P2）。
+    monkeypatch.setenv("WSCAN_LLM_BASE_URL", "http://llm-a.test/v1")
+    a = AgentBrowserScanner("https://app.example.test", llm_provider="openai_compatible")._auth_context_hash()
+    monkeypatch.setenv("WSCAN_LLM_BASE_URL", "http://llm-b.test/v1")
+    b = AgentBrowserScanner("https://app.example.test", llm_provider="openai_compatible")._auth_context_hash()
+    assert a != b
 
 
 @pytest.mark.asyncio

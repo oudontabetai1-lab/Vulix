@@ -25,18 +25,23 @@ def _looks_url_valued(value: str) -> bool:
     )
 
 
-def endpoint_identity(url: str) -> str:
-    """routing 値は保持し、注入らしい値だけを空にして probe の重複を除く。"""
-    parsed = urlsplit(url)
+def _normalized_query(query: str) -> str:
+    """注入らしい値だけを空化し key ソートした query（query / fragment query 共通・純粋）。"""
     pairs = set()
-    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+    for key, value in parse_qsl(query, keep_blank_values=True):
         # ponytail: メタ文字・64文字超・URL 値の簡易判定。必要なら routing の明示契約へ。
         if (len(value) > 64
                 or any(char in _INJECTION_META_CHARS or char.isspace() for char in value)
                 or _looks_url_valued(value)):
             value = ""
         pairs.add((key, value))
-    return urlunsplit(parsed._replace(query=urlencode(sorted(pairs)), fragment=""))
+    return urlencode(sorted(pairs))
+
+
+def endpoint_identity(url: str) -> str:
+    """routing 値は保持し、注入らしい値だけを空にして probe の重複を除く。"""
+    parsed = urlsplit(url)
+    return urlunsplit(parsed._replace(query=_normalized_query(parsed.query), fragment=""))
 
 
 def _normalize_fragment_query(fragment: str) -> str:
@@ -44,17 +49,13 @@ def _normalize_fragment_query(fragment: str) -> str:
 
     ``/search?q=' OR 1=1`` と ``/search?q=x`` が別 identity にならないよう、fragment の
     ``?`` 以降を endpoint_identity と同じ規則で正規化（注入値の空化＋key ソート）する。
-    ``?`` を持たない fragment はそのまま返す。
+    ``?`` を持たない fragment はそのまま返す。URL 値（SSRF/open-redirect payload）の空化も
+    endpoint_identity と共通の判定で行う（Codex #154 P1）。
     """
     path, sep, query = fragment.partition("?")
     if not sep:
         return fragment
-    pairs = set()
-    for key, value in parse_qsl(query, keep_blank_values=True):
-        if len(value) > 64 or any(char in _INJECTION_META_CHARS or char.isspace() for char in value):
-            value = ""
-        pairs.add((key, value))
-    return path + "?" + urlencode(sorted(pairs))
+    return path + "?" + _normalized_query(query)
 
 
 def route_aware_identity(url: str) -> str:
