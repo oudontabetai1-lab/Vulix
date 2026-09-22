@@ -30,16 +30,23 @@ jobs:
       - name: Unit & integration tests
         run: pytest -q --ignore=tests/test_end_to_end_scan.py
 
-      # Browser-driven end-to-end test. Needs a real Chromium; kept as a
-      # non-blocking step while it is being stabilised in CI. The browser
-      # install itself is also non-blocking: ``--with-deps`` pulls OS packages
-      # via apt, which intermittently 403s on the hosted runner mirror
-      # (packages.microsoft.com). That infra hiccup must not fail the whole job
-      # when the blocking unit/integration suite above already passed.
+      # PR 毎の高速 E2E スモーク。full E2E（test_end_to_end_scan.py・1スキャン最大 900s）は重く
+      # nightly 専用（nightly-recall.yml）だが、crawl→attack→verify の通し停止/クラッシュ回帰
+      # （F06/0059 等）は PR 毎に捕まえたい。最小 vuln_app に対する軽量スモークを **ブロッキング**
+      # で走らせる。Chromium 導入は ``--with-deps`` が apt ミラーの一時 403 で稀に失敗する
+      # （インフラ都合）ため retry + continue-on-error の best-effort。導入できなければスモークは
+      # skip に倒れインフラ都合で PR をブロックしない。導入できた通常ケースではスモークが
+      # ブロッキングでコード回帰を捕まえる（WSCAN_E2E=1 + Chromium 起動可のとき実行）。
       - name: Install Chromium for Playwright
         continue-on-error: true
-        run: playwright install --with-deps chromium
+        run: |
+          for i in 1 2 3; do
+            playwright install --with-deps chromium && break
+            echo "playwright install failed (attempt $i/3); retrying..." >&2
+            sleep 5
+          done
 
-      - name: End-to-end (browser) test
-        continue-on-error: true
-        run: pytest -q tests/test_end_to_end_scan.py
+      - name: E2E smoke (blocking when Chromium available)
+        env:
+          WSCAN_E2E: '1'
+        run: pytest -q tests/test_e2e_smoke.py
