@@ -5128,6 +5128,11 @@ class ScanEngine:
                 )
             except Exception as e:
                 page_errored = True
+                # 例外前に得ていた partial finding の副作用（通知/監視 emit 等）を回す。
+                # record_finding で all_findings には既登録だが、engine 側の _record_finding を
+                # 通さないと webhook 等が走らない（Codex #157 P2）。dedup 済みなので二重にならない。
+                for _pf in (getattr(e, "findings", None) or []):
+                    self._record_finding(_pf, source="page-level")
                 console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
                 # 実行途中で例外（probe timeout 等）＝劣化した実行。field-level と同様に
                 # error 行を残し、coverage の attempts/by_status から消えないようにする（Codex #102 P2）。

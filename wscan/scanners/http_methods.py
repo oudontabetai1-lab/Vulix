@@ -145,10 +145,15 @@ def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), targe
     # URL 由来と確定した資格情報は短くても伏せる。切り詰めは秘匿後に行う。
     values = [v for v in (sent_secret_values or []) if v and len(v) >= 4]
     values.extend(url_userinfo_secrets(target_url))
+    import re as _re
     for val in values:
         variants.add(val)
         variants.add(_html.escape(val))                  # & < > " ' → 実体参照
-        variants.add(_quote(val, safe=""))               # percent エンコード
+        _pct = _quote(val, safe="")                      # percent エンコード（%XX は大文字）
+        variants.add(_pct)
+        # アプリが小文字 hex（%3a 等）で直列化した変種も伏せる。大文字 %3A だけだと素通りし
+        # 可逆な資格情報が finding に残る（Codex #157 P1）。%XX の hex だけ小文字化する。
+        variants.add(_re.sub(r"%[0-9A-Fa-f]{2}", lambda m: m.group(0).lower(), _pct))
         variants.add(_json.dumps(val)[1:-1])             # JSON 文字列本体のエスケープ
     for v in sorted({x for x in variants if x}, key=len, reverse=True):
         text = text.replace(v, "[REDACTED]")
@@ -279,8 +284,12 @@ class HttpMethodsScanner(BaseScanner):
         # observability 失敗を伝播する。engine に error 扱いさせ resume で再試行させる（返り値で
         # 正常終了すると checkpoint 完了で恒久 skip される・Codex #157）。
         if target_failed:
+            # 既に得た finding を例外に載せる。raise だけだと engine の page-level ループが
+            # 返り値を受け取れず、それら finding の _record_finding 副作用（通知等）が走らない
+            # （record_finding で all_findings には既登録・Codex #157 P2）。
             raise PageDocumentUnavailable(
-                f"{self.CHECK_TYPE}: 未検査のターゲットがあります（認証情報または応答の取得に失敗）"
+                f"{self.CHECK_TYPE}: 未検査のターゲットがあります（認証情報または応答の取得に失敗）",
+                findings=findings,
             )
         return findings
 
@@ -292,6 +301,14 @@ class HttpMethodsScanner(BaseScanner):
             if probe_state is not None:
                 probe_state["failed"] = True
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:options")
+            return []
+        # 一時応答(408/429/5xx)は Allow を観測できていない＝カバレッジ欠落。telemetry だけ残して
+        # 正常完了すると危険 Allow を見逃したまま checkpoint 完了になる（Codex #157 P2）。失敗扱いにし
+        # resume 対象へ残す。OPTIONS は危険メソッド/WebDAV を観測する主 probe なので特に重要。
+        if r.status_code in (408, 429, 500, 502, 503, 504):
+            if probe_state is not None:
+                probe_state["failed"] = True
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:options:HTTP {r.status_code}")
             return []
         # 危険メソッド/WebDAV の判定は Allow（そのエンドポイントが実際に受理するメソッド）だけに
         # 基づく。Access-Control-Allow-Methods は cross-origin ポリシーの告知でありメソッド対応の
