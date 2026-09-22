@@ -129,7 +129,7 @@ def test_attack_one_page_skips_when_pre_attack_flow_fails():
     )
 
     class _FailRunner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):
@@ -194,7 +194,7 @@ def test_cookies_resynced_after_successful_pre_attack_flow():
     page = types.SimpleNamespace(url="http://t.test/admin", forms=[], url_params=[])
 
     class _OkRunner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):
@@ -257,7 +257,7 @@ def test_pre_attack_flow_redirected_to_login_is_skipped():
     page = types.SimpleNamespace(url="http://t.test/admin", forms=[{"x": 1}], url_params=[])
 
     class _OkRunner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):
@@ -322,7 +322,7 @@ def test_pre_attack_flow_fragment_change_is_on_target():
     page = types.SimpleNamespace(url="http://t.test/admin", forms=[], url_params=[])
 
     class _OkRunner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):
@@ -416,7 +416,7 @@ def test_pre_auth_mode_skips_pre_attack_flow():
     page = types.SimpleNamespace(url="http://t.test/login", forms=[], url_params=[])
 
     class _Runner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):
@@ -479,7 +479,7 @@ def test_pre_attack_flow_skipped_when_no_input_page_fully_checkpointed():
     page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
 
     class _Runner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):
@@ -499,7 +499,7 @@ def test_pre_attack_flow_runs_when_no_input_page_has_pending_check():
     page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
 
     class _Runner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):
@@ -527,7 +527,7 @@ def test_pre_attack_flow_runs_when_checkpoint_has_flow_exposed_field_units():
     page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
 
     class _Runner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):
@@ -561,7 +561,7 @@ def test_checkpoint_sentinel_units_do_not_block_flow_skip():
     page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
 
     class _Runner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):
@@ -589,7 +589,7 @@ def test_pre_attack_flow_with_out_of_scope_navigate_is_refused():
     page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
 
     class _Runner:
-        def __init__(self, browser):
+        def __init__(self, browser, **kwargs):
             pass
 
         async def run(self, flow):

@@ -69,12 +69,22 @@ class FlowRecorder:
             browser = await pw.chromium.launch(headless=headless)
             page = await browser.new_page()
 
-            # ナビゲーション追跡
+            # ナビゲーション追跡。初期 goto（steps[0] と重複）だけを除き、いったん離れて
+            # start_url へ**戻ってきた**遷移は記録する。全 start_url 遷移を潰すと、最後の
+            # navigate が中間ページのままになり _match_pre_attack_flows が誤ったページへ flow を
+            # 適用してしまう（Codex #170 P2）。
+            _initial_load = {"seen": False}
+
             def on_navigate(frame):
-                if frame == page.main_frame:
-                    url = frame.url
-                    if url and url != "about:blank" and url != start_url:
-                        steps.append({"action": "navigate", "url": url})
+                if frame != page.main_frame:
+                    return
+                url = frame.url
+                if not url or url == "about:blank":
+                    return
+                if url == start_url and not _initial_load["seen"]:
+                    _initial_load["seen"] = True  # 初期ロードは steps[0] と重複＝記録しない
+                    return
+                steps.append({"action": "navigate", "url": url})
 
             page.on("framenavigated", on_navigate)
 
@@ -148,6 +158,11 @@ class FlowRecorder:
                             if (typeof window['{_fn_click}'] === 'function') {{
                                 window['{_fn_click}'](sel);
                             }}
+                        }} else if (el.type === 'file') {{
+                            // file input は録画しない。ブラウザは value を "C:\\fakepath\\..." で返し、
+                            // replay で type=file の value 代入は InvalidStateError で拒否され flow 全体が
+                            // 失敗＝ページの全検査を skip してしまう（Codex #170 P2）。
+                            console.warn('[FlowRecorder] file input はリプレイ不可のため記録しません: ' + sel);
                         }} else if (typeof window['{_fn_fill}'] === 'function') {{
                             window['{_fn_fill}'](sel, el.value);
                         }}

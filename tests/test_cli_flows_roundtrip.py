@@ -10,7 +10,7 @@ import asyncio
 import json
 
 from main import _load_flow_files
-from wscan.flow_runner import FlowRunner, ScanFlow
+from wscan.flow_runner import FlowRunner, FlowStep, ScanFlow
 
 
 def test_load_flow_files_wraps_steps_list(tmp_path):
@@ -63,6 +63,42 @@ def test_load_flow_files_rejects_navigate_without_url(tmp_path):
     assert [f["name"] for f in flows] == ["good"]
 
 
+def test_load_flow_files_rejects_flow_without_navigate(tmp_path):
+    # navigate step の無い flow（fill/click のみ・空）は _match_pre_attack_flows が一致させられず
+    # 黙って無視されるため、読み込み時に skip する（Codex #170 P2）。
+    nonav = tmp_path / "nonav.json"
+    nonav.write_text(json.dumps([
+        {"action": "fill", "selector": "#u", "value": "x"},
+        {"action": "click", "selector": "#go"},
+    ]), encoding="utf-8")
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps([]), encoding="utf-8")
+    good = tmp_path / "g.json"
+    good.write_text(json.dumps([{"action": "navigate", "url": "http://t/x"}]), encoding="utf-8")
+    flows = _load_flow_files([str(nonav), str(empty), str(good)])
+    assert [f["name"] for f in flows] == ["g"]
+
+
+def test_flow_navigate_landing_out_of_scope_fails():
+    # navigate が redirect 追従後に scope 外へ着地したら flow 失敗（後続 fill/click を走らせない・#170 P2）。
+    class _P:
+        url = "http://evil.test/steal"
+
+        async def wait_for_load_state(self, *a, **k):
+            return None
+
+    class _B:
+        def __init__(self):
+            self.page = _P()
+
+        async def navigate(self, u):
+            return True  # navigate 自体は成功（redirect 先で 200）
+
+    runner = FlowRunner(_B(), scope_check=lambda u: "evil.test" not in u)
+    flow = ScanFlow(name="t", steps=[FlowStep(action="navigate", url="http://t/ok")])
+    assert asyncio.run(runner.run(flow)) is False
+
+
 def test_load_flow_files_rejects_click_without_selector_or_field(tmp_path):
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps([
@@ -94,7 +130,9 @@ def test_skips_structurally_broken_steps(tmp_path):
 def test_roundtrip_recorded_fill_uses_selector(tmp_path):
     """読み込んだ recording を ScanFlow 化し、fill が selector で解決されることを確認。"""
     rec = tmp_path / "rec.json"
+    # 実録画は必ず先頭に navigate（start_url）を持つ（#170 P2 の no-navigate 拒否と整合）。
     rec.write_text(json.dumps([
+        {"action": "navigate", "url": "http://t/login"},
         {"action": "fill", "selector": "#user", "value": "secret"},
     ]), encoding="utf-8")
     flows = ScanFlow.list_from_dicts(_load_flow_files([str(rec)]))
@@ -113,6 +151,9 @@ def test_roundtrip_recorded_fill_uses_selector(tmp_path):
     class _Browser:
         def __init__(self):
             self.page = _RecPage()
+
+        async def navigate(self, url):
+            return True
 
     ok = asyncio.run(FlowRunner(_Browser()).run(flows[0]))
     assert ok is True

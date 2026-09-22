@@ -1501,8 +1501,13 @@ class BrowserManager:
         """
         return await _bounded_page_content(self.page)
 
-    async def find_forms(self) -> list[dict]:
-        """Find all forms and their inputs on the current page."""
+    async def find_forms(self, *, raise_on_error: bool = False) -> list[dict]:
+        """Find all forms and their inputs on the current page.
+
+        既定は失敗時 ``[]``（従来挙動）。``raise_on_error=True`` のとき評価失敗を再送出し、
+        呼び出し側が「成功して空」と「抽出失敗」を区別できるようにする（flow 後の refresh が
+        transient 失敗で crawl form を消さないため・Codex #170 P2）。
+        """
         try:
             forms = await self.page.evaluate("""
                 () => {
@@ -1548,6 +1553,8 @@ class BrowserManager:
             """)
             return forms
         except Exception:
+            if raise_on_error:
+                raise
             return []
 
     async def get_url_params(self) -> list[str]:

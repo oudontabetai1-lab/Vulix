@@ -111,8 +111,12 @@ class FlowRunner:
         # browser is now on the last page of the flow
     """
 
-    def __init__(self, browser: "BrowserManager"):
+    def __init__(self, browser: "BrowserManager", *, scope_check=None):
         self.browser = browser
+        # navigate 後の実着地 URL を検証するコールバック（url->bool、in-scope なら True）。
+        # browser.navigate は redirect を追従し最終応答で成功を返すため、静的な step-URL 検査だけ
+        # では scope 外へ redirect した先で fill/click が走るのを防げない（Codex #170 P2）。
+        self._scope_check = scope_check
 
     # ------------------------------------------------------------------
     # Public API
@@ -149,6 +153,18 @@ class FlowRunner:
             # 遷移を成功扱いし、前提未達のまま後続/攻撃へ進む（F10・Codex #167 P1）。
             if not await self.browser.navigate(step.url):
                 raise FlowStepError(f"navigate failed (non-OK response/timeout): {step.url}")
+            # redirect 追従後の実着地 URL を scope 検証する。scope 外/除外へ飛んだ先で後続の
+            # fill/click を実行させない（最終遷移が target へ戻っても中間ページで操作が走る・#170 P2）。
+            if self._scope_check is not None:
+                landed = ""
+                try:
+                    landed = self.browser.page.url or ""
+                except Exception:
+                    landed = ""
+                if landed and not self._scope_check(landed):
+                    raise FlowStepError(
+                        f"navigate landed on out-of-scope/excluded URL: {landed}"
+                    )
 
         elif step.action == "fill":
             # record が保存する fill step は CSS selector（`#id` / `[name="x"]`）を持つ。

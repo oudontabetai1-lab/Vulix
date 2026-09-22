@@ -2180,6 +2180,18 @@ def _load_flow_files(paths) -> list[dict]:
                 f"{sorted(set(field_errs))}"
             )
             continue
+        # navigate step を1つも持たない flow は _match_pre_attack_flows が最終 navigate で
+        # ページに一致させられず、選択・再生されないまま警告も出ない（前提未適用の偽陰性）。
+        # 読み込み時に skip して理由を明示する（Codex #170 P2）。
+        if not any(
+            isinstance(s, dict) and str(s.get("action", "")) == "navigate"
+            for s in candidate["steps"]
+        ):
+            print(
+                f"[warn] --flows: {fp} は navigate step を含みません（skip）。"
+                "前提ページを一致させるため最低1つの navigate が必要です。"
+            )
+            continue
         flows.append(candidate)
 
     # 同一遷移先の複数 flow は「統合」せず、ScanEngine 側が一致する flow を **file 順に全て
@@ -3542,7 +3554,11 @@ async def run_setup(args):
         flags = list(suggestion["flags"])
         console.print("\n[dim]LLM の提案を採用しました。[/dim]")
         if suggestion["reason"]:
-            console.print(f"[dim]理由: {suggestion['reason']}[/dim]")
+            # reason は LLM 由来の任意文字列。Rich マークアップ（例: `[/admin]` の未対応閉じタグ）が
+            # 含まれると console.print が MarkupError を投げ、生成コマンドの表示前に setup が落ちる。
+            # escape してプレーン文字として描画する（Codex #170 P2）。
+            from rich.markup import escape as _rich_escape
+            console.print(f"[dim]理由: {_rich_escape(str(suggestion['reason']))}[/dim]")
     else:
         # Simple heuristic fallback（LLM 無効/無応答時の明示的な既定）
         console.print("\n[dim]LLM 応答が無効/利用不可のため既定ヒューリスティックを使用します。[/dim]")

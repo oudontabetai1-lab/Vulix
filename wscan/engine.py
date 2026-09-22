@@ -4908,7 +4908,9 @@ class ScanEngine:
         ベストエフォート（抽出失敗時は既存のまま）。
         """
         try:
-            fresh_forms = await self.browser.find_forms()  # 成功時は list（空もあり）
+            # raise_on_error=True で「成功して空」と「抽出失敗」を区別する。find_forms は既定で
+            # 例外を握り潰し [] を返すため、これが無いと transient 失敗で crawl form を消す（#170 P2）。
+            fresh_forms = await self.browser.find_forms(raise_on_error=True)  # 成功時は list（空もあり）
         except Exception:
             fresh_forms = None  # 抽出失敗（None で成功-空 [] と区別する）
         try:
@@ -5130,7 +5132,11 @@ class ScanEngine:
                 console.print(
                     f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
                 )
-                if not await FlowRunner(self.browser).run(matched_flow):
+                # navigate の実着地（redirect 追従後）も scope 検証する（静的 step 検査の補完）。
+                _flow_scope_ok = lambda u: (
+                    self._is_access_allowed_url(u) and not self._is_url_excluded(u)
+                )
+                if not await FlowRunner(self.browser, scope_check=_flow_scope_ok).run(matched_flow):
                     console.print(
                         f"  [yellow][Flow] Pre-attack flow failed: {matched_flow.name} — "
                         f"skipping all checks on {page.url}[/yellow]"
