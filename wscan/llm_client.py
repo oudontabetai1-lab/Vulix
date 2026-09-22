@@ -96,7 +96,7 @@ def _retry_after_seconds(response: Any, cap: float = 8.0) -> float | None:
 
 def record_llm_call(
     pg, *, provider, role, model, timeout_seconds, elapsed_seconds, status,
-    retries=0, prompt_chars=None, response_chars=None, caller="",
+    retries=0, prompt_chars=None, response_chars=None, caller="", exception_type=None,
 ) -> None:
     """LLM 呼び出しメタデータを ``pg.request_logger`` へ記録する（0065）。
 
@@ -111,7 +111,7 @@ def record_llm_call(
             provider=provider, role=role, model=model,
             timeout_seconds=timeout_seconds, elapsed_seconds=elapsed_seconds,
             status=status, retries=retries, prompt_chars=prompt_chars,
-            response_chars=response_chars, caller=caller,
+            response_chars=response_chars, caller=caller, exception_type=exception_type,
         )
     except Exception:
         pass
@@ -181,14 +181,21 @@ async def complete_text(
     _role = pg.current_role() if hasattr(pg, "current_role") else ""
     _model = getattr(pg, f"{provider}_model", "") or ""
 
-    def _finish(text, status, attempt=0):
+    def _finish(text, status, attempt=0, exc=None):
+        # 失敗の種別名だけを監査行に残す（str(exc) は URL/APIキーを含み得るので保存しない）。
+        # response 処理失敗は内部ラッパーではなく元例外（TypeError/KeyError 等）の型を記録し、
+        # transport と応答処理の失敗を区別できるようにする（Codex #172 P2）。
+        exc_type = None
+        if isinstance(exc, BaseException):
+            root = exc.__cause__ if isinstance(exc, _RetryableResponseError) and exc.__cause__ else exc
+            exc_type = type(root).__name__
         record_llm_call(
             pg, provider=provider, role=_role, model=_model,
             timeout_seconds=request_timeout, elapsed_seconds=_time.monotonic() - _t0,
             status=status, retries=attempt,
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(text) if isinstance(text, str) else 0,
-            caller="complete_text",
+            caller="complete_text", exception_type=exc_type,
         )
         return _completion_result(text, status, return_status)
 
@@ -293,7 +300,7 @@ async def complete_text(
         retryable = is_retryable(failure)
         if attempt >= max_retries or not retryable:
             status: CompletionStatus = "transient" if retryable else "permanent"
-            return _finish(None, status, attempt)
+            return _finish(None, status, attempt, failure)
         delay = retry_after if retry_after is not None else backoff_seconds(attempt)
         await asyncio.sleep(delay)
 

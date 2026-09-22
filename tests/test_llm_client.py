@@ -383,6 +383,25 @@ class LLMObservabilityTests(unittest.TestCase):
         logger.log_llm_call.assert_called_once()
         self.assertEqual(logger.log_llm_call.call_args.kwargs["status"], "transient")
 
+    def test_records_exception_type_without_message(self):
+        # 失敗時は例外の種別名だけを監査行へ渡す（transport と応答処理失敗を区別・Codex #172 P2）。
+        request = httpx.Request("POST", "https://example.test/?key=SECRETKEY")
+        cases = [
+            ([httpx.ConnectError("SECRETKEY", request=request)], "ConnectError"),
+            ([_Response(200, {})], "KeyError"),
+        ]
+        for responses, expected in cases:
+            with self.subTest(expected=expected):
+                logger = MagicMock()
+                pg = _payload_generator("openai", request_logger=logger,
+                                        current_role=lambda: "payload", llm_max_retries=0)
+                _client, context = _mock_async_client(responses)
+                with patch("wscan.llm_client.httpx.AsyncClient", return_value=context):
+                    asyncio.run(complete_text(pg, "p"))
+                kw = logger.log_llm_call.call_args.kwargs
+                self.assertEqual(kw["exception_type"], expected)
+                self.assertNotIn("SECRETKEY", repr(kw))
+
     def test_no_request_logger_does_not_crash(self):
         # request_logger 未配線（既存の SimpleNamespace）でも従来どおり動く（回帰）。
         self.assertEqual(self._run_openai_ok(), "HELLO")

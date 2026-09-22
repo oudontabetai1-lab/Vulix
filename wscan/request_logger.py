@@ -183,6 +183,8 @@ class RequestLogger:
         # NetworkCapture（同期）と Monitor（async）双方から呼ばれうるので
         # ファイル追記をロックで直列化する。
         self._lock = threading.Lock()
+        # 末尾改行を確認済みの path（再利用ファイルの最初の追記時に 1 度だけ検査する）。
+        self._tail_checked: set = set()
         # 既存 output dir（resume で --output=--resume 同一等）を append で再利用すると、
         # ファイルには前回行が残るのにカウンタを 0 開始すると evidence/HTML が今回分しか数えず
         # JSONL 実数と食い違う。既存 JSONL の有効行数からカウンタを初期化する（Codex #172 P2）。
@@ -200,8 +202,22 @@ class RequestLogger:
             return False
         with self._lock:
             try:
+                prefix = ""
+                if path not in self._tail_checked:
+                    # 再利用ファイルが改行無しで終わる（中断で途切れた行・完全な JSON でも改行欠落）と
+                    # 追記行が `}{...}` と連結され無効行になる。最初の追記前に区切りを入れる（Codex #172 P2）。
+                    try:
+                        with open(path, "rb") as rf:
+                            rf.seek(0, 2)
+                            if rf.tell() > 0:
+                                rf.seek(-1, 2)
+                                if rf.read(1) != b"\n":
+                                    prefix = "\n"
+                    except FileNotFoundError:
+                        pass
                 with open(path, "a", encoding="utf-8") as fp:
-                    fp.write(line + "\n")
+                    fp.write(prefix + line + "\n")
+                self._tail_checked.add(path)
                 return True
             except Exception:
                 # ログ保存はベストエフォート。失敗してもスキャンは継続する。

@@ -174,6 +174,22 @@ class CountExistingRecordsTests(unittest.TestCase):
             self.assertEqual(_count_existing_records(p), 1)
 
 
+class UnterminatedTailTests(unittest.TestCase):
+    def test_append_after_unterminated_tail_stays_valid_jsonl(self):
+        # 改行無しで終わる再利用ファイルへの追記が前行と連結しない（Codex #172 P2）。
+        for tail in (b'{"a": 1}', b'{"b": "\xe3\x81'):
+            with self.subTest(tail=tail), tempfile.TemporaryDirectory() as d:
+                (Path(d) / "llm_calls.jsonl").write_bytes(tail)
+                logger = RequestLogger(d)
+                before = logger.llm_call_count
+                logger.log_llm_call(provider="ollama", status="ok")
+                logger.log_llm_call(provider="ollama", status="ok")
+                lines = (Path(d) / "llm_calls.jsonl").read_text(errors="replace").splitlines()
+                parsed = [json.loads(x) for x in lines[1:]]
+                self.assertEqual([r["status"] for r in parsed], ["ok", "ok"])
+                self.assertEqual(logger.llm_call_count, before + 2)
+
+
 class ScannerPayloadLoggingTests(unittest.IsolatedAsyncioTestCase):
     def _scanner(self, engine):
         from wscan.scanners.base import BaseScanner
