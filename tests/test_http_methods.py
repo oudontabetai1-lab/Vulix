@@ -154,6 +154,10 @@ class _FakeEngine:
         # _attack_one_page に導入した呼び出しへの最小スタブ）。
         return None
 
+    def _profile(self, *args, **kwargs):
+        # main が _attack_one_page 冒頭に足したプロファイルログ呼び出しの最小スタブ。
+        return None
+
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
     def _scanner(self):
