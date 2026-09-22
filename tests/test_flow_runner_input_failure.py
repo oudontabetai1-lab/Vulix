@@ -65,6 +65,28 @@ def test_submit_passes_recorded_form_selector():
     assert page.last_arg == "#login"
 
 
+def test_click_zero_timeout_is_bounded_but_wait_zero_allowed():
+    # click の timeout=0 は Playwright で無制限になるので既定の有界値へ（wait の 0 秒は許可・Codex #170 P2）。
+    assert FlowStep.from_dict({"action": "click", "selector": "#b", "timeout": 0}).timeout == 5.0
+    assert FlowStep.from_dict({"action": "wait", "timeout": 0}).timeout == 0.0
+
+
+def test_flow_name_with_rich_markup_does_not_abort():
+    # flow 名の Rich markup（`[/admin]`）で MarkupError を起こさない（Codex #170 P2）。
+    browser = _FakeBrowser(_FakePage(fill_ok=True))
+    flow = ScanFlow(name="[/admin]", steps=[FlowStep(action="fill", field="user", value="x")])
+    assert asyncio.run(FlowRunner(browser).run(flow)) is True
+
+
+def test_landed_url_is_metadata_not_executed_navigation():
+    # 初期 redirect の着地は照合用メタデータとして往復し、実行 step にはならない（Codex #170 P2）。
+    step = FlowStep.from_dict({"action": "navigate", "url": "http://t/start", "landed_url": "http://t/landing"})
+    assert step.to_dict()["landed_url"] == "http://t/landing"
+    browser = _FakeBrowser(_FakePage())
+    assert asyncio.run(FlowRunner(browser).run(ScanFlow(name="f", steps=[step]))) is True
+    assert browser.navigated == ["http://t/start"]
+
+
 def test_fill_missing_field_fails_and_stops_dependent_steps():
     browser = _FakeBrowser(_FakePage(fill_ok=False))
     ok = _run(browser, [
@@ -552,6 +574,30 @@ def test_new_or_changed_flow_replays_on_fully_checkpointed_page():
         asyncio.run(eng._attack_one_page(page, {}))
 
     assert ran["flow"] is True  # 現 flow の完走記録なし → 再生
+
+
+def test_flow_ran_marker_not_written_when_landing_off_target():
+    """step は成功しても login へ着地し target へ戻れない flow には完走記録を書かない（Codex #170 P2）。"""
+    marked = []
+    eng = _build_eng_for_flow_skip(page_check_done=False)
+    eng._checkpoint_mark_flow_ran = lambda url, flow: marked.append(flow.name)
+    eng._browser = types.SimpleNamespace(page=types.SimpleNamespace(url="http://t.test/login"))
+
+    async def _nav(url, retries=0):
+        return False
+    eng._browser.navigate = _nav
+    page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
+
+    class _Runner:
+        def __init__(self, browser, **kwargs):
+            pass
+
+        async def run(self, flow):
+            return True
+
+    with patch("wscan.engine.FlowRunner", _Runner):
+        asyncio.run(eng._attack_one_page(page, {}))
+    assert marked == []
 
 
 def test_pre_attack_flow_runs_when_no_input_page_has_pending_check():

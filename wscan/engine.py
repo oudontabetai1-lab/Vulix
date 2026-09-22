@@ -257,6 +257,7 @@ def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
 import yaml
 from rich.console import Console
 from rich.rule import Rule
+from rich.markup import escape
 from rich.table import Table
 from rich import box as rbox
 
@@ -4895,7 +4896,11 @@ class ScanEngine:
             # 同一ページ扱いで flow を選び、query 値差（`?next=/` と `?next=`）は別物として
             # 誤選択しない。生の rstrip("/") 比較だと fragment 付き flow を取りこぼす一方、
             # query 末尾スラッシュだけ違う別 target を同一視して誤った state 変更 flow を走らせうる。
-            if last_nav and self._urls_same_page(last_nav.url, page.url):
+            # record 時の初期 redirect 着地（landed_url）も照合する（実行はしないメタデータ）。
+            if last_nav and (
+                self._urls_same_page(last_nav.url, page.url)
+                or (last_nav.landed_url and self._urls_same_page(last_nav.landed_url, page.url))
+            ):
                 matched.append(flow)
         return matched
 
@@ -5143,7 +5148,7 @@ class ScanEngine:
             # state 変更 flow の無駄な再実行を避ける（#167 P2）。
             console.print(
                 f"  [dim][Flow] Skip pre-attack flow (page fully checkpointed): "
-                f"{matched_flows[0].name} @ {page.url}[/dim]"
+                f"{escape(matched_flows[0].name)} @ {escape(page.url)}[/dim]"
             )
             matched_flows = []
         if matched_flows:
@@ -5167,7 +5172,7 @@ class ScanEngine:
                 )
                 if _bad_nav:
                     console.print(
-                        f"  [yellow][Flow] Skip '{matched_flow.name}': "
+                        f"  [yellow][Flow] Skip '{escape(matched_flow.name)}': "
                         f"navigate to out-of-scope/excluded URL {_bad_nav} — "
                         f"skipping checks on {page.url}[/yellow]"
                     )
@@ -5180,7 +5185,7 @@ class ScanEngine:
                     )
                     return
                 console.print(
-                    f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
+                    f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {escape(matched_flow.name)}"
                 )
                 # navigate の実着地（redirect 追従後）も scope 検証する（静的 step 検査の補完）。
                 _flow_scope_ok = lambda u: (
@@ -5188,7 +5193,7 @@ class ScanEngine:
                 )
                 if not await FlowRunner(self.browser, scope_check=_flow_scope_ok).run(matched_flow):
                     console.print(
-                        f"  [yellow][Flow] Pre-attack flow failed: {matched_flow.name} — "
+                        f"  [yellow][Flow] Pre-attack flow failed: {escape(matched_flow.name)} — "
                         f"skipping all checks on {page.url}[/yellow]"
                     )
                     self._record_unscannable_url(
@@ -5199,7 +5204,6 @@ class ScanEngine:
                         ),
                     )
                     return
-                self._checkpoint_mark_flow_ran(page.url, matched_flow)
             # flow の最終遷移が login/error ページへ redirect（200）されると navigate は True でも
             # target に居ない。page-level 検査の前に着地先 URL を検証し、復帰できなければ未認証/
             # 誤ページを "tested" と誤記録しないよう記録して skip する（Codex #167 P1）。
@@ -5233,6 +5237,10 @@ class ScanEngine:
                         ),
                     )
                     return
+            # 完走記録は**着地先を検証できた後**にだけ書く。step 成功直後に書くと、login へ redirect
+            # された flow も「完走済み」となり、次の resume で恒久的に skip される（Codex #170 P2）。
+            for _ran_flow in matched_flows:
+                self._checkpoint_mark_flow_ran(page.url, _ran_flow)
             # 成功した flow はセッション Cookie を発行/更新し得る。HTTP scanner は browser jar
             # ではなく engine.cookies から Cookie ヘッダを得るため、flow 後に採り直して乖離を
             # 防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く・Codex #167 P1）。

@@ -61,6 +61,8 @@ class FlowStep:
     value: str = ""      # fill
     selector: str = ""   # click
     timeout: float = 5.0 # wait duration (s) or click timeout (s)
+    # record 時の初期 redirect の実着地 URL（照合用メタデータ・実行はしない）。
+    landed_url: str = ""
 
     def to_dict(self) -> dict:
         d: dict = {"action": self.action}
@@ -68,19 +70,27 @@ class FlowStep:
         if self.field:    d["field"]    = self.field
         if self.value:    d["value"]    = self.value
         if self.selector: d["selector"] = self.selector
+        if self.landed_url: d["landed_url"] = self.landed_url
         if self.action == "wait" or self.action == "click":
             d["timeout"] = self.timeout
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "FlowStep":
+        action = d.get("action", "navigate")
+        timeout = _parse_timeout(d.get("timeout", 5.0))
+        # Playwright は click の timeout=0 を「無制限」と解釈し、欠落/非 actionable な selector で
+        # スキャン全体が停止する。click の 0 は既定の有界値に置き換える（wait の 0 秒は許可・Codex #170 P2）。
+        if action == "click" and timeout == 0:
+            timeout = 5.0
         return cls(
-            action=d.get("action", "navigate"),
+            action=action,
+            landed_url=str(d.get("landed_url", "") or ""),
             url=d.get("url", ""),
             field=d.get("field", ""),
             value=d.get("value", ""),
             selector=d.get("selector", ""),
-            timeout=_parse_timeout(d.get("timeout", 5.0)),
+            timeout=timeout,
         )
 
 
@@ -157,17 +167,17 @@ class FlowRunner:
         Execute every step of *flow*.
         Returns True on success, False if any step raises an exception.
         """
-        console.print(f"  [cyan][Flow][/cyan] {flow.name} ({len(flow.steps)} steps)")
+        console.print(f"  [cyan][Flow][/cyan] {escape(flow.name)} ({len(flow.steps)} steps)")
         for i, step in enumerate(flow.steps, 1):
             try:
                 await self._execute(step, i, len(flow.steps))
             except Exception as exc:
                 console.print(
                     f"  [yellow][Flow] Step {i}/{len(flow.steps)} "
-                    f"({step.action}) failed: {exc}[/yellow]"
+                    f"({escape(str(step.action))}) failed: {escape(str(exc))}[/yellow]"
                 )
                 return False
-        console.print(f"  [green][Flow] Completed:[/green] {flow.name}")
+        console.print(f"  [green][Flow] Completed:[/green] {escape(flow.name)}")
         return True
 
     # ------------------------------------------------------------------

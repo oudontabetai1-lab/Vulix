@@ -91,9 +91,11 @@ class FlowRecorder:
                     if url != start_url:
                         # steps[0]（start_url への navigate）は残す。redirect 応答が SSO callback/
                         # magic link の Set-Cookie 等の前提 state を作るため、置換すると replay が
-                        # それを受け取れない（Codex #170 P2）。実着地は別 navigate として追記し、
-                        # _match_pre_attack_flows の最終 navigate 照合に使わせる。
-                        steps.append({"action": "navigate", "url": url})
+                        # それを受け取れない（Codex #170 P2）。実着地は**実行しない照合用メタデータ**
+                        # として steps[0] に持たせる。別 navigate として追記すると replay が着地ページを
+                        # 二重に GET し、one-shot の確認/コールバック token を消費してしまう（Codex #170 P2）。
+                        if steps and steps[0].get("action") == "navigate":
+                            steps[0]["landed_url"] = url
                     return
                 steps.append({"action": "navigate", "url": url})
 
