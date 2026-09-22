@@ -104,6 +104,26 @@ class ParseJsLibrariesTests(unittest.TestCase):
         self.assertEqual([(l.name, l.version) for l in libs2], [("jquery", "3.4.1")])
 
 
+class ActiveScriptTests(unittest.TestCase):
+    def test_base_href_is_used_for_relative_src(self):
+        # <base href> を文書 base URI として相対 src を解決する（Codex #155 P2）。
+        html = ('<base href="https://cdn.jsdelivr.net/npm/">'
+                '<script src="jquery@3.4.1/dist/jquery.js"></script>')
+        libs = ci.parse_js_libraries(html, "https://app.test/page")
+        self.assertEqual([(l.name, l.version) for l in libs], [("jquery", "3.4.1")])
+
+    def test_inert_script_markup_is_ignored(self):
+        # コメント/template/noscript/非 JS type の <script src> は実行時に読み込まれない（Codex #155 P2）。
+        src = "https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.js"
+        for html in (f'<!-- <script src="{src}"></script> -->',
+                     f'<template><script src="{src}"></script></template>',
+                     f'<noscript><script src="{src}"></script></noscript>',
+                     f'<script type="text/template" src="{src}"></script>'):
+            with self.subTest(html=html):
+                self.assertEqual(ci.parse_js_libraries(html, "https://app.test/"), [])
+        self.assertEqual(len(ci.parse_js_libraries(f'<script src="{src}"></script>', "https://app.test/")), 1)
+
+
 class SummarizeOsvTests(unittest.TestCase):
     def test_summary_extracts_ids_cves_and_max_severity(self):
         vulns = [
@@ -476,6 +496,10 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
             _ci.check_component_eol = orig
         self.assertEqual(len(out), 1)
         self.assertEqual(recorded[0]["evidence_details"]["source"], "cms")
+        # 存在しない 'cms' レスポンスヘッダではなく CMS 検出根拠を案内する（Codex #155 P3）。
+        steps = " ".join(recorded[0]["reproduction_steps"])
+        self.assertNotIn("'cms' response header", steps)
+        self.assertIn("CMS detection evidence", steps)
         self.assertIn("CMS 検出", recorded[0]["evidence"])
 
     async def test_nvd_advisory_when_enabled(self):
@@ -950,6 +974,17 @@ class Review155NetworkTests(unittest.IsolatedAsyncioTestCase):
             "npm", "jquery", "3.4.1", client=_FakeClient(post_result=(200, {}))), [])
         self.assertEqual((await ci.lookup_nvd(
             "nginx", "1.18.0", client=_FakeClient({url: (200, {"totalResults": 0})})))["total"], 0)
+
+    async def test_malformed_nested_payloads_are_unavailable(self):
+        # 200 でも入れ子フィールドの型が不正なら照会失敗扱い（キャッシュ・checkpoint 完了で恒久 FN にしない・Codex #155 P2）。
+        url = f"{ci.DEFAULT_NVD_BASE_URL}/rest/json/cves/2.0"
+        with self.assertRaisesRegex(ci.ComponentIntelUnavailable, "malformed_vulns"):
+            await ci.lookup_osv("npm", "jquery", "3.4.1",
+                                client=_FakeClient(post_result=(200, {"vulns": {"error": "x"}})))
+        for payload in ({}, {"totalResults": "3"}, {"totalResults": 1, "vulnerabilities": {"e": 1}}):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ci.ComponentIntelUnavailable, "malformed_response"):
+                    await ci.lookup_nvd("nginx", "1.18.0", client=_FakeClient({url: (200, payload)}))
 
     async def test_malformed_osv_is_retried_and_alias_reaches_query(self):
         from unittest.mock import patch

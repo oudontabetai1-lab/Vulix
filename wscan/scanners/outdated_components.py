@@ -161,6 +161,8 @@ class OutdatedComponentScanner(BaseScanner):
                 and cms_origin and cms_origin == _origin_of(url)):
             components.append(component_intel.Component(
                 product=cms.name, version=cms.version, source="cms",
+                # 再現手順で実際の検出根拠（generator meta 等）を示すため indicators を保持する。
+                raw="; ".join(getattr(cms, "indicators", []) or []),
             ))
 
         # 外部照会は record_finding を**末尾まで遅延**する。各 _scan_* は finding の spec(kwargs)を
@@ -372,6 +374,12 @@ class OutdatedComponentScanner(BaseScanner):
                 },
                 reproduction_steps=[
                     f"Request {url}",
+                    # CMS 由来は HTML（generator meta 等）から検出され得るので、存在しない 'cms'
+                    # ヘッダではなく CMS 検出の実根拠を示す（Codex #155 P3）。
+                    (f"Inspect the page for the CMS detection evidence "
+                     f"({comp.raw or 'generator meta tag / CMS asset paths'}) "
+                     f"indicating {comp.product} {comp.version}")
+                    if comp.source == "cms" else
                     f"Inspect the '{comp.source}' response header: {comp.product}/{comp.version}",
                     f"Confirm via endoflife.date that {comp.product} {result.get('cycle')} is end-of-life.",
                     f"Upgrade to a supported release (latest: {latest or 'see endoflife.date'}).",

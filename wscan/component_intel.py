@@ -212,14 +212,59 @@ def parse_js_libraries(html: str, base_url: str = "") -> list[Library]:
     ``base_url`` は相対 src の解決に使う。
     """
     from urllib.parse import urljoin  # 局所 import（純粋関数を軽く保つ）
-    from . import js_analysis
 
     if not html:
         return []
-    return parse_js_libraries_from_urls(
-        urljoin(base_url, (src or "").strip())
-        for src in js_analysis.extract_external_script_srcs(html)
-    )
+    srcs, base_href = _active_script_srcs(html)
+    # ブラウザと同じく <base href> を文書の base URI にしてから相対 src を解決する（Codex #155 P2）。
+    doc_base = urljoin(base_url, base_href) if base_href else base_url
+    return parse_js_libraries_from_urls(urljoin(doc_base, src) for src in srcs)
+
+
+# 実行される外部 script として扱う type（空＝既定 JS）。
+_JS_SCRIPT_TYPES = {"", "text/javascript", "application/javascript", "module"}
+
+
+def _active_script_srcs(html: str) -> tuple[list[str], str]:
+    """HTML から**実際に読み込まれる**外部 script の src と最初の ``<base href>`` を返す（純粋）。
+
+    regex だとコメント・``<template>``/``<noscript>`` 内・非 JS type の ``<script src>`` まで拾い、
+    実行時に存在しない依存を OSV finding にしてしまう（Codex #155 P2）。stdlib の HTMLParser で
+    要素として解析し（コメントは要素にならない）、inert な文脈を除外する。
+    """
+    from html.parser import HTMLParser
+
+    class _P(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.srcs: list[str] = []
+            self.base = ""
+            self._inert = 0  # template/noscript のネスト深さ
+
+        def handle_starttag(self, tag, attrs):
+            a = {k: (v or "") for k, v in attrs}
+            if tag in ("template", "noscript"):
+                self._inert += 1
+            elif tag == "base" and not self.base and a.get("href", "").strip():
+                self.base = a["href"].strip()
+            elif tag == "script" and not self._inert:
+                src = a.get("src", "").strip()
+                if (src and a.get("type", "").strip().lower() in _JS_SCRIPT_TYPES
+                        and not src.startswith(("data:", "javascript:", "about:"))
+                        and src not in self.srcs):
+                    self.srcs.append(src)
+
+        def handle_endtag(self, tag):
+            if tag in ("template", "noscript") and self._inert:
+                self._inert -= 1
+
+    p = _P()
+    try:
+        p.feed(html)
+        p.close()
+    except Exception:
+        pass  # 壊れた HTML でもそこまでの結果を返す（graceful）
+    return p.srcs, p.base
 
 
 def _cvss3_roundup(x: float) -> float:
@@ -582,7 +627,13 @@ async def lookup_osv(
         raise ComponentIntelUnavailable(f"osv:{name}:bad_json") from exc
     data = _require_dict(data, f"osv:{name}")
     vulns = data.get("vulns")
-    return vulns if isinstance(vulns, list) else []
+    if vulns is None:
+        return []  # 脆弱性なし（vulns 省略）
+    # 200 でも vulns が list でない（{"vulns": {"error": ...}} 等）応答は照会失敗。空扱いで
+    # キャッシュ・checkpoint 完了すると resume で再照会されず恒久 FN になる（Codex #155 P2）。
+    if not isinstance(vulns, list):
+        raise ComponentIntelUnavailable(f"osv:{name}:malformed_vulns")
+    return vulns
 
 
 def nvd_product_cpe(product: str) -> Optional[str]:
@@ -665,4 +716,12 @@ async def lookup_nvd(
         data = resp.json()
     except Exception as exc:
         raise ComponentIntelUnavailable(f"nvd:{product}:bad_json") from exc
-    return summarize_nvd(_require_dict(data, f"nvd:{product}"))
+    data = _require_dict(data, f"nvd:{product}")
+    # 必須フィールドの型も検証する。不正型を 0 件扱いにするとキャッシュ・checkpoint 完了で恒久 FN
+    # になる（OSV と同様・Codex #155 P2）。
+    total = data.get("totalResults")
+    vulns = data.get("vulnerabilities")
+    if (not isinstance(total, int) or isinstance(total, bool)
+            or (vulns is not None and not isinstance(vulns, list))):
+        raise ComponentIntelUnavailable(f"nvd:{product}:malformed_response")
+    return summarize_nvd(data)
