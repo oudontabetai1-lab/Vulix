@@ -87,6 +87,7 @@ _PRODUCT_SLUGS: dict[str, str] = {
     "python": "python",
     "node": "nodejs",
     "nodejs": "nodejs",
+    "node.js": "nodejs",  # 正規表記 `Node.js/18.12.1`（Codex #155 P2）
     "openssl": "openssl",
     "tomcat": "tomcat",
     "iis": "internet-explorer",  # 注: IIS 単体 slug は無いため既定では扱わない（下の除外を参照）
@@ -221,8 +222,26 @@ def parse_js_libraries(html: str, base_url: str = "") -> list[Library]:
     return parse_js_libraries_from_urls(urljoin(doc_base, src) for src in srcs)
 
 
-# 実行される外部 script として扱う type（空＝既定 JS）。
-_JS_SCRIPT_TYPES = {"", "text/javascript", "application/javascript", "module"}
+# ブラウザが JavaScript として実行する MIME essence（WHATWG MIME Sniffing の JavaScript MIME type）。
+_JS_MIME_ESSENCES = frozenset({
+    "application/ecmascript", "application/javascript", "application/x-ecmascript",
+    "application/x-javascript", "text/ecmascript", "text/javascript", "text/javascript1.0",
+    "text/javascript1.1", "text/javascript1.2", "text/javascript1.3", "text/javascript1.4",
+    "text/javascript1.5", "text/jscript", "text/livescript", "text/x-ecmascript",
+    "text/x-javascript",
+})
+
+
+def _is_js_script_type(value: str) -> bool:
+    """script の type 属性が実行される JS か（空/module/JS MIME。parameter は essence で判定・純粋）。
+
+    ``text/javascript; charset=utf-8`` や ``application/ecmascript`` も実行されるため、完全一致の
+    allowlist だと有効な依存を取りこぼす（Codex #155 P2）。
+    """
+    t = (value or "").strip().lower()
+    if t in ("", "module"):
+        return True
+    return t.split(";", 1)[0].strip() in _JS_MIME_ESSENCES
 
 
 def _active_script_srcs(html: str) -> tuple[list[str], str]:
@@ -245,11 +264,13 @@ def _active_script_srcs(html: str) -> tuple[list[str], str]:
             a = {k: (v or "") for k, v in attrs}
             if tag in ("template", "noscript"):
                 self._inert += 1
-            elif tag == "base" and not self.base and a.get("href", "").strip():
+            elif (tag == "base" and not self._inert and not self.base
+                  and a.get("href", "").strip()):
+                # template/noscript 内の <base> はブラウザが無視する（Codex #155 P2）。
                 self.base = a["href"].strip()
             elif tag == "script" and not self._inert:
                 src = a.get("src", "").strip()
-                if (src and a.get("type", "").strip().lower() in _JS_SCRIPT_TYPES
+                if (src and _is_js_script_type(a.get("type", ""))
                         and not src.startswith(("data:", "javascript:", "about:"))
                         and src not in self.srcs):
                     self.srcs.append(src)
@@ -631,7 +652,9 @@ async def lookup_osv(
         return []  # 脆弱性なし（vulns 省略）
     # 200 でも vulns が list でない（{"vulns": {"error": ...}} 等）応答は照会失敗。空扱いで
     # キャッシュ・checkpoint 完了すると resume で再照会されず恒久 FN になる（Codex #155 P2）。
-    if not isinstance(vulns, list):
+    # 要素も object であること。`{"vulns": ["upstream error"]}` を受けると truthy な list が
+    # 「advisory 0 件の vulnerable_library」finding を生む（Codex #155 P2）。
+    if not isinstance(vulns, list) or not all(isinstance(v, dict) for v in vulns):
         raise ComponentIntelUnavailable(f"osv:{name}:malformed_vulns")
     return vulns
 

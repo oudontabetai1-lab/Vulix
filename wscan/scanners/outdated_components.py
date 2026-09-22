@@ -77,6 +77,9 @@ def _is_exact_version(version: str) -> bool:
 # 悪性ページが任意個の unique な version 風 URL を宣言して外部 OSV 照会を増幅するのを防ぐ
 # per-page 上限（unique はキャッシュを迂回するため・Codex #155 P2）。
 _OSV_MAX_PER_PAGE = 50
+# バナー由来の EOL 照会の per-page 上限。敵対的応答が大量の product/version を並べても同じ
+# product JSON への重複照会で外部 API 枠やスキャン時間を消費させない（Codex #155 P2）。
+_EOL_MAX_PER_PAGE = 10
 
 
 class OutdatedComponentScanner(BaseScanner):
@@ -328,6 +331,11 @@ class OutdatedComponentScanner(BaseScanner):
             key = (comp.product, comp.version)
             if key in seen:
                 continue
+            if len(seen) >= _EOL_MAX_PER_PAGE:
+                self._record_scan_note(
+                    f"eol_lookup_capped:{self.CHECK_TYPE}:>{_EOL_MAX_PER_PAGE}"
+                )
+                break
             seen.add(key)
             try:
                 result = await self._cached_lookup(
@@ -370,7 +378,8 @@ class OutdatedComponentScanner(BaseScanner):
                 evidence_details={
                     "product": comp.product, "version": comp.version, "source": comp.source,
                     "cycle": result.get("cycle"), "eol": eol_val, "latest": latest,
-                    "reference": f"{base_url.rstrip('/')}/{result.get('slug')}",
+                    # self-hosted eol_base_url の userinfo 等を evidence_details に残さない（Codex #155 P2）。
+                    "reference": redact_url(f"{base_url.rstrip('/')}/{result.get('slug')}"),
                 },
                 reproduction_steps=[
                     f"Request {url}",

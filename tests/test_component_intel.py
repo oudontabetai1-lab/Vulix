@@ -124,6 +124,27 @@ class ActiveScriptTests(unittest.TestCase):
         self.assertEqual(len(ci.parse_js_libraries(f'<script src="{src}"></script>', "https://app.test/")), 1)
 
 
+class Review155Round3Tests(unittest.TestCase):
+    def test_base_inside_template_is_ignored(self):
+        # template 内の <base> はブラウザが無視する（Codex #155 P2）。
+        html = ('<template><base href="https://cdn.jsdelivr.net/npm/jquery@3.4.1/"></template>'
+                '<script src="dist/jquery.js"></script>')
+        self.assertEqual(ci.parse_js_libraries(html, "https://app.test/"), [])
+
+    def test_js_mime_types_with_params_and_legacy(self):
+        # parameter 付き・レガシー JS MIME も実行される script として扱う（Codex #155 P2）。
+        src = "https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.js"
+        for t in ("text/javascript; charset=utf-8", "application/ecmascript", "MODULE"):
+            with self.subTest(t=t):
+                html = f'<script type="{t}" src="{src}"></script>'
+                self.assertEqual(len(ci.parse_js_libraries(html, "https://app.test/")), 1)
+        self.assertEqual(ci.parse_js_libraries(
+            f'<script type="text/x-template" src="{src}"></script>', "https://app.test/"), [])
+
+    def test_node_js_banner_maps_to_nodejs_slug(self):
+        self.assertEqual(ci.eol_product_slug("node.js"), "nodejs")
+
+
 class SummarizeOsvTests(unittest.TestCase):
     def test_summary_extracts_ids_cves_and_max_severity(self):
         vulns = [
@@ -455,6 +476,44 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SECRETTOKENVALUE", " ".join(recorded[0]["reproduction_steps"]))
         # ライブラリ識別（path 由来）は維持。
         self.assertEqual(recorded[0]["evidence_details"]["library"], "jquery")
+
+    async def test_eol_lookups_capped_and_reference_redacted(self):
+        # 大量バナーでも per-page 上限で照会を抑え、self-hosted base URL の資格情報を残さない（Codex #155 P2）。
+        from wscan.scanners import outdated_components as oc
+        engine, scanner = self._scanner(enabled=True)
+        engine.component_intel["eol_base_url"] = "https://user:pass@eol.internal"
+        server = " ".join(f"nginx/1.{i}.0" for i in range(30))
+
+        async def _pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {"Server": server}, "body": ""}}
+
+        calls = []
+
+        async def _check(comp, **kw):
+            calls.append(comp.version)
+            return {"product": comp.product, "version": comp.version, "source": comp.source,
+                    "slug": "nginx", "cycle": comp.version, "eol": True, "is_eol": True, "latest": "1.27"}
+
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner._response_pair = _pair
+        scanner.record_finding = _rec
+        import wscan.component_intel as _ci
+        orig = _ci.check_component_eol
+        _ci.check_component_eol = _check
+        try:
+            await scanner.scan_page("http://x/")
+        finally:
+            _ci.check_component_eol = orig
+        self.assertLessEqual(len(calls), oc._EOL_MAX_PER_PAGE)
+        self.assertTrue(recorded)
+        for r in recorded:
+            self.assertNotIn("pass", r["evidence_details"]["reference"])
 
     async def test_reports_eol_cms(self):
         # クロールで検出した CMS（detected_cms）も EOL 照会対象にする。
@@ -985,6 +1044,12 @@ class Review155NetworkTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(payload=payload):
                 with self.assertRaisesRegex(ci.ComponentIntelUnavailable, "malformed_response"):
                     await ci.lookup_nvd("nginx", "1.18.0", client=_FakeClient({url: (200, payload)}))
+
+    async def test_osv_non_object_entries_are_unavailable(self):
+        # `{"vulns": ["upstream error"]}` を advisory 0 件の finding にしない（Codex #155 P2）。
+        with self.assertRaisesRegex(ci.ComponentIntelUnavailable, "malformed_vulns"):
+            await ci.lookup_osv("npm", "jquery", "3.4.1",
+                                client=_FakeClient(post_result=(200, {"vulns": ["upstream error"]})))
 
     async def test_malformed_osv_is_retried_and_alias_reaches_query(self):
         from unittest.mock import patch
