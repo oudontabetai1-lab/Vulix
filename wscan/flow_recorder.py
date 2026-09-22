@@ -81,12 +81,15 @@ class FlowRecorder:
                 url = frame.url
                 if not url or url == "about:blank":
                     return
-                # 最初の main-frame ナビゲーション（初期 goto。**redirect 先でも**）は steps[0] の
-                # start_url と重複扱いで記録しない。start_url 完全一致を条件にすると、初期 goto が
-                # HTTP redirect したときフラグが立たず、後で意図的に start_url へ戻った遷移を初期
-                # ロードと誤認して捨て、最後の navigate が中間ページのままになる（Codex #170 P2）。
+                # 最初の main-frame ナビゲーション（初期 goto）は steps[0] と重複するので新規
+                # append しない。ただし初期 goto が別 scheme/host/path へ **redirect** した場合は、
+                # 実着地 URL を steps[0] に反映する。さもないと最後の navigate が pre-redirect の
+                # start_url のままになり _match_pre_attack_flows が crawl 済み着地ページと結び付けられ
+                # ない／最終 target チェックで弾かれる（Codex #170 P2）。
                 if not _initial_load["seen"]:
                     _initial_load["seen"] = True
+                    if url != start_url and steps and steps[0].get("action") == "navigate":
+                        steps[0]["url"] = url  # 初期 redirect の実着地を初期 step に反映
                     return
                 steps.append({"action": "navigate", "url": url})
 

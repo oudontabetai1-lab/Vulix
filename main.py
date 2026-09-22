@@ -2261,7 +2261,21 @@ def _parse_setup_llm(text, known_checks) -> "Optional[dict]":
     # `--header-refresh-cmd=id` のような値がシェル実行される option を通してしまうため、
     # 無害な boolean トグルの明示許可リスト（_SAFE_SETUP_FLAGS）だけに限定する（#170 P2）。
     flags_raw = data.get("flags") if isinstance(data.get("flags"), list) else []
-    flags = [f for f in flags_raw if isinstance(f, str) and f in _SAFE_SETUP_FLAGS]
+    # 宣伝例 `--dom-xss` のように「実は check」を指すフラグを check へ正規化してから許可リストで
+    # 絞る。さもないと model が例に従い checks=xss + flags=--dom-xss を返したとき、--dom-xss が
+    # _SAFE_SETUP_FLAGS に無く黙って落ちて DOM-XSS 検査が抜ける（採用表示と生成コマンドが不一致・
+    # Codex #170 P2）。`--x-y` は `x_y` に写して known_checks なら checks へ移す。
+    _kept_flags = []
+    for f in flags_raw:
+        if not isinstance(f, str):
+            continue
+        as_check = f.lstrip("-").replace("-", "_")
+        if as_check in known_checks:
+            if as_check not in checks:
+                checks.append(as_check)
+        else:
+            _kept_flags.append(f)
+    flags = [f for f in _kept_flags if f in _SAFE_SETUP_FLAGS]
     reason = data.get("reason") if isinstance(data.get("reason"), str) else ""
     return {"checks": checks, "depth": depth, "flags": flags, "reason": reason}
 

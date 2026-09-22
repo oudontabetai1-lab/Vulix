@@ -32,6 +32,17 @@ def test_code_fenced_json_is_extracted():
     assert out["depth"] == 2                     # 範囲外 depth は既定 2 へ
 
 
+def test_check_flag_is_normalized_into_checks():
+    # 宣伝例 `--dom-xss` 等「実は check」を指すフラグは checks へ正規化し、黙って落とさない
+    # （Codex #170 P2）。known に dom_xss を含めて検証。
+    known = KNOWN | {"dom_xss"}
+    text = '{"checks": ["xss"], "flags": ["--dom-xss", "--headless"], "depth": 2}'
+    out = _parse_setup_llm(text, known)
+    assert "dom_xss" in out["checks"]            # --dom-xss → dom_xss check へ
+    assert "xss" in out["checks"]
+    assert out["flags"] == ["--headless"]        # check フラグは flags から除去、無害トグルは残す
+
+
 def test_all_unknown_checks_is_invalid():
     assert _parse_setup_llm('{"checks": ["nope", "nada"]}', KNOWN) is None
 

@@ -163,6 +163,12 @@ class FlowRunner:
     async def _execute(self, step: FlowStep, num: int, total: int) -> None:
         label = f"[Flow {num}/{total}]"
 
+        # 直前の action が非同期遷移を起こし、その後の wait 中に scope 外/除外へ着地した状態で
+        # fill/click/submit を実行しないよう、対話 step の**着手前**に現在 URL を再検証する
+        # （click 直後だけの検査では遅延遷移＋wait を取りこぼす・Codex #170 P2）。
+        if step.action in ("fill", "click", "submit"):
+            self._assert_landing_in_scope()
+
         if step.action == "navigate":
             console.print(f"  [dim]{label} navigate → {step.url}[/dim]")
             # navigate は 4xx/timeout で False を返す（例外は投げない）。破棄すると失敗した
@@ -176,14 +182,6 @@ class FlowRunner:
             # selector があればそれを優先し、無ければ field(name/id)から組み立てる。これで
             # record→scan --flows の再生が実際に効く（click と対称・F09）。
             ident = step.selector or step.field
-            # `#pwd` / `#pw` / secret 系の識別子も伏せる。console 出力は CI/operator ログに
-            # 残るため平文パスワードを出さない（表示のみの判定なので安全側に広く取る・Codex #170 P2）。
-            masked = any(
-                p in ident.lower()
-                for p in ("password", "passwd", "pass", "pwd", "secret")
-            )
-            display_val = "***" if masked else step.value
-            console.print(f"  [dim]{label} fill [{ident}] = {display_val[:40]}[/dim]")
             filled = await self.browser.page.evaluate(
                 """([sel, f, v]) => {
                     const find = (s) => { try { return document.querySelector(s); } catch (e) { return null; } };
@@ -198,7 +196,8 @@ class FlowRunner:
                     } else {
                         el = find(`[name="${f}"],[id="${f}"]`);
                     }
-                    if (!el) return {ok: false, ambiguous: false};
+                    if (!el) return {ok: false, ambiguous: false, sensitive: false};
+                    const sensitive = (el.type === 'password');
                     // 旧記録は checkbox/radio も fill(value) で保存する。value は checked を符号化
                     // しない（未チェックでも value は "on"/value属性のまま）ため、明示的な真偽トークン
                     // だけを信頼し、それ以外は checked と仮定しつつ ambiguous を返して呼び出し側で
@@ -219,16 +218,26 @@ class FlowRunner:
                     ['input', 'change', 'blur'].forEach(e =>
                         el.dispatchEvent(new Event(e, {bubbles: true}))
                     );
-                    return {ok: true, ambiguous: ambiguous};
+                    return {ok: true, ambiguous: ambiguous, sensitive: sensitive};
                 }""",
                 [step.selector, step.field, step.value],
             )
-            # JS は {ok, ambiguous} を返す。ok/ambiguous を安全に取り出す（旧 bool 返しにも耐性）。
+            # JS は {ok, ambiguous, sensitive} を返す。安全に取り出す（旧 bool 返しにも耐性）。
             ok = filled.get("ok") if isinstance(filled, dict) else bool(filled)
             ambiguous = filled.get("ambiguous") if isinstance(filled, dict) else False
+            sensitive = filled.get("sensitive") if isinstance(filled, dict) else False
             if not ok:
                 # 存在しない欄への fill を成功扱いにすると前提の欠落を見逃す（F10）。
                 raise FlowStepError(f"fill target not found: {ident!r}")
+            # 平文パスワードを console/CI ログへ出さない。recorder は input type を保存しないため、
+            # replay 時に実要素の type=password（sensitive）で判定し、加えて secret 系識別子も伏せる
+            # （selector 文字列だけの判定では type=password で id が中立な欄を漏らす・Codex #170 P2）。
+            masked = sensitive or any(
+                p in ident.lower()
+                for p in ("password", "passwd", "pass", "pwd", "secret")
+            )
+            display_val = "***" if masked else step.value
+            console.print(f"  [dim]{label} fill [{ident}] = {display_val[:40]}[/dim]")
             if ambiguous:
                 # 旧記録の checkbox/radio は真の checked を値から復元できない。checked と仮定した
                 # ことを明示し、現行 record（click 記録）での再取得を促す（黙って反転させない）。
@@ -278,6 +287,8 @@ class FlowRunner:
         elif step.action == "wait":
             console.print(f"  [dim]{label} wait {step.timeout}s[/dim]")
             await asyncio.sleep(step.timeout)
+            # wait 中に遅延遷移で scope 外へ着地していないか検証する（Codex #170 P2）。
+            self._assert_landing_in_scope()
 
         else:
             # 不明アクション（タイプミス等）を skip して flow を成功扱いにすると、前提未達のまま
