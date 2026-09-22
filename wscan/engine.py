@@ -4907,6 +4907,14 @@ class ScanEngine:
         Codex #170 P1）。既存の crawl フォームは失わず、新規のみ署名で重複排除して追加する。
         ベストエフォート（抽出失敗時は既存のまま）。
         """
+        # flow 最終 action が非同期 DOM 更新（click→AJAX→coupon モーダル等）を起こす場合、
+        # runner の domcontentloaded 待ちは document 既ロードで即返り、直後の find_forms が描画前に
+        # 走って空 form を authoritative に採用し露出フォームを取りこぼす。ネットワークが静まるのを
+        # 短く待ってからスナップショットする（bounded・失敗は無視）（Codex #170 P2）。
+        try:
+            await self.browser.page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
         try:
             # raise_on_error=True で「成功して空」と「抽出失敗」を区別する。find_forms は既定で
             # 例外を握り潰し [] を返すため、これが無いと transient 失敗で crawl form を消す（#170 P2）。
@@ -4947,18 +4955,39 @@ class ScanEngine:
                     existing.add(name)
         # flow が URL を変えずに inline/外部 JS を露出し得る。js_static は page.html /
         # page.external_scripts を見るため、HTML スナップショットも採り直す（Codex #170 P2）。
+        # 相対 script の解決基点は **ブラウザの実 URL**（page.url は crawl 時の値で、末尾
+        # スラッシュ等価な遷移先だと `/app` vs `/app/` がずれ `src="bundle.js"` を `/bundle.js`
+        # と誤解決して external_scripts を空にする）。現在 URL が取れなければ page.url へ退避。
         try:
             fresh_html = await self.browser.get_page_source()
             if fresh_html:
+                try:
+                    base_url = self.browser.page.url or page.url
+                except Exception:
+                    base_url = page.url
                 page.html = fresh_html
-                page.external_scripts = self._snapshot_external_scripts(fresh_html, page.url)
+                page.external_scripts = self._snapshot_external_scripts(fresh_html, base_url)
         except Exception:
             pass
+        # flow が入力（form/url_param）を露出したら「flow-exposed」marker を **page-level 検査より
+        # 前に** 永続化する。field checkpoint が1つも書かれる前に中断されても、resume が本ページを
+        # 「入力なし＝page-level のみ」と誤断して flow を捨て、露出フィールドを恒久的に取りこぼすのを
+        # 防ぐ（Codex #170 P2）。sentinel 名なので _checkpoint_has_field_units には数えられない。
+        if page.forms or page.url_params:
+            self._checkpoint_mark_done(page.url, "(flow-exposed)", 0, "(flow-exposed)")
         if added:
             console.print(
                 f"  [cyan][Flow] prerequisite exposed {added} new form(s) — scanning them too[/cyan]"
             )
         return None
+
+    def _checkpoint_has_flow_exposed_marker(self, url: str) -> bool:
+        """この URL で過去 run の flow が入力を露出した marker が checkpoint にあるか（#170 P2）。
+
+        flow-exposed だが field checkpoint 完了前に中断されたページを resume で skip しないための
+        signal。field 単位が無くてもこの marker があれば flow を再生して露出入力を再構成する。
+        """
+        return self._checkpoint_is_done(url, "(flow-exposed)", 0, "(flow-exposed)")
 
     def _page_level_checks_pending(self, page: "CrawledPage") -> bool:
         """page-level 検査でこのページに未完了(=実際に probe する)単位が残るか。
@@ -5086,7 +5115,8 @@ class ScanEngine:
         # 列挙は取りこぼし時に必要な flow を誤 skip＝偽陰性を生むため行わない）。
         if (matched_flows and not page.forms and not page.url_params
                 and not self._page_level_checks_pending(page)
-                and not self._checkpoint_has_field_units(page.url)):
+                and not self._checkpoint_has_field_units(page.url)
+                and not self._checkpoint_has_flow_exposed_marker(page.url)):
             # crawl スナップショットが入力ゼロでも、前回 flow が露出した入力を検査した痕跡
             # （field 単位）があれば skip しない：refresh が入力を再露出し、中断された field
             # 検査を再開できるようにする（Codex #170 P2）。field 単位が無ければ従来どおり
@@ -5190,6 +5220,19 @@ class ScanEngine:
                     await self._sync_cookies_from_browser(self.browser, for_url=page.url)
                 except Exception:
                     pass
+            elif not getattr(self, "_warned_flow_concurrency", False):
+                # concurrency>1 では engine.cookies が全 worker 共有のため、worker ごとに flow 発行
+                # Cookie を同期すると別 worker の状態を壊す。同期を見送る結果、HTTP scanner は
+                # pre-flow Cookie で検査し得る。per-worker Cookie スナップショットは follow-up 課題と
+                # し、ここでは制限を1度だけ可視化する（Codex #170 P2）。flow の Cookie 状態を正確に
+                # 検査するには --concurrency 1 を推奨。
+                self._warned_flow_concurrency = True
+                self.wave_errors.append("flow_cookie_sync_skipped:concurrency_gt_1")
+                console.print(
+                    "  [yellow][Flow] --concurrency>1 では flow 発行 Cookie を HTTP scanner の "
+                    "engine.cookies へ同期しません（per-worker 分離は follow-up）。flow の Cookie 状態を"
+                    "正確に検査するには --concurrency 1 を推奨（Codex #170 P2）[/yellow]"
+                )
             # 前提 flow が checkout/coupon 等のフォームや URL パラメータを新たに露出し得る。
             # 再生前に採取した CrawledPage のまま攻撃すると新出フォームを検査しないため、
             # 攻撃対象を決める前に現在のページから form/url_param を採り直す（Codex #170 P1）。

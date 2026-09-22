@@ -2192,6 +2192,13 @@ def _load_flow_files(paths) -> list[dict]:
                 "前提ページを一致させるため最低1つの navigate が必要です。"
             )
             continue
+        # navigate url の前後空白を除いて正規化して格納する。u.strip() は真偽判定にしか使って
+        # おらず、untrimmed のままだと _match_pre_attack_flows が空白入り URL を crawl URL と
+        # 一致させられず、前提 flow が黙って選ばれない（Codex #170 P2）。
+        for _s in candidate["steps"]:
+            if isinstance(_s, dict) and str(_s.get("action", "")) == "navigate" \
+                    and isinstance(_s.get("url"), str):
+                _s["url"] = _s["url"].strip()
         flows.append(candidate)
 
     # 同一遷移先の複数 flow は「統合」せず、ScanEngine 側が一致する flow を **file 順に全て

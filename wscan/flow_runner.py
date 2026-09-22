@@ -118,6 +118,22 @@ class FlowRunner:
         # では scope 外へ redirect した先で fill/click が走るのを防げない（Codex #170 P2）。
         self._scope_check = scope_check
 
+    def _assert_landing_in_scope(self) -> None:
+        """直近の action 後の実着地 URL を scope 検証する（navigate/submit/click 共通・#170 P2）。
+
+        submit/click も redirect や JS 遷移で scope 外/除外へ着地し得るため、静的 step 検査では
+        検知できない runtime landing をここで弾き、その先で後続の fill/click を走らせない。
+        """
+        if self._scope_check is None:
+            return
+        landed = ""
+        try:
+            landed = self.browser.page.url or ""
+        except Exception:
+            landed = ""
+        if landed and not self._scope_check(landed):
+            raise FlowStepError(f"flow step landed on out-of-scope/excluded URL: {landed}")
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -153,18 +169,7 @@ class FlowRunner:
             # 遷移を成功扱いし、前提未達のまま後続/攻撃へ進む（F10・Codex #167 P1）。
             if not await self.browser.navigate(step.url):
                 raise FlowStepError(f"navigate failed (non-OK response/timeout): {step.url}")
-            # redirect 追従後の実着地 URL を scope 検証する。scope 外/除外へ飛んだ先で後続の
-            # fill/click を実行させない（最終遷移が target へ戻っても中間ページで操作が走る・#170 P2）。
-            if self._scope_check is not None:
-                landed = ""
-                try:
-                    landed = self.browser.page.url or ""
-                except Exception:
-                    landed = ""
-                if landed and not self._scope_check(landed):
-                    raise FlowStepError(
-                        f"navigate landed on out-of-scope/excluded URL: {landed}"
-                    )
+            self._assert_landing_in_scope()
 
         elif step.action == "fill":
             # record が保存する fill step は CSS selector（`#id` / `[name="x"]`）を持つ。
@@ -256,6 +261,7 @@ class FlowRunner:
                 )
             except Exception:
                 pass
+            self._assert_landing_in_scope()
 
         elif step.action == "click":
             sel = step.selector or step.field
@@ -267,6 +273,7 @@ class FlowRunner:
                 )
             except Exception:
                 pass
+            self._assert_landing_in_scope()
 
         elif step.action == "wait":
             console.print(f"  [dim]{label} wait {step.timeout}s[/dim]")

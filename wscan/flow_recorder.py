@@ -81,8 +81,12 @@ class FlowRecorder:
                 url = frame.url
                 if not url or url == "about:blank":
                     return
-                if url == start_url and not _initial_load["seen"]:
-                    _initial_load["seen"] = True  # 初期ロードは steps[0] と重複＝記録しない
+                # 最初の main-frame ナビゲーション（初期 goto。**redirect 先でも**）は steps[0] の
+                # start_url と重複扱いで記録しない。start_url 完全一致を条件にすると、初期 goto が
+                # HTTP redirect したときフラグが立たず、後で意図的に start_url へ戻った遷移を初期
+                # ロードと誤認して捨て、最後の navigate が中間ページのままになる（Codex #170 P2）。
+                if not _initial_load["seen"]:
+                    _initial_load["seen"] = True
                     return
                 steps.append({"action": "navigate", "url": url})
 
@@ -94,6 +98,7 @@ class FlowRecorder:
             _tok = secrets.token_hex(12)
             _fn_fill = f"__wscan_fill_{_tok}__"
             _fn_click = f"__wscan_click_{_tok}__"
+            _fn_notify = f"__wscan_notify_{_tok}__"
 
             await page.expose_function(_fn_fill, lambda selector, value: steps.append(
                 {"action": "fill", "selector": selector, "value": value}
@@ -101,6 +106,11 @@ class FlowRecorder:
             await page.expose_function(_fn_click, lambda selector: steps.append(
                 {"action": "click", "selector": selector}
             ))
+            # ページ側の警告（file input skip 等）を **記録プロセスの stdout** へ出す。ページの
+            # console.warn だけだと DevTools 非表示の headed recorder では操作者に届かない（Codex #170 P2）。
+            await page.expose_function(
+                _fn_notify, lambda message: print(f"[FlowRecorder][warn] {message}")
+            )
 
             # ページに監視スクリプト注入
             await page.add_init_script(f"""
@@ -131,7 +141,13 @@ class FlowRecorder:
                         // querySelector で pseudo-class 等と誤解釈され throw するのを防ぐ・#170 P2）。
                         const esc = (window.CSS && CSS.escape) ? CSS.escape(el.id) : el.id;
                         const escv = (v) => (window.CSS && CSS.escape) ? CSS.escape(v) : v;
-                        let sel = el.id ? '#' + esc : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase());
+                        // name/value は CSS.escape した**引用符なし**属性セレクタで組む。生の
+                        // `[name="..."]` だと name に引用符/バックスラッシュを含むと無効セレクタになり、
+                        // 通常入力は replay 不能、radio/checkbox は querySelectorAll が throw して step
+                        // ごと欠落する（Codex #170 P2）。CSS.escape 出力は選択子として妥当。
+                        let sel = el.id
+                            ? '#' + esc
+                            : (el.name ? '[name=' + escv(el.name) + ']' : __wscanPath(el));
                         // radio/checkbox は name を共有するのが普通で、[name="plan"] だけだと
                         // グループ内のどの選択肢か判別できず replay が誤って先頭を click する。
                         // id が無い場合、**明示 value 属性がグループ内で一意なとき**だけ
@@ -141,15 +157,14 @@ class FlowRecorder:
                         if (!el.id && (el.type === 'radio' || el.type === 'checkbox')) {{
                             const attrVal = el.getAttribute('value');
                             let uniqueByValue = false;
+                            let valueSel = '';
                             if (el.name && attrVal !== null) {{
-                                const group = document.querySelectorAll(
-                                    '[name="' + el.name + '"][value="' + escv(attrVal) + '"]'
-                                );
+                                valueSel = '[name=' + escv(el.name) + '][value=' + escv(attrVal) + ']';
+                                let group = [];
+                                try {{ group = document.querySelectorAll(valueSel); }} catch (e) {{ group = []; }}
                                 uniqueByValue = (group.length === 1);
                             }}
-                            sel = uniqueByValue
-                                ? '[name="' + el.name + '"][value="' + escv(attrVal) + '"]'
-                                : __wscanPath(el);
+                            sel = uniqueByValue ? valueSel : __wscanPath(el);
                         }}
                         // checkbox/radio は value ではなく checked 状態が本質。fill は value を
                         // 代入するだけで checked を変えず、規約同意等の前提を再現できない。click で
@@ -161,8 +176,11 @@ class FlowRecorder:
                         }} else if (el.type === 'file') {{
                             // file input は録画しない。ブラウザは value を "C:\\fakepath\\..." で返し、
                             // replay で type=file の value 代入は InvalidStateError で拒否され flow 全体が
-                            // 失敗＝ページの全検査を skip してしまう（Codex #170 P2）。
-                            console.warn('[FlowRecorder] file input はリプレイ不可のため記録しません: ' + sel);
+                            // 失敗＝ページの全検査を skip してしまう（Codex #170 P2）。skip を記録
+                            // プロセスへ通知して操作者に見えるようにする（console.warn だけでは埋もれる）。
+                            if (typeof window['{_fn_notify}'] === 'function') {{
+                                window['{_fn_notify}']('file input はリプレイ不可のため記録しません: ' + sel);
+                            }}
                         }} else if (typeof window['{_fn_fill}'] === 'function') {{
                             window['{_fn_fill}'](sel, el.value);
                         }}

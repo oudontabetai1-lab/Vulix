@@ -447,7 +447,7 @@ def _build_eng_for_flow_skip(page_check_done: bool):
     # flow navigate の scope 検証（#170 P2）用スタブ。テストの flow URL は in-scope。
     eng._is_access_allowed_url = lambda url: True
     eng._is_url_excluded = lambda url: False
-    eng._checkpoint_is_done = lambda *a, **k: page_check_done
+    eng._checkpoint_is_done = lambda url, field, *a, **k: (field == "(page)") and page_check_done
     eng._checkpoint_mark_done = lambda *a, **k: None
     eng._record_scan_matrix = lambda *a, **k: None
     eng._record_finding = lambda *a, **k: None
@@ -523,7 +523,7 @@ def test_pre_attack_flow_runs_when_checkpoint_has_flow_exposed_field_units():
     cp = CheckpointState()
     cp.mark_done("http://t.test/cart", "coupon", 0, "xss")  # flow が露出した想定の入力
     eng.checkpoint = cp
-    eng._checkpoint_is_done = lambda *a, **k: True
+    eng._checkpoint_is_done = lambda url, field, *a, **k: field == "(page)"
     page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
 
     class _Runner:
@@ -557,7 +557,7 @@ def test_checkpoint_sentinel_units_do_not_block_flow_skip():
     cp.mark_done("http://t.test/cart", "(api-template)", 0, "mass_assignment")  # sentinel
     cp.mark_done("http://t.test/cart", "(page)", 0, "security_headers")          # sentinel
     eng.checkpoint = cp
-    eng._checkpoint_is_done = lambda *a, **k: True
+    eng._checkpoint_is_done = lambda url, field, *a, **k: field == "(page)"
     page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
 
     class _Runner:
@@ -572,6 +572,38 @@ def test_checkpoint_sentinel_units_do_not_block_flow_skip():
         asyncio.run(eng._attack_one_page(page, {}))
 
     assert ran["flow"] is False  # sentinel のみ → 本物の field 単位なし → skip される
+
+
+def test_flow_exposed_marker_forces_replay_before_any_field_checkpoint():
+    """flow が入力を露出したが field checkpoint 完了前に中断されたページは、(flow-exposed) marker
+    により resume で skip せず再生する（露出フィールドの恒久取りこぼし防止・Codex #170 P2）。"""
+    from wscan.checkpoint import CheckpointState
+    ran = {"flow": False}
+    eng = _build_eng_for_flow_skip(page_check_done=True)
+    eng.enable_checkpoint = True
+    cp = CheckpointState()
+    cp.mark_done("http://t.test/cart", "(flow-exposed)", 0, "(flow-exposed)")  # 露出痕跡のみ
+    eng.checkpoint = cp
+    # 実 cp を使う（page-level は済み扱い、field 単位は無い）。
+    eng._checkpoint_is_done = lambda url, field, *a, **k: cp.is_done(url, field, a[0] if a else 0, a[1] if len(a) > 1 else "") or (field == "(page)")
+    page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
+
+    class _Runner:
+        def __init__(self, browser, **kwargs):
+            pass
+
+        async def run(self, flow):
+            ran["flow"] = True
+            return True
+
+    with patch("wscan.engine.FlowRunner", _Runner):
+        async def _noop_refresh(page):
+            return None
+        eng._refresh_page_after_flow = _noop_refresh
+        eng._urls_same_page = lambda a, b: True
+        asyncio.run(eng._attack_one_page(page, {}))
+
+    assert ran["flow"] is True  # flow-exposed marker あり → skip せず再生
 
 
 def test_pre_attack_flow_with_out_of_scope_navigate_is_refused():
