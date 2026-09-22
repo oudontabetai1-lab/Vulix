@@ -155,7 +155,12 @@ class FlowRunner:
             # selector があればそれを優先し、無ければ field(name/id)から組み立てる。これで
             # record→scan --flows の再生が実際に効く（click と対称・F09）。
             ident = step.selector or step.field
-            masked = any(p in ident.lower() for p in ("password", "pass", "passwd"))
+            # `#pwd` / `#pw` / secret 系の識別子も伏せる。console 出力は CI/operator ログに
+            # 残るため平文パスワードを出さない（表示のみの判定なので安全側に広く取る・Codex #170 P2）。
+            masked = any(
+                p in ident.lower()
+                for p in ("password", "passwd", "pass", "pwd", "secret")
+            )
             display_val = "***" if masked else step.value
             console.print(f"  [dim]{label} fill [{ident}] = {display_val[:40]}[/dim]")
             filled = await self.browser.page.evaluate(

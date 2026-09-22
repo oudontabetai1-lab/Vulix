@@ -4924,13 +4924,15 @@ class ScanEngine:
 
         if page.forms is None:
             page.forms = []
-        have = {_sig(f) for f in page.forms}
-        added = 0
-        for f in fresh_forms:
-            if _sig(f) not in have:
-                page.forms.append(f)
-                have.add(_sig(f))
-                added += 1
+        # 同一署名のフォームは **replay 時の fresh コピーで置換** する。crawl 時の index は flow が
+        # フォームを挿入/削除/並べ替えると陳腐化し、_attack_page がその index を
+        # fill_and_submit_form へ渡すと別フォームを掴む（Codex #170 P2）。fresh を基準に、
+        # fresh に無い crawl-only フォームだけ後ろに残す（到達性を落とさない）。
+        fresh_sigs = {_sig(f) for f in fresh_forms}
+        crawl_only = [f for f in page.forms if _sig(f) not in fresh_sigs]
+        prev_sigs = {_sig(f) for f in page.forms}
+        added = sum(1 for f in fresh_forms if _sig(f) not in prev_sigs)
+        page.forms = list(fresh_forms) + crawl_only
         if fresh_params:
             if page.url_params is None:
                 page.url_params = []
@@ -4939,6 +4941,15 @@ class ScanEngine:
                 if name not in existing:
                     page.url_params.append(name)
                     existing.add(name)
+        # flow が URL を変えずに inline/外部 JS を露出し得る。js_static は page.html /
+        # page.external_scripts を見るため、HTML スナップショットも採り直す（Codex #170 P2）。
+        try:
+            fresh_html = await self.browser.get_page_source()
+            if fresh_html:
+                page.html = fresh_html
+                page.external_scripts = self._snapshot_external_scripts(fresh_html, page.url)
+        except Exception:
+            pass
         if added:
             console.print(
                 f"  [cyan][Flow] prerequisite exposed {added} new form(s) — scanning them too[/cyan]"
@@ -5184,7 +5195,9 @@ class ScanEngine:
 
         # 前提 flow は page-level 検査の前に実行・成否判定済み（上参照）。ここでは attack の
         # ため browser が target ページに居ることを確認し、ずれていれば復帰する。
-        if matched_flow:
+        # matched_flows は常に定義済み（空リスト可）。flow を1本でも再生したときだけ確認する
+        # （単数 matched_flow は _match_pre_attack_flows へのリネームで廃止・Codex #170 P1）。
+        if matched_flows:
             # Verify the browser ended on the intended target page.
             # A failed step in the flow may leave the browser on the wrong URL.
             try:

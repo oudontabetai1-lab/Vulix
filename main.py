@@ -3457,13 +3457,15 @@ async def run_setup(args):
         print("No description provided.")
         sys.exit(1)
 
+    # 提案候補の check 一覧は SCANNERS レジストリから導出する。ハードコードだと新規 scanner
+    # （cors/stored_xss/security_headers/request_smuggling/cache_poisoning 等）がモデルへ提示されず
+    # 「利用不可」と誤誘導して不完全な設定を生む（Codex #170 P2）。
+    from wscan.scanners import SCANNERS as _SCANNERS_FOR_PROMPT
+    _available_checks = ", ".join(sorted(_SCANNERS_FOR_PROMPT))
     prompt = (
         f"You are a web security scanner configuration assistant.\n"
         f"The user wants to scan this target: {description}\n\n"
-        f"Available checks: sqli, xss, dom_xss, os, ssti, path_traversal, "
-        f"csrf, header_injection, mail_header, open_redirect, clickjacking, session, privesc, "
-        f"nosql, deserialization, ssrf, graphql, jwt, cms, xxe, ldap, file_upload, "
-        f"race_condition, websocket\n\n"
+        f"Available checks: {_available_checks}\n\n"
         f"Based on the description, suggest the optimal scan command. "
         f"Return a JSON object with these fields:\n"
         f"  checks: list of check names to enable\n"
