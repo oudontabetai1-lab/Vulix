@@ -49,6 +49,30 @@ def test_load_flow_files_skips_broken_file_keeps_rest(tmp_path):
     assert [f["name"] for f in flows] == ["good"]   # 壊れた/欠落は skip、good は残る
 
 
+def test_load_flow_files_rejects_navigate_without_url(tmp_path):
+    # navigate に nonempty string url が無い flow は skip（_match_pre_attack_flows が
+    # 一致させられず前提が黙って無視される＝偽陰性を防ぐ・Codex #170 P2）。
+    bad_nav = tmp_path / "bad_nav.json"
+    bad_nav.write_text(json.dumps([{"action": "navigate"}]), encoding="utf-8")
+    bad_nav2 = tmp_path / "bad_nav2.json"
+    bad_nav2.write_text(json.dumps([{"action": "navigate", "url": 123}]), encoding="utf-8")
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps([{"action": "navigate", "url": "http://t/x"}]), encoding="utf-8")
+
+    flows = _load_flow_files([str(bad_nav), str(bad_nav2), str(good)])
+    assert [f["name"] for f in flows] == ["good"]
+
+
+def test_load_flow_files_rejects_click_without_selector_or_field(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps([
+        {"action": "navigate", "url": "http://t/x"},
+        {"action": "click"},
+    ]), encoding="utf-8")
+    flows = _load_flow_files([str(bad)])
+    assert flows == []
+
+
 def test_none_returns_empty():
     assert _load_flow_files(None) == []
 

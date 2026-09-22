@@ -433,6 +433,9 @@ def _build_eng_for_flow_skip(page_check_done: bool):
 
     eng = ScanEngine.__new__(ScanEngine)
     eng.scanners = {"security_headers": _PageScanner()}
+    # _checkpoint_has_field_units（#170 P2）が参照する。checkpoint 無しの最小構成。
+    eng.enable_checkpoint = False
+    eng.checkpoint = None
     eng._checkpoint_is_done = lambda *a, **k: page_check_done
     eng._checkpoint_mark_done = lambda *a, **k: None
     eng._record_scan_matrix = lambda *a, **k: None
@@ -496,3 +499,36 @@ def test_pre_attack_flow_runs_when_no_input_page_has_pending_check():
         asyncio.run(eng._attack_one_page(page, {}))
 
     assert ran["flow"] is True  # 残 probe あり → 従来どおり flow 再生
+
+
+def test_pre_attack_flow_runs_when_checkpoint_has_flow_exposed_field_units():
+    """入力無し crawl・page-level 済みでも、前回 flow が露出した入力の field 単位が checkpoint に
+    あれば flow を再生する（中断された field 検査を取りこぼさない・Codex #170 P2）。"""
+    from wscan.checkpoint import CheckpointState
+    ran = {"flow": False}
+    eng = _build_eng_for_flow_skip(page_check_done=True)
+    # 実 checkpoint を有効化し、この URL に field 単位（field_name != "(page)"）を1つ記録する。
+    eng.enable_checkpoint = True
+    cp = CheckpointState()
+    cp.mark_done("http://t.test/cart", "coupon", 0, "xss")  # flow が露出した想定の入力
+    eng.checkpoint = cp
+    eng._checkpoint_is_done = lambda *a, **k: True
+    page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
+
+    class _Runner:
+        def __init__(self, browser):
+            pass
+
+        async def run(self, flow):
+            ran["flow"] = True
+            return True
+
+    with patch("wscan.engine.FlowRunner", _Runner):
+        # refresh 内の find_forms 等は browser 依存なので最小スタブ。
+        async def _noop_refresh(page):
+            return None
+        eng._refresh_page_after_flow = _noop_refresh
+        eng._urls_same_page = lambda a, b: True
+        asyncio.run(eng._attack_one_page(page, {}))
+
+    assert ran["flow"] is True  # field 単位あり → skip せず再生

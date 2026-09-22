@@ -177,24 +177,45 @@ class FlowRunner:
                     } else {
                         el = find(`[name="${f}"],[id="${f}"]`);
                     }
-                    if (!el) return false;
-                    // 旧記録は checkbox/radio も fill(value) で保存する。value 代入では checked が
-                    // 変わらず前提（規約同意等）を再現できないため、checked を復元する（#170 P2）。
+                    if (!el) return {ok: false, ambiguous: false};
+                    // 旧記録は checkbox/radio も fill(value) で保存する。value は checked を符号化
+                    // しない（未チェックでも value は "on"/value属性のまま）ため、明示的な真偽トークン
+                    // だけを信頼し、それ以外は checked と仮定しつつ ambiguous を返して呼び出し側で
+                    // 警告する（黙ってチェック状態を反転させない・Codex #170 P2）。現行 record は
+                    // checkbox/radio を click で記録するのでこの曖昧さは生じない。
+                    let ambiguous = false;
                     if (el.type === 'checkbox' || el.type === 'radio') {
-                        el.checked = v !== '' && v !== 'false' && v !== 'off' && v !== '0';
+                        const low = String(v).toLowerCase();
+                        const falsy = (v === '' || low === 'false' || low === 'off'
+                                       || low === '0' || low === 'no' || low === 'unchecked');
+                        const truthyExplicit = (low === 'true' || low === '1'
+                                                || low === 'checked' || low === 'yes');
+                        el.checked = !falsy;
+                        ambiguous = !falsy && !truthyExplicit;
                     } else {
                         el.value = v;
                     }
                     ['input', 'change', 'blur'].forEach(e =>
                         el.dispatchEvent(new Event(e, {bubbles: true}))
                     );
-                    return true;
+                    return {ok: true, ambiguous: ambiguous};
                 }""",
                 [step.selector, step.field, step.value],
             )
-            if not filled:
+            # JS は {ok, ambiguous} を返す。ok/ambiguous を安全に取り出す（旧 bool 返しにも耐性）。
+            ok = filled.get("ok") if isinstance(filled, dict) else bool(filled)
+            ambiguous = filled.get("ambiguous") if isinstance(filled, dict) else False
+            if not ok:
                 # 存在しない欄への fill を成功扱いにすると前提の欠落を見逃す（F10）。
                 raise FlowStepError(f"fill target not found: {ident!r}")
+            if ambiguous:
+                # 旧記録の checkbox/radio は真の checked を値から復元できない。checked と仮定した
+                # ことを明示し、現行 record（click 記録）での再取得を促す（黙って反転させない）。
+                console.print(
+                    f"  [yellow]{label} fill [{ident}]: 旧記録の checkbox/radio は値から "
+                    f"checked 状態を復元できません（checked と仮定）。現行の record は click で "
+                    f"記録するため再記録を推奨[/yellow]"
+                )
 
         elif step.action == "submit":
             console.print(f"  [dim]{label} submit[/dim]")

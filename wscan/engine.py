@@ -4908,9 +4908,9 @@ class ScanEngine:
         ベストエフォート（抽出失敗時は既存のまま）。
         """
         try:
-            fresh_forms = await self.browser.find_forms()
+            fresh_forms = await self.browser.find_forms()  # 成功時は list（空もあり）
         except Exception:
-            fresh_forms = []
+            fresh_forms = None  # 抽出失敗（None で成功-空 [] と区別する）
         try:
             fresh_params = self._merge_url_params(
                 await self.browser.get_url_params(), page.url
@@ -4924,15 +4924,17 @@ class ScanEngine:
 
         if page.forms is None:
             page.forms = []
-        # 同一署名のフォームは **replay 時の fresh コピーで置換** する。crawl 時の index は flow が
-        # フォームを挿入/削除/並べ替えると陳腐化し、_attack_page がその index を
-        # fill_and_submit_form へ渡すと別フォームを掴む（Codex #170 P2）。fresh を基準に、
-        # fresh に無い crawl-only フォームだけ後ろに残す（到達性を落とさない）。
-        fresh_sigs = {_sig(f) for f in fresh_forms}
-        crawl_only = [f for f in page.forms if _sig(f) not in fresh_sigs]
-        prev_sigs = {_sig(f) for f in page.forms}
-        added = sum(1 for f in fresh_forms if _sig(f) not in prev_sigs)
-        page.forms = list(fresh_forms) + crawl_only
+        # 抽出が **成功** したら fresh を正典にする（Codex #170 P2）。crawl 時に採った form の
+        # DOM index は flow が form を削除/並べ替えると陳腐化し、stale な crawl-only form を
+        # 後ろに残すと _attack_page がその index を fill_and_submit_form へ渡して別 form を掴む/
+        # 署名変化で同一 live form を二重攻撃する。post-flow の現在ページ（_on_target 済み）から
+        # 採り直した fresh がそのページの権威。抽出 **失敗時のみ** 既存を保持し到達性を落とさない。
+        if fresh_forms is None:
+            added = 0  # 抽出失敗: 既存 page.forms をそのまま維持
+        else:
+            prev_sigs = {_sig(f) for f in page.forms}
+            added = sum(1 for f in fresh_forms if _sig(f) not in prev_sigs)
+            page.forms = list(fresh_forms)
         if fresh_params:
             if page.url_params is None:
                 page.url_params = []
@@ -4979,6 +4981,25 @@ class ScanEngine:
                     continue
             cp_url = _page_check_cp_url(check_name, page.url)
             if not self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
+                return True
+        return False
+
+    def _checkpoint_has_field_units(self, url: str) -> bool:
+        """この URL に field/param 単位の完了記録があるか（checkpoint 参照のみ・純粋）。
+
+        crawl スナップショットが入力ゼロでも、前回 run で pre-attack flow が露出したフォーム/
+        パラメータを検査済みなら field 単位（field_name != "(page)"）が残る。resume の flow skip
+        判定で「入力なし＝page-level のみ」と誤断して flow を捨て、中断された field 検査を取りこぼす
+        のを防ぐ signal（Codex #170 P2）。pending 単位は保存されないため、field 単位が1つでも
+        あれば安全側に倒して flow を再生する（=残作業を再構成できる）。
+        """
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return False
+        from wscan.url_normalize import normalize_url_for_key
+        target = normalize_url_for_key(url or "")
+        for key in self.checkpoint.completed_units:
+            parts = key.split("\x1f")
+            if len(parts) >= 2 and parts[0] == target and parts[1] and parts[1] != "(page)":
                 return True
         return False
 
@@ -5052,7 +5073,12 @@ class ScanEngine:
         # なし」を厳密に判定できる。入力のあるページは従来どおり再生する（field/adaptive 単位の厳密
         # 列挙は取りこぼし時に必要な flow を誤 skip＝偽陰性を生むため行わない）。
         if (matched_flows and not page.forms and not page.url_params
-                and not self._page_level_checks_pending(page)):
+                and not self._page_level_checks_pending(page)
+                and not self._checkpoint_has_field_units(page.url)):
+            # crawl スナップショットが入力ゼロでも、前回 flow が露出した入力を検査した痕跡
+            # （field 単位）があれば skip しない：refresh が入力を再露出し、中断された field
+            # 検査を再開できるようにする（Codex #170 P2）。field 単位が無ければ従来どおり
+            # state 変更 flow の無駄な再実行を避ける（#167 P2）。
             console.print(
                 f"  [dim][Flow] Skip pre-attack flow (page fully checkpointed): "
                 f"{matched_flows[0].name} @ {page.url}[/dim]"

@@ -2153,6 +2153,33 @@ def _load_flow_files(paths) -> list[dict]:
                 f"有効: {sorted(_VALID_FLOW_ACTIONS)}"
             )
             continue
+        # action ごとの必須フィールドも読み込み時に検証する。特に navigate は nonempty string
+        # url が無いと _match_pre_attack_flows が最終 navigate を実ページに一致させられず、前提が
+        # 黙って無視される（未知 action と違い警告も runner の失敗報告も出ない＝偽陰性・Codex #170 P2）。
+        # fill/click は selector か field が無いと replay 時に "target not found" で明示失敗するが、
+        # ここでも早期に弾いて他 flow・スキャンを止めない。
+        def _flow_field_error(s: dict) -> str:
+            act = str(s.get("action", ""))
+            if act == "navigate":
+                u = s.get("url")
+                if not (isinstance(u, str) and u.strip()):
+                    return "navigate は空でない文字列 url が必須"
+            elif act in ("fill", "click"):
+                has_sel = isinstance(s.get("selector"), str) and s.get("selector").strip()
+                has_field = isinstance(s.get("field"), str) and s.get("field").strip()
+                if not has_sel and not has_field:
+                    return f"{act} は selector か field が必須"
+            return ""
+        field_errs = [
+            _flow_field_error(s) for s in candidate["steps"] if isinstance(s, dict)
+        ]
+        field_errs = [e for e in field_errs if e]
+        if field_errs:
+            print(
+                f"[warn] --flows: {fp} の step に必須フィールド欠落（skip）: "
+                f"{sorted(set(field_errs))}"
+            )
+            continue
         flows.append(candidate)
 
     # 同一遷移先の複数 flow は「統合」せず、ScanEngine 側が一致する flow を **file 順に全て

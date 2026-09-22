@@ -94,6 +94,26 @@ class FlowRecorder:
 
             # ページに監視スクリプト注入
             await page.add_init_script(f"""
+                // id 無し要素の一意な CSS パスを組み立てる。`button[type=submit]`（type 無しの
+                // 既定 submit ボタンに一致しない）や `a`（先頭リンクを掴む）では replay が別要素を
+                // click し得るため、祖先 id か nth-of-type チェーンで一意化する（Codex #170 P2）。
+                const __wscanEsc = (v) => (window.CSS && CSS.escape) ? CSS.escape(v) : v;
+                function __wscanPath(el) {{
+                    if (el.id) return '#' + __wscanEsc(el.id);
+                    const parts = [];
+                    let node = el;
+                    while (node && node.nodeType === 1
+                           && node.tagName !== 'HTML' && node.tagName !== 'BODY') {{
+                        if (node.id) {{ parts.unshift('#' + __wscanEsc(node.id)); break; }}
+                        let i = 1, sib = node;
+                        while ((sib = sib.previousElementSibling)) {{
+                            if (sib.tagName === node.tagName) i++;
+                        }}
+                        parts.unshift(node.tagName.toLowerCase() + ':nth-of-type(' + i + ')');
+                        node = node.parentElement;
+                    }}
+                    return parts.join(' > ');
+                }}
                 document.addEventListener('change', function(e) {{
                     const el = e.target;
                     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {{
@@ -121,10 +141,13 @@ class FlowRecorder:
                     }}
                 }}, true);
                 document.addEventListener('click', function(e) {{
-                    const el = e.target;
-                    if (el.tagName === 'BUTTON' || el.type === 'submit' || el.tagName === 'A') {{
-                        const esc = (window.CSS && CSS.escape) ? CSS.escape(el.id) : el.id;
-                        const sel = el.id ? '#' + esc : (el.type === 'submit' ? 'button[type=submit]' : el.tagName.toLowerCase());
+                    // クリック対象がボタン/リンク内の子要素（アイコン span 等）でも、
+                    // closest で実際の操作要素へ解決してから一意セレクタを記録する。
+                    const el = e.target && e.target.closest
+                        ? e.target.closest('button, a, input[type=submit], [type=submit]')
+                        : null;
+                    if (el) {{
+                        const sel = __wscanPath(el);
                         if (typeof window['{_fn_click}'] === 'function') {{
                             window['{_fn_click}'](sel);
                         }}
