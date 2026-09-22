@@ -184,6 +184,14 @@ Evidence: alert dialog was observed
                 ),
                 variant,
             )
+        # 設定 access scope 自体が query 付き（/login?tenant=a）でも、正規化を両側対称に行い
+        # 候補 /login を access-only と判定して probe 禁止にする（Codex #154 P1）。
+        self.assertFalse(
+            security_probe_allowed(
+                "http://fixture.test/login", target_urls, [],
+                access_urls=["http://fixture.test/login?tenant=a"],
+            )
+        )
 
 
 class AgentReconHandoffTests(unittest.IsolatedAsyncioTestCase):

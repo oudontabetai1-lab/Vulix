@@ -11,13 +11,29 @@ from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunspli
 _INJECTION_META_CHARS = frozenset("<>\"'`;(){}|\\%*")
 
 
+def _looks_url_valued(value: str) -> bool:
+    """値が URL/準 URL（SSRF・open-redirect payload）かを判定する（純粋・Codex #154 P1）。
+
+    ``http://127.0.0.1/``・``http://169.254.169.254/...``・``https://evil.com``・``//evil.com`` は
+    メタ文字を含まず 64 字以下でも payload。scheme:// 始まり・protocol-relative ``//``・``://`` 含有を
+    URL 値とみなす。単一スラッシュ始まりの routing 値（``/home``）は URL 値ではないので保持される。
+    """
+    low = value.strip().lower()
+    return (
+        low.startswith(("http://", "https://", "ftp://", "file://", "gopher://", "dict://", "ldap://", "//"))
+        or "://" in low
+    )
+
+
 def endpoint_identity(url: str) -> str:
     """routing 値は保持し、注入らしい値だけを空にして probe の重複を除く。"""
     parsed = urlsplit(url)
     pairs = set()
     for key, value in parse_qsl(parsed.query, keep_blank_values=True):
-        # ponytail: メタ文字・64文字超の簡易判定。必要なら routing の明示契約へ。
-        if len(value) > 64 or any(char in _INJECTION_META_CHARS or char.isspace() for char in value):
+        # ponytail: メタ文字・64文字超・URL 値の簡易判定。必要なら routing の明示契約へ。
+        if (len(value) > 64
+                or any(char in _INJECTION_META_CHARS or char.isspace() for char in value)
+                or _looks_url_valued(value)):
             value = ""
         pairs.add((key, value))
     return urlunsplit(parsed._replace(query=urlencode(sorted(pairs)), fragment=""))

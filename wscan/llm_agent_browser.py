@@ -194,6 +194,16 @@ def _url_is_excluded(url: str, exclude_urls: list[str]) -> bool:
     return False
 
 
+def _strip_query_fragment(u: str) -> str:
+    """URL/パスから query と fragment を落として scheme+netloc+path へ正規化する（純粋）。
+
+    access-only 照合を候補・設定 scope の両側で対称に行うため（Codex #154 P1）。path 指定
+    （scheme 無し）はそのまま path を返す。
+    """
+    p = urlparse(str(u or "").strip())
+    return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
+
+
 def security_probe_allowed(
     url: str,
     target_urls: list[str],
@@ -212,11 +222,12 @@ def security_probe_allowed(
     # target scope より access scope を優先する（訪問/認証のみの契約を守る・Codex #154 P1）。
     # full-URL scope は exact/`scope+"/"` 一致のみのため、query/fragment 付きの login 変種
     # （`/login?next=/home`・`/login#step2`）が access scope に一致せず probe 許可されてしまう。
-    # access 判定では URL を scheme+netloc+path へ正規化してから照合する（Codex #154 P1）。
+    # **候補・設定 scope の両側**を scheme+netloc+path へ正規化してから照合する。片側だけだと
+    # 設定 scope 自体が `/login?tenant=a` のとき正規化候補 `/login` と一致しない（Codex #154 P1）。
     if access_urls:
-        _p = urlparse(url)
-        _access_probe = urlunparse((_p.scheme, _p.netloc, _p.path, "", "", ""))
-        if _url_matches_scope(_access_probe, _normalize_scope_urls(access_urls)):
+        _access_probe = _strip_query_fragment(url)
+        _norm_access = [_strip_query_fragment(a) for a in _normalize_scope_urls(access_urls)]
+        if _url_matches_scope(_access_probe, _norm_access):
             return False
     excluded_fields = {str(name).strip().lower() for name in (exclude_fields or [])}
     return not field_name or field_name.strip().lower() not in excluded_fields
@@ -1757,6 +1768,12 @@ class AgentBrowserScanner:
                 "totp_secret": self.totp_secret,
                 "headers": sorted(self.extra_headers.items()),
                 "storage_state": storage_digest,
+                # LLM エンドポイントも resume 同一性に含める。provider/model 名だけだと、同じ
+                # model ラベルで別 OpenAI 互換/Ollama サーバへ resume され、無関係なモデルの成果を
+                # 結合しうる（--resume は元条件の一致を約束する・Codex #154 P2）。末尾スラッシュを
+                # 正規化して安定化する。
+                "llm_base_url": str(self.llm_base_url or "").strip().rstrip("/"),
+                "ollama_url": str(getattr(self, "ollama_url", "") or "").strip().rstrip("/"),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1825,21 +1842,21 @@ class AgentBrowserScanner:
         # なり未完了なのに coverage 完了と誤報告する（Codex #154 P1）。マーカーが行の先頭または
         # 末尾に立ち（"No coverage gaps found. REVIEW COMPLETE" のような肯定末尾も可）、かつ同一行の
         # マーカーより前に行為否定語（cannot/unable 等）が無い行だけを肯定完了とみなす。
-        _NEG_BEFORE = (
+        # 否定/留保語は marker の **前後どちらでも** 拒否する。marker 前だけを見ると
+        # "PROBE COMPLETE was not reached" / "PROBE COMPLETE but several inputs remain" が
+        # before 空で通ってしまう（Codex #154 P1）。exact 一致は無条件肯定、start/end 一致は
+        # 行全体に否定/留保語が無い場合のみ肯定完了とみなす。
+        _NEG = (
             "CANNOT", "CAN'T", "UNABLE", "WON'T", "COULDN'T", "DO NOT", "DON'T",
-            "DID NOT", "DIDN'T", "NOT ABLE", "NOT YET", "WITHOUT",
+            "DID NOT", "DIDN'T", " NOT ", "NOT ABLE", "NOT YET", "WITHOUT",
+            "BUT ", "REMAIN", "INCOMPLETE", "UNFINISHED", "FAILED", "PENDING",
         )
         for line in upper.splitlines():
             s = line.strip().lstrip("-*#>・ ").strip().rstrip(".!:）) ")
-            standalone = (
-                s == marker
-                or s.startswith(marker + " ")
-                or s.endswith(" " + marker)
-            )
-            if not standalone:
-                continue
-            before = s.split(marker, 1)[0]
-            if not any(neg in before for neg in _NEG_BEFORE):
+            if s == marker:
+                return True
+            if (s.startswith(marker + " ") or s.endswith(" " + marker)) \
+                    and not any(neg in s for neg in _NEG):
                 return True
         return False
 

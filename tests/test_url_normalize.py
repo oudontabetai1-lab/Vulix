@@ -335,6 +335,25 @@ def test_endpoint_identity_collapses_injection_values(value):
     assert endpoint_identity("/search?" + urlencode({"q": value})) == endpoint_identity("/search?q=1'")
 
 
+@pytest.mark.parametrize("value", [
+    "http://127.0.0.1/", "http://169.254.169.254/latest/meta-data/",
+    "https://evil.com", "//evil.com", "gopher://x/y",
+])
+def test_endpoint_identity_collapses_url_valued_payloads(value):
+    # SSRF/open-redirect の URL 値はメタ文字無し・短くても payload として畳む（budget 膨張防止・#154 P1）。
+    from urllib.parse import urlencode
+    from wscan.url_normalize import endpoint_identity
+    assert endpoint_identity("/go?" + urlencode({"next": value})) == "/go?next="
+
+
+def test_endpoint_identity_url_payloads_do_not_blow_up_but_routes_stay_distinct():
+    from wscan.url_normalize import endpoint_identity
+    # 複数の SSRF 標的は同一 identity へ（probe 膨張なし）。
+    assert endpoint_identity("/go?url=http://127.0.0.1/") == endpoint_identity("/go?url=https://evil.com")
+    # 単一スラッシュの routing 値は URL 値ではないので保持（別 identity）。
+    assert endpoint_identity("/go?next=/home") != endpoint_identity("/go?next=/admin")
+
+
 @pytest.mark.parametrize("value", ["/home", "/admin", "/a/b/c", "/"])
 def test_endpoint_identity_preserves_slash_routing_values(value):
     # `/` を含む path/route 値は payload ではなく routing 値として保持する（Codex #154 P1）。

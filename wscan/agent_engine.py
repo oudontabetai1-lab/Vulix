@@ -294,15 +294,16 @@ class AgentEngine:
         from wscan.reproduction import write_reproduction_package
         # 認証（user/pass・TOTP・storage-state）を使った run の finding は認証セッション無しでは
         # 再現不能なので、reproduction に authorization_required を立てる（Codex #154 P2）。
-        # bearer は --bearer で extra_headers（Authorization 等）として渡るため、機微ヘッダの
-        # 有無も認証済み扱いに含める（さもないと bearer 認証 run が authorization_required=false に
-        # なる・Codex #154 P2）。
-        from wscan.request_logger import _is_sensitive_header
+        # bearer/カスタム認証ヘッダは extra_headers として渡る。Agent path は
+        # register_sensitive_headers を呼ばないため `_is_sensitive_header` は `X-Company-Auth` 等の
+        # カスタム名を認識できない。operator が明示指定した extra_headers は認証/コンテキスト付与と
+        # みなし、**存在するだけで** authenticated 扱いにする（authorization_required=true が安全側。
+        # 良性ヘッダでも注記が付くだけで無害・Codex #154 P2）。
         authenticated_run = bool(
             (self.auth_user and self.auth_pass)
             or self.totp_secret
             or self.storage_state
-            or any(_is_sensitive_header(name) for name in self.extra_headers)
+            or self.extra_headers
         )
         write_reproduction_package(
             findings, self.output_dir, authenticated=authenticated_run
