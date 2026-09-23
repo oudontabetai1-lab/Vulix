@@ -52,6 +52,7 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     "host_header":       ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",  5.4),
     "security_headers":  ("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N",  3.1),
     "outdated_components": ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L",  4.8),
+    "http_methods":      ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",  6.5),
     "tls_scan":          ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",  5.9),
     "nosql":             ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",  9.1),
     "deserialization":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
@@ -615,7 +616,15 @@ class PageDocumentUnavailable(RuntimeError):
     header 観測系（clickjacking/security_headers）はこれを送出し、engine の page-level except に
     捕捉させて **checkpoint を完了扱いにしない**（[] を返すと tested/完了で恒久 skip となり resume が
     再試行できない・Codex #145 P2 round15）。3xx 等の legitimate NOT_REACHED では送出しない。
+
+    後続 probe の失敗で送出する前に既に得た finding は ``findings`` に載せ、engine 側の except が
+    それらへ ``_record_finding`` の副作用（通知/監視 emit 等）を回せるようにする（raise で partial
+    finding の副作用が失われるのを防ぐ・Codex #157 P2）。
     """
+
+    def __init__(self, *args, findings=None):
+        super().__init__(*args)
+        self.findings = list(findings or [])
 
 
 class _DirectResponse:

@@ -367,7 +367,9 @@ def test_generate_report_passes_only_display_scope_matrix(monkeypatch, tmp_path)
         coverage_summary=lambda: {},
     )
 
-    ScanEngine._generate_report(engine)
+    # HTML 描画（display scope matrix の適用）は _render_report_templates に集約された
+    # （_generate_report はブラウザ/monitor 配線のみ・Codex #172 P2）。
+    ScanEngine._render_report_templates(engine)
 
     assert len(generated) == 3
     assert all(call["scan_matrix"] == [xss_row, access_row] for call in generated)

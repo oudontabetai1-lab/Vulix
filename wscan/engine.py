@@ -182,6 +182,11 @@ _AUTO_ENABLED_CHECKS: frozenset[str] = frozenset({"cms", "privesc"})
 # する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
 _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 
+# 1 件の finding 検証（_verify_one）の上限秒。正常な verify_finding は実測で ~50-115s に収まるため
+# 十分な余裕を取りつつ、内部 await が返らない病的ケースが verify フェーズ全体（＝スキャン）を
+# 止めるのを防ぐ（超過は "skipped"＝未検証/要手動確認へ・F06/0059）。
+_VERIFY_ONE_TIMEOUT_S = 180.0
+
 # SPA 収穫の JSON body を実攻撃するチェック。capability 判定に加えて明示的な
 # ホワイトリストを置き、将来の対応拡大が意図せず攻撃範囲を広げるのを防ぐ。
 _JSON_INJECTION_CHECKS = ("sqli",)
@@ -254,9 +259,59 @@ def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
     # 境界が "/" であること（/admin が /administrator に誤マッチしないように）
     return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
 
+
+def _scoped_cookie_header(cookies: list | None, url: str) -> str | None:
+    """ブラウザ jar の cookie 群から、``url`` のホスト/パスへ送られる Cookie ヘッダを作る（純粋・RFC6265）。
+
+    domain（host-only は完全一致のみ・domain-scoped は suffix 可）と path（``_cookie_path_matches``）で
+    絞り、Path の長い順（§5.4）に並べる。空なら ""。同一ホストでも origin ルート(/) と page(/admin)で
+    送るべき Cookie が変わる（Path=/admin は / に送らない）ため、URL 単位でスコープした文字列を返す。
+    """
+    if cookies is None:
+        return None  # 取得失敗と正当な空 jar を区別する。
+    from urllib.parse import urlparse as _up
+    parsed = _up(url or "")
+    target_host = (parsed.hostname or "").lower()
+    req_path = parsed.path or "/"
+    is_https = (parsed.scheme or "").lower() == "https"
+    matched: list[tuple[str, str]] = []
+    for c in (cookies or []):
+        name = c.get("name")
+        if not name:
+            continue
+        # Secure Cookie は HTTPS 宛以外に送らない（ブラウザの Secure 強制と同じ）。手組み Cookie を
+        # 平文 HTTP へ送ると TRACE 反射等で秘匿値が漏れる（Codex #157）。
+        if c.get("secure") and not is_https:
+            continue
+        raw_dom = str(c.get("domain", ""))
+        is_domain_cookie = raw_dom.startswith(".")
+        dom = raw_dom.lstrip(".").lower()
+        if dom and target_host and not (
+            target_host == dom
+            or (is_domain_cookie and target_host.endswith("." + dom))
+        ):
+            continue
+        cpath = str(c.get("path", "/") or "/")
+        if not _cookie_path_matches(req_path, cpath):
+            continue
+        # CHIPS（partitioned）Cookie は partitionKey の top-level site でだけ送られる。直接 probe の
+        # top-level は宛先自身なので、宛先の schemeful site に一致しない partition の Cookie は送らない
+        # （別 partition の資格情報で認証・TRACE で露出しない・Codex #157 P1）。
+        pkey = c.get("partitionKey")
+        if pkey:
+            kp = _up(pkey if "://" in str(pkey) else f"https://{pkey}")
+            khost = (kp.hostname or "").lower()
+            if not (khost and (kp.scheme or "").lower() == (parsed.scheme or "").lower()
+                    and (target_host == khost or target_host.endswith("." + khost))):
+                continue
+        matched.append((cpath, f"{name}={c.get('value', '')}"))
+    matched.sort(key=lambda pv: len(pv[0]), reverse=True)
+    return "; ".join(pv[1] for pv in matched)
+
 import yaml
 from rich.console import Console
 from rich.rule import Rule
+from rich.markup import escape
 from rich.table import Table
 from rich import box as rbox
 
@@ -552,6 +607,7 @@ class ScanEngine:
         openai_base_url: str = "",
         role_models: Optional[dict] = None,
         llm_timeout_seconds: float = 30.0,
+        llm_stream_timeout_seconds: float = 90.0,
         llm_max_retries: int = 2,
         checks: Optional[list] = None,
         output_dir: Optional[str] = None,
@@ -1101,11 +1157,14 @@ class ScanEngine:
             openai_base_url=openai_base_url,
             role_models=role_models,
             llm_timeout_seconds=llm_timeout_seconds,
+            llm_stream_timeout_seconds=llm_stream_timeout_seconds,
             llm_max_retries=llm_max_retries,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
         )
+        # LLM 呼び出し観測性（0065）：complete_text がここから logger を getattr で拾う。
+        self.payload_gen.request_logger = self.request_logger
 
         # Central registry lives in wscan/scanners/__init__.py
         from .scanners import SCANNERS as _SCANNERS
@@ -1215,9 +1274,13 @@ class ScanEngine:
             category = note.split(":", 1)[0].strip() if ":" in note else "other"
             category = category or "other"
             by_category[category] = by_category.get(category, 0) + 1
+        # LLM 呼び出し総数を併記（llm_calls.jsonl の件数・0065）。詳細な role/status/latency 集計は
+        # RequestLogger に構造化カウンタを足す follow-up（step2）で。ここは可視化の第一歩の count のみ。
+        rl = getattr(self, "request_logger", None)
         return {
             "total": len(self.wave_errors),
             "by_category": by_category,
+            "llm_calls": getattr(rl, "llm_call_count", 0) if rl is not None else 0,
         }
 
     def coverage_summary(self) -> dict:
@@ -2376,7 +2439,6 @@ class ScanEngine:
         ホストを渡さないと host-only Cookie が落ちて API 検査が未認証になる。
         """
         try:
-            from urllib.parse import urlparse as _up
             page = getattr(browser, "page", None)
             if page is None:
                 return
@@ -2389,43 +2451,26 @@ class ScanEngine:
             # できないため上の except/None 経路では据え置く（無闇に消さない）。
             self.cookies = ""
             return
-        _parsed = _up(for_url or self.target_url)
-        target_host = (_parsed.hostname or "").lower()
-        req_path = _parsed.path or "/"
-        # (path, "name=value") を集めてから RFC 6265 §5.4 の並びへ整える。
-        matched: list[tuple[str, str]] = []
-        for c in cookies:
-            name = c.get("name")
-            if not name:
-                continue
-            raw_dom = str(c.get("domain", ""))
-            # 先頭ドットの有無で host-only か domain-scoped かを判別する
-            # （Playwright: ドメイン Cookie は ".example.com"、host-only は "example.com"）。
-            is_domain_cookie = raw_dom.startswith(".")
-            dom = raw_dom.lstrip(".").lower()
-            # ブラウザの送出規則に合わせて採用する:
-            #  - 完全一致は常に可
-            #  - サブドメインへの suffix 一致は **domain-scoped Cookie のときだけ** 可
-            #    （host-only な example.com の Cookie を api.example.com へ送らない）。
-            if dom and target_host and not (
-                target_host == dom
-                or (is_domain_cookie and target_host.endswith("." + dom))
-            ):
-                continue
-            cpath = str(c.get("path", "/") or "/")
-            # path スコープも照合（Path=/admin の Cookie を /api へ送らない）。
-            if not _cookie_path_matches(req_path, cpath):
-                continue
-            matched.append((cpath, f"{name}={c.get('value', '')}"))
-        # RFC 6265 §5.4: path の長いものを先に送る（同名 Cookie が / と /admin に
-        # ある場合、より具体的な /admin を先頭に）。最初の値を使うフレームワークで
-        # 誤ったセッション（root cookie）で検査するのを防ぐ。stable sort なので同じ
-        # path 長は元の順序（概ね生成順）を保つ。
-        matched.sort(key=lambda pv: len(pv[0]), reverse=True)
-        # マッチ集合で**常に置換**する（空でも）。per-URL 同期では、前の URL で
-        # 別ホスト用に設定した self.cookies が残ると、当該ホストに無関係な Cookie を
+        # domain/path スコープした Cookie ヘッダで**常に置換**する（空でも）。per-URL 同期では、
+        # 前の URL で別ホスト用に設定した self.cookies が残ると、当該ホストに無関係な Cookie を
         # 送って別セッションで検査してしまう。一致が無ければクリアして未認証で送る。
-        self.cookies = "; ".join(pv[1] for pv in matched)
+        self.cookies = _scoped_cookie_header(cookies, for_url or self.target_url)
+
+    async def cookie_header_for_url(self, url: str) -> str | None:
+        """``url`` のホスト/パスへ送られる Cookie ヘッダをブラウザ jar から作る（path/domain スコープ済み）。
+
+        ``self.cookies`` は同期時の for_url（=ページ path）でスコープされ Path=/ と Path=/admin の
+        両方を含むため、origin ルート(/) の probe へそのまま送ると Path=/admin の Cookie を漏らす。
+        本メソッドは URL 単位で再スコープした文字列を返し、origin と page で送り分けられるようにする
+        （http_methods 等が使用・Codex #157）。jar 空は ""、ブラウザ未接続・取得例外時は None（呼び出し側で記録・未完了扱い）。"""
+        try:
+            page = getattr(self.browser, "page", None)
+            if page is None:
+                return None
+            cookies = await page.context.cookies()
+        except Exception:
+            return None
+        return _scoped_cookie_header(cookies, url)
 
     async def _maybe_relogin_for_page(self, url: str) -> None:
         """攻撃対象ページの状態を見てセッション失効なら再ログインする。
@@ -2549,6 +2594,22 @@ class ScanEngine:
     # Public entry point
     # =========================================================================
 
+    def _profile(self, msg: str) -> None:
+        """WSCAN_PROFILE=1 のとき scan 開始からの経過秒を stderr へ即時 flush 出力する（F06/0059 計測用）。
+
+        E2E が SCAN_TIMEOUT_S で殺されても「どこで時間が集中したか / 最後にどの単位で止まったか」を
+        残すため、まとめてでなく逐次出力する。本番は環境変数未設定で完全 no-op（オーバーヘッドなし）。
+        """
+        if not os.environ.get("WSCAN_PROFILE"):
+            return
+        import time as _t
+        import sys as _s
+        t0 = getattr(self, "_scan_t0", None)
+        if t0 is None:
+            t0 = _t.monotonic()
+            self._scan_t0 = t0
+        print(f"[PROFILE +{_t.monotonic() - t0:7.1f}s] {msg}", file=_s.stderr, flush=True)
+
     async def run(self):
         """4-phase scan pipeline."""
         if self.monitor:
@@ -2646,7 +2707,9 @@ class ScanEngine:
 
                 # ── Phase 1: Crawl ───────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("crawl")
+                self._profile("crawl: start")
                 crawled_pages = await self._phase_crawl()
+                self._profile(f"crawl: done ({len(crawled_pages)} pages)")
 
                 # ── Phase 1b: Crawl Review (crawl→plan 間の一時停止レビュー) ──
                 if self.interactive_crawl_review and self.monitor:
@@ -2663,11 +2726,15 @@ class ScanEngine:
 
                 # ── Phase 2: Plan ────────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("plan")
+                self._profile("plan: start")
                 plans = await self._phase_plan(crawled_pages)
+                self._profile("plan: done")
 
                 # ── Phase 3: Attack ──────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("attack")
+                self._profile("attack: start")
                 await self._phase_attack(crawled_pages, plans)
+                self._profile("attack: done")
             except AbortScan:
                 scan_aborted = True
                 # 中断時点の Finding と進捗を必ず永続化してから続行する。payload 単位の
@@ -2689,11 +2756,15 @@ class ScanEngine:
             # この後続フェーズは実行しない（abort 制御の信頼性を保つ）。
             if not scan_aborted:
                 try:
+                    self._profile("phase3b api-template: start")
                     await self._run_api_template_checks()
+                    self._profile("phase3b json-injection: start")
                     await self._run_json_injection_checks()
+                    self._profile("phase3b tls-seed: start")
                     # crawl が到達できない弱プロトコル origin を取りこぼさないため、
                     # seed origin に対して TLS 検査を直接走らせる（Codex #158 P1）。
                     await self._run_tls_seed_scans()
+                    self._profile("phase3b: done")
                 except AbortScan:
                     scan_aborted = True
 
@@ -2743,14 +2814,27 @@ class ScanEngine:
             # snapshot — verifiers near token expiry would 401 and mark real
             # findings unconfirmed.
             try:
+                self._profile("verify: start")
                 await self._phase_verify()
+                self._profile("verify: done")
                 self._save_checkpoint()
             finally:
                 try:
                     await self.header_manager.stop_background_refresh()
                 except Exception:
                     pass
-                await self._browser.close()
+                try:
+                    await self._browser.close()
+                finally:
+                    # planner/adaptive 用の AsyncAnthropic を決定的に閉じる。serve の反復スキャンで
+                    # 接続プールが放置され transport/FD が蓄積するのを防ぐ（Codex #173 P2）。
+                    # 以降の report 分析は sync client 経路なので、ここで閉じてよい。
+                    _aclose = getattr(self.payload_gen, "aclose", None)
+                    if _aclose is not None:
+                        try:
+                            await _aclose()
+                        except Exception:
+                            pass
 
             # Agent Finding は認可済みスコープ内だけ、決定論 Finding の生成・検証を
             # 変えずに追加する。source の異なる同一 Finding は意図的に併記する。
@@ -2761,7 +2845,9 @@ class ScanEngine:
 
             # ── Phase 4: Report ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("report")
+            self._profile("report: start")
             await self._phase_report_async()
+            self._profile("report: done")
 
             if self.monitor:
                 self.monitor.api_findings = [f.to_dict() for f in self.all_findings]
@@ -4931,11 +5017,14 @@ class ScanEngine:
         # (which, on redirect-on-auth apps, would only capture post-login content).
         self.visited_urls.add(login_seed)
 
-    def _match_pre_attack_flow(self, page: "CrawledPage"):
-        """このページを target とする pre-attack flow を返す（無ければ None）。
+    def _match_pre_attack_flows(self, page: "CrawledPage") -> list:
+        """このページを target とする pre-attack flow を **file 順に全て** 返す（無ければ空）。
 
         flow の最後の navigate step の URL がページ URL と一致するものを prerequisite とみなす。
+        同一遷移先の flow が複数あっても取りこぼさず、呼び出し側が順次再生する（Codex #170 P2）。
+        `_urls_same_page` 等価を使うので `/checkout` と `/checkout/`・fragment 差も同一視して選ぶ。
         """
+        matched = []
         for flow in self.flows:
             if not flow.steps:
                 continue
@@ -4946,9 +5035,122 @@ class ScanEngine:
             # 同一ページ扱いで flow を選び、query 値差（`?next=/` と `?next=`）は別物として
             # 誤選択しない。生の rstrip("/") 比較だと fragment 付き flow を取りこぼす一方、
             # query 末尾スラッシュだけ違う別 target を同一視して誤った state 変更 flow を走らせうる。
-            if last_nav and self._urls_same_page(last_nav.url, page.url):
-                return flow
+            # record 時の初期 redirect 着地（landed_url）も照合する（実行はしないメタデータ）。
+            if last_nav and (
+                self._urls_same_page(last_nav.url, page.url)
+                or (last_nav.landed_url and self._urls_same_page(last_nav.landed_url, page.url))
+            ):
+                matched.append(flow)
+        return matched
+
+    async def _refresh_page_after_flow(self, page: "CrawledPage") -> None:
+        """成功した pre-attack flow の後、現在のページから form/url_param を採り直して page に union する。
+
+        flow が新たに露出したフォーム/パラメータ（add-to-cart 後の checkout/coupon 等）を攻撃対象へ
+        含める（再生前 crawl 時の stale な CrawledPage のまま攻撃すると新出フォームを検査しない・
+        Codex #170 P1）。既存の crawl フォームは失わず、新規のみ署名で重複排除して追加する。
+        ベストエフォート（抽出失敗時は既存のまま）。
+        """
+        # flow 最終 action が非同期 DOM 更新（click→AJAX→coupon モーダル等）を起こす場合、
+        # runner の domcontentloaded 待ちは document 既ロードで即返り、直後の find_forms が描画前に
+        # 走って空 form を authoritative に採用し露出フォームを取りこぼす。ネットワークが静まるのを
+        # 短く待ってからスナップショットする（bounded・失敗は無視）（Codex #170 P2）。
+        try:
+            await self.browser.page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        try:
+            # raise_on_error=True で「成功して空」と「抽出失敗」を区別する。find_forms は既定で
+            # 例外を握り潰し [] を返すため、これが無いと transient 失敗で crawl form を消す（#170 P2）。
+            fresh_forms = await self.browser.find_forms(raise_on_error=True)  # 成功時は list（空もあり）
+        except Exception:
+            fresh_forms = None  # 抽出失敗（None で成功-空 [] と区別する）
+        try:
+            fresh_params = self._merge_url_params(
+                await self.browser.get_url_params(), page.url
+            )
+        except Exception:
+            fresh_params = []
+
+        def _sig(f: dict):
+            names = tuple(sorted(str(i.get("name", "")) for i in (f.get("inputs") or [])))
+            return (str(f.get("action", "")), str(f.get("method", "") or "").lower(), names)
+
+        if page.forms is None:
+            page.forms = []
+        # 抽出が **成功** したら fresh を正典にする（Codex #170 P2）。crawl 時に採った form の
+        # DOM index は flow が form を削除/並べ替えると陳腐化し、stale な crawl-only form を
+        # 後ろに残すと _attack_page がその index を fill_and_submit_form へ渡して別 form を掴む/
+        # 署名変化で同一 live form を二重攻撃する。post-flow の現在ページ（_on_target 済み）から
+        # 採り直した fresh がそのページの権威。抽出 **失敗時のみ** 既存を保持し到達性を落とさない。
+        if fresh_forms is None:
+            added = 0  # 抽出失敗: 既存 page.forms をそのまま維持
+        else:
+            prev_sigs = {_sig(f) for f in page.forms}
+            added = sum(1 for f in fresh_forms if _sig(f) not in prev_sigs)
+            page.forms = list(fresh_forms)
+        if fresh_params:
+            if page.url_params is None:
+                page.url_params = []
+            existing = set(page.url_params)
+            for name in fresh_params:
+                if name not in existing:
+                    page.url_params.append(name)
+                    existing.add(name)
+        # flow が URL を変えずに inline/外部 JS を露出し得る。js_static は page.html /
+        # page.external_scripts を見るため、HTML スナップショットも採り直す（Codex #170 P2）。
+        # 相対 script の解決基点は **ブラウザの実 URL**（page.url は crawl 時の値で、末尾
+        # スラッシュ等価な遷移先だと `/app` vs `/app/` がずれ `src="bundle.js"` を `/bundle.js`
+        # と誤解決して external_scripts を空にする）。現在 URL が取れなければ page.url へ退避。
+        try:
+            fresh_html = await self.browser.get_page_source()
+            if fresh_html:
+                try:
+                    base_url = self.browser.page.url or page.url
+                except Exception:
+                    base_url = page.url
+                page.html = fresh_html
+                page.external_scripts = self._snapshot_external_scripts(fresh_html, base_url)
+        except Exception:
+            pass
+        # flow が入力（form/url_param）を露出したら「flow-exposed」marker を **page-level 検査より
+        # 前に** 永続化する。field checkpoint が1つも書かれる前に中断されても、resume が本ページを
+        # 「入力なし＝page-level のみ」と誤断して flow を捨て、露出フィールドを恒久的に取りこぼすのを
+        # 防ぐ（Codex #170 P2）。sentinel 名なので _checkpoint_has_field_units には数えられない。
+        if page.forms or page.url_params:
+            self._checkpoint_mark_done(page.url, "(flow-exposed)", 0, "(flow-exposed)")
+        if added:
+            console.print(
+                f"  [cyan][Flow] prerequisite exposed {added} new form(s) — scanning them too[/cyan]"
+            )
         return None
+
+    @staticmethod
+    def _flow_fingerprint(flow) -> str:
+        """flow 内容（steps）の fingerprint（純粋）。同名でも内容が変われば別物として扱う。"""
+        import hashlib
+        import json as _json
+        payload = _json.dumps(flow.to_dict().get("steps", []), ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    def _checkpoint_mark_flow_ran(self, url: str, flow) -> None:
+        """この URL で当該 flow（内容 fingerprint）が完走したことを永続化する（Codex #170 P2）。"""
+        fp = self._flow_fingerprint(flow)
+        self._checkpoint_mark_done(url, "(flow-ran)", 0, f"(flow-ran:{fp})")
+
+    def _checkpoint_flow_ran(self, url: str, flow) -> bool:
+        """当該 flow が過去 run でこの URL に対し完走済みか。resume で新規/変更された --flows を
+        「完全 checkpoint 済み」として捨て、露出フォームを取りこぼすのを防ぐ（Codex #170 P2）。"""
+        fp = self._flow_fingerprint(flow)
+        return self._checkpoint_is_done(url, "(flow-ran)", 0, f"(flow-ran:{fp})")
+
+    def _checkpoint_has_flow_exposed_marker(self, url: str) -> bool:
+        """この URL で過去 run の flow が入力を露出した marker が checkpoint にあるか（#170 P2）。
+
+        flow-exposed だが field checkpoint 完了前に中断されたページを resume で skip しないための
+        signal。field 単位が無くてもこの marker があれば flow を再生して露出入力を再構成する。
+        """
+        return self._checkpoint_is_done(url, "(flow-exposed)", 0, "(flow-exposed)")
 
     def _page_level_checks_pending(self, page: "CrawledPage") -> bool:
         """page-level 検査でこのページに未完了(=実際に probe する)単位が残るか。
@@ -4973,6 +5175,35 @@ class ScanEngine:
                     continue
             cp_url = _page_check_cp_url(check_name, page.url)
             if not self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
+                return True
+        return False
+
+    def _checkpoint_has_field_units(self, url: str) -> bool:
+        """この URL に field/param 単位の完了記録があるか（checkpoint 参照のみ・純粋）。
+
+        crawl スナップショットが入力ゼロでも、前回 run で pre-attack flow が露出したフォーム/
+        パラメータを検査済みなら **本物の** field 単位が残る。resume の flow skip 判定で
+        「入力なし＝page-level のみ」と誤断して flow を捨て、中断された field 検査を取りこぼす
+        のを防ぐ signal（Codex #170 P2）。pending 単位は保存されないため、field 単位が1つでも
+        あれば安全側に倒して flow を再生する（=残作業を再構成できる）。
+
+        checkpoint sentinel（``(page)``＝page-level、``(api-template)``＝API テンプレート）は
+        field_name が括弧付きの疑似名で、real な form/URL-param ではない。これらを field 単位と
+        誤カウントすると、入力ゼロ・page 済みの resume ページで無関係な API 完了記録のせいで skip
+        されず、状態変更 flow（add-to-cart 等）を無駄に再生して target 状態を汚す（Codex #170 P2）。
+        括弧で囲まれた sentinel 名は除外し、実フィールド/パラメータ名だけを数える。
+        """
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return False
+        from wscan.url_normalize import normalize_url_for_key
+        target = normalize_url_for_key(url or "")
+        for key in self.checkpoint.completed_units:
+            parts = key.split("\x1f")
+            if len(parts) < 2 or parts[0] != target:
+                continue
+            field = parts[1]
+            # sentinel（"(page)"/"(api-template)" 等の括弧付き疑似名）は field 単位ではない。
+            if field and not (field.startswith("(") and field.endswith(")")):
                 return True
         return False
 
@@ -5015,6 +5246,10 @@ class ScanEngine:
         Uses ``self.browser`` which transparently returns the worker's browser
         when called from inside a concurrent worker task.
         """
+        self._profile(
+            f"attack page START: {page.url} "
+            f"(forms={len(page.forms)} params={len(page.url_params)})"
+        )
         # ── セッション失効チェック（全検査の前に一度）────────────────────
         # 長時間スキャンでセッションが切れると以降が全てログイン画面/401 に化け、
         # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
@@ -5038,37 +5273,80 @@ class ScanEngine:
         # 失敗時は coverage gap を記録し、以降の全検査を skip する。
         # ただし認証前のログインフォーム検査（_scan_login_form_preauth）から呼ばれた場合は、
         # auto-login 前の pre-auth 検査を汚染しないよう flow を実行しない（#167 P2）。
-        matched_flow = self._match_pre_attack_flow(page) if run_pre_attack_flows else None
+        matched_flows = self._match_pre_attack_flows(page) if run_pre_attack_flows else []
         # 再開時、フォーム/URLパラメータの無いページで page-level 単位が全て checkpoint 済みなら
         # pre-attack flow を再生しない（Codex #167 P2）。state 変更を伴う前提 flow（add-to-cart 等）を
         # 「残 probe 0」で再実行し、アプリ操作を無駄に繰り返す/状態を汚すのを防ぐ。安全側限定：入力の
         # 無いページは page-level 検査だけが走り field/adaptive/multi-param 単位を持たないため「残作業
         # なし」を厳密に判定できる。入力のあるページは従来どおり再生する（field/adaptive 単位の厳密
         # 列挙は取りこぼし時に必要な flow を誤 skip＝偽陰性を生むため行わない）。
-        if (matched_flow and not page.forms and not page.url_params
-                and not self._page_level_checks_pending(page)):
+        if (matched_flows and not page.forms and not page.url_params
+                and not self._page_level_checks_pending(page)
+                and not self._checkpoint_has_field_units(page.url)
+                and not self._checkpoint_has_flow_exposed_marker(page.url)
+                and all(self._checkpoint_flow_ran(page.url, f) for f in matched_flows)):
+            # crawl スナップショットが入力ゼロでも、前回 flow が露出した入力を検査した痕跡
+            # （field 単位）があれば skip しない：refresh が入力を再露出し、中断された field
+            # 検査を再開できるようにする（Codex #170 P2）。field 単位が無ければ従来どおり
+            # state 変更 flow の無駄な再実行を避ける（#167 P2）。
             console.print(
                 f"  [dim][Flow] Skip pre-attack flow (page fully checkpointed): "
-                f"{matched_flow.name} @ {page.url}[/dim]"
+                f"{escape(matched_flows[0].name)} @ {escape(page.url)}[/dim]"
             )
-            matched_flow = None
-        if matched_flow:
-            console.print(
-                f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
-            )
-            if not await FlowRunner(self.browser).run(matched_flow):
-                console.print(
-                    f"  [yellow][Flow] Pre-attack flow failed: {matched_flow.name} — "
-                    f"skipping all checks on {page.url}[/yellow]"
-                )
-                self._record_unscannable_url(
-                    page.url,
-                    note=(
-                        f"Pre-attack flow '{matched_flow.name}' failed: a prerequisite "
-                        "step could not complete (e.g. missing field/selector)"
+            matched_flows = []
+        if matched_flows:
+            # 同一遷移先に一致する flow を **file 順に全て順次再生** する（1つでも失敗したら
+            # そのページの検査を skip）。以前は最初の1つしか再生せず残りを黙って無視していた（#170 P2）。
+            for matched_flow in matched_flows:
+                # scope 外/除外 URL への navigate を含む flow は実行しない。最終遷移が target へ
+                # 戻っても、記録された flow が中間 navigate で scope 設定を迂回して未認可の外部/
+                # 除外アプリを訪問・操作しうる（Codex #170 P2）。access_urls（login 等の訪問許可）は
+                # _is_access_allowed_url が許すため auth flow は通る。
+                _bad_nav = next(
+                    (
+                        s.url for s in matched_flow.steps
+                        if s.action == "navigate" and s.url
+                        and (
+                            not self._is_access_allowed_url(s.url)
+                            or self._is_url_excluded(s.url)
+                        )
                     ),
+                    None,
                 )
-                return
+                if _bad_nav:
+                    console.print(
+                        f"  [yellow][Flow] Skip '{escape(matched_flow.name)}': "
+                        f"navigate to out-of-scope/excluded URL {_bad_nav} — "
+                        f"skipping checks on {page.url}[/yellow]"
+                    )
+                    self._record_unscannable_url(
+                        page.url,
+                        note=(
+                            f"Pre-attack flow '{matched_flow.name}' navigates to an "
+                            "out-of-scope or excluded URL; refused to run for scope safety"
+                        ),
+                    )
+                    return
+                console.print(
+                    f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {escape(matched_flow.name)}"
+                )
+                # navigate の実着地（redirect 追従後）も scope 検証する（静的 step 検査の補完）。
+                _flow_scope_ok = lambda u: (
+                    self._is_access_allowed_url(u) and not self._is_url_excluded(u)
+                )
+                if not await FlowRunner(self.browser, scope_check=_flow_scope_ok).run(matched_flow):
+                    console.print(
+                        f"  [yellow][Flow] Pre-attack flow failed: {escape(matched_flow.name)} — "
+                        f"skipping all checks on {page.url}[/yellow]"
+                    )
+                    self._record_unscannable_url(
+                        page.url,
+                        note=(
+                            f"Pre-attack flow '{matched_flow.name}' failed: a prerequisite "
+                            "step could not complete (e.g. missing field/selector)"
+                        ),
+                    )
+                    return
             # flow の最終遷移が login/error ページへ redirect（200）されると navigate は True でも
             # target に居ない。page-level 検査の前に着地先 URL を検証し、復帰できなければ未認証/
             # 誤ページを "tested" と誤記録しないよう記録して skip する（Codex #167 P1）。
@@ -5102,6 +5380,10 @@ class ScanEngine:
                         ),
                     )
                     return
+            # 完走記録は**着地先を検証できた後**にだけ書く。step 成功直後に書くと、login へ redirect
+            # された flow も「完走済み」となり、次の resume で恒久的に skip される（Codex #170 P2）。
+            for _ran_flow in matched_flows:
+                self._checkpoint_mark_flow_ran(page.url, _ran_flow)
             # 成功した flow はセッション Cookie を発行/更新し得る。HTTP scanner は browser jar
             # ではなく engine.cookies から Cookie ヘッダを得るため、flow 後に採り直して乖離を
             # 防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く・Codex #167 P1）。
@@ -5110,6 +5392,23 @@ class ScanEngine:
                     await self._sync_cookies_from_browser(self.browser, for_url=page.url)
                 except Exception:
                     pass
+            elif not getattr(self, "_warned_flow_concurrency", False):
+                # concurrency>1 では engine.cookies が全 worker 共有のため、worker ごとに flow 発行
+                # Cookie を同期すると別 worker の状態を壊す。同期を見送る結果、HTTP scanner は
+                # pre-flow Cookie で検査し得る。per-worker Cookie スナップショットは follow-up 課題と
+                # し、ここでは制限を1度だけ可視化する（Codex #170 P2）。flow の Cookie 状態を正確に
+                # 検査するには --concurrency 1 を推奨。
+                self._warned_flow_concurrency = True
+                self.wave_errors.append("flow_cookie_sync_skipped:concurrency_gt_1")
+                console.print(
+                    "  [yellow][Flow] --concurrency>1 では flow 発行 Cookie を HTTP scanner の "
+                    "engine.cookies へ同期しません（per-worker 分離は follow-up）。flow の Cookie 状態を"
+                    "正確に検査するには --concurrency 1 を推奨（Codex #170 P2）[/yellow]"
+                )
+            # 前提 flow が checkout/coupon 等のフォームや URL パラメータを新たに露出し得る。
+            # 再生前に採取した CrawledPage のまま攻撃すると新出フォームを検査しないため、
+            # 攻撃対象を決める前に現在のページから form/url_param を採り直す（Codex #170 P1）。
+            await self._refresh_page_after_flow(page)
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
@@ -5161,6 +5460,11 @@ class ScanEngine:
                 )
             except Exception as e:
                 page_errored = True
+                # 例外前に得ていた partial finding の副作用（通知/監視 emit 等）を回す。
+                # record_finding で all_findings には既登録だが、engine 側の _record_finding を
+                # 通さないと webhook 等が走らない（Codex #157 P2）。dedup 済みなので二重にならない。
+                for _pf in (getattr(e, "findings", None) or []):
+                    self._record_finding(_pf, source="page-level")
                 console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
                 # 実行途中で例外（probe timeout 等）＝劣化した実行。field-level と同様に
                 # error 行を残し、coverage の attempts/by_status から消えないようにする（Codex #102 P2）。
@@ -5182,7 +5486,9 @@ class ScanEngine:
 
         # 前提 flow は page-level 検査の前に実行・成否判定済み（上参照）。ここでは attack の
         # ため browser が target ページに居ることを確認し、ずれていれば復帰する。
-        if matched_flow:
+        # matched_flows は常に定義済み（空リスト可）。flow を1本でも再生したときだけ確認する
+        # （単数 matched_flow は _match_pre_attack_flows へのリネームで廃止・Codex #170 P1）。
+        if matched_flows:
             # Verify the browser ended on the intended target page.
             # A failed step in the flow may leave the browser on the wrong URL.
             try:
@@ -5321,6 +5627,7 @@ class ScanEngine:
 
         for fi, dom, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
+            self._profile(f"  field: {field_name} @ {page.url}")
             key = (f"{page.url}||url_param||{field_name}" if is_url_param
                    else f"{page.url}||{fi}||{field_name}")
             # Guard scanned_forms with a lock so concurrent workers don't
@@ -6293,14 +6600,36 @@ class ScanEngine:
                 f"Verification: re-testing {len(to_verify)} finding(s)", "running"
             )
 
+        self._profile(f"verify: {len(to_verify)} findings to verify")
+        # verify 1 件あたりの上限。固定 180s だと利用者設定の --timeout（上限なし）を無視し、
+        # 遅い対象では正当な検証（navigate+baseline+apply+fire+content の複数リクエスト）が
+        # cancel されて skipped 化し、confirmed からも通知からも漏れる（Codex #171 P2）。
+        # request timeout があれば数ステップ分（×6）を確保しつつ、従来の 180s を下限に保つ。
+        _browser = getattr(self, "browser", None)
+        _req_to = ((getattr(_browser, "timeout", 0) or 0) / 1000.0) if _browser else 0.0
+        verify_budget = (
+            max(_VERIFY_ONE_TIMEOUT_S, 6.0 * _req_to) if _req_to else _VERIFY_ONE_TIMEOUT_S
+        )
         for i, finding in enumerate(to_verify):
             skipped = False
             state = ""
+            self._profile(
+                f"  verify #{i+1}/{len(to_verify)}: {getattr(finding, 'check_type', '?')} "
+                f"@ {getattr(finding, 'url', '?')}"
+            )
             try:
-                state = await self._verify_one(finding)
+                # 1 件の finding 検証が wedge しても verify フェーズ全体（＝スキャン）を
+                # 止めないよう有界化する。verify_finding は navigate/baseline/apply/fire を
+                # 重ねるため、特定 finding（例: 反射 XSS の再現）で内部 await が返らないと
+                # 外側 SCAN_TIMEOUT_S まで到達し全 E2E が停止していた（F06/0059 実測）。
+                # timeout は下の except（TimeoutError も Exception）で "skipped"＝未検証
+                # （要手動確認）に倒す：finding は消さず、CONFIRMED にも上げない。
+                state = await asyncio.wait_for(
+                    self._verify_one(finding), timeout=verify_budget
+                )
             except Exception as exc:
-                # 想定外の例外（破損 provenance の復元失敗など）で verify フェーズ全体を
-                # 止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
+                # 想定外の例外（破損 provenance の復元失敗など）や上記 timeout で verify
+                # フェーズ全体を止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
                 # 黙って検出力を落とさないよう wave_errors に記録する。
                 skipped = True
                 errors = getattr(self, "wave_errors", None)
@@ -6620,12 +6949,52 @@ class ScanEngine:
             except Exception:
                 pass
 
+        # core report/evidence を先に永続化する。AI 分析(_ai_analysis_report)は集約1+finding毎
+        # 最大10リクエスト×60s×retries で数十分かかりうるため、先に決定論スキャンの成果物を確実に
+        # 残し、途中中断でも core report を失わない（Codex #172 P2）。
         self._phase_report()
-        # A-1: post-scan AI analysis (if enabled)
+        # A-1: post-scan AI analysis（永続化後に実行）。その report-role 呼び出しは evidence.json の
+        # llm_calls 集計後に llm_calls.jsonl へ追記されるため、完了後に集計値だけ refresh して
+        # 監査ファイルと総数を一致させる（core report/report ファイルはそのまま）。
         if self.enable_ai_analysis:
             ai_text = await self._ai_analysis_report()
+            self._refresh_evidence_observability()
             if ai_text and self.monitor:
                 await self.monitor.emit("ai_analysis", {"text": ai_text})
+
+    def _refresh_evidence_observability(self) -> None:
+        """AI 分析後に evidence.json と HTML の observability（llm_calls 総数）を実態へ更新する（Codex #172 P2）。
+
+        core report/evidence は _phase_report で先に永続化済み。post-scan AI 呼び出しは集計後に
+        llm_calls.jsonl へ追記されるため、その分を反映して総数を実態に合わせる。evidence.json は
+        原子的に置換し、HTML はテンプレートを再描画する（描画時に live 値を読むので集計値が
+        JSONL/evidence と一致する）。失敗しても既存の成果物は壊さない（ベストエフォート）。
+        """
+        import json
+        import os
+        path = self.output_dir / "evidence.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        try:
+            data["observability"] = self._observability_report_data()
+            # アトミックに置換する。write_text は書き込み前に既存の有効な evidence.json を
+            # truncate するため、途中中断/ディスク満杯で core evidence を空/破損させ得る（Codex #172 P2）。
+            # 一時ファイルへ書き切ってから os.replace で入れ替える（失敗時も元ファイルは無傷）。
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            os.replace(tmp, path)
+        except Exception:
+            pass
+        # HTML も再描画して observability の表示値を分析後の実数に一致させる（ブラウザは再オープン
+        # しない）。初回の core-report 永続化は済んでいるので、失敗しても成果物は残る。
+        try:
+            self._render_report_templates()
+        except Exception:
+            pass
 
     def _save_evidence(self):
         findings_dicts = [f.to_dict() for f in self.all_findings]
@@ -6748,8 +7117,13 @@ class ScanEngine:
             except Exception as _notify_err:
                 console.print(f"  [yellow][Notification] 完了通知失敗: {_notify_err}[/yellow]")
 
-    def _generate_report(self):
-        import webbrowser
+    def _render_report_templates(self):
+        """audit/executive/developer の HTML を現在の state から描画し audit のパスを返す。
+
+        observability(llm_calls 等) は描画時に live 値を読むため、post-scan AI 分析後に
+        再描画すれば HTML の集計値も実態と一致する。ブラウザ起動/monitor 登録は含めない
+        （初回描画・分析後 refresh の双方から呼ぶ・Codex #172 P2）。
+        """
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir)
         display_scan_matrix = self._scan_matrix_for_display()
@@ -6801,6 +7175,11 @@ class ScanEngine:
                 )
             except Exception:
                 pass
+        return report_path
+
+    def _generate_report(self):
+        import webbrowser
+        report_path = self._render_report_templates()
 
         # D: CI/CD API — レポートパスを monitor に登録
         if self.monitor:
@@ -7168,8 +7547,11 @@ class ScanEngine:
         from . import llm_client
 
         with self.payload_gen.use_role("report"):
+            # report 分析も one-shot。固定 60s ではなく設定済みの one-shot timeout を使う
+            # （--llm-timeout / config llm.timeout_seconds を尊重・Codex #173 P2）。
             text = await llm_client.complete_text(
-                self.payload_gen, prompt, max_tokens=1500, timeout=60
+                self.payload_gen, prompt, max_tokens=1500,
+                timeout=self.payload_gen.llm_timeout_seconds,
             )
         return text or ""
 
