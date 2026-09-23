@@ -390,7 +390,9 @@ class TriageEngine:
         claude_model: str = "claude-haiku-4-5-20251001",
         openai_base_url: str = "",
         role_models: Optional[dict] = None,
+        llm_timeout_seconds: float = 30.0,
     ):
+        self.llm_timeout_seconds = llm_timeout_seconds
         self.target_url = url.rstrip("/")
         self.depth = depth
         self.headless = headless
@@ -522,6 +524,8 @@ class TriageEngine:
                 claude_model=self.claude_model,
                 openai_base_url=self.openai_base_url,
                 role_models=self.role_models,
+                # triage の LLM 呼び出しにも設定済み timeout を効かせる（Codex #173 P2）。
+                llm_timeout_seconds=getattr(self, "llm_timeout_seconds", 30.0),
             )
             if not await pg._check_llm_available():
                 return ""
