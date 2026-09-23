@@ -528,6 +528,7 @@ class ScanEngine:
         openai_base_url: str = "",
         role_models: Optional[dict] = None,
         llm_timeout_seconds: float = 30.0,
+        llm_stream_timeout_seconds: float = 90.0,
         llm_max_retries: int = 2,
         checks: Optional[list] = None,
         output_dir: Optional[str] = None,
@@ -1052,6 +1053,7 @@ class ScanEngine:
             openai_base_url=openai_base_url,
             role_models=role_models,
             llm_timeout_seconds=llm_timeout_seconds,
+            llm_stream_timeout_seconds=llm_stream_timeout_seconds,
             llm_max_retries=llm_max_retries,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
@@ -2735,7 +2737,18 @@ class ScanEngine:
                     await self.header_manager.stop_background_refresh()
                 except Exception:
                     pass
-                await self._browser.close()
+                try:
+                    await self._browser.close()
+                finally:
+                    # planner/adaptive 用の AsyncAnthropic を決定的に閉じる。serve の反復スキャンで
+                    # 接続プールが放置され transport/FD が蓄積するのを防ぐ（Codex #173 P2）。
+                    # 以降の report 分析は sync client 経路なので、ここで閉じてよい。
+                    _aclose = getattr(self.payload_gen, "aclose", None)
+                    if _aclose is not None:
+                        try:
+                            await _aclose()
+                        except Exception:
+                            pass
 
             # Agent Finding は認可済みスコープ内だけ、決定論 Finding の生成・検証を
             # 変えずに追加する。source の異なる同一 Finding は意図的に併記する。
@@ -7232,8 +7245,11 @@ class ScanEngine:
         from . import llm_client
 
         with self.payload_gen.use_role("report"):
+            # report 分析も one-shot。固定 60s ではなく設定済みの one-shot timeout を使う
+            # （--llm-timeout / config llm.timeout_seconds を尊重・Codex #173 P2）。
             text = await llm_client.complete_text(
-                self.payload_gen, prompt, max_tokens=1500, timeout=60
+                self.payload_gen, prompt, max_tokens=1500,
+                timeout=self.payload_gen.llm_timeout_seconds,
             )
         return text or ""
 

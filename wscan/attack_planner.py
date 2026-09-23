@@ -602,32 +602,37 @@ Consider stored / second-order attacks carefully:
 
     async def _call_claude(self, prompt: str) -> Optional[str]:
         """Claude streaming attack plan — prints chunks live."""
-        client = self.payload_gen._get_anthropic_client()
+        client = self.payload_gen._get_async_anthropic_client()
         if not client:
             return None
         _model = getattr(self.payload_gen, "claude_model", "claude-haiku-4-5-20251001")
         _thinking_header("Claude", _model)
         try:
             import asyncio
-            full = ""
+            _timeout = self.payload_gen.llm_stream_timeout_seconds
 
-            def _stream_sync():
-                nonlocal full
-                with client.messages.stream(
+            # AsyncAnthropic の単一 create を wait_for(_timeout) で縛る（猶予なし・executor 不使用で
+            # cancel が HTTP リクエストを打ち切る・Codex #173 P2）。max_retries=0 で SDK retry も抑止。
+            _c = (client.with_options(timeout=_timeout, max_retries=0)
+                  if hasattr(client, "with_options") else client)
+            resp = await asyncio.wait_for(
+                _c.messages.create(
                     model=_model,
                     max_tokens=2000,
                     messages=[{"role": "user", "content": prompt}],
-                ) as stream:
-                    for chunk in stream.text_stream:
-                        sys.stdout.write(chunk)
-                        sys.stdout.flush()
-                        full += chunk
-                return full
-
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _stream_sync)
+                ),
+                timeout=_timeout,
+            )
+            text = resp.content[0].text if getattr(resp, "content", None) else ""
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
             _thinking_footer()
-            return full if full else None
+            return text if text else None
+        except asyncio.TimeoutError:
+            _thinking_footer()
+            console.print("[yellow][AttackPlanner] Claude timeout[/yellow]")
+            return None
         except Exception as e:
             _thinking_footer()
             console.print(f"[yellow][AttackPlanner] Claude error: {e}[/yellow]")
@@ -636,10 +641,14 @@ Consider stored / second-order attacks carefully:
     async def _call_ollama(self, prompt: str) -> Optional[str]:
         """Ollama streaming attack plan — prints chunks live."""
         import httpx
+        import asyncio
         _thinking_header("Ollama", self.payload_gen.ollama_model)
         full = ""
-        try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+        status_holder = {"bad": None}
+
+        async def _run() -> None:
+            nonlocal full
+            async with httpx.AsyncClient(timeout=self.payload_gen.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     f"{self.payload_gen.ollama_url}/api/generate",
@@ -651,9 +660,8 @@ Consider stored / second-order attacks carefully:
                     },
                 ) as resp:
                     if resp.status_code != 200:
-                        _thinking_footer()
-                        console.print(f"[yellow][AttackPlanner] Ollama error {resp.status_code}[/yellow]")
-                        return None
+                        status_holder["bad"] = resp.status_code
+                        return
                     async for line in resp.aiter_lines():
                         if not line:
                             continue
@@ -668,7 +676,18 @@ Consider stored / second-order attacks carefully:
                                 break
                         except json.JSONDecodeError:
                             pass
+        try:
+            # scalar httpx timeout は操作単位のため、streaming 全体を wait_for で有界化する
+            # （llm_stream_timeout_seconds を1応答の上限として効かせる・Codex #173 P2）。
+            await asyncio.wait_for(_run(), timeout=self.payload_gen.llm_stream_timeout_seconds)
             _thinking_footer()
+            if status_holder["bad"] is not None:
+                console.print(f"[yellow][AttackPlanner] Ollama error {status_holder['bad']}[/yellow]")
+                return None
+            return full if full else None
+        except asyncio.TimeoutError:
+            _thinking_footer()
+            console.print("[yellow][AttackPlanner] Ollama stream overall timeout[/yellow]")
             return full if full else None
         except Exception as e:
             _thinking_footer()
@@ -682,10 +701,14 @@ Consider stored / second-order attacks carefully:
         api_key = self.payload_gen.openai_api_key
         if not api_key:
             return None
+        import asyncio
         _thinking_header("OpenAI", self.payload_gen.openai_model)
         full = ""
-        try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+        status_holder = {"bad": None}
+
+        async def _run() -> None:
+            nonlocal full
+            async with httpx.AsyncClient(timeout=self.payload_gen.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     llm_endpoint.chat_completions_url(self.payload_gen.openai_base_url),
@@ -699,9 +722,8 @@ Consider stored / second-order attacks carefully:
                     },
                 ) as resp:
                     if resp.status_code != 200:
-                        _thinking_footer()
-                        console.print(f"[yellow][AttackPlanner] OpenAI error {resp.status_code}[/yellow]")
-                        return None
+                        status_holder["bad"] = resp.status_code
+                        return
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):
                             continue
@@ -717,7 +739,17 @@ Consider stored / second-order attacks carefully:
                                 full += chunk
                         except (json.JSONDecodeError, KeyError, IndexError):
                             pass
+        try:
+            # scalar httpx timeout は操作単位のため streaming 全体を wait_for で有界化する（Codex #173 P2）。
+            await asyncio.wait_for(_run(), timeout=self.payload_gen.llm_stream_timeout_seconds)
             _thinking_footer()
+            if status_holder["bad"] is not None:
+                console.print(f"[yellow][AttackPlanner] OpenAI error {status_holder['bad']}[/yellow]")
+                return None
+            return full if full else None
+        except asyncio.TimeoutError:
+            _thinking_footer()
+            console.print("[yellow][AttackPlanner] OpenAI stream overall timeout[/yellow]")
             return full if full else None
         except Exception as e:
             _thinking_footer()
@@ -737,7 +769,7 @@ Consider stored / second-order attacks carefully:
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{model}:generateContent?key={api_key}"
             )
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=self.payload_gen.llm_stream_timeout_seconds) as client:
                 resp = await client.post(
                     url,
                     json={"contents": [{"parts": [{"text": prompt}]}]},
