@@ -260,6 +260,88 @@ def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
     return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
 
 
+def _idna_host(host: str) -> str:
+    """ホスト名を小文字＋IDNA（Punycode）へ正規化する（純粋）。Chromium は IDN を Punycode で保存する。"""
+    host = (host or "").lower()
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
+def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
+    """手動巡回の実効 URL が target と異なる同一ホストなら、追加すべき scope を返す（純粋・Codex #153）。
+    該当しなければ ""。
+
+    別ホストや同一 origin では "" を返し、scheme・ポート変更だけを反映する。
+    設定 scope のパス・query 限定（例 ``http://host/app`` / ``http://host/action?op=save``）は昇格後
+    scope にも引き継ぐ。origin 全体へ広げると未許可パスへ能動 probe が及び、query を落とすと query 限定
+    target が access-only 扱いになって検査されない（Codex #153 P1）。ホストは IDNA で正規化して比較する
+    （Unicode 設定と Punycode 保存の不一致で昇格を落とさない・Codex #153 P2）。
+    """
+    if not effective_origin:
+        return ""
+    from urllib.parse import urlparse as _up
+    ep, tp = _up(effective_origin), _up(target_url or "")
+    _default_port = {"https": 443, "http": 80}
+    if (ep.hostname and tp.hostname
+            and ep.scheme in _default_port and tp.scheme in _default_port
+            and _idna_host(ep.hostname) == _idna_host(tp.hostname)
+            and (ep.scheme, ep.port or _default_port[ep.scheme])
+            != (tp.scheme, tp.port or _default_port[tp.scheme])):
+        _path = tp.path.rstrip("/")
+        _query = f"?{tp.query}" if tp.query else ""
+        return f"{ep.scheme}://{ep.netloc}{_path}{_query}"
+    return ""
+
+
+def _scope_path_contains(effective_url: str, scope_url: str) -> int:
+    """scope のパスが実効 URL のパスを含めばパス長（具体度）、含まなければ -1（純粋）。"""
+    from urllib.parse import urlparse as _up
+    sp = _up(scope_url or "").path.rstrip("/")
+    ep = _up(effective_url or "").path or "/"
+    if not sp:
+        return 0
+    if ep == sp or ep.startswith(sp + "/"):
+        return len(sp)
+    return -1
+
+
+def _promote_redirect_scope(
+    effective_origin: str,
+    target_url: str,
+    target_urls: list,
+    access_urls: list,
+) -> tuple[str, bool]:
+    """手動巡回の実効 URL を昇格すべき scope と、その役割を返す（純粋・Codex #153 P1）。
+
+    戻り値 ``(scope, is_attack)``。攻撃対象 scope（target_url/target_urls）由来なら ``True``、
+    access-only scope 由来なら ``False``（access-only の IdP/支援 origin を攻撃対象へ昇格させない）。
+    同一ホストに攻撃・access の scope が別パスで並ぶ場合は、実効 URL のパスを**実際に含む**最も具体的な
+    設定 scope を選び、その役割を保つ（/login の access seed を /app の攻撃 scope に誤帰属させない）。
+    どのパスにも含まれない場合だけ従来どおり設定順（攻撃→access）の最初の同一ホスト scope を採る。
+    該当なしは ``("", False)``。
+    """
+    # primary の攻撃 scope は init で origin（scheme://netloc）へ正規化されている。生の target_url の
+    # パスを引き継ぐと https 昇格後の scope が縮みカバレッジが減る（Codex #153 P1）ため origin で評価する。
+    from urllib.parse import urlparse as _up
+    _pp = _up(target_url or "")
+    primary = f"{_pp.scheme}://{_pp.netloc}" if _pp.scheme and _pp.netloc else target_url
+    candidates = []  # (具体度, 設定順, scope, is_attack)
+    for order, (cfg, is_attack) in enumerate(
+        [(primary, True)] + [(u, True) for u in target_urls] + [(u, False) for u in access_urls]
+    ):
+        scope = _redirect_scope_to_add(effective_origin, cfg)
+        if not scope or scope in (target_urls if is_attack else access_urls):
+            continue
+        candidates.append((_scope_path_contains(effective_origin, cfg), order, scope, is_attack))
+    if not candidates:
+        return "", False
+    contained = [c for c in candidates if c[0] >= 0]
+    pool = contained or candidates
+    best = sorted(pool, key=lambda c: (-c[0], c[1]))[0] if contained else min(pool, key=lambda c: c[1])
+    return best[2], best[3]
+
 def _scoped_cookie_header(cookies: list | None, url: str) -> str | None:
     """ブラウザ jar の cookie 群から、``url`` のホスト/パスへ送られる Cookie ヘッダを作る（純粋・RFC6265）。
 
@@ -3130,6 +3212,36 @@ class ScanEngine:
                     f"  [dim cyan][Manual Crawl][/dim cyan] {len(manual_seed.urls)} URL, "
                     f"{len(manual_seed.cookies)} Cookie を読み込みました: {self.manual_crawl_path}"
                 )
+                # 同一ホストへの scheme・ポート変更後の実効 origin を、設定時の scope 役割を
+                # 保ったまま昇格する。訪問だけでなく手動巡回で捕捉したフォーム・パラメータも
+                # 検査対象にするが、**攻撃対象 scope に一致したときだけ target_urls（攻撃可）へ**、
+                # access-only scope に一致したときは access_urls（訪問のみ）へ加える。access-only の
+                # IdP/支援 origin が https へリダイレクトしても攻撃対象へ昇格させない（Codex #153 P1）。
+                # primary（target_url）だけでなく設定済みの全 scope と突き合わせる：副 target が
+                # https へリダイレクトすると実効 origin が primary と別ホストになり、primary 比較だけ
+                # だと scope に入らず副 target が未スキャンになる。無関係 origin は
+                # _redirect_scope_to_add が host 一致を要求するので広げない。
+                _added_scope, _is_attack = _promote_redirect_scope(
+                    manual_seed.effective_origin,
+                    self.target_url,
+                    self.target_urls,
+                    self.access_urls,
+                )
+                if _added_scope:
+                    (self.target_urls if _is_attack else self.access_urls).append(_added_scope)
+                # 昇格した origin には認証ヘッダを送れるよう header scope も更新する。init 時に
+                # 算出済みの _header_scope_origins と、_phase_crawl 前に BrowserManager へ渡した
+                # コピーの双方を同期しないと headers_for_url()／リクエスト interceptor が新 origin を
+                # 弾き、未認証でクロール・攻撃してしまう（Codex #153 P1）。
+                if _added_scope:
+                    self._header_scope_origins = allowed_header_origins(
+                        self.target_url,
+                        self.target_urls,
+                        self.access_urls,
+                        self.login_url,
+                    )
+                    if self.browser is not None:
+                        self.browser.header_scope_origins = set(self._header_scope_origins)
                 for _murl in manual_seed.urls:
                     if (
                         _murl not in self.visited_urls
