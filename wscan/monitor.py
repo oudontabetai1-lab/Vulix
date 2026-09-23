@@ -834,6 +834,9 @@ class MonitorServer:
                     claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001"),
                     openai_base_url=_ac_base,
                     role_models=cfg.get("role_models", {}) or {},
+                    # 選択/設定済み one-shot timeout を尊重する。空・不正値は PayloadGenerator の
+                    # 正規化で既定に落ちる（Codex #173 P2）。
+                    llm_timeout_seconds=cfg.get("llm_timeout_seconds"),
                 )
                 result = await generate_from_description(gen, description)
                 if result is None:

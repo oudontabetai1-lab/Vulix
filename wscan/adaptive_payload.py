@@ -570,7 +570,14 @@ class AdaptivePayloadEngine:
 
         provider = self.pg.provider
         raw: Optional[str] = None
+        import time as _time
+        from .llm_client import record_llm_call
+        _t0 = _time.monotonic()
+        _resolved_model = ""
         with self.pg.use_role("adaptive"):
+            # role モデルは context 内でのみ解決される（*_model は _active_role 依存の property）。
+            # 監査に実際に使ったモデルを残すため context 内で捕捉する（Codex #172 P2）。
+            _resolved_model = getattr(self.pg, f"{provider}_model", "") or ""
             if provider == "claude":
                 raw = await self._stream_claude(prompt)
             elif provider == "openai":
@@ -579,6 +586,23 @@ class AdaptivePayloadEngine:
                 raw = await self._call_gemini(prompt)
             else:
                 raw = await self._stream_ollama(prompt)
+        # LLM 呼び出し観測性（0065）。mutate_payload は complete_text 非経由の自前ストリーミング。
+        # timeout_seconds は各 backend の実効 timeout（openai/ollama=90s, gemini=60s, claude は
+        # SDK stream で明示 deadline 無し=None・Codex #172 P2）。失敗種別の transient/permanent
+        # 細分は self-streaming 経路の status 露出を要する follow-up で対応する。
+        _adaptive_timeout = {"openai": 90.0, "ollama": 90.0, "gemini": 60.0}.get(provider)
+        record_llm_call(
+            self.pg, provider=provider, role="adaptive",
+            model=_resolved_model,
+            timeout_seconds=_adaptive_timeout, elapsed_seconds=_time.monotonic() - _t0,
+            status=("ok" if raw else "empty"),
+            # Claude は Anthropic SDK が透過 retry しうるため実回数不明＝None。OpenAI/Gemini/Ollama の
+            # 自前 helper は httpx 1 回きりで retry ループを持たないので 0 と確定できる（Codex #172 P2）。
+            retries=(None if provider == "claude" else 0),
+            prompt_chars=len(prompt) if isinstance(prompt, str) else None,
+            response_chars=len(raw) if isinstance(raw, str) else 0,
+            caller="adaptive_payload.mutate_payload",
+        )
 
         if not raw:
             return []
@@ -590,9 +614,12 @@ class AdaptivePayloadEngine:
 
     async def _stream_ollama(self, prompt: str) -> Optional[str]:
         import httpx
+        import asyncio
         full = ""
-        try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+
+        async def _run() -> None:
+            nonlocal full
+            async with httpx.AsyncClient(timeout=self.pg.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     f"{self.pg.ollama_url}/api/generate",
@@ -604,7 +631,7 @@ class AdaptivePayloadEngine:
                     },
                 ) as resp:
                     if resp.status_code != 200:
-                        return None
+                        return
                     async for line in resp.aiter_lines():
                         if not line:
                             continue
@@ -619,6 +646,15 @@ class AdaptivePayloadEngine:
                                 break
                         except json.JSONDecodeError:
                             pass
+        try:
+            # httpx の scalar timeout は read/connect 等の**操作単位**の無通信 timeout で、
+            # チャンクが届き続ける限り全体は無制限に延びる。llm_stream_timeout_seconds を
+            # 「1応答の上限」として効かせるため streaming 全体を wait_for で有界化する
+            # （超過時は cancel され async context が stream を閉じる・Codex #173 P2）。
+            await asyncio.wait_for(_run(), timeout=self.pg.llm_stream_timeout_seconds)
+            return full or None
+        except asyncio.TimeoutError:
+            console.print("[yellow][AdaptiveAI] Ollama stream overall timeout[/yellow]")
             return full or None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] Ollama error: {e}[/yellow]")
@@ -630,9 +666,13 @@ class AdaptivePayloadEngine:
         if not api_key:
             return None
         import httpx
+        import asyncio
         full = ""
-        try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+        status_holder = {"bad": None}
+
+        async def _run() -> None:
+            nonlocal full
+            async with httpx.AsyncClient(timeout=self.pg.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     llm_endpoint.chat_completions_url(self.pg.openai_base_url),
@@ -646,8 +686,8 @@ class AdaptivePayloadEngine:
                     },
                 ) as resp:
                     if resp.status_code != 200:
-                        console.print(f"[yellow][AdaptiveAI] OpenAI error {resp.status_code}[/yellow]")
-                        return None
+                        status_holder["bad"] = resp.status_code
+                        return
                     async for line in resp.aiter_lines():
                         if not line or not line.startswith("data:"):
                             continue
@@ -667,37 +707,51 @@ class AdaptivePayloadEngine:
                                 full += chunk
                         except (json.JSONDecodeError, IndexError, KeyError):
                             pass
+        try:
+            # scalar timeout は操作単位のため、streaming 全体を wait_for で有界化する
+            # （llm_stream_timeout_seconds を1応答の上限として効かせる・Codex #173 P2）。
+            await asyncio.wait_for(_run(), timeout=self.pg.llm_stream_timeout_seconds)
+            if status_holder["bad"] is not None:
+                console.print(f"[yellow][AdaptiveAI] OpenAI error {status_holder['bad']}[/yellow]")
+                return None
+            return full or None
+        except asyncio.TimeoutError:
+            console.print("[yellow][AdaptiveAI] OpenAI stream overall timeout[/yellow]")
             return full or None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] OpenAI error: {e}[/yellow]")
             return None
 
     async def _stream_claude(self, prompt: str) -> Optional[str]:
-        client = self.pg._get_anthropic_client()
+        client = self.pg._get_async_anthropic_client()
         if not client:
             return None
         import asyncio
-        full = ""
-        # run_in_executor はワーカースレッドへ ContextVar を伝播しないため、role 解決済み
-        # モデルを async 文脈（use_role("adaptive") 内）でここで確定してから executor へ渡す。
+        # role 解決済みモデルは async 文脈（use_role("adaptive") 内）でそのまま読める。
         _model = getattr(self.pg, "claude_model", "claude-haiku-4-5-20251001")
+        _timeout = self.pg.llm_stream_timeout_seconds
         try:
-            def _stream_sync():
-                nonlocal full
-                with client.messages.stream(
+            # AsyncAnthropic の単一 create を wait_for(_timeout) で縛る。executor スレッドを使わない
+            # ので deadline 超過時は cancel で HTTP リクエストごと打ち切られ、猶予も居残りも無い
+            # （Codex #173 P2）。max_retries=0 で SDK 内 retry による deadline 超過も防ぐ。
+            _c = (client.with_options(timeout=_timeout, max_retries=0)
+                  if hasattr(client, "with_options") else client)
+            resp = await asyncio.wait_for(
+                _c.messages.create(
                     model=_model,
                     max_tokens=1000,
                     messages=[{"role": "user", "content": prompt}],
-                ) as stream:
-                    for chunk in stream.text_stream:
-                        sys.stdout.write(chunk)
-                        sys.stdout.flush()
-                        full += chunk
-                return full
-
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _stream_sync)
-            return full or None
+                ),
+                timeout=_timeout,
+            )
+            text = resp.content[0].text if getattr(resp, "content", None) else ""
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            return text or None
+        except asyncio.TimeoutError:
+            console.print("[yellow][AdaptiveAI] Claude timeout[/yellow]")
+            return None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] Claude error: {e}[/yellow]")
             return None
@@ -708,8 +762,11 @@ class AdaptivePayloadEngine:
         if not api_key:
             return None
         import httpx
+        # 設定済み stream timeout をそのまま尊重する（60s 上限で縛ると --llm-stream-timeout 120 等の
+        # 明示値が Gemini だけ無視される・Codex #173 P2）。
+        _gemini_to = self.pg.llm_stream_timeout_seconds
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=_gemini_to) as client:
                 url = (
                     f"https://generativelanguage.googleapis.com/v1beta/models/"
                     f"{self.pg.gemini_model}:generateContent?key={api_key}"

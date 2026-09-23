@@ -42,6 +42,8 @@ _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 # try/except は例外しか捕まえられずハングを防げないため、待機を有界にする（F06）。
 # realistic_site 通し E2E が SQLi 再検証の page.content() 待ちで 900 秒 timeout していた。
 _PAGE_CONTENT_TIMEOUT = 30.0
+# dialog.dismiss() は native timeout を持たないため asyncio.wait_for で有界化する上限（F06/0059）。
+_DIALOG_DISMISS_TIMEOUT = 3.0
 
 
 async def _bounded_page_content(page) -> str:
@@ -556,6 +558,8 @@ class BrowserManager:
         self.dialog_fired: bool = False
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
+        # 初回セットアップの scoped-header 方針（_wire_current_page が参照）。
+        self._use_scoped_headers: bool = False
         self.last_login_url: str = ""
         self.last_login_success: bool = False
         self.last_navigation_error: str = ""
@@ -639,8 +643,13 @@ class BrowserManager:
                 # main/worker page は明示 attach するため、イベント購読に失敗しても
                 # スキャンを止めない。popup はヘッダなしのフェイルクローズになる。
                 pass
+        self._use_scoped_headers = use_scoped_headers
         self.page = await self._context.new_page()
-        if use_scoped_headers:
+        await self._wire_current_page()
+
+    async def _wire_current_page(self) -> None:
+        """self.page に既定 timeout・ネットワーク傍受・dialog ハンドラを配線する（初回セットアップ）。"""
+        if self._use_scoped_headers:
             # 最初のナビゲーションより前に Fetch.enable の完了を保証する。
             await self._activate_scoped_header_interception(self.page)
             if self._header_intercept_mode == "cdp":
@@ -1201,10 +1210,15 @@ class BrowserManager:
         except Exception:
             self.dialog_screenshot_b64 = ""
         try:
-            await dialog.dismiss()
+            # dismiss() は native timeout を持たないコマンドで、CDP 応答が返らないと await が
+            # 永久に完了しない。ダイアログ未解消の間は同ページの goto/content/フォーム操作が全て
+            # ブロックされるため、alert() を撒く payload が1つでも wedge すると以降の全操作が
+            # 連鎖停止し外側の scan timeout まで到達する（F06/0059）。asyncio.wait_for で有界化する
+            # （3.12 は timeout 時に内側 coroutine を cancel+drain するので orphan future を残さない）。
+            await asyncio.wait_for(dialog.dismiss(), timeout=_DIALOG_DISMISS_TIMEOUT)
         except Exception:
-            # The page may already have navigated or been closed by a parallel
-            # worker. The dialog signal is still useful evidence.
+            # timeout（未応答）や、並行 worker がページを navigate/close 済みのケースを含む。
+            # dialog 発火の signal 自体は evidence として有効なので握りつぶして続行する。
             pass
 
     async def update_extra_headers(self, headers: dict) -> None:
@@ -1501,8 +1515,13 @@ class BrowserManager:
         """
         return await _bounded_page_content(self.page)
 
-    async def find_forms(self) -> list[dict]:
-        """Find all forms and their inputs on the current page."""
+    async def find_forms(self, *, raise_on_error: bool = False) -> list[dict]:
+        """Find all forms and their inputs on the current page.
+
+        既定は失敗時 ``[]``（従来挙動）。``raise_on_error=True`` のとき評価失敗を再送出し、
+        呼び出し側が「成功して空」と「抽出失敗」を区別できるようにする（flow 後の refresh が
+        transient 失敗で crawl form を消さないため・Codex #170 P2）。
+        """
         try:
             forms = await self.page.evaluate("""
                 () => {
@@ -1548,6 +1567,8 @@ class BrowserManager:
             """)
             return forms
         except Exception:
+            if raise_on_error:
+                raise
             return []
 
     async def get_url_params(self) -> list[str]:

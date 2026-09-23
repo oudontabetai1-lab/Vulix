@@ -1,10 +1,12 @@
-# WScan — Web Security Scanner
+# Vulix — self-learning browser security exploration engine
 
-WScan は、IPA「安全なウェブサイトの作り方」の脆弱性カテゴリを中心に、Playwright による実ブラウザ操作、決定論スキャナ、LLM を組み合わせた Web 脆弱性検査ツールです。用途に応じて、再現性と確証を重視する **通常モード (`scan`)**、LLM の独自解釈と探索力を重視する **Agent モード (`agent`)**、Agent の発見範囲と通常スキャンの確実性を両立する **Hybrid モード（ダッシュボード）**を使い分けます。Hybrid は Agent を URL 偵察だけに使うのではなく、Agent が見つけた脆弱性仮説も最終レポートへラベル付きで併記します。
+**Vulix**（VULIX = Vulnerability Understanding, Learning & Intelligent eXploration）は、対象アプリと対話しながら状態を理解し、観測結果で次の行動を決める **security exploration engine** です（設計判断 ADR-0022 による再定義。旧称 WScan）。Playwright による実ブラウザ操作、決定論スキャナ、LLM を組み合わせ、用途に応じて、再現性と確証を重視する **通常モード (`scan`)**、LLM の独自解釈と探索力を重視する **Agent モード (`agent`)**、両者を両立する **Hybrid モード（ダッシュボード）**を使い分けます。Hybrid は Agent を URL 偵察だけに使うのではなく、Agent が見つけた脆弱性仮説も最終レポートへラベル付きで併記します。
+
+> **exploration engine への進化は段階的**です。現行の実装・CLI（`python3 main.py …`・内部パッケージ `wscan/`）はそのまま利用でき、Vulix ブランドと新しいエンジン語彙（Observer/Mapper/Planner/Executor/Evaluator/Learner）へ加算的に移行します。
 
 > **基本の操作面はブラウザで開くダッシュボードです**（`python3 main.py serve`）。通常・Agent・Hybrid の起動、機能フラグの切り替え、進捗確認、結果閲覧までダッシュボードで完結します。`scan`・`agent` などの CLI サブコマンドは自動化・CI・スクリプト用の補助入口です。
 
-> WScan は、自分が管理している環境、または明示的な検査許可を得た環境だけに使用してください。
+> Vulix は、自分が管理している環境、または明示的な検査許可を得た環境だけに使用してください。
 
 ## 目次
 
@@ -50,15 +52,33 @@ WScan は、IPA「安全なウェブサイトの作り方」の脆弱性カテ�
 
 ### 対応チェック種別
 
-`wscan.scanners.SCANNERS` に登録されている 37 種類です。
+`wscan.scanners.SCANNERS` に登録されている 38 種類です。
 
 ```text
 sqli xss dom_xss os ssti path_traversal csrf header_injection mail_header
 open_redirect clickjacking session privesc stored_xss cors info_disclosure
 host_header security_headers nosql deserialization request_smuggling ssrf
 graphql jwt cms xxe ldap file_upload race_condition websocket secret_leak sri
-js_static prototype_pollution cache_poisoning mass_assignment tls_scan
+js_static prototype_pollution cache_poisoning mass_assignment http_methods tls_scan
 ```
+
+**`outdated_components`（EOL・脆弱コンポーネント検査・opt-in）**: 2 種類の無料 API へ照会して
+既知の問題を持つコンポーネントを検出します。
+- **EOL 判定**: `Server` / `X-Powered-By` / `X-AspNet-Version` / `X-Generator` バナーから製品名+
+  バージョンを抽出し、[endoflife.date](https://endoflife.date) でサポート終了（EOL）版を検出。
+- **既知脆弱性（JS ライブラリ）**: ページが読み込む外部 JS ライブラリ（jsdelivr/cdnjs/unpkg 等の
+  `name@version`）を [OSV.dev](https://osv.dev) へ照会し、CVE/GHSA のある版を検出。
+
+**既定は無効**（有効時のみスキャン中に製品名/ライブラリ名を外部 API へ送信するため、`config/wscan.yaml` の
+`features.component_intel: true` かダッシュボードの「EOL コンポーネント検査」トグルで opt-in）。
+外部へ送るのは製品名/パッケージ名+バージョンのみで、対象 URL やヘッダ値全体は送信しません。API のベース URL・
+タイムアウトは `config/wscan.yaml` の `component_intel` ブロックで管理します（`eol_base_url` / `osv_base_url`。
+self-host 版へ差し替え可）。
+
+- **CVE 照会（NVD・限定オプション）**: `config/wscan.yaml` の `component_intel.nvd_enabled: true` で有効化すると、
+  少数の対応製品（nginx/apache/php/tomcat/openssl 等の保守的な CPE マップ）について [NVD](https://nvd.nist.gov)
+  の CVE を照会します。CPE 一致は範囲が広く誤差を含むため、**参考情報（低深刻度の集約）**として件数・最大深刻度・
+  代表 CVE を報告します。API キーは環境変数 `WSCAN_NVD_API_KEY` で渡すとレート制限が緩和されます（**無くても動作**）。
 
 Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traversal ssrf open_redirect csrf header_injection` です。
 
@@ -80,7 +100,7 @@ Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traver
 | 1.9 | クリックジャッキング | `clickjacking` | X-Frame-Options / CSP `frame-ancestors` |
 | 1.11 | オープンリダイレクト | `open_redirect` | リダイレクト先検証 |
 
-このほか、権限昇格/IDOR、CORS、情報漏洩、Host ヘッダ、セキュリティヘッダ、NoSQL、デシリアライズ、リクエストスマグリング、SSRF、GraphQL、JWT、CMS、XXE、LDAP、ファイルアップロード、Race Condition、WebSocket、シークレット漏洩、SRI、Prototype Pollution、Cache Poisoning/Deception、Mass Assignment、TLS 設定不備を検査できます。
+このほか、権限昇格/IDOR、CORS、情報漏洩、Host ヘッダ、セキュリティヘッダ、NoSQL、デシリアライズ、リクエストスマグリング、SSRF、GraphQL、JWT、CMS、XXE、LDAP、ファイルアップロード、Race Condition、WebSocket、シークレット漏洩、SRI、Prototype Pollution、Cache Poisoning/Deception、Mass Assignment、HTTP メソッド設定不備、TLS 設定不備を検査できます。
 
 `info_disclosure` は、詳細エラー/技術バナーに加えて、**忘れ物 artifact**（`.git/config`・`.git/HEAD`・`.svn`・`.hg`・`.env`・`.htpasswd`・`.npmrc`・`.aws/credentials`・`id_rsa`・`.DS_Store`・`*.bak`・`*.sql`/`*.zip` 等のバックアップ/ダンプ）と、**ディレクトリリスティング**（autoindex）も検出します。誤検知を避けるため、各ファイルは内容シグネチャ（または非 HTML の実体）で「実際に配信された」ことを確認してから報告します。
 
@@ -284,8 +304,11 @@ python3 main.py scan URL [URL ...] [options]
 | `--report-model MODEL` | provider モデル | 分析・修正提案用モデル上書き |
 | `-o, --output DIR` | `output/<timestamp>/` | 証跡・レポート出力先 |
 | `--port PORT` | `8765` | モニターポート |
-| `--timeout SECS` | `30` | リクエストタイムアウト |
+| `--timeout SECS` | `30` | HTTP/ページ読み込みのタイムアウト（**LLM ではない**） |
+| `--llm-timeout SECS` | config `llm.timeout_seconds`（`30`） | LLM 1回（one-shot: baseline/adaptive本体/report/triage）の応答上限。正の有限値のみ |
+| `--llm-stream-timeout SECS` | config `llm.stream_timeout_seconds`（`90`） | LLM streaming（planner・適応ペイロード変異）の1回応答上限。正の有限値のみ |
 | `--max-forms N` | `50` | 1ページの最大フォーム数 |
+| `--flows FILE...` | なし | `record` で保存したフロー JSON を、その `navigate` 先が一致したクロール済みページの攻撃直前に再生（カート投入等のページ単位前提操作）。複数指定可。サイト全体の認証は `--cookie`/自動ログインを使う |
 
 スコープ・認証・通信:
 
@@ -399,14 +422,21 @@ python3 main.py agent URL [options]
 | `--max-steps N` | `100` | 最大操作ステップ |
 | `--headless / --no-headless` | headless | 非表示/表示ブラウザ |
 | `--auth-user`, `--auth-pass`, `--login-url` | config / 空 | 事前ログイン |
+| `--totp-secret SECRET` | `WSCAN_TOTP_SECRET` / 空 | TOTP ログイン。secret は証跡やプロンプトへ平文保存しない |
+| `--storage-state FILE` | 空 | Playwright/browser-use の認証済み storage state を復元 |
 | `--bearer TOKEN` | `WSCAN_BEARER` / config / 空 | Agent ブラウザへ Bearer 認証を付与 |
 | `-H, --header "Name: Value"` | `[]` | Agent ブラウザへカスタムヘッダを追加。複数指定可 |
 | `--header-file FILE` | 空 | JSON/YAML/1行1ヘッダ形式 |
 | `-o, --output DIR` | `output/agent_<timestamp>/` | 出力先 |
+| `--resume` | 無効 | `--output DIR` の checkpoint から、同一条件・残予算で再開 |
 | `--port PORT` | `8765` | モニターポート |
 | `--no-monitor`, `--no-open-report` | 無効 | モニター/自動表示を無効化 |
 
 > 初期化や実行がハードエラー（LLM プロバイダ不在、`browser-use` 未導入など）で失敗した場合、Agent は「0 findings の正常完了」とは表示せず **FAILED を表示して終了コードを非0** にします（CI で失敗を検知できます）。設定ディレクトリ（`~/.config` 系）が書込み不可のときは起動前に案内を出します（`export XDG_CONFIG_HOME=/書込み可能な場所` で解消。案内は警告で、実行自体は継続し、実際に失敗すれば上記のとおり FAILED になります）。
+
+Agent は認証、全体探索、検査種別ごとの probe、独立再検証、敵対的レビューを別 episode として実行します。探索で発見した各ページ×各指定 check が work queue に残っている、再検証が未完了、レビューが coverage gap を示した、または step 予算を使い切った場合は `COMPLETE` ではなく `PARTIAL`（終了コード 2）です。`agent_state.json`、`agent_steps.jsonl`、`agent_manifest.json` に再開可能な状態と伏字済み証跡を保存します。
+
+通常スキャンと Agent のどちらも、出力先の `reproduction.json` と `reproduce.sh` に再現情報を出します。再現 JSON には前提条件、操作手順、期待挙動、陰性対照、検証状態を含みます。`<REDACTED>` は実行時に認可済みの値へ差し替えてください。
 
 ### `triage` — ペイロード非投入の高速評価
 
@@ -457,6 +487,13 @@ python3 main.py record URL [--output flows/recording.json] [--headless]
 ```
 
 ブラウザ操作を再生可能な JSON フローとして記録します。画面を操作する場合は `--headless` を付けません。
+記録したフローは **ページ単位の前提操作**（例: カート投入してからカート画面を攻撃）として `scan --flows` で再生できます。
+
+```bash
+python3 main.py scan URL --flows flows/recording.json [flows/other.json ...]
+```
+
+フローはその最後の `navigate` 先 URL が**クロールで発見したページと一致したとき**、そのページの攻撃直前に再生されます。したがって「ログインして初めて到達できる保護領域」全体を認証させる用途には向きません（未認証クロールが保護ページを発見できないため）。サイト全体の認証には `--cookie` / `--cookie-file` や自動ログインを使ってください。フローで確立した認証をクロール前段に効かせる強化は今後の課題です。
 
 ### `manual-crawl` — 手動巡回シード
 
@@ -545,7 +582,8 @@ python3 main.py capability-matrix -o cap.md  # ファイルへ書き出し
 | キー | 型 | 既定値 | 対応 CLI / UI |
 | --- | --- | --- | --- |
 | `llm.provider` | str | `ollama` | `--llm` / LLM設定 |
-| `llm.timeout_seconds` | int | `30` | — |
+| `llm.timeout_seconds` | float | `30` | `--llm-timeout` / LLM one-shot 応答上限（HTTP `--timeout` とは別） |
+| `llm.stream_timeout_seconds` | float | `90` | `--llm-stream-timeout` / LLM streaming（planner・適応変異）応答上限 |
 | `llm.max_retries` | int | `2` | — |
 | `llm.ollama_model` | str | `llama3` | `--ollama-model` / LLM設定 |
 | `llm.ollama_url` | str | `http://localhost:11434` | Agent/Setup の `--ollama-url` / Agent・Hybrid設定 |
@@ -759,6 +797,7 @@ output/<timestamp>/
 ├── ai_finding_fixes.json
 ├── http_requests.jsonl
 ├── payloads.jsonl
+├── llm_calls.jsonl      # LLM 呼び出しの監査（provider/role/所要時間/失敗種別・本文なし）
 └── screenshots/
 ```
 
