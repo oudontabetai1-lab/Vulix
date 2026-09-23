@@ -1,0 +1,49 @@
+# Orca 並列オーケストレーション: タスク定義（汎用テンプレ）
+# ------------------------------------------------------------------------------
+# 1 タスク = 1 Orca セッション = 1 worktree(.claude/worktrees/<slug>) = 1 ブランチ
+#          = 1 PR。粒度は「機能/バグ 1 件 = 1 PR」（CLAUDE.md のスコープ規律に合わせる）。
+#
+# depends_on で DAG を表現。依存が全てマージ済みになったタスクだけを次に着手する
+# （Orca の orchestration スキルに投げる／手動で fan out する、どちらでも使える）。
+#
+# 使い方の要点:
+#   - slug は kebab-case。ブランチは claude/<slug>、worktree は .claude/worktrees/<slug>。
+#   - 各 prompt の最後で `scripts/orca/finish_task.sh --title "..."` を必ず実行させる。
+#   - マージ/クローズは scripts/orca/merge_watcher.sh --watch が自動で行う（人手不要）。
+# ------------------------------------------------------------------------------
+version: 1
+base_branch: main
+
+defaults:
+  # 各セッション prompt の末尾に自動で足したい共通指示（テンプレとして参照）
+  finish_hint: |
+    完了したら必ずリポジトリ直下で次を実行すること:
+      scripts/orca/finish_task.sh --title "<簡潔なPRタイトル>" --commit "<コミットメッセージ>"
+    これによりテスト→push→PR作成→@codex review までが自動化される。
+
+tasks:
+  - id: t1
+    slug: example-fix-header-parse
+    title: "fix: ヘッダ解析の境界条件を修正"
+    depends_on: []
+    prompt: |
+      wscan/ のヘッダ解析で <条件> のとき <不具合> が起きる。
+      再現テストを tests/ に追加し、純粋関数側で修正すること。スコープはこの1件のみ。
+      <defaults.finish_hint を展開>
+
+  - id: t2
+    slug: example-add-scanner-xyz
+    title: "feat: XYZ スキャナを追加"
+    depends_on: []          # t1 と並行可能
+    prompt: |
+      新スキャナ scanners/xyz.py を追加（BaseScanner 継承・CHECK_TYPE 定義・SCANNERS 登録）。
+      フィクスチャに「脆弱＋安全ツイン」を1対追加し E2E で false positive/negative を確認。
+      <defaults.finish_hint を展開>
+
+  - id: t3
+    slug: example-doc-update
+    title: "docs: 上記変更を README/docs に反映"
+    depends_on: [t1, t2]    # t1,t2 マージ後に着手
+    prompt: |
+      t1/t2 の利用者向け変更を README.md と docs/ に反映（CLAUDE.md のドキュメント規約に従う）。
+      <defaults.finish_hint を展開>
