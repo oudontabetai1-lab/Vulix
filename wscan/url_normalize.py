@@ -1,7 +1,86 @@
 """checkpoint キー専用の保守的な URL 正規化。"""
 from __future__ import annotations
 
-from urllib.parse import unquote_plus, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
+
+
+# `/` は **含めない**：``?next=/home`` と ``?next=/admin`` のような path/route 値まで空化すると
+# 別ルートを「既知」と誤判定し、_enqueue_observed_probe_work が probe を作らず偽 COMPLETE に
+# なる（Codex #154 P1）。真の注入マーカー（``<>"'`` 等）を含む値だけ空化して payload 変種を dedup
+# する。純粋な path 値（``/`` と英数のみ）は routing 値として保持する。
+_INJECTION_META_CHARS = frozenset("<>\"'`;(){}|\\%*")
+
+
+def _looks_url_valued(value: str) -> bool:
+    """値が URL/準 URL（SSRF・open-redirect payload）かを判定する（純粋・Codex #154 P1）。
+
+    ``http://127.0.0.1/``・``http://169.254.169.254/...``・``https://evil.com``・``//evil.com`` は
+    メタ文字を含まず 64 字以下でも payload。scheme:// 始まり・protocol-relative ``//``・``://`` 含有を
+    URL 値とみなす。単一スラッシュ始まりの routing 値（``/home``）は URL 値ではないので保持される。
+    """
+    low = value.strip().lower()
+    return (
+        low.startswith(("http://", "https://", "ftp://", "file://", "gopher://", "dict://", "ldap://", "//"))
+        or "://" in low
+    )
+
+
+def _normalized_query(query: str) -> str:
+    """注入らしい値だけを空化した query（query / fragment query 共通・純粋）。
+
+    **観測順を保持**する。key ソートすると ``?action=transfer&stage=confirm`` と
+    ``?stage=confirm&action=transfer`` のように順序で操作を選ぶアプリで別ページが同一 identity になり、
+    後者を「既知」として probe せず偽の完全カバレッジになる（Codex #154 P1）。
+    """
+    pairs: list = []
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        # ponytail: メタ文字・64文字超・URL 値の簡易判定。必要なら routing の明示契約へ。
+        if (len(value) > 64
+                or any(char in _INJECTION_META_CHARS or char.isspace() for char in value)
+                or _looks_url_valued(value)):
+            value = ""
+        if (key, value) not in pairs:
+            pairs.append((key, value))
+    return urlencode(pairs)
+
+
+def endpoint_identity(url: str) -> str:
+    """routing 値は保持し、注入らしい値だけを空にして probe の重複を除く。"""
+    parsed = urlsplit(url)
+    return urlunsplit(parsed._replace(query=_normalized_query(parsed.query), fragment=""))
+
+
+def _normalize_fragment_query(fragment: str) -> str:
+    """route-like fragment 内の query payload を正規化する（純粋・Codex #154 P1）。
+
+    ``/search?q=' OR 1=1`` と ``/search?q=x`` が別 identity にならないよう、fragment の
+    ``?`` 以降を endpoint_identity と同じ規則で正規化（注入値の空化＋key ソート）する。
+    ``?`` を持たない fragment はそのまま返す。URL 値（SSRF/open-redirect payload）の空化も
+    endpoint_identity と共通の判定で行う（Codex #154 P1）。
+    """
+    path, sep, query = fragment.partition("?")
+    if not sep:
+        return fragment
+    return path + "?" + _normalized_query(query)
+
+
+def route_aware_identity(url: str) -> str:
+    """endpoint_identity（注入値の空化＋query ソートで payload 変種を dedup）に、
+    client-side route を示す fragment を **保持**して合成した identity（Codex #154 P1）。
+
+    endpoint_identity は fragment を落とすため、hash ルート SPA の ``/app#/users`` と
+    ``/app#/admin`` が同一 identity になり、2つ目のルートが「既知」として probe queue から
+    抑止されていた。route らしい fragment（``/`` や ``!`` 始まり、または ``/`` を含む）だけを
+    付け直し、payload 変種の dedup（値の空化・query ソート）はそのまま活かす。純粋関数。
+    """
+    base = endpoint_identity(url)
+    fragment = urlsplit(url).fragment
+    if fragment and (fragment[:1] in ("/", "!") or "/" in fragment):
+        # fragment 内の query payload も正規化する。さもないと SPA route の payload 変種
+        # （`/app#/search?q=<payload>`）が毎回別 identity になり probe queue を再帰的に膨張させ
+        # global budget を食い潰す（Codex #154 P1）。route path 自体は保持する。
+        return f"{base}#{_normalize_fragment_query(fragment)}"
+    return base
 
 
 # 名前だけで意味を持ち得ない、純粋なキャッシュバスター/CSRF トークン。
