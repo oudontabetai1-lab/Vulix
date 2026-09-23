@@ -1,0 +1,194 @@
+"""F09: record→scan --flows の往復が実際に効くことを検証する。
+
+record は steps の**リスト**を保存し、fill step は CSS selector を持つ。
+- main._load_flow_files がリスト/｛name,steps｝の両形式を flow dict へ読み込むこと。
+- 読み込んだ dict が ScanFlow へ復元され、fill が selector で解決されること
+  （案内どおり `scan --flows <file>` が動く）。
+- 壊れたファイルは skip して他を止めないこと。
+"""
+import asyncio
+import json
+
+from main import _load_flow_files
+from wscan.flow_runner import FlowRunner, FlowStep, ScanFlow
+
+
+def test_load_flow_files_wraps_steps_list(tmp_path):
+    # record が保存する形式（bare steps list）。
+    rec = tmp_path / "recording.json"
+    rec.write_text(json.dumps([
+        {"action": "navigate", "url": "http://t.test/login"},
+        {"action": "fill", "selector": "#user", "value": "alice"},
+        {"action": "click", "selector": "button[type=submit]"},
+    ]), encoding="utf-8")
+
+    flows = _load_flow_files([str(rec)])
+    assert len(flows) == 1
+    assert flows[0]["name"] == "recording"          # file stem を name に
+    assert flows[0]["steps"][1]["selector"] == "#user"
+
+
+def test_load_flow_files_accepts_named_dict(tmp_path):
+    named = tmp_path / "login.json"
+    named.write_text(json.dumps(
+        {"name": "ログイン", "steps": [{"action": "navigate", "url": "http://t/x"}]}
+    ), encoding="utf-8")
+
+    flows = _load_flow_files([str(named)])
+    assert flows == [{"name": "ログイン", "steps": [{"action": "navigate", "url": "http://t/x"}]}]
+
+
+def test_load_flow_files_skips_broken_file_keeps_rest(tmp_path):
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps([{"action": "navigate", "url": "http://t/x"}]), encoding="utf-8")
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    missing = tmp_path / "nope.json"
+
+    flows = _load_flow_files([str(bad), str(good), str(missing)])
+    assert [f["name"] for f in flows] == ["good"]   # 壊れた/欠落は skip、good は残る
+
+
+def test_load_flow_files_rejects_navigate_without_url(tmp_path):
+    # navigate に nonempty string url が無い flow は skip（_match_pre_attack_flows が
+    # 一致させられず前提が黙って無視される＝偽陰性を防ぐ・Codex #170 P2）。
+    bad_nav = tmp_path / "bad_nav.json"
+    bad_nav.write_text(json.dumps([{"action": "navigate"}]), encoding="utf-8")
+    bad_nav2 = tmp_path / "bad_nav2.json"
+    bad_nav2.write_text(json.dumps([{"action": "navigate", "url": 123}]), encoding="utf-8")
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps([{"action": "navigate", "url": "http://t/x"}]), encoding="utf-8")
+
+    flows = _load_flow_files([str(bad_nav), str(bad_nav2), str(good)])
+    assert [f["name"] for f in flows] == ["good"]
+
+
+def test_load_flow_files_rejects_flow_without_navigate(tmp_path):
+    # navigate step の無い flow（fill/click のみ・空）は _match_pre_attack_flows が一致させられず
+    # 黙って無視されるため、読み込み時に skip する（Codex #170 P2）。
+    nonav = tmp_path / "nonav.json"
+    nonav.write_text(json.dumps([
+        {"action": "fill", "selector": "#u", "value": "x"},
+        {"action": "click", "selector": "#go"},
+    ]), encoding="utf-8")
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps([]), encoding="utf-8")
+    good = tmp_path / "g.json"
+    good.write_text(json.dumps([{"action": "navigate", "url": "http://t/x"}]), encoding="utf-8")
+    flows = _load_flow_files([str(nonav), str(empty), str(good)])
+    assert [f["name"] for f in flows] == ["g"]
+
+
+def test_flow_navigate_landing_out_of_scope_fails():
+    # navigate が redirect 追従後に scope 外へ着地したら flow 失敗（後続 fill/click を走らせない・#170 P2）。
+    class _P:
+        url = "http://evil.test/steal"
+
+        async def wait_for_load_state(self, *a, **k):
+            return None
+
+    class _B:
+        def __init__(self):
+            self.page = _P()
+
+        async def navigate(self, u):
+            return True  # navigate 自体は成功（redirect 先で 200）
+
+    runner = FlowRunner(_B(), scope_check=lambda u: "evil.test" not in u)
+    flow = ScanFlow(name="t", steps=[FlowStep(action="navigate", url="http://t/ok")])
+    assert asyncio.run(runner.run(flow)) is False
+
+
+def test_load_flow_files_rejects_click_without_selector_or_field(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps([
+        {"action": "navigate", "url": "http://t/x"},
+        {"action": "click"},
+    ]), encoding="utf-8")
+    flows = _load_flow_files([str(bad)])
+    assert flows == []
+
+
+def test_none_returns_empty():
+    assert _load_flow_files(None) == []
+
+
+def test_skips_structurally_broken_steps(tmp_path):
+    # JSON 妥当でも step が非 dict（[1]）や timeout 非数値だと後段の FlowStep.from_dict が
+    # 落ちてスキャン全体を止める。_load_flow_files で検証して skip すること（#170 P2）。
+    nondict = tmp_path / "nondict.json"
+    nondict.write_text(json.dumps([1, 2]), encoding="utf-8")
+    badtimeout = tmp_path / "badtimeout.json"
+    badtimeout.write_text(json.dumps([{"action": "wait", "timeout": "soon"}]), encoding="utf-8")
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps([{"action": "navigate", "url": "http://t/x"}]), encoding="utf-8")
+
+    flows = _load_flow_files([str(nondict), str(badtimeout), str(good)])
+    assert [f["name"] for f in flows] == ["good"]   # 壊れた step 構造は skip、good は残す
+
+
+def test_roundtrip_recorded_fill_uses_selector(tmp_path):
+    """読み込んだ recording を ScanFlow 化し、fill が selector で解決されることを確認。"""
+    rec = tmp_path / "rec.json"
+    # 実録画は必ず先頭に navigate（start_url）を持つ（#170 P2 の no-navigate 拒否と整合）。
+    rec.write_text(json.dumps([
+        {"action": "navigate", "url": "http://t/login"},
+        {"action": "fill", "selector": "#user", "value": "secret"},
+    ]), encoding="utf-8")
+    flows = ScanFlow.list_from_dicts(_load_flow_files([str(rec)]))
+    assert len(flows) == 1
+
+    captured = {}
+
+    class _RecPage:
+        async def evaluate(self, js, arg=None):
+            captured["arg"] = arg
+            return bool(arg and arg[0])
+
+        async def wait_for_load_state(self, *a, **k):
+            return None
+
+    class _Browser:
+        def __init__(self):
+            self.page = _RecPage()
+
+        async def navigate(self, url):
+            return True
+
+    ok = asyncio.run(FlowRunner(_Browser()).run(flows[0]))
+    assert ok is True
+    # fill が [selector, field, value] を JS へ渡し、selector で要素解決する。
+    assert captured["arg"] == ["#user", "", "secret"]
+
+
+def test_load_flow_files_skips_unknown_action(tmp_path, capsys):
+    # action 綴り誤り（navigat）を含む flow は読み込み時に skip される（Codex #170 P2）。
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps([{"action": "navigat", "url": "http://t.test/cart"}]))
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps([{"action": "navigate", "url": "http://t.test/ok"}]))
+    flows = _load_flow_files([str(bad), str(good)])
+    names = {f["name"] for f in flows}
+    assert "good" in names and "bad" not in names
+    assert "未知の action" in capsys.readouterr().out
+
+
+def test_load_flow_files_keeps_same_destination_flows_intact(tmp_path):
+    # 同一遷移先の 2 flow は統合せず両方そのまま保持する（engine が順次再生する・Codex #170 P2）。
+    # 以前の連結統合は等価先の取りこぼし/最終 navigate 以外の前寄せによる順序破壊を招いた。
+    a = tmp_path / "cart.json"
+    a.write_text(json.dumps([
+        {"action": "click", "selector": "#add-to-cart"},
+        {"action": "navigate", "url": "http://t.test/checkout"},
+    ]))
+    b = tmp_path / "coupon.json"
+    b.write_text(json.dumps([
+        {"action": "fill", "selector": "#code", "value": "SAVE10"},
+        {"action": "navigate", "url": "http://t.test/checkout"},
+    ]))
+    flows = _load_flow_files([str(a), str(b)])
+    assert len(flows) == 2                       # 統合せず両方保持
+    # 各 flow は元の step 順（最終 navigate 含む）を保つ＝順序破壊なし。
+    assert flows[0]["steps"][-1]["action"] == "navigate"
+    assert flows[1]["steps"][-1]["action"] == "navigate"
+    assert {f["name"] for f in flows} == {"cart", "coupon"}

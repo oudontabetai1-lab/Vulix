@@ -1307,6 +1307,10 @@ Examples:
         ),
     )
     scan.add_argument(
+        "--flows", nargs="+", metavar="FILE", default=None,
+        help="record で保存した flow JSON を1つ以上、攻撃前に再生する（例: --flows flows/recording.json）",
+    )
+    scan.add_argument(
         "--delay", type=float, default=_CFG.get("request_delay", 0.5), metavar="SECS",
         help=(
             "リクエスト間の待機秒数 (デフォルト: config scan.request_delay または 0.5)。"
@@ -2178,6 +2182,184 @@ def _collapse_multi_target(
     return primary, list(extra) + list(target_urls or [])
 
 
+def _load_flow_files(paths) -> list[dict]:
+    """`--flows` の JSON ファイルを ScanEngine 用の flow dict へ読み込む（F09）。
+
+    record サブコマンドは steps の**リスト**を保存し、ScanFlow.from_dict は
+    ``{"name", "steps"}`` を期待する。両形式を受ける：リストは file 名を name として包み、
+    dict はそのまま使う（name 欠落は file 名で補完）。壊れた/読めないファイルは警告して
+    skip する（他の flow やスキャン自体は止めない）。
+    """
+    import json
+    from pathlib import Path
+    from wscan.flow_runner import ScanFlow
+
+    flows: list[dict] = []
+    for fp in paths or []:
+        p = Path(fp)
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[warn] --flows: {fp} を読み込めません（skip）: {exc}")
+            continue
+        if isinstance(raw, list):
+            candidate = {"name": p.stem, "steps": raw}
+        elif isinstance(raw, dict) and isinstance(raw.get("steps"), list):
+            candidate = {"name": raw.get("name") or p.stem, "steps": raw["steps"]}
+        else:
+            print(f"[warn] --flows: {fp} は steps リスト/｛name,steps｝形式ではありません（skip）")
+            continue
+        # 構造検証: JSON 妥当でも step が非 dict（`[1]`）や timeout 非数値だと後段の
+        # ScanFlow.from_dict/FlowStep.from_dict が AttributeError/ValueError でスキャン全体を
+        # 落とす。ここで構築を試し、壊れていれば skip して他 flow・スキャンを止めない（#170 P2）。
+        try:
+            ScanFlow.from_dict(candidate)
+        except Exception as exc:
+            print(f"[warn] --flows: {fp} の step 構造が不正（skip）: {exc}")
+            continue
+        # action 名の妥当性を **読み込み時** に検証する。ScanFlow.from_dict は任意の action
+        # 文字列を受けるため、`navigat` のような綴り誤りは replay 時まで気づかれず、しかも
+        # _match_pre_attack_flow が navigate step を見つけられず flow が黙って選ばれない
+        # （前提未適用のまま警告も出ない）＝偽陰性になる（Codex #170 P2）。未知 action を含む
+        # flow はここで skip し、理由を明示する。
+        _VALID_FLOW_ACTIONS = {"navigate", "fill", "submit", "click", "wait"}
+        unknown = sorted({
+            str(s.get("action", "")) for s in candidate["steps"]
+            if isinstance(s, dict) and str(s.get("action", "")) not in _VALID_FLOW_ACTIONS
+        })
+        if unknown:
+            print(
+                f"[warn] --flows: {fp} に未知の action {unknown} が含まれます（skip）。"
+                f"有効: {sorted(_VALID_FLOW_ACTIONS)}"
+            )
+            continue
+        # action ごとの必須フィールドも読み込み時に検証する。特に navigate は nonempty string
+        # url が無いと _match_pre_attack_flows が最終 navigate を実ページに一致させられず、前提が
+        # 黙って無視される（未知 action と違い警告も runner の失敗報告も出ない＝偽陰性・Codex #170 P2）。
+        # fill/click は selector か field が無いと replay 時に "target not found" で明示失敗するが、
+        # ここでも早期に弾いて他 flow・スキャンを止めない。
+        def _flow_field_error(s: dict) -> str:
+            act = str(s.get("action", ""))
+            if act == "navigate":
+                u = s.get("url")
+                if not (isinstance(u, str) and u.strip()):
+                    return "navigate は空でない文字列 url が必須"
+            elif act in ("fill", "click"):
+                has_sel = isinstance(s.get("selector"), str) and s.get("selector").strip()
+                has_field = isinstance(s.get("field"), str) and s.get("field").strip()
+                if not has_sel and not has_field:
+                    return f"{act} は selector か field が必須"
+            return ""
+        field_errs = [
+            _flow_field_error(s) for s in candidate["steps"] if isinstance(s, dict)
+        ]
+        field_errs = [e for e in field_errs if e]
+        if field_errs:
+            print(
+                f"[warn] --flows: {fp} の step に必須フィールド欠落（skip）: "
+                f"{sorted(set(field_errs))}"
+            )
+            continue
+        # navigate step を1つも持たない flow は _match_pre_attack_flows が最終 navigate で
+        # ページに一致させられず、選択・再生されないまま警告も出ない（前提未適用の偽陰性）。
+        # 読み込み時に skip して理由を明示する（Codex #170 P2）。
+        if not any(
+            isinstance(s, dict) and str(s.get("action", "")) == "navigate"
+            for s in candidate["steps"]
+        ):
+            print(
+                f"[warn] --flows: {fp} は navigate step を含みません（skip）。"
+                "前提ページを一致させるため最低1つの navigate が必要です。"
+            )
+            continue
+        # navigate url の前後空白を除いて正規化して格納する。u.strip() は真偽判定にしか使って
+        # おらず、untrimmed のままだと _match_pre_attack_flows が空白入り URL を crawl URL と
+        # 一致させられず、前提 flow が黙って選ばれない（Codex #170 P2）。
+        for _s in candidate["steps"]:
+            if isinstance(_s, dict) and str(_s.get("action", "")) == "navigate" \
+                    and isinstance(_s.get("url"), str):
+                _s["url"] = _s["url"].strip()
+        flows.append(candidate)
+
+    # 同一遷移先の複数 flow は「統合」せず、ScanEngine 側が一致する flow を **file 順に全て
+    # 順次再生**する（_match_pre_attack_flows が matcher の URL 等価で全一致を返す）。以前の
+    # 連結統合は (a) 生文字列 group で /checkout と /checkout/ 等の等価先を取りこぼし、
+    # (b) 各 flow の最終 navigate 以外を前寄せして順序を壊す、という不具合があった（Codex #170）。
+    return flows
+
+
+# setup 提案が出してよい flag の明示許可リスト（#170 P2）。すべて値を取らない boolean
+# トグルに限定する。setup のコピー可能コマンドへそのまま連結されるため、`--header-refresh-cmd`
+# のように値がシェル実行される option（header_manager が create_subprocess_shell で実行）や
+# 任意の値付き option を弾く。構文的に正しいだけの long option は許可しない。
+# すべて scan サブコマンドに実在する option（scan --help で検証済・#170 P2）。
+# `--no-headless` は scan に無く生成コマンドが `unrecognized arguments` で落ちるため除外。
+# `--fast` は run_scan が depth==既定を「未指定」とみなし fast preset で depth=1 に変える＝
+# 案内した `--depth N` と実行結果が食い違うため除外（#170 P2）。
+# 提案 checks/depth の要約と**実効設定が食い違う**flag は全て除外する（#170 P2）：
+#   --all-checks（--checks を全 scanner で置換）/ --dom-xss（dom_xss を checks に追加）/
+#   --ctf（ssti 追加＋遅延半減）/ --spa-crawl（クロール範囲拡大）/ --fast（depth を 1 に）/
+#   --no-headless（scan 非対応）。
+# 残すのは表示・実行時のみで check セットを変えず、要約より広くならない（＝narrow/中立の）flag だけ。
+_SAFE_SETUP_FLAGS = frozenset({
+    "--headless", "--no-monitor", "--no-sitemap-crawl",
+})
+
+
+def _parse_setup_llm(text, known_checks) -> "Optional[dict]":
+    """setup の LLM 応答テキストから {checks, depth, flags, reason} を防御的に抽出（F11）。
+
+    壊れた JSON・非 dict・checks 不在/全て未知は None（＝無効応答→呼び出し側が既定へ fallback）。
+    checks は実レジストリ（SCANNERS）で検証し未知を落とす。depth は 1-5 の int 以外なら 2。
+    純粋関数（ネット非依存）でテスト可能。
+    """
+    import json
+    import re as _re
+
+    if not text or not text.strip():
+        return None
+    m = _re.search(r"\{.*\}", text, _re.S)  # コードフェンス等を無視して最外 JSON を拾う
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("checks"), list):
+        return None
+    checks = list(dict.fromkeys(
+        c for c in data["checks"] if isinstance(c, str) and c in known_checks
+    ))
+    if not checks:
+        return None  # 有効な check が皆無＝無効応答として扱う
+    depth = data.get("depth")
+    # bool は int のサブクラス（isinstance(True,int)==True）なので type() で厳密判定する。
+    # さもないと depth=true が通り `--depth True` を生成し argparse が弾く（#170 P2）。
+    if type(depth) is not int or not (1 <= depth <= 5):
+        depth = 2
+    # flags は setup が出すコピー可能コマンドへそのまま連結される。構文検証だけだと
+    # `--header-refresh-cmd=id` のような値がシェル実行される option を通してしまうため、
+    # 無害な boolean トグルの明示許可リスト（_SAFE_SETUP_FLAGS）だけに限定する（#170 P2）。
+    flags_raw = data.get("flags") if isinstance(data.get("flags"), list) else []
+    # 宣伝例 `--dom-xss` のように「実は check」を指すフラグを check へ正規化してから許可リストで
+    # 絞る。さもないと model が例に従い checks=xss + flags=--dom-xss を返したとき、--dom-xss が
+    # _SAFE_SETUP_FLAGS に無く黙って落ちて DOM-XSS 検査が抜ける（採用表示と生成コマンドが不一致・
+    # Codex #170 P2）。`--x-y` は `x_y` に写して known_checks なら checks へ移す。
+    _kept_flags = []
+    for f in flags_raw:
+        if not isinstance(f, str):
+            continue
+        as_check = f.lstrip("-").replace("-", "_")
+        if as_check in known_checks:
+            if as_check not in checks:
+                checks.append(as_check)
+        else:
+            _kept_flags.append(f)
+    flags = [f for f in _kept_flags if f in _SAFE_SETUP_FLAGS]
+    reason = data.get("reason") if isinstance(data.get("reason"), str) else ""
+    return {"checks": checks, "depth": depth, "flags": flags, "reason": reason}
+
+
 async def run_scan(args):
     from rich.console import Console
     from rich.panel import Panel
@@ -2491,7 +2673,7 @@ async def run_scan(args):
             enable_tls_scan=True if "tls_scan" in checks_list else None,
             enable_llm_web_browsing=getattr(args, "llm_web_browsing", False),
             concurrency=getattr(args, "concurrency", 1),
-            flows=getattr(args, "flows", None) or [],
+            flows=_load_flow_files(getattr(args, "flows", None)),
             max_payloads=getattr(args, "max_payloads", 0),
             fast_mode=getattr(args, "fast", False),
             # A: Multi-account privilege escalation
@@ -3426,13 +3608,15 @@ async def run_setup(args):
         print("No description provided.")
         sys.exit(1)
 
+    # 提案候補の check 一覧は SCANNERS レジストリから導出する。ハードコードだと新規 scanner
+    # （cors/stored_xss/security_headers/request_smuggling/cache_poisoning 等）がモデルへ提示されず
+    # 「利用不可」と誤誘導して不完全な設定を生む（Codex #170 P2）。
+    from wscan.scanners import SCANNERS as _SCANNERS_FOR_PROMPT
+    _available_checks = ", ".join(sorted(_SCANNERS_FOR_PROMPT))
     prompt = (
         f"You are a web security scanner configuration assistant.\n"
         f"The user wants to scan this target: {description}\n\n"
-        f"Available checks: sqli, xss, dom_xss, os, ssti, path_traversal, "
-        f"csrf, header_injection, mail_header, open_redirect, clickjacking, session, privesc, "
-        f"nosql, deserialization, ssrf, graphql, jwt, cms, xxe, ldap, file_upload, "
-        f"race_condition, websocket\n\n"
+        f"Available checks: {_available_checks}\n\n"
         f"Based on the description, suggest the optimal scan command. "
         f"Return a JSON object with these fields:\n"
         f"  checks: list of check names to enable\n"
@@ -3454,35 +3638,60 @@ async def run_setup(args):
         role_models=getattr(args, "role_models", {}),
     )
 
+    # LLM 応答を検証して提案へ反映する（F11）。妥当な JSON が得られなければ（無効応答・
+    # LLM 障害・provider=none）明示的にヒューリスティックへ fallback する。両経路とも
+    # 最終的に checks/depth/flags を確定させ、後段のコマンド生成へ渡す。
+    from wscan.scanners import SCANNERS
+    from wscan import auto_config as _auto_config
+
+    # ウィザード既定の system プロンプト（_SYSTEM_PROMPT）は checks/depth のみの別スキーマを
+    # 要求し flags/reason を含まないため、その system のままだとモデルが setup 用の追加項目を
+    # 落とす。setup のスキーマに一致する system を渡す（#170 P2）。
+    setup_system = (
+        "You are a web security scanner configuration assistant. "
+        "Follow the user's message exactly and return only the JSON object it specifies "
+        "(fields: checks, depth, reason, flags). Do not add or omit fields."
+    )
     suggestion = None
     if await pg._check_llm_available():
         try:
-            import re as _re
-            raw = await pg._call_llm(prompt) or []
-            # _call_llm returns list; for setup we need text → call backends directly
-            # Fallback: use text-based call
+            text = await _auto_config._call_llm(pg, prompt, system=setup_system)
+            suggestion = _parse_setup_llm(text, set(SCANNERS))
         except Exception:
-            pass
+            suggestion = None
 
-    # Simple heuristic fallback
-    checks = ["sqli", "xss", "os"]
-    depth = 2
-    flags: list[str] = []
-    desc_lower = description.lower()
-    if "api" in desc_lower or "rest" in desc_lower or "graphql" in desc_lower:
-        checks += ["header_injection"]
-    if "admin" in desc_lower or "dashboard" in desc_lower:
-        checks += ["privesc"]
-        depth = 3
-    if "login" in desc_lower or "auth" in desc_lower:
-        checks += ["session", "csrf"]
-    if "redirect" in desc_lower or "link" in desc_lower:
-        checks += ["open_redirect"]
-    if "template" in desc_lower or "render" in desc_lower:
-        checks += ["ssti"]
-    if "dom" in desc_lower or "spa" in desc_lower or "react" in desc_lower or "vue" in desc_lower:
-        flags.append("--dom-xss")
-    checks = list(dict.fromkeys(checks))  # dedup
+    if suggestion:
+        checks = suggestion["checks"]
+        depth = suggestion["depth"]
+        flags = list(suggestion["flags"])
+        console.print("\n[dim]LLM の提案を採用しました。[/dim]")
+        if suggestion["reason"]:
+            # reason は LLM 由来の任意文字列。Rich マークアップ（例: `[/admin]` の未対応閉じタグ）が
+            # 含まれると console.print が MarkupError を投げ、生成コマンドの表示前に setup が落ちる。
+            # escape してプレーン文字として描画する（Codex #170 P2）。
+            from rich.markup import escape as _rich_escape
+            console.print(f"[dim]理由: {_rich_escape(str(suggestion['reason']))}[/dim]")
+    else:
+        # Simple heuristic fallback（LLM 無効/無応答時の明示的な既定）
+        console.print("\n[dim]LLM 応答が無効/利用不可のため既定ヒューリスティックを使用します。[/dim]")
+        checks = ["sqli", "xss", "os"]
+        depth = 2
+        flags = []
+        desc_lower = description.lower()
+        if "api" in desc_lower or "rest" in desc_lower or "graphql" in desc_lower:
+            checks += ["header_injection"]
+        if "admin" in desc_lower or "dashboard" in desc_lower:
+            checks += ["privesc"]
+            depth = 3
+        if "login" in desc_lower or "auth" in desc_lower:
+            checks += ["session", "csrf"]
+        if "redirect" in desc_lower or "link" in desc_lower:
+            checks += ["open_redirect"]
+        if "template" in desc_lower or "render" in desc_lower:
+            checks += ["ssti"]
+        if "dom" in desc_lower or "spa" in desc_lower or "react" in desc_lower or "vue" in desc_lower:
+            flags.append("--dom-xss")
+        checks = list(dict.fromkeys(checks))  # dedup
 
     cmd = f"python main.py scan <URL> --checks {' '.join(checks)} --depth {depth}"
     if flags:
@@ -3534,9 +3743,13 @@ async def run_record(args):
             headless=getattr(args, "headless", False),
         )
         console.print(f"\n[bold green]✓ {len(steps)} ステップを保存しました:[/bold green] {args.output}")
+        # 出力パスに空白（例: "checkout flow.json"）があると、そのまま貼れるコマンドとして
+        # 表示したとき --flows が2引数に割れて _load_flow_files が両方欠落 skip し、前提 flow
+        # 無しで別状態をスキャンしてしまう。shlex.quote でシェル安全に引用する（Codex #170 P2）。
+        import shlex
         console.print(
             f"\n[dim]このフロー ファイルをスキャンで使用するには:[/dim]\n"
-            f"  python main.py scan <URL> --flows {args.output}"
+            f"  python main.py scan <URL> --flows {shlex.quote(str(args.output))}"
         )
     except Exception as exc:
         console.print(f"[red]記録中にエラーが発生しました: {exc}[/red]")

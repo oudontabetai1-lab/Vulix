@@ -262,6 +262,7 @@ def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
 import yaml
 from rich.console import Console
 from rich.rule import Rule
+from rich.markup import escape
 from rich.table import Table
 from rich import box as rbox
 
@@ -4931,11 +4932,14 @@ class ScanEngine:
         # (which, on redirect-on-auth apps, would only capture post-login content).
         self.visited_urls.add(login_seed)
 
-    def _match_pre_attack_flow(self, page: "CrawledPage"):
-        """このページを target とする pre-attack flow を返す（無ければ None）。
+    def _match_pre_attack_flows(self, page: "CrawledPage") -> list:
+        """このページを target とする pre-attack flow を **file 順に全て** 返す（無ければ空）。
 
         flow の最後の navigate step の URL がページ URL と一致するものを prerequisite とみなす。
+        同一遷移先の flow が複数あっても取りこぼさず、呼び出し側が順次再生する（Codex #170 P2）。
+        `_urls_same_page` 等価を使うので `/checkout` と `/checkout/`・fragment 差も同一視して選ぶ。
         """
+        matched = []
         for flow in self.flows:
             if not flow.steps:
                 continue
@@ -4946,9 +4950,122 @@ class ScanEngine:
             # 同一ページ扱いで flow を選び、query 値差（`?next=/` と `?next=`）は別物として
             # 誤選択しない。生の rstrip("/") 比較だと fragment 付き flow を取りこぼす一方、
             # query 末尾スラッシュだけ違う別 target を同一視して誤った state 変更 flow を走らせうる。
-            if last_nav and self._urls_same_page(last_nav.url, page.url):
-                return flow
+            # record 時の初期 redirect 着地（landed_url）も照合する（実行はしないメタデータ）。
+            if last_nav and (
+                self._urls_same_page(last_nav.url, page.url)
+                or (last_nav.landed_url and self._urls_same_page(last_nav.landed_url, page.url))
+            ):
+                matched.append(flow)
+        return matched
+
+    async def _refresh_page_after_flow(self, page: "CrawledPage") -> None:
+        """成功した pre-attack flow の後、現在のページから form/url_param を採り直して page に union する。
+
+        flow が新たに露出したフォーム/パラメータ（add-to-cart 後の checkout/coupon 等）を攻撃対象へ
+        含める（再生前 crawl 時の stale な CrawledPage のまま攻撃すると新出フォームを検査しない・
+        Codex #170 P1）。既存の crawl フォームは失わず、新規のみ署名で重複排除して追加する。
+        ベストエフォート（抽出失敗時は既存のまま）。
+        """
+        # flow 最終 action が非同期 DOM 更新（click→AJAX→coupon モーダル等）を起こす場合、
+        # runner の domcontentloaded 待ちは document 既ロードで即返り、直後の find_forms が描画前に
+        # 走って空 form を authoritative に採用し露出フォームを取りこぼす。ネットワークが静まるのを
+        # 短く待ってからスナップショットする（bounded・失敗は無視）（Codex #170 P2）。
+        try:
+            await self.browser.page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        try:
+            # raise_on_error=True で「成功して空」と「抽出失敗」を区別する。find_forms は既定で
+            # 例外を握り潰し [] を返すため、これが無いと transient 失敗で crawl form を消す（#170 P2）。
+            fresh_forms = await self.browser.find_forms(raise_on_error=True)  # 成功時は list（空もあり）
+        except Exception:
+            fresh_forms = None  # 抽出失敗（None で成功-空 [] と区別する）
+        try:
+            fresh_params = self._merge_url_params(
+                await self.browser.get_url_params(), page.url
+            )
+        except Exception:
+            fresh_params = []
+
+        def _sig(f: dict):
+            names = tuple(sorted(str(i.get("name", "")) for i in (f.get("inputs") or [])))
+            return (str(f.get("action", "")), str(f.get("method", "") or "").lower(), names)
+
+        if page.forms is None:
+            page.forms = []
+        # 抽出が **成功** したら fresh を正典にする（Codex #170 P2）。crawl 時に採った form の
+        # DOM index は flow が form を削除/並べ替えると陳腐化し、stale な crawl-only form を
+        # 後ろに残すと _attack_page がその index を fill_and_submit_form へ渡して別 form を掴む/
+        # 署名変化で同一 live form を二重攻撃する。post-flow の現在ページ（_on_target 済み）から
+        # 採り直した fresh がそのページの権威。抽出 **失敗時のみ** 既存を保持し到達性を落とさない。
+        if fresh_forms is None:
+            added = 0  # 抽出失敗: 既存 page.forms をそのまま維持
+        else:
+            prev_sigs = {_sig(f) for f in page.forms}
+            added = sum(1 for f in fresh_forms if _sig(f) not in prev_sigs)
+            page.forms = list(fresh_forms)
+        if fresh_params:
+            if page.url_params is None:
+                page.url_params = []
+            existing = set(page.url_params)
+            for name in fresh_params:
+                if name not in existing:
+                    page.url_params.append(name)
+                    existing.add(name)
+        # flow が URL を変えずに inline/外部 JS を露出し得る。js_static は page.html /
+        # page.external_scripts を見るため、HTML スナップショットも採り直す（Codex #170 P2）。
+        # 相対 script の解決基点は **ブラウザの実 URL**（page.url は crawl 時の値で、末尾
+        # スラッシュ等価な遷移先だと `/app` vs `/app/` がずれ `src="bundle.js"` を `/bundle.js`
+        # と誤解決して external_scripts を空にする）。現在 URL が取れなければ page.url へ退避。
+        try:
+            fresh_html = await self.browser.get_page_source()
+            if fresh_html:
+                try:
+                    base_url = self.browser.page.url or page.url
+                except Exception:
+                    base_url = page.url
+                page.html = fresh_html
+                page.external_scripts = self._snapshot_external_scripts(fresh_html, base_url)
+        except Exception:
+            pass
+        # flow が入力（form/url_param）を露出したら「flow-exposed」marker を **page-level 検査より
+        # 前に** 永続化する。field checkpoint が1つも書かれる前に中断されても、resume が本ページを
+        # 「入力なし＝page-level のみ」と誤断して flow を捨て、露出フィールドを恒久的に取りこぼすのを
+        # 防ぐ（Codex #170 P2）。sentinel 名なので _checkpoint_has_field_units には数えられない。
+        if page.forms or page.url_params:
+            self._checkpoint_mark_done(page.url, "(flow-exposed)", 0, "(flow-exposed)")
+        if added:
+            console.print(
+                f"  [cyan][Flow] prerequisite exposed {added} new form(s) — scanning them too[/cyan]"
+            )
         return None
+
+    @staticmethod
+    def _flow_fingerprint(flow) -> str:
+        """flow 内容（steps）の fingerprint（純粋）。同名でも内容が変われば別物として扱う。"""
+        import hashlib
+        import json as _json
+        payload = _json.dumps(flow.to_dict().get("steps", []), ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    def _checkpoint_mark_flow_ran(self, url: str, flow) -> None:
+        """この URL で当該 flow（内容 fingerprint）が完走したことを永続化する（Codex #170 P2）。"""
+        fp = self._flow_fingerprint(flow)
+        self._checkpoint_mark_done(url, "(flow-ran)", 0, f"(flow-ran:{fp})")
+
+    def _checkpoint_flow_ran(self, url: str, flow) -> bool:
+        """当該 flow が過去 run でこの URL に対し完走済みか。resume で新規/変更された --flows を
+        「完全 checkpoint 済み」として捨て、露出フォームを取りこぼすのを防ぐ（Codex #170 P2）。"""
+        fp = self._flow_fingerprint(flow)
+        return self._checkpoint_is_done(url, "(flow-ran)", 0, f"(flow-ran:{fp})")
+
+    def _checkpoint_has_flow_exposed_marker(self, url: str) -> bool:
+        """この URL で過去 run の flow が入力を露出した marker が checkpoint にあるか（#170 P2）。
+
+        flow-exposed だが field checkpoint 完了前に中断されたページを resume で skip しないための
+        signal。field 単位が無くてもこの marker があれば flow を再生して露出入力を再構成する。
+        """
+        return self._checkpoint_is_done(url, "(flow-exposed)", 0, "(flow-exposed)")
 
     def _page_level_checks_pending(self, page: "CrawledPage") -> bool:
         """page-level 検査でこのページに未完了(=実際に probe する)単位が残るか。
@@ -4973,6 +5090,35 @@ class ScanEngine:
                     continue
             cp_url = _page_check_cp_url(check_name, page.url)
             if not self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
+                return True
+        return False
+
+    def _checkpoint_has_field_units(self, url: str) -> bool:
+        """この URL に field/param 単位の完了記録があるか（checkpoint 参照のみ・純粋）。
+
+        crawl スナップショットが入力ゼロでも、前回 run で pre-attack flow が露出したフォーム/
+        パラメータを検査済みなら **本物の** field 単位が残る。resume の flow skip 判定で
+        「入力なし＝page-level のみ」と誤断して flow を捨て、中断された field 検査を取りこぼす
+        のを防ぐ signal（Codex #170 P2）。pending 単位は保存されないため、field 単位が1つでも
+        あれば安全側に倒して flow を再生する（=残作業を再構成できる）。
+
+        checkpoint sentinel（``(page)``＝page-level、``(api-template)``＝API テンプレート）は
+        field_name が括弧付きの疑似名で、real な form/URL-param ではない。これらを field 単位と
+        誤カウントすると、入力ゼロ・page 済みの resume ページで無関係な API 完了記録のせいで skip
+        されず、状態変更 flow（add-to-cart 等）を無駄に再生して target 状態を汚す（Codex #170 P2）。
+        括弧で囲まれた sentinel 名は除外し、実フィールド/パラメータ名だけを数える。
+        """
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return False
+        from wscan.url_normalize import normalize_url_for_key
+        target = normalize_url_for_key(url or "")
+        for key in self.checkpoint.completed_units:
+            parts = key.split("\x1f")
+            if len(parts) < 2 or parts[0] != target:
+                continue
+            field = parts[1]
+            # sentinel（"(page)"/"(api-template)" 等の括弧付き疑似名）は field 単位ではない。
+            if field and not (field.startswith("(") and field.endswith(")")):
                 return True
         return False
 
@@ -5042,37 +5188,80 @@ class ScanEngine:
         # 失敗時は coverage gap を記録し、以降の全検査を skip する。
         # ただし認証前のログインフォーム検査（_scan_login_form_preauth）から呼ばれた場合は、
         # auto-login 前の pre-auth 検査を汚染しないよう flow を実行しない（#167 P2）。
-        matched_flow = self._match_pre_attack_flow(page) if run_pre_attack_flows else None
+        matched_flows = self._match_pre_attack_flows(page) if run_pre_attack_flows else []
         # 再開時、フォーム/URLパラメータの無いページで page-level 単位が全て checkpoint 済みなら
         # pre-attack flow を再生しない（Codex #167 P2）。state 変更を伴う前提 flow（add-to-cart 等）を
         # 「残 probe 0」で再実行し、アプリ操作を無駄に繰り返す/状態を汚すのを防ぐ。安全側限定：入力の
         # 無いページは page-level 検査だけが走り field/adaptive/multi-param 単位を持たないため「残作業
         # なし」を厳密に判定できる。入力のあるページは従来どおり再生する（field/adaptive 単位の厳密
         # 列挙は取りこぼし時に必要な flow を誤 skip＝偽陰性を生むため行わない）。
-        if (matched_flow and not page.forms and not page.url_params
-                and not self._page_level_checks_pending(page)):
+        if (matched_flows and not page.forms and not page.url_params
+                and not self._page_level_checks_pending(page)
+                and not self._checkpoint_has_field_units(page.url)
+                and not self._checkpoint_has_flow_exposed_marker(page.url)
+                and all(self._checkpoint_flow_ran(page.url, f) for f in matched_flows)):
+            # crawl スナップショットが入力ゼロでも、前回 flow が露出した入力を検査した痕跡
+            # （field 単位）があれば skip しない：refresh が入力を再露出し、中断された field
+            # 検査を再開できるようにする（Codex #170 P2）。field 単位が無ければ従来どおり
+            # state 変更 flow の無駄な再実行を避ける（#167 P2）。
             console.print(
                 f"  [dim][Flow] Skip pre-attack flow (page fully checkpointed): "
-                f"{matched_flow.name} @ {page.url}[/dim]"
+                f"{escape(matched_flows[0].name)} @ {escape(page.url)}[/dim]"
             )
-            matched_flow = None
-        if matched_flow:
-            console.print(
-                f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
-            )
-            if not await FlowRunner(self.browser).run(matched_flow):
-                console.print(
-                    f"  [yellow][Flow] Pre-attack flow failed: {matched_flow.name} — "
-                    f"skipping all checks on {page.url}[/yellow]"
-                )
-                self._record_unscannable_url(
-                    page.url,
-                    note=(
-                        f"Pre-attack flow '{matched_flow.name}' failed: a prerequisite "
-                        "step could not complete (e.g. missing field/selector)"
+            matched_flows = []
+        if matched_flows:
+            # 同一遷移先に一致する flow を **file 順に全て順次再生** する（1つでも失敗したら
+            # そのページの検査を skip）。以前は最初の1つしか再生せず残りを黙って無視していた（#170 P2）。
+            for matched_flow in matched_flows:
+                # scope 外/除外 URL への navigate を含む flow は実行しない。最終遷移が target へ
+                # 戻っても、記録された flow が中間 navigate で scope 設定を迂回して未認可の外部/
+                # 除外アプリを訪問・操作しうる（Codex #170 P2）。access_urls（login 等の訪問許可）は
+                # _is_access_allowed_url が許すため auth flow は通る。
+                _bad_nav = next(
+                    (
+                        s.url for s in matched_flow.steps
+                        if s.action == "navigate" and s.url
+                        and (
+                            not self._is_access_allowed_url(s.url)
+                            or self._is_url_excluded(s.url)
+                        )
                     ),
+                    None,
                 )
-                return
+                if _bad_nav:
+                    console.print(
+                        f"  [yellow][Flow] Skip '{escape(matched_flow.name)}': "
+                        f"navigate to out-of-scope/excluded URL {_bad_nav} — "
+                        f"skipping checks on {page.url}[/yellow]"
+                    )
+                    self._record_unscannable_url(
+                        page.url,
+                        note=(
+                            f"Pre-attack flow '{matched_flow.name}' navigates to an "
+                            "out-of-scope or excluded URL; refused to run for scope safety"
+                        ),
+                    )
+                    return
+                console.print(
+                    f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {escape(matched_flow.name)}"
+                )
+                # navigate の実着地（redirect 追従後）も scope 検証する（静的 step 検査の補完）。
+                _flow_scope_ok = lambda u: (
+                    self._is_access_allowed_url(u) and not self._is_url_excluded(u)
+                )
+                if not await FlowRunner(self.browser, scope_check=_flow_scope_ok).run(matched_flow):
+                    console.print(
+                        f"  [yellow][Flow] Pre-attack flow failed: {escape(matched_flow.name)} — "
+                        f"skipping all checks on {page.url}[/yellow]"
+                    )
+                    self._record_unscannable_url(
+                        page.url,
+                        note=(
+                            f"Pre-attack flow '{matched_flow.name}' failed: a prerequisite "
+                            "step could not complete (e.g. missing field/selector)"
+                        ),
+                    )
+                    return
             # flow の最終遷移が login/error ページへ redirect（200）されると navigate は True でも
             # target に居ない。page-level 検査の前に着地先 URL を検証し、復帰できなければ未認証/
             # 誤ページを "tested" と誤記録しないよう記録して skip する（Codex #167 P1）。
@@ -5106,6 +5295,10 @@ class ScanEngine:
                         ),
                     )
                     return
+            # 完走記録は**着地先を検証できた後**にだけ書く。step 成功直後に書くと、login へ redirect
+            # された flow も「完走済み」となり、次の resume で恒久的に skip される（Codex #170 P2）。
+            for _ran_flow in matched_flows:
+                self._checkpoint_mark_flow_ran(page.url, _ran_flow)
             # 成功した flow はセッション Cookie を発行/更新し得る。HTTP scanner は browser jar
             # ではなく engine.cookies から Cookie ヘッダを得るため、flow 後に採り直して乖離を
             # 防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く・Codex #167 P1）。
@@ -5114,6 +5307,23 @@ class ScanEngine:
                     await self._sync_cookies_from_browser(self.browser, for_url=page.url)
                 except Exception:
                     pass
+            elif not getattr(self, "_warned_flow_concurrency", False):
+                # concurrency>1 では engine.cookies が全 worker 共有のため、worker ごとに flow 発行
+                # Cookie を同期すると別 worker の状態を壊す。同期を見送る結果、HTTP scanner は
+                # pre-flow Cookie で検査し得る。per-worker Cookie スナップショットは follow-up 課題と
+                # し、ここでは制限を1度だけ可視化する（Codex #170 P2）。flow の Cookie 状態を正確に
+                # 検査するには --concurrency 1 を推奨。
+                self._warned_flow_concurrency = True
+                self.wave_errors.append("flow_cookie_sync_skipped:concurrency_gt_1")
+                console.print(
+                    "  [yellow][Flow] --concurrency>1 では flow 発行 Cookie を HTTP scanner の "
+                    "engine.cookies へ同期しません（per-worker 分離は follow-up）。flow の Cookie 状態を"
+                    "正確に検査するには --concurrency 1 を推奨（Codex #170 P2）[/yellow]"
+                )
+            # 前提 flow が checkout/coupon 等のフォームや URL パラメータを新たに露出し得る。
+            # 再生前に採取した CrawledPage のまま攻撃すると新出フォームを検査しないため、
+            # 攻撃対象を決める前に現在のページから form/url_param を採り直す（Codex #170 P1）。
+            await self._refresh_page_after_flow(page)
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
@@ -5186,7 +5396,9 @@ class ScanEngine:
 
         # 前提 flow は page-level 検査の前に実行・成否判定済み（上参照）。ここでは attack の
         # ため browser が target ページに居ることを確認し、ずれていれば復帰する。
-        if matched_flow:
+        # matched_flows は常に定義済み（空リスト可）。flow を1本でも再生したときだけ確認する
+        # （単数 matched_flow は _match_pre_attack_flows へのリネームで廃止・Codex #170 P1）。
+        if matched_flows:
             # Verify the browser ended on the intended target page.
             # A failed step in the flow may leave the browser on the wrong URL.
             try:
