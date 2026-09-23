@@ -69,12 +69,35 @@ class FlowRecorder:
             browser = await pw.chromium.launch(headless=headless)
             page = await browser.new_page()
 
-            # ナビゲーション追跡
+            # ナビゲーション追跡。初期 goto（steps[0] と重複）だけを除き、いったん離れて
+            # start_url へ**戻ってきた**遷移は記録する。全 start_url 遷移を潰すと、最後の
+            # navigate が中間ページのままになり _match_pre_attack_flows が誤ったページへ flow を
+            # 適用してしまう（Codex #170 P2）。
+            _initial_load = {"seen": False}
+
             def on_navigate(frame):
-                if frame == page.main_frame:
-                    url = frame.url
-                    if url and url != "about:blank" and url != start_url:
-                        steps.append({"action": "navigate", "url": url})
+                if frame != page.main_frame:
+                    return
+                url = frame.url
+                if not url or url == "about:blank":
+                    return
+                # 最初の main-frame ナビゲーション（初期 goto）は steps[0] と重複するので新規
+                # append しない。ただし初期 goto が別 scheme/host/path へ **redirect** した場合は、
+                # 実着地 URL を steps[0] に反映する。さもないと最後の navigate が pre-redirect の
+                # start_url のままになり _match_pre_attack_flows が crawl 済み着地ページと結び付けられ
+                # ない／最終 target チェックで弾かれる（Codex #170 P2）。
+                if not _initial_load["seen"]:
+                    _initial_load["seen"] = True
+                    if url != start_url:
+                        # steps[0]（start_url への navigate）は残す。redirect 応答が SSO callback/
+                        # magic link の Set-Cookie 等の前提 state を作るため、置換すると replay が
+                        # それを受け取れない（Codex #170 P2）。実着地は**実行しない照合用メタデータ**
+                        # として steps[0] に持たせる。別 navigate として追記すると replay が着地ページを
+                        # 二重に GET し、one-shot の確認/コールバック token を消費してしまう（Codex #170 P2）。
+                        if steps and steps[0].get("action") == "navigate":
+                            steps[0]["landed_url"] = url
+                    return
+                steps.append({"action": "navigate", "url": url})
 
             page.on("framenavigated", on_navigate)
 
@@ -84,6 +107,8 @@ class FlowRecorder:
             _tok = secrets.token_hex(12)
             _fn_fill = f"__wscan_fill_{_tok}__"
             _fn_click = f"__wscan_click_{_tok}__"
+            _fn_submit = f"__wscan_submit_{_tok}__"
+            _fn_notify = f"__wscan_notify_{_tok}__"
 
             await page.expose_function(_fn_fill, lambda selector, value: steps.append(
                 {"action": "fill", "selector": selector, "value": value}
@@ -91,22 +116,116 @@ class FlowRecorder:
             await page.expose_function(_fn_click, lambda selector: steps.append(
                 {"action": "click", "selector": selector}
             ))
+            await page.expose_function(_fn_submit, lambda selector: steps.append(
+                {"action": "submit", "selector": selector}
+            ))
+            # ページ側の警告（file input skip 等）を **記録プロセスの stdout** へ出す。ページの
+            # console.warn だけだと DevTools 非表示の headed recorder では操作者に届かない（Codex #170 P2）。
+            await page.expose_function(
+                _fn_notify, lambda message: print(f"[FlowRecorder][warn] {message}")
+            )
 
             # ページに監視スクリプト注入
             await page.add_init_script(f"""
+                // id 無し要素の一意な CSS パスを組み立てる。`button[type=submit]`（type 無しの
+                // 既定 submit ボタンに一致しない）や `a`（先頭リンクを掴む）では replay が別要素を
+                // click し得るため、祖先 id か nth-of-type チェーンで一意化する（Codex #170 P2）。
+                const __wscanEsc = (v) => (window.CSS && CSS.escape) ? CSS.escape(v) : v;
+                function __wscanPath(el) {{
+                    if (el.id) return '#' + __wscanEsc(el.id);
+                    const parts = [];
+                    let node = el;
+                    while (node && node.nodeType === 1
+                           && node.tagName !== 'HTML' && node.tagName !== 'BODY') {{
+                        if (node.id) {{ parts.unshift('#' + __wscanEsc(node.id)); break; }}
+                        let i = 1, sib = node;
+                        while ((sib = sib.previousElementSibling)) {{
+                            if (sib.tagName === node.tagName) i++;
+                        }}
+                        parts.unshift(node.tagName.toLowerCase() + ':nth-of-type(' + i + ')');
+                        node = node.parentElement;
+                    }}
+                    return parts.join(' > ');
+                }}
                 document.addEventListener('change', function(e) {{
                     const el = e.target;
                     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {{
-                        const sel = el.id ? '#' + el.id : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase());
-                        if (typeof window['{_fn_fill}'] === 'function') {{
+                        // CSS.escape で id を安全化（`user:name` 等の CSS 特殊文字が
+                        // querySelector で pseudo-class 等と誤解釈され throw するのを防ぐ・#170 P2）。
+                        const esc = (window.CSS && CSS.escape) ? CSS.escape(el.id) : el.id;
+                        const escv = (v) => (window.CSS && CSS.escape) ? CSS.escape(v) : v;
+                        // name/value は CSS.escape した**引用符なし**属性セレクタで組む。生の
+                        // `[name="..."]` だと name に引用符/バックスラッシュを含むと無効セレクタになり、
+                        // 通常入力は replay 不能、radio/checkbox は querySelectorAll が throw して step
+                        // ごと欠落する（Codex #170 P2）。CSS.escape 出力は選択子として妥当。
+                        let sel = el.id
+                            ? '#' + esc
+                            : (el.name ? '[name=' + escv(el.name) + ']' : __wscanPath(el));
+                        // radio/checkbox は name を共有するのが普通で、[name="plan"] だけだと
+                        // グループ内のどの選択肢か判別できず replay が誤って先頭を click する。
+                        // id が無い場合、**明示 value 属性がグループ内で一意なとき**だけ
+                        // [name][value] で弁別する。value 属性が無い（DOM の el.value は既定 "on" で
+                        // 属性は不在＝そのセレクタは何にも一致しない）／同名グループで value が重複する
+                        // 場合は一意な要素パスへフォールバックする（Codex #170 P2）。
+                        if (!el.id && (el.type === 'radio' || el.type === 'checkbox')) {{
+                            const attrVal = el.getAttribute('value');
+                            let uniqueByValue = false;
+                            let valueSel = '';
+                            if (el.name && attrVal !== null) {{
+                                valueSel = '[name=' + escv(el.name) + '][value=' + escv(attrVal) + ']';
+                                let group = [];
+                                try {{ group = document.querySelectorAll(valueSel); }} catch (e) {{ group = []; }}
+                                uniqueByValue = (group.length === 1);
+                            }}
+                            sel = uniqueByValue ? valueSel : __wscanPath(el);
+                        }}
+                        // checkbox/radio は value ではなく checked 状態が本質。fill は value を
+                        // 代入するだけで checked を変えず、規約同意等の前提を再現できない。click で
+                        // 相互作用そのものを記録・再現する（#170 P2）。
+                        if (el.type === 'checkbox' || el.type === 'radio') {{
+                            // 見た目用 label で操作される**非表示**の input は replay の page.click
+                            // （actionability 検査付き）が timeout する。checked 状態を明示トークンで
+                            // fill 記録し、replay は要素のクリック可否に依存せず状態を復元する（Codex #170 P2）。
+                            const cs = window.getComputedStyle(el);
+                            const hidden = !el.getClientRects().length || cs.visibility === 'hidden';
+                            if (hidden) {{
+                                if (typeof window['{_fn_fill}'] === 'function') {{
+                                    window['{_fn_fill}'](sel, el.checked ? 'true' : 'false');
+                                }}
+                            }} else if (typeof window['{_fn_click}'] === 'function') {{
+                                window['{_fn_click}'](sel);
+                            }}
+                        }} else if (el.type === 'file') {{
+                            // file input は録画しない。ブラウザは value を "C:\\fakepath\\..." で返し、
+                            // replay で type=file の value 代入は InvalidStateError で拒否され flow 全体が
+                            // 失敗＝ページの全検査を skip してしまう（Codex #170 P2）。skip を記録
+                            // プロセスへ通知して操作者に見えるようにする（console.warn だけでは埋もれる）。
+                            if (typeof window['{_fn_notify}'] === 'function') {{
+                                window['{_fn_notify}']('file input はリプレイ不可のため記録しません: ' + sel);
+                            }}
+                        }} else if (typeof window['{_fn_fill}'] === 'function') {{
                             window['{_fn_fill}'](sel, el.value);
                         }}
                     }}
                 }}, true);
+                // Enter キー等の暗黙送信も記録する。送信ボタンがある form の暗黙送信は既定ボタンへの
+                // click として click listener が記録済み（e.submitter が立つ）なので、submitter の
+                // 無い送信だけを記録して二重送信を避ける（Codex #170 P2）。
+                document.addEventListener('submit', function(e) {{
+                    const form = e.target;
+                    if (!form || form.tagName !== 'FORM' || e.submitter) return;
+                    if (typeof window['{_fn_submit}'] === 'function') {{
+                        window['{_fn_submit}'](__wscanPath(form));
+                    }}
+                }}, true);
                 document.addEventListener('click', function(e) {{
-                    const el = e.target;
-                    if (el.tagName === 'BUTTON' || el.type === 'submit' || el.tagName === 'A') {{
-                        const sel = el.id ? '#' + el.id : (el.type === 'submit' ? 'button[type=submit]' : el.tagName.toLowerCase());
+                    // クリック対象がボタン/リンク内の子要素（アイコン span 等）でも、
+                    // closest で実際の操作要素へ解決してから一意セレクタを記録する。
+                    const el = e.target && e.target.closest
+                        ? e.target.closest('button, a, input[type=submit], [type=submit]')
+                        : null;
+                    if (el) {{
+                        const sel = __wscanPath(el);
                         if (typeof window['{_fn_click}'] === 'function') {{
                             window['{_fn_click}'](sel);
                         }}
