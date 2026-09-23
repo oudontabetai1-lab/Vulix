@@ -16,3 +16,6 @@ build/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/.DS_Store
+
+# 実行時の学習状態（並列衝突回避のため版管理しない）
+config/payload_learning.json
