@@ -1039,8 +1039,16 @@ body { padding-left: 212px; }
             <input type="number" id="cfgDepth" value="2" min="1" max="10">
           </div>
           <div class="cfg-field">
-            <label>タイムアウト (秒)</label>
+            <label>タイムアウト (秒・HTTP/ページ)</label>
             <input type="number" id="cfgTimeoutInput" value="30" min="5" max="300">
+          </div>
+          <div class="cfg-field">
+            <label>LLM タイムアウト (秒・1回)</label>
+            <input type="number" id="cfgLlmTimeoutInput" value="30" min="1" max="600">
+          </div>
+          <div class="cfg-field">
+            <label>LLM streaming タイムアウト (秒・planner/変異)</label>
+            <input type="number" id="cfgLlmStreamTimeoutInput" value="90" min="1" max="600">
           </div>
           <div class="cfg-field">
             <label>最大フォーム数/ページ</label>
@@ -2978,6 +2986,8 @@ function submitScanConfig() {
     url,
     depth:       parseInt(document.getElementById('cfgDepth').value) || 2,
     timeout:     parseInt(document.getElementById('cfgTimeoutInput').value) || 30,
+    llm_timeout_seconds: parseFloat(document.getElementById('cfgLlmTimeoutInput')?.value) || 30,
+    llm_stream_timeout_seconds: parseFloat(document.getElementById('cfgLlmStreamTimeoutInput')?.value) || 90,
     max_forms:   parseInt(document.getElementById('cfgMaxForms').value) || 50,
     concurrency: parseInt(document.getElementById('cfgConcurrency').value) || 1,
     proxy:       document.getElementById('cfgProxy').value.trim(),
@@ -3081,6 +3091,8 @@ function _collectFullConfigForExport() {
     url: collect('cfgInputUrl').trim(),
     depth: collect('cfgDepth'),
     timeout: collect('cfgTimeoutInput'),
+    llm_timeout_seconds: collect('cfgLlmTimeoutInput'),
+    llm_stream_timeout_seconds: collect('cfgLlmStreamTimeoutInput'),
     max_forms: collect('cfgMaxForms'),
     concurrency: collect('cfgConcurrency'),
     max_payloads: collect('cfgMaxPayloads'),
@@ -3186,6 +3198,8 @@ function applyImportedConfig(cfg) {
   setVal('cfgInputUrl', cfg.url);
   setVal('cfgDepth', cfg.depth);
   setVal('cfgTimeoutInput', cfg.timeout);
+  setVal('cfgLlmTimeoutInput', cfg.llm_timeout_seconds);
+  setVal('cfgLlmStreamTimeoutInput', cfg.llm_stream_timeout_seconds);
   setVal('cfgMaxForms', cfg.max_forms);
   setVal('cfgConcurrency', cfg.concurrency);
   setVal('cfgMaxPayloads', cfg.max_payloads);
@@ -3338,6 +3352,8 @@ function saveConfigToStorage() {
       url: document.getElementById('cfgInputUrl').value,
       depth: document.getElementById('cfgDepth').value,
       timeout: document.getElementById('cfgTimeoutInput').value,
+      llm_timeout_seconds: document.getElementById('cfgLlmTimeoutInput')?.value,
+      llm_stream_timeout_seconds: document.getElementById('cfgLlmStreamTimeoutInput')?.value,
       max_forms: document.getElementById('cfgMaxForms').value,
       concurrency: document.getElementById('cfgConcurrency').value,
       request_delay: document.getElementById('cfgDelay').value,
@@ -3400,6 +3416,8 @@ function loadConfigFromStorage() {
     if (cfg.url) document.getElementById('cfgInputUrl').value = cfg.url;
     if (cfg.depth) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
+    if (cfg.llm_timeout_seconds != null) document.getElementById('cfgLlmTimeoutInput').value = cfg.llm_timeout_seconds;
+    if (cfg.llm_stream_timeout_seconds != null) document.getElementById('cfgLlmStreamTimeoutInput').value = cfg.llm_stream_timeout_seconds;
     if (cfg.max_forms) document.getElementById('cfgMaxForms').value = cfg.max_forms;
     if (cfg.concurrency) document.getElementById('cfgConcurrency').value = cfg.concurrency;
     if (cfg.request_delay != null) document.getElementById('cfgDelay').value = cfg.request_delay;
@@ -3466,6 +3484,8 @@ async function loadDefaultConfigFromServer() {
     if (!cfg || typeof cfg !== 'object') return;
     if (cfg.depth != null) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout != null) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
+    if (cfg.llm_timeout_seconds != null) document.getElementById('cfgLlmTimeoutInput').value = cfg.llm_timeout_seconds;
+    if (cfg.llm_stream_timeout_seconds != null) document.getElementById('cfgLlmStreamTimeoutInput').value = cfg.llm_stream_timeout_seconds;
     if (cfg.max_forms != null) document.getElementById('cfgMaxForms').value = cfg.max_forms;
     if (cfg.request_delay != null) document.getElementById('cfgDelay').value = cfg.request_delay;
     if (cfg.navigation_retries != null) document.getElementById('cfgNavigationRetries').value = cfg.navigation_retries;
@@ -5037,6 +5057,9 @@ async function runAutoConfig() {
           openai_base_url: ((document.getElementById('cfgLlm')?.value === 'openai_compatible')
             ? (document.getElementById('cfgLlmBaseUrl')?.value || '').trim() : ''),
           role_models: collectRoleModels(),
+          // auto-config も one-shot 呼び出し。選択中の timeout を渡す（正規化はサーバ側・Codex #173 P2）。
+          // 空欄は undefined にして送らず、サーバ設定値を上書きしない。
+          llm_timeout_seconds: document.getElementById('cfgLlmTimeoutInput')?.value || undefined,
         },
       }),
     });
@@ -5133,6 +5156,8 @@ function submitHybridScan() {
     headless:     cfgToggles.headless,
     depth:        parseInt(document.getElementById('cfgDepth').value) || 2,
     timeout:      parseInt(document.getElementById('cfgTimeoutInput').value) || 30,
+    llm_timeout_seconds: parseFloat(document.getElementById('cfgLlmTimeoutInput')?.value) || 30,
+    llm_stream_timeout_seconds: parseFloat(document.getElementById('cfgLlmStreamTimeoutInput')?.value) || 90,
     concurrency:  parseInt(document.getElementById('cfgConcurrency').value) || 1,
     auth_user:    (document.getElementById('cfgAuthUser')?.value || '').trim(),
     auth_pass:    (document.getElementById('cfgAuthPass')?.value || ''),

@@ -286,8 +286,11 @@ python3 main.py scan URL [URL ...] [options]
 | `--report-model MODEL` | provider モデル | 分析・修正提案用モデル上書き |
 | `-o, --output DIR` | `output/<timestamp>/` | 証跡・レポート出力先 |
 | `--port PORT` | `8765` | モニターポート |
-| `--timeout SECS` | `30` | リクエストタイムアウト |
+| `--timeout SECS` | `30` | HTTP/ページ読み込みのタイムアウト（**LLM ではない**） |
+| `--llm-timeout SECS` | config `llm.timeout_seconds`（`30`） | LLM 1回（one-shot: baseline/adaptive本体/report/triage）の応答上限。正の有限値のみ |
+| `--llm-stream-timeout SECS` | config `llm.stream_timeout_seconds`（`90`） | LLM streaming（planner・適応ペイロード変異）の1回応答上限。正の有限値のみ |
 | `--max-forms N` | `50` | 1ページの最大フォーム数 |
+| `--flows FILE...` | なし | `record` で保存したフロー JSON を、その `navigate` 先が一致したクロール済みページの攻撃直前に再生（カート投入等のページ単位前提操作）。複数指定可。サイト全体の認証は `--cookie`/自動ログインを使う |
 
 スコープ・認証・通信:
 
@@ -401,14 +404,21 @@ python3 main.py agent URL [options]
 | `--max-steps N` | `100` | 最大操作ステップ |
 | `--headless / --no-headless` | headless | 非表示/表示ブラウザ |
 | `--auth-user`, `--auth-pass`, `--login-url` | config / 空 | 事前ログイン |
+| `--totp-secret SECRET` | `WSCAN_TOTP_SECRET` / 空 | TOTP ログイン。secret は証跡やプロンプトへ平文保存しない |
+| `--storage-state FILE` | 空 | Playwright/browser-use の認証済み storage state を復元 |
 | `--bearer TOKEN` | `WSCAN_BEARER` / config / 空 | Agent ブラウザへ Bearer 認証を付与 |
 | `-H, --header "Name: Value"` | `[]` | Agent ブラウザへカスタムヘッダを追加。複数指定可 |
 | `--header-file FILE` | 空 | JSON/YAML/1行1ヘッダ形式 |
 | `-o, --output DIR` | `output/agent_<timestamp>/` | 出力先 |
+| `--resume` | 無効 | `--output DIR` の checkpoint から、同一条件・残予算で再開 |
 | `--port PORT` | `8765` | モニターポート |
 | `--no-monitor`, `--no-open-report` | 無効 | モニター/自動表示を無効化 |
 
 > 初期化や実行がハードエラー（LLM プロバイダ不在、`browser-use` 未導入など）で失敗した場合、Agent は「0 findings の正常完了」とは表示せず **FAILED を表示して終了コードを非0** にします（CI で失敗を検知できます）。設定ディレクトリ（`~/.config` 系）が書込み不可のときは起動前に案内を出します（`export XDG_CONFIG_HOME=/書込み可能な場所` で解消。案内は警告で、実行自体は継続し、実際に失敗すれば上記のとおり FAILED になります）。
+
+Agent は認証、全体探索、検査種別ごとの probe、独立再検証、敵対的レビューを別 episode として実行します。探索で発見した各ページ×各指定 check が work queue に残っている、再検証が未完了、レビューが coverage gap を示した、または step 予算を使い切った場合は `COMPLETE` ではなく `PARTIAL`（終了コード 2）です。`agent_state.json`、`agent_steps.jsonl`、`agent_manifest.json` に再開可能な状態と伏字済み証跡を保存します。
+
+通常スキャンと Agent のどちらも、出力先の `reproduction.json` と `reproduce.sh` に再現情報を出します。再現 JSON には前提条件、操作手順、期待挙動、陰性対照、検証状態を含みます。`<REDACTED>` は実行時に認可済みの値へ差し替えてください。
 
 ### `triage` — ペイロード非投入の高速評価
 
@@ -459,6 +469,13 @@ python3 main.py record URL [--output flows/recording.json] [--headless]
 ```
 
 ブラウザ操作を再生可能な JSON フローとして記録します。画面を操作する場合は `--headless` を付けません。
+記録したフローは **ページ単位の前提操作**（例: カート投入してからカート画面を攻撃）として `scan --flows` で再生できます。
+
+```bash
+python3 main.py scan URL --flows flows/recording.json [flows/other.json ...]
+```
+
+フローはその最後の `navigate` 先 URL が**クロールで発見したページと一致したとき**、そのページの攻撃直前に再生されます。したがって「ログインして初めて到達できる保護領域」全体を認証させる用途には向きません（未認証クロールが保護ページを発見できないため）。サイト全体の認証には `--cookie` / `--cookie-file` や自動ログインを使ってください。フローで確立した認証をクロール前段に効かせる強化は今後の課題です。
 
 ### `manual-crawl` — 手動巡回シード
 
@@ -545,7 +562,8 @@ python3 main.py capability-matrix -o cap.md  # ファイルへ書き出し
 | キー | 型 | 既定値 | 対応 CLI / UI |
 | --- | --- | --- | --- |
 | `llm.provider` | str | `ollama` | `--llm` / LLM設定 |
-| `llm.timeout_seconds` | int | `30` | — |
+| `llm.timeout_seconds` | float | `30` | `--llm-timeout` / LLM one-shot 応答上限（HTTP `--timeout` とは別） |
+| `llm.stream_timeout_seconds` | float | `90` | `--llm-stream-timeout` / LLM streaming（planner・適応変異）応答上限 |
 | `llm.max_retries` | int | `2` | — |
 | `llm.ollama_model` | str | `llama3` | `--ollama-model` / LLM設定 |
 | `llm.ollama_url` | str | `http://localhost:11434` | Agent/Setup の `--ollama-url` / Agent・Hybrid設定 |
@@ -759,6 +777,7 @@ output/<timestamp>/
 ├── ai_finding_fixes.json
 ├── http_requests.jsonl
 ├── payloads.jsonl
+├── llm_calls.jsonl      # LLM 呼び出しの監査（provider/role/所要時間/失敗種別・本文なし）
 └── screenshots/
 ```
 

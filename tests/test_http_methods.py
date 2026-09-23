@@ -184,10 +184,11 @@ class _FakeEngine:
         self.flows = []
         self.navigation_retries = 0
 
-    def _match_pre_attack_flow(self, page):
+    def _match_pre_attack_flows(self, page):
         # これらの http_methods テストは pre-attack flow を扱わない（#167 が
-        # _attack_one_page に導入した呼び出しへの最小スタブ）。
-        return None
+        # _attack_one_page に導入した呼び出しへの最小スタブ。#170 で
+        # _match_pre_attack_flow→_match_pre_attack_flows へリネーム・list 返却）。
+        return []
 
     def _profile(self, *args, **kwargs):
         # main が _attack_one_page 冒頭に足したプロファイルログ呼び出しの最小スタブ。
