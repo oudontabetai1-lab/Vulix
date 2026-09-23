@@ -182,6 +182,11 @@ _AUTO_ENABLED_CHECKS: frozenset[str] = frozenset({"cms", "privesc"})
 # する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
 _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 
+# 1 件の finding 検証（_verify_one）の上限秒。正常な verify_finding は実測で ~50-115s に収まるため
+# 十分な余裕を取りつつ、内部 await が返らない病的ケースが verify フェーズ全体（＝スキャン）を
+# 止めるのを防ぐ（超過は "skipped"＝未検証/要手動確認へ・F06/0059）。
+_VERIFY_ONE_TIMEOUT_S = 180.0
+
 # SPA 収穫の JSON body を実攻撃するチェック。capability 判定に加えて明示的な
 # ホワイトリストを置き、将来の対応拡大が意図せず攻撃範囲を広げるのを防ぐ。
 _JSON_INJECTION_CHECKS = ("sqli",)
@@ -524,6 +529,7 @@ class ScanEngine:
         openai_base_url: str = "",
         role_models: Optional[dict] = None,
         llm_timeout_seconds: float = 30.0,
+        llm_stream_timeout_seconds: float = 90.0,
         llm_max_retries: int = 2,
         checks: Optional[list] = None,
         output_dir: Optional[str] = None,
@@ -1048,11 +1054,14 @@ class ScanEngine:
             openai_base_url=openai_base_url,
             role_models=role_models,
             llm_timeout_seconds=llm_timeout_seconds,
+            llm_stream_timeout_seconds=llm_stream_timeout_seconds,
             llm_max_retries=llm_max_retries,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
         )
+        # LLM 呼び出し観測性（0065）：complete_text がここから logger を getattr で拾う。
+        self.payload_gen.request_logger = self.request_logger
 
         # Central registry lives in wscan/scanners/__init__.py
         from .scanners import SCANNERS as _SCANNERS
@@ -1162,9 +1171,13 @@ class ScanEngine:
             category = note.split(":", 1)[0].strip() if ":" in note else "other"
             category = category or "other"
             by_category[category] = by_category.get(category, 0) + 1
+        # LLM 呼び出し総数を併記（llm_calls.jsonl の件数・0065）。詳細な role/status/latency 集計は
+        # RequestLogger に構造化カウンタを足す follow-up（step2）で。ここは可視化の第一歩の count のみ。
+        rl = getattr(self, "request_logger", None)
         return {
             "total": len(self.wave_errors),
             "by_category": by_category,
+            "llm_calls": getattr(rl, "llm_call_count", 0) if rl is not None else 0,
         }
 
     def coverage_summary(self) -> dict:
@@ -2496,6 +2509,22 @@ class ScanEngine:
     # Public entry point
     # =========================================================================
 
+    def _profile(self, msg: str) -> None:
+        """WSCAN_PROFILE=1 のとき scan 開始からの経過秒を stderr へ即時 flush 出力する（F06/0059 計測用）。
+
+        E2E が SCAN_TIMEOUT_S で殺されても「どこで時間が集中したか / 最後にどの単位で止まったか」を
+        残すため、まとめてでなく逐次出力する。本番は環境変数未設定で完全 no-op（オーバーヘッドなし）。
+        """
+        if not os.environ.get("WSCAN_PROFILE"):
+            return
+        import time as _t
+        import sys as _s
+        t0 = getattr(self, "_scan_t0", None)
+        if t0 is None:
+            t0 = _t.monotonic()
+            self._scan_t0 = t0
+        print(f"[PROFILE +{_t.monotonic() - t0:7.1f}s] {msg}", file=_s.stderr, flush=True)
+
     async def run(self):
         """4-phase scan pipeline."""
         if self.monitor:
@@ -2593,7 +2622,9 @@ class ScanEngine:
 
                 # ── Phase 1: Crawl ───────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("crawl")
+                self._profile("crawl: start")
                 crawled_pages = await self._phase_crawl()
+                self._profile(f"crawl: done ({len(crawled_pages)} pages)")
 
                 # ── Phase 1b: Crawl Review (crawl→plan 間の一時停止レビュー) ──
                 if self.interactive_crawl_review and self.monitor:
@@ -2610,11 +2641,15 @@ class ScanEngine:
 
                 # ── Phase 2: Plan ────────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("plan")
+                self._profile("plan: start")
                 plans = await self._phase_plan(crawled_pages)
+                self._profile("plan: done")
 
                 # ── Phase 3: Attack ──────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("attack")
+                self._profile("attack: start")
                 await self._phase_attack(crawled_pages, plans)
+                self._profile("attack: done")
             except AbortScan:
                 scan_aborted = True
                 # 中断時点の Finding と進捗を必ず永続化してから続行する。payload 単位の
@@ -2636,11 +2671,15 @@ class ScanEngine:
             # この後続フェーズは実行しない（abort 制御の信頼性を保つ）。
             if not scan_aborted:
                 try:
+                    self._profile("phase3b api-template: start")
                     await self._run_api_template_checks()
+                    self._profile("phase3b json-injection: start")
                     await self._run_json_injection_checks()
+                    self._profile("phase3b tls-seed: start")
                     # crawl が到達できない弱プロトコル origin を取りこぼさないため、
                     # seed origin に対して TLS 検査を直接走らせる（Codex #158 P1）。
                     await self._run_tls_seed_scans()
+                    self._profile("phase3b: done")
                 except AbortScan:
                     scan_aborted = True
 
@@ -2690,14 +2729,27 @@ class ScanEngine:
             # snapshot — verifiers near token expiry would 401 and mark real
             # findings unconfirmed.
             try:
+                self._profile("verify: start")
                 await self._phase_verify()
+                self._profile("verify: done")
                 self._save_checkpoint()
             finally:
                 try:
                     await self.header_manager.stop_background_refresh()
                 except Exception:
                     pass
-                await self._browser.close()
+                try:
+                    await self._browser.close()
+                finally:
+                    # planner/adaptive 用の AsyncAnthropic を決定的に閉じる。serve の反復スキャンで
+                    # 接続プールが放置され transport/FD が蓄積するのを防ぐ（Codex #173 P2）。
+                    # 以降の report 分析は sync client 経路なので、ここで閉じてよい。
+                    _aclose = getattr(self.payload_gen, "aclose", None)
+                    if _aclose is not None:
+                        try:
+                            await _aclose()
+                        except Exception:
+                            pass
 
             # Agent Finding は認可済みスコープ内だけ、決定論 Finding の生成・検証を
             # 変えずに追加する。source の異なる同一 Finding は意図的に併記する。
@@ -2708,7 +2760,9 @@ class ScanEngine:
 
             # ── Phase 4: Report ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("report")
+            self._profile("report: start")
             await self._phase_report_async()
+            self._profile("report: done")
 
             if self.monitor:
                 self.monitor.api_findings = [f.to_dict() for f in self.all_findings]
@@ -5107,6 +5161,10 @@ class ScanEngine:
         Uses ``self.browser`` which transparently returns the worker's browser
         when called from inside a concurrent worker task.
         """
+        self._profile(
+            f"attack page START: {page.url} "
+            f"(forms={len(page.forms)} params={len(page.url_params)})"
+        )
         # ── セッション失効チェック（全検査の前に一度）────────────────────
         # 長時間スキャンでセッションが切れると以降が全てログイン画面/401 に化け、
         # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
@@ -5479,6 +5537,7 @@ class ScanEngine:
 
         for fi, dom, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
+            self._profile(f"  field: {field_name} @ {page.url}")
             key = (f"{page.url}||url_param||{field_name}" if is_url_param
                    else f"{page.url}||{fi}||{field_name}")
             # Guard scanned_forms with a lock so concurrent workers don't
@@ -6451,14 +6510,36 @@ class ScanEngine:
                 f"Verification: re-testing {len(to_verify)} finding(s)", "running"
             )
 
+        self._profile(f"verify: {len(to_verify)} findings to verify")
+        # verify 1 件あたりの上限。固定 180s だと利用者設定の --timeout（上限なし）を無視し、
+        # 遅い対象では正当な検証（navigate+baseline+apply+fire+content の複数リクエスト）が
+        # cancel されて skipped 化し、confirmed からも通知からも漏れる（Codex #171 P2）。
+        # request timeout があれば数ステップ分（×6）を確保しつつ、従来の 180s を下限に保つ。
+        _browser = getattr(self, "browser", None)
+        _req_to = ((getattr(_browser, "timeout", 0) or 0) / 1000.0) if _browser else 0.0
+        verify_budget = (
+            max(_VERIFY_ONE_TIMEOUT_S, 6.0 * _req_to) if _req_to else _VERIFY_ONE_TIMEOUT_S
+        )
         for i, finding in enumerate(to_verify):
             skipped = False
             state = ""
+            self._profile(
+                f"  verify #{i+1}/{len(to_verify)}: {getattr(finding, 'check_type', '?')} "
+                f"@ {getattr(finding, 'url', '?')}"
+            )
             try:
-                state = await self._verify_one(finding)
+                # 1 件の finding 検証が wedge しても verify フェーズ全体（＝スキャン）を
+                # 止めないよう有界化する。verify_finding は navigate/baseline/apply/fire を
+                # 重ねるため、特定 finding（例: 反射 XSS の再現）で内部 await が返らないと
+                # 外側 SCAN_TIMEOUT_S まで到達し全 E2E が停止していた（F06/0059 実測）。
+                # timeout は下の except（TimeoutError も Exception）で "skipped"＝未検証
+                # （要手動確認）に倒す：finding は消さず、CONFIRMED にも上げない。
+                state = await asyncio.wait_for(
+                    self._verify_one(finding), timeout=verify_budget
+                )
             except Exception as exc:
-                # 想定外の例外（破損 provenance の復元失敗など）で verify フェーズ全体を
-                # 止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
+                # 想定外の例外（破損 provenance の復元失敗など）や上記 timeout で verify
+                # フェーズ全体を止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
                 # 黙って検出力を落とさないよう wave_errors に記録する。
                 skipped = True
                 errors = getattr(self, "wave_errors", None)
@@ -6778,12 +6859,52 @@ class ScanEngine:
             except Exception:
                 pass
 
+        # core report/evidence を先に永続化する。AI 分析(_ai_analysis_report)は集約1+finding毎
+        # 最大10リクエスト×60s×retries で数十分かかりうるため、先に決定論スキャンの成果物を確実に
+        # 残し、途中中断でも core report を失わない（Codex #172 P2）。
         self._phase_report()
-        # A-1: post-scan AI analysis (if enabled)
+        # A-1: post-scan AI analysis（永続化後に実行）。その report-role 呼び出しは evidence.json の
+        # llm_calls 集計後に llm_calls.jsonl へ追記されるため、完了後に集計値だけ refresh して
+        # 監査ファイルと総数を一致させる（core report/report ファイルはそのまま）。
         if self.enable_ai_analysis:
             ai_text = await self._ai_analysis_report()
+            self._refresh_evidence_observability()
             if ai_text and self.monitor:
                 await self.monitor.emit("ai_analysis", {"text": ai_text})
+
+    def _refresh_evidence_observability(self) -> None:
+        """AI 分析後に evidence.json と HTML の observability（llm_calls 総数）を実態へ更新する（Codex #172 P2）。
+
+        core report/evidence は _phase_report で先に永続化済み。post-scan AI 呼び出しは集計後に
+        llm_calls.jsonl へ追記されるため、その分を反映して総数を実態に合わせる。evidence.json は
+        原子的に置換し、HTML はテンプレートを再描画する（描画時に live 値を読むので集計値が
+        JSONL/evidence と一致する）。失敗しても既存の成果物は壊さない（ベストエフォート）。
+        """
+        import json
+        import os
+        path = self.output_dir / "evidence.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        try:
+            data["observability"] = self._observability_report_data()
+            # アトミックに置換する。write_text は書き込み前に既存の有効な evidence.json を
+            # truncate するため、途中中断/ディスク満杯で core evidence を空/破損させ得る（Codex #172 P2）。
+            # 一時ファイルへ書き切ってから os.replace で入れ替える（失敗時も元ファイルは無傷）。
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            os.replace(tmp, path)
+        except Exception:
+            pass
+        # HTML も再描画して observability の表示値を分析後の実数に一致させる（ブラウザは再オープン
+        # しない）。初回の core-report 永続化は済んでいるので、失敗しても成果物は残る。
+        try:
+            self._render_report_templates()
+        except Exception:
+            pass
 
     def _save_evidence(self):
         findings_dicts = [f.to_dict() for f in self.all_findings]
@@ -6906,8 +7027,13 @@ class ScanEngine:
             except Exception as _notify_err:
                 console.print(f"  [yellow][Notification] 完了通知失敗: {_notify_err}[/yellow]")
 
-    def _generate_report(self):
-        import webbrowser
+    def _render_report_templates(self):
+        """audit/executive/developer の HTML を現在の state から描画し audit のパスを返す。
+
+        observability(llm_calls 等) は描画時に live 値を読むため、post-scan AI 分析後に
+        再描画すれば HTML の集計値も実態と一致する。ブラウザ起動/monitor 登録は含めない
+        （初回描画・分析後 refresh の双方から呼ぶ・Codex #172 P2）。
+        """
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir)
         display_scan_matrix = self._scan_matrix_for_display()
@@ -6959,6 +7085,11 @@ class ScanEngine:
                 )
             except Exception:
                 pass
+        return report_path
+
+    def _generate_report(self):
+        import webbrowser
+        report_path = self._render_report_templates()
 
         # D: CI/CD API — レポートパスを monitor に登録
         if self.monitor:
@@ -7326,8 +7457,11 @@ class ScanEngine:
         from . import llm_client
 
         with self.payload_gen.use_role("report"):
+            # report 分析も one-shot。固定 60s ではなく設定済みの one-shot timeout を使う
+            # （--llm-timeout / config llm.timeout_seconds を尊重・Codex #173 P2）。
             text = await llm_client.complete_text(
-                self.payload_gen, prompt, max_tokens=1500, timeout=60
+                self.payload_gen, prompt, max_tokens=1500,
+                timeout=self.payload_gen.llm_timeout_seconds,
             )
         return text or ""
 

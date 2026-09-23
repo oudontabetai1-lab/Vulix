@@ -311,3 +311,126 @@ def test_normalize_proxy_server_rejects_unparseable():
     for bad in ("://x", "not a url", "http://127.0.0.1: 8080"):
         with pytest.raises(ValueError):
             p(bad)
+
+
+def test_endpoint_identity_ignores_payloads_order_duplicates_and_fragment():
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("https://a/search?q=<script>&tag=1") == endpoint_identity(
+        "https://a/search?q=%3Cscript%3E&q=1%27&tag=1#anchor"
+    )
+    # 観測順は保持する（順序で操作を選ぶアプリを同一 identity に潰さない・Codex #154 P1）。
+    assert endpoint_identity("https://a/wf?action=transfer&stage=confirm") != endpoint_identity(
+        "https://a/wf?stage=confirm&action=transfer"
+    )
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/admin?q=x")
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/search?q=x&debug=1")
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("http://a/search?q=x")
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://b/search?q=x")
+    assert endpoint_identity("https://a/search?debug") == endpoint_identity("https://a/search?debug=")
+    assert endpoint_identity("https://a/search?a%26b=x") != endpoint_identity("https://a/search?a=x&b=y")
+
+
+@pytest.mark.parametrize("value", ["<script>", "1'", '"', "`", ";", "(", ")", "{", "}", "|", "\\", "%", "*", "two words", "x" * 65, "%3Cscript%3E"])
+def test_endpoint_identity_collapses_injection_values(value):
+    from urllib.parse import urlencode
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/search?" + urlencode({"q": value})) == endpoint_identity("/search?q=1'")
+
+
+@pytest.mark.parametrize("value", [
+    "http://127.0.0.1/", "http://169.254.169.254/latest/meta-data/",
+    "https://evil.com", "//evil.com", "gopher://x/y",
+])
+def test_endpoint_identity_collapses_url_valued_payloads(value):
+    # SSRF/open-redirect の URL 値はメタ文字無し・短くても payload として畳む（budget 膨張防止・#154 P1）。
+    from urllib.parse import urlencode
+    from wscan.url_normalize import endpoint_identity
+    assert endpoint_identity("/go?" + urlencode({"next": value})) == "/go?next="
+
+
+def test_endpoint_identity_url_payloads_do_not_blow_up_but_routes_stay_distinct():
+    from wscan.url_normalize import endpoint_identity
+    # 複数の SSRF 標的は同一 identity へ（probe 膨張なし）。
+    assert endpoint_identity("/go?url=http://127.0.0.1/") == endpoint_identity("/go?url=https://evil.com")
+    # 単一スラッシュの routing 値は URL 値ではないので保持（別 identity）。
+    assert endpoint_identity("/go?next=/home") != endpoint_identity("/go?next=/admin")
+
+
+@pytest.mark.parametrize("value", ["/home", "/admin", "/a/b/c", "/"])
+def test_endpoint_identity_preserves_slash_routing_values(value):
+    # `/` を含む path/route 値は payload ではなく routing 値として保持する（Codex #154 P1）。
+    from urllib.parse import urlencode
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?" + urlencode({"next": value})) != endpoint_identity("/view?next=")
+
+
+def test_endpoint_identity_distinguishes_slash_routes():
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?next=/home") != endpoint_identity("/view?next=/admin")
+
+
+@pytest.mark.parametrize("value", ["admin", "home", "123", "x" * 64])
+def test_endpoint_identity_preserves_short_routing_values(value):
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?page=" + value) == "/view?page=" + value
+    assert endpoint_identity("/view?page=" + value) != endpoint_identity("/view")
+
+
+def test_endpoint_identity_distinguishes_routes():
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?page=admin") != endpoint_identity("/view?page=home")
+    assert endpoint_identity("/search?q=<script>") == endpoint_identity("/search?q=1'")
+
+
+def test_route_aware_identity_normalizes_payload_in_fragment_query():
+    # SPA route fragment 内の query payload も正規化し、payload 変種で probe が膨張しないこと。
+    # route path 自体（/search vs /admin）は区別を保つ（Codex #154 P1）。
+    from wscan.url_normalize import route_aware_identity
+    # 注入 payload 変種は fragment 内でも同一 identity へ畳む（budget 膨張防止）。
+    assert route_aware_identity("http://h/app#/search?q=<script>") == \
+        route_aware_identity("http://h/app#/search?q=' OR 1=1")
+    # route path が違えば別 identity。
+    assert route_aware_identity("http://h/app#/search?q=<script>") != \
+        route_aware_identity("http://h/app#/admin?q=<script>")
+    # 通常の routing 値（slash 含む）は fragment 内でも保持する。
+    assert route_aware_identity("http://h/app#/go?next=/home") != \
+        route_aware_identity("http://h/app#/go?next=/admin")
+
+
+def test_route_aware_identity_distinguishes_hash_routes():
+    # hash ルート SPA は fragment を保持して別 identity にする（Codex #154 P1・偽 COMPLETE 防止）。
+    from wscan.url_normalize import route_aware_identity, endpoint_identity
+
+    assert route_aware_identity("http://h/app#/users") != route_aware_identity("http://h/app#/admin")
+    # fragment 無しは endpoint_identity と一致（挙動不変）。
+    assert route_aware_identity("http://h/view?page=x") == endpoint_identity("http://h/view?page=x")
+
+
+def test_route_aware_identity_still_dedups_payload_variants():
+    # payload 変種（注入メタ文字入りの query 値）は従来どおり dedup される。
+    from wscan.url_normalize import route_aware_identity
+
+    assert route_aware_identity("http://h/search?q=<script>") == route_aware_identity("http://h/search?q=1'")
+
+
+def test_route_aware_identity_ignores_non_route_fragment():
+    # 単なるアンカー（route でない fragment）は identity に影響しない。
+    from wscan.url_normalize import route_aware_identity, endpoint_identity
+
+    assert route_aware_identity("http://h/doc#section1") == endpoint_identity("http://h/doc#section1")
+
+
+def test_route_aware_identity_normalizes_url_payload_in_fragment_query():
+    # fragment query の URL 値（SSRF/open-redirect payload）も空化し、probe 変種で再帰 enqueue しない（Codex #154 P1）。
+    from wscan.url_normalize import route_aware_identity
+    assert route_aware_identity("http://h/app#/redirect?next=https://evil.com") == \
+        route_aware_identity("http://h/app#/redirect?next=//169.254.169.254/")
+    # routing 値（単一スラッシュ始まり）は保持。
+    assert route_aware_identity("http://h/app#/r?next=/home") != \
+        route_aware_identity("http://h/app#/r?next=/admin")

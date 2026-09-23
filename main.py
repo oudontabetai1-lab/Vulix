@@ -28,6 +28,33 @@ _CONFIG_PATH = Path(__file__).parent / "config" / "wscan.yaml"
 HYBRID_RECON_MAX_RETRIES = 2
 
 
+def _positive_float(value):
+    """argparse 用: 正の有限 float だけを受ける（0/負/NaN/inf を開始前に拒否・0065）。"""
+    import argparse
+    import math
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"数値ではありません: {value!r}")
+    if not math.isfinite(f) or f <= 0:
+        raise argparse.ArgumentTypeError(f"正の有限秒を指定してください（0/負/NaN/inf 不可）: {value!r}")
+    return f
+
+
+def _cfg_timeout(value, default: float) -> float:
+    """YAML の timeout 値を正規化する（空/非数値/非有限/非正は既定・純粋）。
+
+    import 時の eager float() が空キー（None）や非数値で例外を投げ ``--help`` すら落ちるのを防ぐ
+    （Codex #173 P2）。
+    """
+    import math
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) and v > 0 else default
+
+
 def _load_config(path: Path = _CONFIG_PATH) -> dict:
     """
     Load config/wscan.yaml and return a flat dict of resolved values.
@@ -92,7 +119,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["openai_model"]            = str(l.get("openai_model", "gpt-4o-mini"))
     cfg["gemini_model"]            = str(l.get("gemini_model", "gemini-2.0-flash"))
     cfg["claude_model"]            = str(l.get("claude_model", "claude-haiku-4-5-20251001"))
-    cfg["llm_timeout_seconds"]     = float(l.get("timeout_seconds", 30))
+    cfg["llm_timeout_seconds"]     = _cfg_timeout(l.get("timeout_seconds"), 30.0)
+    cfg["llm_stream_timeout_seconds"] = _cfg_timeout(l.get("stream_timeout_seconds"), 90.0)
     cfg["llm_max_retries"]         = int(l.get("max_retries", 2))
     # 外部 OpenAI 互換 LLM（tsuzumi2 等）のベース URL。config ファイルの値のみを
     # CLI/ダッシュボードの既定にする。env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)は
@@ -628,6 +656,7 @@ async def _run_hybrid_recon_with_retries(
     now_fn=None,
     sleep_fn=None,
     max_retries=None,
+    on_retry=None,
 ):
     """時間帯中断された Hybrid 偵察を、次の許可枠で上限付き再実行する。
 
@@ -668,6 +697,8 @@ async def _run_hybrid_recon_with_retries(
             f"ハイブリッド Phase 1: 再試行 {retries}/{max_retries} を開始します。",
             "running",
         )
+        if on_retry:
+            on_retry()
         handoff, interrupted = await _run_with_time_window_monitor(
             operation,
             monitor,
@@ -860,7 +891,17 @@ Examples:
     )
     scan.add_argument(
         "--timeout", type=int, default=_CFG.get("timeout", 30), metavar="SECS",
-        help=f"Request timeout in seconds (default: {_CFG.get('timeout', 30)})",
+        help=f"HTTP/ページ読み込みのタイムアウト秒（LLM ではない。default: {_CFG.get('timeout', 30)}）",
+    )
+    scan.add_argument(
+        "--llm-timeout", type=_positive_float, default=None, metavar="SECS",
+        help="LLM 1回（one-shot: baseline/adaptive/report/triage）の応答上限秒。"
+             f"未指定は config llm.timeout_seconds（既定 {_CFG.get('llm_timeout_seconds', 30)}）。",
+    )
+    scan.add_argument(
+        "--llm-stream-timeout", type=_positive_float, default=None, metavar="SECS",
+        help="LLM streaming（planner・適応ペイロード変異）の1回応答上限秒。"
+             f"未指定は config llm.stream_timeout_seconds（既定 {_CFG.get('llm_stream_timeout_seconds', 90)}）。",
     )
     scan.add_argument(
         "--max-forms", type=int, default=_CFG.get("max_forms", 50), metavar="N",
@@ -1462,6 +1503,11 @@ Examples:
         ),
     )
     agent.add_argument("url", help="Target URL (e.g. https://example.com)")
+    # 注: --llm-timeout / --llm-stream-timeout は agent サブコマンドには **敢えて足さない**。
+    # agent モードの LLM は browser-use の Chat クライアント（ChatAnthropic/ChatOpenAI/ChatOllama）が
+    # 駆動し、これらへの timeout 配線は browser-use のバージョン依存で本リポジトリからは確実に
+    # 検証できない。宣伝だけして無効な flag（inert）を避けるため非公開にする（Codex #173 P2:
+    # "Wire or remove" のうち remove を選択）。scan/triage の --llm-timeout は決定論経路で機能する。
     agent.add_argument(
         "--llm",
         choices=["claude", "openai", "openai_compatible", "ollama"],
@@ -1528,6 +1574,15 @@ Examples:
         help="Login page URL (agent will log in before testing)",
     )
     agent.add_argument(
+        "--totp-secret", metavar="SECRET",
+        default=os.environ.get("WSCAN_TOTP_SECRET", ""),
+        help="TOTP secret for login (env WSCAN_TOTP_SECRET; never written to evidence)",
+    )
+    agent.add_argument(
+        "--storage-state", metavar="FILE", default="",
+        help="Playwright/browser-use storage-state JSON used for authenticated sessions",
+    )
+    agent.add_argument(
         "-H", "--header", metavar="HEADER", action="append", default=[],
         help=(
             "Agentブラウザの全リクエストへ追加するHTTPヘッダ。"
@@ -1554,6 +1609,10 @@ Examples:
         "--output", "-o", metavar="DIR",
         default=_CFG.get("output_dir") or None,
         help="Output directory for report and evidence (default: output/agent_<timestamp>)",
+    )
+    agent.add_argument(
+        "--resume", action="store_true", default=False,
+        help="Resume the exact Agent run in --output using its checkpoint and remaining budget",
     )
     agent.add_argument(
         "--port", type=int, default=_CFG.get("port", 8765),
@@ -1611,6 +1670,10 @@ Examples:
     )
     triage.add_argument(
         "--claude-model", default=_CFG.get("claude_model", "claude-haiku-4-5-20251001"), metavar="MODEL",
+    )
+    triage.add_argument(
+        "--llm-timeout", type=_positive_float, default=None, metavar="SECS",
+        help="triage の LLM 1回（one-shot）応答上限秒。未指定は config llm.timeout_seconds。",
     )
     for role in ("planner", "payload", "adaptive", "triage", "report"):
         triage.add_argument(
@@ -1851,6 +1914,10 @@ def _agent_exit_code(result) -> int:
         return 0
     if getattr(result, "error", None):
         return 1
+    if getattr(result, "harness_status", "") in {
+        "partial", "evidence_incomplete", "cancelled"
+    }:
+        return 2
     if not getattr(result, "success", False) and not getattr(result, "findings", None):
         return 1
     return 0
@@ -1963,9 +2030,16 @@ async def run_agent(args):
     from rich.panel import Panel
     from wscan.monitor import MonitorServer
     from wscan.agent_engine import AgentEngine
+    from wscan.llm_agent_browser import AgentScanResult
     from wscan import llm_endpoint
 
     console = Console()
+
+    if getattr(args, "resume", False) and not (getattr(args, "output", "") or ""):
+        return AgentScanResult(
+            target_url=getattr(args, "url", ""),
+            error="--resume には元の Agent 出力先を --output DIR で指定してください。",
+        )
 
     # 外部 OpenAI 互換（tsuzumi2 等）のベース URL は AgentEngine 経由で明示的に渡す。
     # グローバル env は書き換えない（serve での operator 設定を壊さないため）。
@@ -2024,6 +2098,9 @@ async def run_agent(args):
             monitor=monitor,
             port=args.port,
             extra_headers=_agent_headers,
+            totp_secret=getattr(args, "totp_secret", "") or "",
+            storage_state=getattr(args, "storage_state", "") or "",
+            resume=getattr(args, "resume", False),
         )
         return await engine.run()
 
@@ -2063,12 +2140,15 @@ async def run_agent(args):
                 monitor=monitor,
                 port=args.port,
                 extra_headers=_agent_headers,
+                totp_secret=getattr(args, "totp_secret", "") or "",
+                storage_state=getattr(args, "storage_state", "") or "",
+                resume=getattr(args, "resume", False),
             )
             result = await engine.run()
             # early-return 条件は _agent_exit_code の非0条件と一致させる（D8）。
             # incomplete-empty（success=False かつ 0 findings）でも sleep(3600) に入れず
             # result をそのまま返し、非0 exit を確実に届ける。
-            if result.error or (not result.success and not result.findings):
+            if _agent_exit_code(result):
                 return result
             console.print("[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]")
             await asyncio.sleep(3600)
@@ -2368,7 +2448,8 @@ async def run_scan(args):
             claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
             openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
-            llm_timeout_seconds=_CFG.get("llm_timeout_seconds", 30),
+            llm_timeout_seconds=(getattr(args, "llm_timeout", None) or _CFG.get("llm_timeout_seconds", 30)),
+            llm_stream_timeout_seconds=(getattr(args, "llm_stream_timeout", None) or _CFG.get("llm_stream_timeout_seconds", 90)),
             llm_max_retries=_CFG.get("llm_max_retries", 2),
         )
         _wizard_result = await run_wizard(_pg)
@@ -2529,7 +2610,8 @@ async def run_scan(args):
             claude_model=args.claude_model,
             openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
-            llm_timeout_seconds=_CFG.get("llm_timeout_seconds", 30),
+            llm_timeout_seconds=(getattr(args, "llm_timeout", None) or _CFG.get("llm_timeout_seconds", 30)),
+            llm_stream_timeout_seconds=(getattr(args, "llm_stream_timeout", None) or _CFG.get("llm_stream_timeout_seconds", 90)),
             llm_max_retries=_CFG.get("llm_max_retries", 2),
             checks=checks_list,
             output_dir=args.output,
@@ -2880,6 +2962,7 @@ async def run_serve(args):
         "openai_base_url": _CFG.get("openai_base_url", ""),
         "role_models": _CFG.get("role_models", {}),
         "llm_timeout_seconds": _CFG.get("llm_timeout_seconds", 30),
+        "llm_stream_timeout_seconds": _CFG.get("llm_stream_timeout_seconds", 90),
         "llm_max_retries": _CFG.get("llm_max_retries", 2),
         "auth_user": _CFG.get("auth_user", ""),
         "auth_pass": _CFG.get("auth_pass", ""),
@@ -2946,6 +3029,7 @@ async def run_serve(args):
         "claude_model": _CFG.get("claude_model", _llm_section.get("claude_model", "claude-haiku-4-5-20251001")),
         "openai_base_url": _CFG.get("openai_base_url", _llm_section.get("openai_base_url", "")),
         "role_models":  _CFG.get("role_models", _llm_section.get("models", {}) or {}),
+        "llm_timeout_seconds": _CFG.get("llm_timeout_seconds", 30),
     }
     config = uvicorn.Config(app=monitor.app, host=host, port=port, log_level="error")
     server = uvicorn.Server(config)
@@ -3100,6 +3184,7 @@ async def run_serve(args):
                         monitor,
                         cfg.get("allowed_hours") or None,
                         cfg.get("forbidden_hours") or None,
+                        on_retry=lambda: setattr(recon_engine, "resume", True),
                     )
                 )
                 if not continue_to_phase2:
@@ -3154,8 +3239,13 @@ async def run_serve(args):
                 claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
                 openai_base_url=_scan_base,
                 role_models=cfg.get("role_models", {}) or {},
-                llm_timeout_seconds=float(
-                    cfg.get("llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30))
+                # eager float() は WS/API が null/非数値を送ると scan 開始前に例外化する。
+                # 生値を渡し、PayloadGenerator 側の正規化（不正→既定）に一元的に委ねる（Codex #173 P2）。
+                llm_timeout_seconds=cfg.get(
+                    "llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30)
+                ),
+                llm_stream_timeout_seconds=cfg.get(
+                    "llm_stream_timeout_seconds", _CFG.get("llm_stream_timeout_seconds", 90)
                 ),
                 llm_max_retries=_serve_ints["llm_max_retries"],
                 auth_user=cfg.get("auth_user", "") or "",
@@ -3478,6 +3568,7 @@ async def run_triage(args):
         claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
         openai_base_url=_effective_llm_base_url(args),
         role_models=getattr(args, "role_models", {}),
+        llm_timeout_seconds=(getattr(args, "llm_timeout", None) or _CFG.get("llm_timeout_seconds", 30)),
     )
 
     report = await engine.run()

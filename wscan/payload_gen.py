@@ -67,6 +67,7 @@ class PayloadGenerator:
         openai_base_url: str = "",
         llm_timeout_seconds: float = 30.0,
         llm_max_retries: int = 2,
+        llm_stream_timeout_seconds: float = 90.0,
     ):
         from . import llm_endpoint
         # このインスタンスが使うベース URL を **構築時にスナップショット** する。
@@ -87,8 +88,21 @@ class PayloadGenerator:
         self._openai_model = openai_model
         self._gemini_model = gemini_model
         self._claude_model = claude_model
-        self.llm_timeout_seconds = float(llm_timeout_seconds)
         self.llm_max_retries = max(0, int(llm_max_retries))
+        # one-shot / streaming の1回上限。不正値（0/負/NaN/inf・serve API 等 argparse を通らない
+        # 経路の null/非数値）は既定へ安全に倒す（呼び出し側の eager float() で scan 開始前に落ちない
+        # よう、正規化はここに集約する・Codex #173 P2）。既定は従来のハードコード値を維持（回帰なし）。
+        import math as _math
+
+        def _norm_timeout(value, default: float) -> float:
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                return default
+            return v if (_math.isfinite(v) and v > 0) else default
+
+        self.llm_timeout_seconds = _norm_timeout(llm_timeout_seconds, 30.0)
+        self.llm_stream_timeout_seconds = _norm_timeout(llm_stream_timeout_seconds, 90.0)
         self.default_payloads = default_payloads or {}
         self.prompt_templates = prompt_templates or {}
         self.role_models = {
@@ -155,6 +169,10 @@ class PayloadGenerator:
         roles = ["planner", "payload", "adaptive", "triage", "report"]
         return {role: self.get_model(role) for role in roles if self.get_model(role)}
 
+    def current_role(self) -> str:
+        """現在 active な role（use_role コンテキスト内）を返す。LLM 呼び出しログ記録用。既定は空文字（0065）。"""
+        return _active_role.get() or ""
+
     @contextmanager
     def use_role(self, role: str):
         """Expose a role-specific model in the current task context."""
@@ -177,10 +195,40 @@ class PayloadGenerator:
             if api_key:
                 try:
                     import anthropic
+                    # 共有 client は SDK 既定の retry を保つ。streaming caller（planner/adaptive の
+                    # _call_claude/_stream_claude）は外側 retry を持たず SDK retry に依存するため、
+                    # ここで無効化すると transient 失敗で即 None になり回帰する（Codex #172 P2）。
+                    # complete_text は自前 retry を持つので、その呼び出し時だけ per-call で
+                    # with_options(max_retries=0) にして監査 retries を正本化する。
                     self._anthropic_client = anthropic.Anthropic(api_key=api_key)
                 except ImportError:
                     pass
         return self._anthropic_client
+
+    def _get_async_anthropic_client(self):
+        """deadline 付き呼び出し用の AsyncAnthropic（キャッシュ）。
+
+        sync client を executor で回すと wait_for でスレッドを止められず、SDK の read timeout は
+        チャンク間隔にしか効かないため overall deadline にならない。async client なら wait_for の
+        cancel で HTTP リクエストごと打ち切れる（Codex #173 P2）。
+        """
+        if getattr(self, "_async_anthropic_client", None) is None:
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                return None
+            try:
+                import anthropic
+                self._async_anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
+            except ImportError:
+                return None
+        return self._async_anthropic_client
+
+    async def aclose(self) -> None:
+        """キャッシュした AsyncAnthropic の接続プールを閉じる（スキャン終了時・冪等）。"""
+        client = getattr(self, "_async_anthropic_client", None)
+        self._async_anthropic_client = None
+        if client is not None and hasattr(client, "close"):
+            await client.close()
 
     async def _check_llm_available(self) -> bool:
         if self._llm_available is not None:

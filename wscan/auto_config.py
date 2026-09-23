@@ -116,6 +116,9 @@ async def _call_llm(payload_gen, prompt: str, system: Optional[str] = None) -> O
     """
     provider = payload_gen.provider
     system = system or _SYSTEM_PROMPT
+    # auto-config も one-shot 呼び出し。固定 60s ではなく設定済み one-shot timeout を使う
+    # （--llm-timeout / config を尊重・Codex #173 P2）。
+    _to = float(getattr(payload_gen, "llm_timeout_seconds", 60.0) or 60.0)
     try:
         if provider == "claude":
             client = payload_gen._get_anthropic_client()
@@ -130,6 +133,7 @@ async def _call_llm(payload_gen, prompt: str, system: Optional[str] = None) -> O
                     model=model,
                     max_tokens=1200,
                     system=system,
+                    timeout=_to,
                     messages=[{"role": "user", "content": prompt}],
                 ),
             )
@@ -141,7 +145,7 @@ async def _call_llm(payload_gen, prompt: str, system: Optional[str] = None) -> O
             api_key = getattr(payload_gen, "openai_api_key", None)
             if not api_key:
                 return None
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=_to) as client:
                 resp = await client.post(
                     llm_endpoint.chat_completions_url(getattr(payload_gen, "openai_base_url", "")),
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -166,7 +170,7 @@ async def _call_llm(payload_gen, prompt: str, system: Optional[str] = None) -> O
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{payload_gen.gemini_model}:generateContent?key={api_key}"
             )
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=_to) as client:
                 resp = await client.post(url, json={
                     "contents": [{"parts": [{"text": system + "\n\n" + prompt}]}]
                 })
@@ -176,7 +180,7 @@ async def _call_llm(payload_gen, prompt: str, system: Optional[str] = None) -> O
         else:
             # Ollama
             import httpx
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=_to) as client:
                 resp = await client.post(
                     f"{payload_gen.ollama_url}/api/generate",
                     json={
