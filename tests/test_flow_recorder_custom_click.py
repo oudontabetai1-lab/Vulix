@@ -32,7 +32,11 @@ _RECORD_HTML = (
     "<input id='btn' type='button' value='Btn'>"
     "<label id='lbl' for='chk'>Agree</label>"
     "<input id='chk' type='checkbox' style='display:none'>"
+    "<label id='standalone'>Standalone action</label>"
+    "<label id='upload-label' for='upload'>Upload</label>"
+    "<input id='upload' type='file'>"
     "<div id='onc' onclick='void 0'>onclick div</div>"
+    "<div id='plain'>plain child</div>"
     "<span id='deco'>decoration</span>"
     "</body></html>"
 )
@@ -76,11 +80,14 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
             {"action": "click", "selector": selector}))
         await page.expose_function("S", lambda selector: steps.append(
             {"action": "submit", "selector": selector}))
-        await page.expose_function("N", lambda message: None)
+        notices: list[str] = []
+        await page.expose_function("N", lambda message: notices.append(message))
         await page.add_init_script(_build_recorder_script("F", "C", "S", "N"))
         await page.goto(_RECORD_HTML)
 
-        for sel in ("#addcart", "#btn", "#lbl", "#onc", "#deco"):
+        # BODY の inline handler は descendant click の closest 候補になるが、root は記録不能。
+        await page.evaluate("() => document.body.setAttribute('onclick', 'void 0')")
+        for sel in ("#addcart", "#btn", "#lbl", "#standalone", "#upload-label", "#onc", "#plain", "#deco"):
             await page.click(sel)
         await page.wait_for_timeout(150)  # expose_function IPC の到達待ち
 
@@ -88,8 +95,16 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         # カスタム操作要素は closest 解決で記録される（子 span をクリックしても祖先 #addcart）。
         self.assertIn("#addcart", clicked)
         self.assertIn("#btn", clicked)
-        self.assertIn("#lbl", clicked)
+        self.assertIn("#standalone", clicked)
         self.assertIn("#onc", clicked)
+        # 関連 checkbox は change handler が状態を記録するため label click を重ねない。
+        self.assertNotIn("#lbl", clicked)
+        self.assertTrue(any(s.get("selector") == "#chk" for s in steps))
+        # file label は replay 不能な chooser を開く step にせず通知する。
+        self.assertNotIn("#upload-label", clicked)
+        self.assertTrue(any("file input" in message for message in notices))
+        # body[onclick] へ解決されても空 selector/root click は保存しない。
+        self.assertNotIn("", clicked)
         # 装飾 span は操作要素セレクタに一致せず記録されない。
         self.assertNotIn("#deco", clicked)
         await page.close()
@@ -141,6 +156,34 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         clicked = await page.evaluate("() => !!window.__clicked")
         self.assertFalse(clicked)
+        await page.close()
+
+    async def test_replay_rejects_invalid_selector(self):
+        """actionability timeout 以外（selector 構文不正）は flow を失敗させる。"""
+        page = await self._context.new_page()
+        runner = FlowRunner(_PageBrowser(page))
+        flow = ScanFlow.from_dict({
+            "name": "invalid-selector",
+            "steps": [
+                {"action": "navigate", "url": "data:text/html,<button>ok</button>"},
+                {"action": "click", "selector": "[", "timeout": 1.0},
+            ],
+        })
+        self.assertFalse(await runner.run(flow))
+        await page.close()
+
+    async def test_replay_rejects_missing_click_target(self):
+        """存在しない selector の timeout は actionability skip に丸めない。"""
+        page = await self._context.new_page()
+        runner = FlowRunner(_PageBrowser(page))
+        flow = ScanFlow.from_dict({
+            "name": "missing-selector",
+            "steps": [
+                {"action": "navigate", "url": "data:text/html,<button>ok</button>"},
+                {"action": "click", "selector": "#missing", "timeout": 0.1},
+            ],
+        })
+        self.assertFalse(await runner.run(flow))
         await page.close()
 
 

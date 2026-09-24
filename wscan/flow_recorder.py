@@ -159,9 +159,26 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                     const el = e.target && e.target.closest
                         ? e.target.closest(__WSCAN_CLICKABLE_SEL)
                         : null;
-                    if (el) {{
+                    if (el && el.tagName !== 'BODY' && el.tagName !== 'HTML') {{
+                        // label が checkbox/radio を作動させる場合は直後の change handler が
+                        // 実 input の click/fill を記録する。label click まで残すと replay で二重に
+                        // toggle して元と逆になる。file input は再現不能なので既存の skip-notify
+                        // 方針を label 経由にも適用する。
+                        if (el.tagName === 'LABEL' && el.control) {{
+                            const controlType = (el.control.type || '').toLowerCase();
+                            if (controlType === 'file') {{
+                                if (typeof window['{fn_notify}'] === 'function') {{
+                                    window['{fn_notify}'](
+                                        'file input はリプレイ不可のため記録しません: ' + __wscanPath(el.control)
+                                    );
+                                }}
+                                return;
+                            }}
+                            if (controlType === 'checkbox' || controlType === 'radio') return;
+                        }}
                         const sel = __wscanPath(el);
-                        if (typeof window['{fn_click}'] === 'function') {{
+                        // BODY/HTML や path を構築できない root 要素は replay 不能なので保存しない。
+                        if (sel && typeof window['{fn_click}'] === 'function') {{
                             window['{fn_click}'](sel);
                         }}
                     }}
