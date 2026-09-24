@@ -64,7 +64,13 @@ _FIELD_LENIENT_CHECKS = {"stored_xss"}
 
 # payload mutation wave（未検出フィールドでバイパス変種を追加投入）でスキャンが重くなるため
 # 既存 E2E より長めに確保する。
-SCAN_TIMEOUT_S = 1500
+# F06/0059: 旧来 healthcare は単一 stored sink（/community/posts の comment）へ反射スキャナ＋
+# evolution/mutation wave が alert flood を積み、1 フィールドだけで ~2587s を消費 → attack 途中で
+# timeout 発火 → finally の verify+report 追加 → 計 4108s/4 ERROR で完走不能だった。
+# 根本対処は engine のフィールド単位 attack 時間ボックス（WSCAN_FIELD_BUDGET 既定 120s／
+# base `_apply_ip`）で flood を打ち切ること。これにより comment は 334s へ、全体は実測 2708s で
+# 完走する。3600s は 2708s に対する headroom（~1.33 倍）。timeout 延長は根本策ではない点に注意。
+SCAN_TIMEOUT_S = 3600
 
 
 def _free_port() -> int:

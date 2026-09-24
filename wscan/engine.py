@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import warnings
 import xml.etree.ElementTree as _ET
 from collections import Counter, deque
@@ -1316,6 +1317,18 @@ class ScanEngine:
         # State
         self.all_findings: list = []
         self.wave_errors: list = []                  # 検出力低下事象の観測ログ（base から共有）
+        # F06/0059: フィールド単位の attack 時間ボックス。stored sink（コメント欄等）で反射
+        # スキャナ＋evolution/mutation wave が alert flood を積み、単一フィールドが数千秒を消費して
+        # 以降のフィールドを SCAN_TIMEOUT で starve させる回帰を防ぐ（実測: comment 1 件で 2587s）。
+        # deadline 超過後は _apply_ip が追加注入を止める（baseline は先に実行済み・stored_xss は
+        # 独自送信で不影響・verify は対象外）。既定 120s は実測の最遅正常フィールド(~45s)の 2.6 倍。
+        # WSCAN_FIELD_BUDGET=0 で無効化。
+        self._field_attack_deadline: Optional[float] = None
+        self._field_budget_notes: set = set()
+        try:
+            self._field_attack_budget_s = float(os.environ.get("WSCAN_FIELD_BUDGET", "120") or "120")
+        except (TypeError, ValueError):
+            self._field_attack_budget_s = 120.0
         self._finding_dedup: set[tuple] = set()     # (url, field_name, check_type) — prevent duplicates
         self.attack_plans: list = []
         self.visited_urls: set = set()
@@ -2896,6 +2909,9 @@ class ScanEngine:
             # snapshot — verifiers near token expiry would 401 and mark real
             # findings unconfirmed.
             try:
+                # F06/0059: verify は時間ボックス対象外（attack フィールドの stale deadline が
+                # verify_finding の再注入を誤って skip し finding を落とすのを防ぐ）。
+                self._field_attack_deadline = None
                 self._profile("verify: start")
                 await self._phase_verify()
                 self._profile("verify: done")
@@ -6001,6 +6017,10 @@ class ScanEngine:
     ):
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
+        # F06/0059: このフィールドの attack 時間ボックスを張り直す（フィールド毎に fresh）。
+        _budget = getattr(self, "_field_attack_budget_s", 0.0) or 0.0
+        self._field_attack_deadline = (time.monotonic() + _budget) if _budget > 0 else None
+        self._field_budget_notes = set()
         ip = self._injection_point_for(
             url, field_name, form_index, is_url_param, dom_index, field
         )

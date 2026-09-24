@@ -813,6 +813,18 @@ class BaseScanner(ABC):
         # に限る。form/url の例外は従来どおりスキャナ側（baseline_unavailable 等）へ伝播させる。
         if not self.may_scan_injection_point(ip):
             return "", {}
+        # F06/0059: フィールド単位 attack 時間ボックス。deadline 超過後は追加注入を止めて
+        # 観測ノートを (フィールド×check) ごとに 1 回だけ残す。stored sink の alert flood で
+        # 単一フィールドが以降を starve させる回帰を防ぐ（engine._scan_field が deadline を設定・
+        # verify では None＝対象外）。baseline は deadline 前に実行済みのため必須検出は保たれる。
+        _engine = getattr(self, "engine", None)
+        _deadline = getattr(_engine, "_field_attack_deadline", None)
+        if _deadline is not None and time.monotonic() > _deadline:
+            _notes = getattr(_engine, "_field_budget_notes", None)
+            if _notes is not None and self.CHECK_TYPE not in _notes:
+                self._record_scan_note(f"field_budget_exceeded:{self.CHECK_TYPE}")
+                _notes.add(self.CHECK_TYPE)
+            return "", {}
         if ip.location == "json_body":
             if not self.SUPPORTS_JSON_BODY:
                 return "", {}

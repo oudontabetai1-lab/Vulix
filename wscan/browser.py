@@ -44,6 +44,9 @@ _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _PAGE_CONTENT_TIMEOUT = 30.0
 # dialog.dismiss() は native timeout を持たないため asyncio.wait_for で有界化する上限（F06/0059）。
 _DIALOG_DISMISS_TIMEOUT = 3.0
+# playwright.stop() は close() 時に稀にハングする（TargetClosedError 起因で内部 wait が
+# timeout=None のまま閉じたループ上に残る）。close は best-effort なので有界化して抜ける（F06/0059）。
+_PLAYWRIGHT_STOP_TIMEOUT = 10.0
 
 
 async def _bounded_page_content(page) -> str:
@@ -2933,7 +2936,9 @@ class BrowserManager:
             if self._browser:
                 await self._browser.close()
             if self._playwright:
-                await self._playwright.stop()
+                await asyncio.wait_for(
+                    self._playwright.stop(), timeout=_PLAYWRIGHT_STOP_TIMEOUT
+                )
         except Exception:
             pass
 
