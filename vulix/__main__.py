@@ -18,6 +18,12 @@ import main as _main
 _ALIASES = {"explore": "scan"}
 
 
+def _show_alias_hint(argv: list[str]) -> None:
+    """Vulix の top-level help に wrapper 固有の別名を表示する。"""
+    if len(argv) >= 2 and argv[1] in {"-h", "--help"}:
+        print("Vulix command alias: explore (alias for scan)\n")
+
+
 def _rewrite_argv(argv: list[str]) -> list[str]:
     """先頭のサブコマンド語だけを別名変換する（引数値には触れない）。"""
     if len(argv) >= 2 and argv[1] in _ALIASES:
@@ -26,6 +32,7 @@ def _rewrite_argv(argv: list[str]) -> list[str]:
 
 
 def main() -> None:
+    _show_alias_hint(sys.argv)
     sys.argv = _rewrite_argv(sys.argv)
     _main.main()
 
