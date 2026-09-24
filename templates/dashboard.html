@@ -3118,6 +3118,8 @@ function submitScanConfig() {
     // （配信される scan_started は伏字版なので、そこからは復元できないため）。
     _markOwnScan(config);
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
+    // スキャン開始時に非秘匿設定を localStorage へ保存し、リロードで復元する。
+    saveConfigToStorage();
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('スキャン開始リクエスト送信中...', 'running');
   } else {
@@ -3393,9 +3395,39 @@ function submitAgentScan() {
 }
 
 // ─── Restore saved config from localStorage ─────────────────────
+// localStorage に保存してよい非秘匿キーの allowlist。ここに列挙したキーだけを
+// 永続化するため、秘匿値（パスワード/トークン/Bearer/TOTP secret/認証・カスタム
+// ヘッダ値/証明書パスワード/IMAP パスワード/QRパス/Cookie 等）や、新規に追加した
+// フィールドは「明示的に列挙しない限り漏れない」。TLS の *_cert/_key/_pfx/_ca は
+// ファイルパスであり秘密そのものではないため保存する（cert_password のみ除外）。
+const CONFIG_SAVE_ALLOWLIST = [
+  'url', 'depth', 'timeout', 'llm_timeout_seconds', 'llm_stream_timeout_seconds',
+  'max_forms', 'concurrency', 'request_delay', 'navigation_retries', 'proxy',
+  'tls_client_cert', 'tls_client_key', 'tls_client_pfx', 'tls_ca_cert',
+  'state_profile', 'toggles',
+  'llm', 'ollama_model', 'openai_model', 'gemini_model', 'claude_model',
+  'openai_base_url', 'role_models',
+  'auth_user', 'login_url', 'login_user_field', 'login_pass_field', 'login_success_indicator',
+  'mfa_type', 'mfa_field', 'mfa_email_account',
+  'mfa_email_address', 'mfa_email_imap_host', 'mfa_email_imap_port',
+  'mfa_email_imap_user', 'mfa_email_imap_ssl',
+  'mfa_selector', 'mfa_totp_digits', 'mfa_totp_period', 'mfa_totp_algorithm',
+  'allowed_hours', 'forbidden_hours',
+  'exclude_fields', 'exclude_urls', 'target_urls', 'access_urls',
+  'ctf_flag_pattern', 'manual_crawl_file', 'manual_crawl_output', 'checks',
+];
+// 旧バージョンが localStorage に残した可能性のある秘匿キー。読込時に検出したら
+// 破棄して allowlist だけで上書き保存する（後方互換の後始末）。
+const CONFIG_SECRET_KEYS = [
+  'auth_pass', 'tls_client_cert_password', 'bearer', 'headers', 'cookies',
+  'mfa_totp_uri', 'mfa_totp_secret', 'mfa_totp_qr', 'mfa_email_imap_password',
+];
+
 function saveConfigToStorage() {
   try {
-    const cfg = {
+    // まず全フィールドを集めてから allowlist で絞り込む。秘匿値を含む spread
+    // （mfaTotpFields/authHeaderFields 等）が返すキーも、列挙外は自動的に落ちる。
+    const full = {
       url: document.getElementById('cfgInputUrl').value,
       depth: document.getElementById('cfgDepth').value,
       timeout: document.getElementById('cfgTimeoutInput').value,
@@ -3409,7 +3441,6 @@ function saveConfigToStorage() {
       tls_client_cert: document.getElementById('cfgTlsClientCert').value,
       tls_client_key: document.getElementById('cfgTlsClientKey').value,
       tls_client_pfx: document.getElementById('cfgTlsClientPfx').value,
-      tls_client_cert_password: document.getElementById('cfgTlsClientCertPassword').value,
       tls_ca_cert: document.getElementById('cfgTlsCaCert').value,
       state_profile: document.getElementById('cfgStateProfile').value,
       toggles: {...cfgToggles},
@@ -3422,7 +3453,6 @@ function saveConfigToStorage() {
         ? document.getElementById('cfgLlmBaseUrl').value : ''),
       role_models: collectRoleModels(),
       auth_user: document.getElementById('cfgAuthUser').value,
-      auth_pass: document.getElementById('cfgAuthPass').value,
       login_url: document.getElementById('cfgLoginUrl').value,
       login_user_field: document.getElementById('cfgLoginUserField').value,
       login_pass_field: document.getElementById('cfgLoginPassField').value,
@@ -3432,9 +3462,7 @@ function saveConfigToStorage() {
       mfa_email_account: document.getElementById('cfgMfaEmailAccount').value,
       ...mfaImapFields(),
       ...mfaTotpFields(),
-      ...authHeaderFields(),
       ...timeWindowFields(),
-      cookies: document.getElementById('cfgCookies').value,
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
       target_urls: document.getElementById('cfgTargetUrls').value,
@@ -3443,14 +3471,9 @@ function saveConfigToStorage() {
       manual_crawl_file: document.getElementById('cfgManualCrawlFile').value,
       manual_crawl_output: document.getElementById('manualCrawlOutput').value,
       checks: getSelectedChecks(),
-      flows: collectFlows(),
     };
-    // localStorageにもTOTP登録情報・Bearer・カスタムヘッダ値・QRパスを残さない。
-    delete cfg.mfa_totp_uri;
-    delete cfg.mfa_totp_secret;
-    delete cfg.mfa_totp_qr;
-    delete cfg.bearer;
-    delete cfg.headers;
+    const cfg = {};
+    CONFIG_SAVE_ALLOWLIST.forEach(k => { if (full[k] !== undefined) cfg[k] = full[k]; });
     localStorage.setItem('wscan_config', JSON.stringify(cfg));
   } catch(e) {}
 }
@@ -3520,6 +3543,9 @@ function loadConfigFromStorage() {
         else el.classList.remove('checked');
       });
     }
+    // 後方互換: 旧バージョンが平文で残した秘匿値があれば破棄し、allowlist だけで
+    // 上書き保存する（フィールドへは復元済みなので当セッションの利用は保てる）。
+    if (CONFIG_SECRET_KEYS.some(k => k in cfg)) saveConfigToStorage();
   } catch(e) {}
 }
 
