@@ -330,6 +330,19 @@ class FlowRunner:
                 # 遷移で消えた等）は、file input skip-notify や非表示 label→input の方針とそろえ、
                 # notify した上で当該ステップを skip する。前提操作が1つ抜けても flow 全体は落とさず
                 # 後続手順とページ検査を継続する（vault 0078）。
+                from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+                if not isinstance(exc, PlaywrightTimeoutError):
+                    # selector 構文不正、page/browser close、transport failure 等まで成功扱いすると、
+                    # 必須の前提操作を欠いた状態で scan/checkpoint を進めてしまう（Codex #179 P1）。
+                    raise FlowStepError(f"click failed for {sel!r}: {exc}") from exc
+                try:
+                    target_count = await self.browser.page.locator(sel).count()
+                except Exception as inspect_exc:
+                    raise FlowStepError(f"click target inspection failed for {sel!r}: {inspect_exc}") from inspect_exc
+                if target_count == 0:
+                    # 「存在するが overlay/非表示で actionability を満たさない」場合だけ skip 可。
+                    # 対象自体の欠落は必須前提の欠落なので F10 と同様に flow を失敗させる。
+                    raise FlowStepError(f"click target not found: {sel!r}") from exc
                 console.print(
                     f"  [yellow]{label} click \\[{escape(sel)}] skip"
                     f"（クリック不能: {escape(str(exc))}）[/yellow]"
