@@ -1713,11 +1713,12 @@ class BaseScanner(ABC):
             # 送らないようにする（Codex #145 P1 round14）。**成功・失敗どちらでも** finally で行うのが要点で、
             # 中間 redirect hop が cookie を変異させた後に次 hop が例外（timeout 等）を投げると、成功パス
             # だけの同期では engine.cookies に無効トークンが残り CORS 等が未認証応答に走る（Codex #145 P2 round16）。
-            # engine の既存同期機構を使う（自作しない）。ただし engine.cookies は共有なので、並列
-            # (--concurrency>1)では別 worker の検査中に書き換える競合になる。_attack_one_page の
-            # per-page cookie 同期と同じく **直列時のみ**行う（並列は既存の共有 cookie 前提・round15）。
+            # engine の既存同期機構を使う（自作しない）。並列(--concurrency>1)でも安全：
+            # engine 側の _sync_cookies_from_browser は worker task 内では task-local な
+            # ContextVar へ書き（共有 engine.cookies を汚染しない）、直列時は従来どおり
+            # engine.cookies を更新する（0067。旧: 直列時のみ実行の round15 制限を解除）。
             _sync = getattr(self.engine, "_sync_cookies_from_browser", None)
-            if callable(_sync) and (getattr(self.engine, "concurrency", 1) or 1) <= 1:
+            if callable(_sync):
                 try:
                     await _sync(browser, url)
                 except Exception:
