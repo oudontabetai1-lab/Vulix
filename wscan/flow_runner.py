@@ -322,7 +322,19 @@ class FlowRunner:
         elif step.action == "click":
             sel = step.selector or step.field
             console.print(f"  [dim]{label} click \\[{escape(sel)}][/dim]")
-            await self.browser.page.click(sel, timeout=int(step.timeout * 1000))
+            try:
+                await self.browser.page.click(sel, timeout=int(step.timeout * 1000))
+            except Exception as exc:
+                # 記録した操作要素（role=button/label/[onclick] 等のカスタム操作要素も含む）が
+                # Playwright の actionability 検査を通らない場合（非表示の実体・overlay に隠れる・
+                # 遷移で消えた等）は、file input skip-notify や非表示 label→input の方針とそろえ、
+                # notify した上で当該ステップを skip する。前提操作が1つ抜けても flow 全体は落とさず
+                # 後続手順とページ検査を継続する（vault 0078）。
+                console.print(
+                    f"  [yellow]{label} click \\[{escape(sel)}] skip"
+                    f"（クリック不能: {escape(str(exc))}）[/yellow]"
+                )
+                return
             try:
                 await self.browser.page.wait_for_load_state(
                     "domcontentloaded", timeout=10_000
