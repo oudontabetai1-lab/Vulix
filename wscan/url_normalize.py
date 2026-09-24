@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
+from wscan.url_scope import is_route_fragment
+
 
 # `/` は **含めない**：``?next=/home`` と ``?next=/admin`` のような path/route 値まで空化すると
 # 別ルートを「既知」と誤判定し、_enqueue_observed_probe_work が probe を作らず偽 COMPLETE に
@@ -75,7 +77,7 @@ def route_aware_identity(url: str) -> str:
     """
     base = endpoint_identity(url)
     fragment = urlsplit(url).fragment
-    if fragment and (fragment[:1] in ("/", "!") or "/" in fragment):
+    if is_route_fragment(fragment):
         # fragment 内の query payload も正規化する。さもないと SPA route の payload 変種
         # （`/app#/search?q=<payload>`）が毎回別 identity になり probe queue を再帰的に膨張させ
         # global budget を食い潰す（Codex #154 P1）。route path 自体は保持する。
@@ -231,14 +233,9 @@ def normalize_url_for_key(url: str) -> str:
         # vs ?stage=confirm&action=transfer）を潰さないよう、**非揮発パラメータの観測順を保持**する
         # （ソートすると別 operation を同一 checkpoint identity にして初回でも偽陰性・Codex #103 P1）。
         # 揮発項目のみ除去済み。
-        # manual_crawl._strip_in_page_anchor と同じ規則。predicate は循環 import を
-        # 避けるため複製しているので、変更時は両者の挙動を一致させること。
-        fragment = parsed.fragment
-        keep_frag = (
-            fragment
-            if fragment[:1] in ("/", "!") or "/" in fragment
-            else ""
-        )
+        # route fragment の判定は url_scope.is_route_fragment が正典
+        # （manual_crawl._strip_in_page_anchor / engine の flow マッチと同じ規則）。
+        keep_frag = parsed.fragment if is_route_fragment(parsed.fragment) else ""
         # パス末尾スラッシュは **除去後クエリ(query_str)も保持 fragment(keep_frag)も無い**
         # ときだけ吸収する。query_str と keep_frag はどちらも正規化後に不変なので **冪等**
         # （normalize∘normalize=normalize・Codex #103 P1）。同時に: (a) slash 非依存 /a/≡/a

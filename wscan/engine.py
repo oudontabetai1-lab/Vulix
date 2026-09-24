@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urljoin, parse_qs, urlsplit
 
+from wscan import url_scope
 from wscan.state_profile import VALID_PROFILES
 
 # ---------------------------------------------------------------------------
@@ -245,28 +246,18 @@ def _reset_scanner_url_guard(scanner, url: str) -> None:
 
 
 def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
-    """RFC 6265 の path-match（純粋関数）。
+    """RFC 6265 の path-match（純粋関数・``url_scope.path_within`` へ委譲）。
 
     Cookie の ``Path`` 属性が要求パスにマッチするか。``cookie_path`` が要求パスの
-    プレフィックス（境界はスラッシュ）であれば送出してよい。
+    プレフィックス（境界はスラッシュ）であれば送出してよい（/admin が /administrator に
+    誤マッチしない）。
     """
-    req = request_path or "/"
-    cp = cookie_path or "/"
-    if cp == req:
-        return True
-    if not req.startswith(cp):
-        return False
-    # 境界が "/" であること（/admin が /administrator に誤マッチしないように）
-    return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
+    return url_scope.path_within(request_path or "/", cookie_path or "/")
 
 
 def _idna_host(host: str) -> str:
-    """ホスト名を小文字＋IDNA（Punycode）へ正規化する（純粋）。Chromium は IDN を Punycode で保存する。"""
-    host = (host or "").lower()
-    try:
-        return host.encode("idna").decode("ascii")
-    except UnicodeError:
-        return host
+    """ホスト名を小文字＋IDNA（Punycode）へ正規化する（純粋・``url_scope.idna_host``）。"""
+    return url_scope.idna_host(host)
 
 
 def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
@@ -276,19 +267,20 @@ def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
     別ホストや同一 origin では "" を返し、scheme・ポート変更だけを反映する。
     設定 scope のパス・query 限定（例 ``http://host/app`` / ``http://host/action?op=save``）は昇格後
     scope にも引き継ぐ。origin 全体へ広げると未許可パスへ能動 probe が及び、query を落とすと query 限定
-    target が access-only 扱いになって検査されない（Codex #153 P1）。ホストは IDNA で正規化して比較する
-    （Unicode 設定と Punycode 保存の不一致で昇格を落とさない・Codex #153 P2）。
+    target が access-only 扱いになって検査されない（Codex #153 P1）。ホスト/ポートの正規化は
+    ``url_scope.origin_tuple``（IDNA・既定ポート補完）が正典（Unicode 設定と Punycode 保存の
+    不一致で昇格を落とさない・Codex #153 P2）。
     """
     if not effective_origin:
         return ""
     from urllib.parse import urlparse as _up
     ep, tp = _up(effective_origin), _up(target_url or "")
-    _default_port = {"https": 443, "http": 80}
-    if (ep.hostname and tp.hostname
-            and ep.scheme in _default_port and tp.scheme in _default_port
-            and _idna_host(ep.hostname) == _idna_host(tp.hostname)
-            and (ep.scheme, ep.port or _default_port[ep.scheme])
-            != (tp.scheme, tp.port or _default_port[tp.scheme])):
+    e_scheme, e_host, e_port = url_scope.origin_tuple(effective_origin)
+    t_scheme, t_host, t_port = url_scope.origin_tuple(target_url or "")
+    if (e_host and t_host
+            and e_scheme in url_scope.DEFAULT_PORTS and t_scheme in url_scope.DEFAULT_PORTS
+            and e_host == t_host
+            and (e_scheme, e_port) != (t_scheme, t_port)):
         _path = tp.path.rstrip("/")
         _query = f"?{tp.query}" if tp.query else ""
         return f"{ep.scheme}://{ep.netloc}{_path}{_query}"
@@ -302,9 +294,8 @@ def _scope_path_contains(effective_url: str, scope_url: str) -> int:
     ep = _up(effective_url or "").path or "/"
     if not sp:
         return 0
-    if ep == sp or ep.startswith(sp + "/"):
-        return len(sp)
-    return -1
+    return len(sp) if url_scope.path_within(ep, sp) else -1
+
 
 
 def _promote_redirect_scope(
@@ -345,15 +336,18 @@ def _promote_redirect_scope(
 def _scoped_cookie_header(cookies: list | None, url: str) -> str | None:
     """ブラウザ jar の cookie 群から、``url`` のホスト/パスへ送られる Cookie ヘッダを作る（純粋・RFC6265）。
 
-    domain（host-only は完全一致のみ・domain-scoped は suffix 可）と path（``_cookie_path_matches``）で
-    絞り、Path の長い順（§5.4）に並べる。空なら ""。同一ホストでも origin ルート(/) と page(/admin)で
-    送るべき Cookie が変わる（Path=/admin は / に送らない）ため、URL 単位でスコープした文字列を返す。
+    domain（host-only は完全一致のみ・domain-scoped は suffix 可。``url_scope.host_matches``）と
+    path（``_cookie_path_matches``）で絞り、Path の長い順（§5.4）に並べる。空なら ""。同一ホストでも
+    origin ルート(/) と page(/admin)で送るべき Cookie が変わる（Path=/admin は / に送らない）ため、
+    URL 単位でスコープした文字列を返す。
     """
     if cookies is None:
         return None  # 取得失敗と正当な空 jar を区別する。
     from urllib.parse import urlparse as _up
     parsed = _up(url or "")
-    target_host = (parsed.hostname or "").lower()
+    target_host = url_scope.idna_host(parsed.hostname or "")
+    # cookie path-match は URI の path 成分だけで行う（``;params`` は含めない。RFC6265 §5.1.4 の
+    # 既定 path 算出と同様に、``/dav;jsessionid=1`` へ Path=/dav の Cookie を送る従来挙動を保つ）。
     req_path = parsed.path or "/"
     is_https = (parsed.scheme or "").lower() == "https"
     matched: list[tuple[str, str]] = []
@@ -367,10 +361,8 @@ def _scoped_cookie_header(cookies: list | None, url: str) -> str | None:
             continue
         raw_dom = str(c.get("domain", ""))
         is_domain_cookie = raw_dom.startswith(".")
-        dom = raw_dom.lstrip(".").lower()
-        if dom and target_host and not (
-            target_host == dom
-            or (is_domain_cookie and target_host.endswith("." + dom))
+        if raw_dom.lstrip(".") and target_host and not url_scope.host_matches(
+            target_host, raw_dom, allow_subdomain=is_domain_cookie
         ):
             continue
         cpath = str(c.get("path", "/") or "/")
@@ -382,9 +374,9 @@ def _scoped_cookie_header(cookies: list | None, url: str) -> str | None:
         pkey = c.get("partitionKey")
         if pkey:
             kp = _up(pkey if "://" in str(pkey) else f"https://{pkey}")
-            khost = (kp.hostname or "").lower()
+            khost = url_scope.idna_host(kp.hostname or "")
             if not (khost and (kp.scheme or "").lower() == (parsed.scheme or "").lower()
-                    and (target_host == khost or target_host.endswith("." + khost))):
+                    and url_scope.host_matches(target_host, khost)):
                 continue
         matched.append((cpath, f"{name}={c.get('value', '')}"))
     matched.sort(key=lambda pv: len(pv[0]), reverse=True)
@@ -1684,16 +1676,14 @@ class ScanEngine:
         return normalized
 
     def _url_matches_scope(self, url: str, scopes: list[str]) -> bool:
-        candidate = url.rstrip("/")
-        parsed = urlparse(candidate)
-        for scope in scopes:
-            if scope.startswith(("http://", "https://")):
-                if candidate == scope or candidate.startswith(scope + "/"):
-                    return True
-                continue
-            if parsed.path == scope or parsed.path.startswith(scope.rstrip("/") + "/"):
-                return True
-        return False
+        """URL がいずれかの scope に含まれるか（``url_scope.url_matches_any_scope`` へ委譲）。
+
+        scope が full URL なら URL 全体の前方一致（境界は ``/``）、そうでなければパス境界一致。
+        manual_crawl と違いホスト系 scope（``auth.example.com``）はパスとして扱う（``host_scope``
+        を立てない）: scope は init で origin 正規化済みなので、裸ホスト文字列を許すと意図しない
+        別ホスト許可になりうるための意図的な差。
+        """
+        return url_scope.url_matches_any_scope(url, scopes)
 
     def _is_attack_target_url(self, url: str) -> bool:
         return self._url_matches_scope(url, self.target_urls)
@@ -1711,17 +1701,16 @@ class ScanEngine:
             return False
         if self._is_attack_target_url(url):
             return True
-        clean = urlparse(url)._replace(query="", fragment="").geturl()
+        clean = url_scope.without_query(url)
         return clean != url and self._is_attack_target_url(clean)
 
     def _is_access_allowed_url(self, url: str) -> bool:
         if self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls):
             return True
-        parsed = urlparse(url)
         # fragment はサーバに送られないので常に除いて再判定する。これで query 付きで
         # 明示スコープした target（例 .../action?op=save）の fragment 付き変種
         # （.../action?op=save#details）も許可される（設定 query は保持・Codex #104 P2）。
-        no_frag = parsed._replace(fragment="").geturl()
+        no_frag = url_scope.without_fragment(url)
         if no_frag != url and (
             self._is_attack_target_url(no_frag)
             or self._url_matches_scope(no_frag, self.access_urls)
@@ -1729,7 +1718,7 @@ class ScanEngine:
             return True
         # path-scoped target（query 無しで設定）向けに query も除いて再判定し、
         # ?page=2 のような同一パス URL を許可する（_json_target_in_scope と同じ許容）。
-        clean = parsed._replace(query="", fragment="").geturl()
+        clean = url_scope.without_query(url)
         if clean != url and (
             self._is_attack_target_url(clean)
             or self._url_matches_scope(clean, self.access_urls)
@@ -5339,7 +5328,7 @@ class ScanEngine:
             u = u or ""
             p = urlsplit(u)
             frag = p.fragment
-            keep_frag = frag if (frag[:1] in ("/", "!") or "/" in frag) else ""
+            keep_frag = frag if url_scope.is_route_fragment(frag) else ""
             path = p.path if (p.query or keep_frag) else p.path.rstrip("/")
             # 明示的な空クエリ `?` を保持する（`/confirm?` と `/confirm` を区別）。urlsplit は
             # 両方 query="" で表すため、サーバが別ルートへ写す2形を同一視しないよう

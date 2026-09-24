@@ -15,8 +15,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
 
+from wscan import url_scope
 from wscan.mfa import seconds_until_next_window
 from wscan.totp import generate_totp, resolve_totp_secret
 from wscan.url_normalize import normalize_proxy_server
@@ -37,32 +37,23 @@ class ManualCrawlSeed:
 
 
 def _origin_tuple(u: str):
-    """(scheme, host, 実効ポート) を返す。既定ポートを正規化し scheme を含める。"""
-    p = urlparse(u)
-    scheme = (p.scheme or "").lower()
-    host = (p.hostname or "").lower()
-    # Chromium は page.url の IDN ホストを Punycode（ASCII）へ正規化する。Unicode のまま比較すると
-    # 同一サイトの遷移/request/snapshot/cookie が全て cross-origin 扱いになる（Codex #153 P2）。
-    try:
-        host = host.encode("idna").decode("ascii")
-    except UnicodeError:
-        pass
-    port = p.port or {"https": 443, "http": 80}.get(scheme)
-    return scheme, host, port
+    """(scheme, host, 実効ポート) を返す。既定ポートを正規化し scheme を含める。
+
+    正典は ``url_scope.origin_tuple``（IDNA 正規化・既定ポート補完）。Chromium は page.url の
+    IDN ホストを Punycode（ASCII）へ正規化するため、Unicode のまま比較すると同一サイトの
+    遷移/request/snapshot/cookie が全て cross-origin 扱いになる（Codex #153 P2）。
+    """
+    return url_scope.origin_tuple(u)
 
 
 def _same_origin(url: str, origin: str) -> bool:
-    """同一 origin か（scheme+host+実効ポートで判定）。
+    """同一 origin か（scheme+host+実効ポートで判定・``url_scope.same_origin`` へ委譲）。
 
     netloc だけの比較は (1) scheme を無視して http↔https を同一視し（cross-origin の SSO/決済
     popup の URL を same-origin と誤判定して記録し得る）、(2) 明示ポートと既定ポート
     （app.test と app.test:443）を別 origin 扱いして記録を取りこぼす。両方を正す（Codex #153）。
     """
-    try:
-        a, b = _origin_tuple(url), _origin_tuple(origin)
-        return bool(a[0] and a[1]) and a == b
-    except Exception:
-        return False
+    return url_scope.same_origin(url, origin)
 
 
 def _cookie_host_matches(cookie_domain: str, host: str) -> bool:
@@ -71,35 +62,17 @@ def _cookie_host_matches(cookie_domain: str, host: str) -> bool:
     先頭ドットを除いて完全一致、または host がその domain のサブドメインなら True。
     別サイト（IdP 等）の cookie を除外するために使う。空は False。
     """
-    d = (cookie_domain or "").lower().lstrip(".")
-    h = (host or "").lower()
-    if not d or not h:
-        return False
-    return h == d or h.endswith("." + d)
+    return url_scope.host_matches(host, cookie_domain)
 
 
 def _matches_scope(url: str, scopes: list[str]) -> bool:
-    candidate = url.rstrip("/")
-    parsed = urlparse(candidate)
-    host = (parsed.hostname or "").lower()
-    for raw in scopes:
-        scope = str(raw or "").strip().rstrip("/")
-        if not scope:
-            continue
-        if scope.startswith(("http://", "https://")):
-            if candidate == scope or candidate.startswith(scope + "/"):
-                return True
-        elif "/" in scope:
-            # パス系スコープ（/admin 等）
-            if parsed.path == scope or parsed.path.startswith(scope + "/"):
-                return True
-        else:
-            # ホスト系スコープ（auth.example.com 等）: 完全一致 or サブドメイン。
-            # monitor の allowed_target_hosts と同じホスト許可判定を共有する。
-            low = scope.lower().strip(".")
-            if host and (host == low or host.endswith("." + low)):
-                return True
-    return False
+    """URL がいずれかの scope（full URL / パス系 / ホスト系）に含まれるか。
+
+    ホスト系 scope（``auth.example.com`` 等）を許すのが engine 側 scope 判定との意図的な差で、
+    monitor の allowed_target_hosts と同じホスト許可判定を共有する。
+    """
+    return url_scope.url_matches_any_scope(url, scopes, host_scope=True)
+
 
 
 def _unique_urls(values: list[str], origin: str = "", allowed_scopes: list[str] | None = None) -> list[str]:
@@ -178,14 +151,13 @@ def _strip_in_page_anchor(url: str) -> str:
 
     ``https://app/#/admin`` のような hash ルーティングや DOM XSS 対象は、``#`` 以降を
     捨てると別ページ（``https://app/``）になってしまうため落とさない。``/`` や ``!`` を
-    含む（=ルート風の）フラグメントは保持し、単純なアンカーだけ除去する。
+    含む（=ルート風の）フラグメントは保持し、単純なアンカーだけ除去する
+    （判定は ``url_scope.is_route_fragment`` が正典）。
     """
     head, sep, frag = url.partition("#")
     if not sep or not frag:
         return head
-    if frag[:1] in ("/", "!") or "/" in frag:
-        return url
-    return head
+    return url if url_scope.is_route_fragment(frag) else head
 
 
 def parse_url_list(text: str | list[str]) -> list[str]:
