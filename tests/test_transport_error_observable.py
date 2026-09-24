@@ -1192,9 +1192,11 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
         # 例外が伝播しても、直列なので再同期は必ず実行される。
         self.assertEqual(called.get("url"), "http://app.test/start")
 
-    async def test_no_cookie_resync_under_concurrency(self):
-        """並列(--concurrency>1)では共有 engine.cookies を書き換えないよう再同期をスキップ
-        （別 worker の検査中の競合防止・Codex #145 P1 round15）。"""
+    async def test_cookie_resync_runs_under_concurrency(self):
+        """並列(--concurrency>1)でも監査 GET 後の Cookie 再同期を実行する（0067）。
+        engine 側の _sync_cookies_from_browser が worker task 内では task-local な
+        ContextVar に閉じるため、共有 engine.cookies を汚染せず安全（旧 round15 の
+        直列限定スキップを解除）。"""
         engine, scanner = self._scanner(_FakeAPIResponse(200))
         engine.concurrency = 2
         called = {"n": 0}
@@ -1204,7 +1206,7 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
 
         engine._sync_cookies_from_browser = _sync
         await scanner._get("http://app.test/p")
-        self.assertEqual(called["n"], 0)
+        self.assertEqual(called["n"], 1)
 
     async def test_disposes_responses(self):
         """最終 response を dispose して body を解放する（Codex #145 round13）。"""
