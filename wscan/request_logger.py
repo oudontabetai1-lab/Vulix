@@ -12,11 +12,12 @@
 妨げないよう、失敗しても例外を握りつぶす（ベストエフォート）。
 """
 import json
-import re
 import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+from wscan import url_scope
 
 # 巨大な post_data でログが肥大化するのを防ぐための上限（文字数）
 _MAX_POST_DATA = 20000
@@ -49,7 +50,7 @@ def _count_existing_records(path: Path) -> int:
 # 監査ログは output/ 配下に保存され、ダッシュボードが（既定では認証なしで）
 # 配信しうる。認証情報がそのまま残ると閲覧者に漏れるため、書き込み前に
 # 機微なヘッダ値・ボディフィールドをマスクする。
-_REDACTED = "<redacted>"
+_REDACTED = url_scope.REDACTED
 
 # 値をマスクするヘッダ名（小文字・完全一致）。
 # ここが機密ヘッダの**単一の正典**。scanners/base（merge_template_headers / evidence redaction）も
@@ -93,18 +94,10 @@ def is_sensitive_header(name) -> bool:
     return _is_sensitive_header(name)
 
 
-# urlencoded / JSON ボディや URL クエリでマスクするキーのトークン（部分一致）
-_SENSITIVE_BODY_KEYS = (
-    "password", "passwd", "pwd", "secret", "token", "api_key", "apikey",
-    "apitoken", "access_token", "refresh_token", "client_secret",
-    "sessionid", "session_id", "csrf", "xsrf", "authenticity_token",
-)
-_KEYS_ALT = "|".join(re.escape(k) for k in _SENSITIVE_BODY_KEYS)
-# urlencoded: <key>=<value>  （key が機微トークンを含むとき value をマスク）
-_RE_URLENCODED = re.compile(rf"(?i)([^&=?\s]*(?:{_KEYS_ALT})[^&=]*)=[^&]*")
-# JSON: "<key>": "<value>"
-# 値は escape-aware（`\"` を含む JSON scalar 全体を伏せる。`"[^"]*"` だと `\"` で切れて末尾漏れ）
-_RE_JSON = re.compile(rf'(?i)("(?:[^"\\]*(?:{_KEYS_ALT})[^"\\]*)"\s*:\s*)"(?:\\.|[^"\\])*"')
+# urlencoded / JSON ボディや URL クエリでマスクするキーのトークン（部分一致）。
+# 正典は url_scope（URL redaction と同じ集合・正規表現を共有する）。名前は後方互換のため残す。
+_SENSITIVE_BODY_KEYS = url_scope.SENSITIVE_KEY_TOKENS
+_KEYS_ALT = url_scope.KEYS_ALT
 
 
 def _redact_headers(headers: dict) -> dict:
@@ -117,46 +110,16 @@ def _redact_headers(headers: dict) -> dict:
 
 
 def _redact_text(text):
-    """urlencoded ボディ / JSON ボディ中の機微フィールド値をマスクする。"""
-    if not isinstance(text, str) or not text:
-        return text
-    text = _RE_URLENCODED.sub(lambda m: f"{m.group(1)}={_REDACTED}", text)
-    text = _RE_JSON.sub(lambda m: f'{m.group(1)}"{_REDACTED}"', text)
-    return text
-
-
-_RE_URL_SCHEME = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
+    """urlencoded ボディ / JSON ボディ中の機微フィールド値をマスクする（url_scope へ委譲）。"""
+    return url_scope.redact_kv_values(text)
 
 
 def _redact_url(url):
     """URL の機微値をマスクする（クエリ・フラグメント・userinfo）。
 
     OAuth implicit 等はトークンを **fragment**（`#access_token=...`）に載せ、`user:pass@host` の
-    **userinfo** も資格情報。クエリだけでなくこれらも永続化前に伏せる。"""
-    if not isinstance(url, str) or not url:
-        return url
-    result = url
-    # userinfo: scheme://user:pass@host → 資格情報を伏せる
-    m = _RE_URL_SCHEME.match(result)
-    if m:
-        after = result[m.end():]
-        cut = [i for i in (after.find("/"), after.find("?"), after.find("#")) if i != -1]
-        authority_end = min(cut) if cut else len(after)
-        authority = after[:authority_end]
-        if "@" in authority:
-            host = authority.rpartition("@")[2]
-            result = result[:m.end()] + _REDACTED + "@" + host + after[authority_end:]
-    # query（? 以降。# があれば分離してフラグメントも処理）
-    if "?" in result:
-        base, _, rest = result.partition("?")
-        query, hsep, frag = rest.partition("#")
-        result = f"{base}?{_redact_text(query)}"
-        if hsep:
-            result += f"#{_redact_text(frag)}"
-    elif "#" in result:
-        base, _, frag = result.partition("#")
-        result = f"{base}#{_redact_text(frag)}"
-    return result
+    **userinfo** も資格情報。クエリだけでなくこれらも永続化前に伏せる。判定は url_scope が正典。"""
+    return url_scope.redact_url(url)
 
 
 def redact_text(text):

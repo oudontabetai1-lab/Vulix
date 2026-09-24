@@ -4,36 +4,24 @@ from __future__ import annotations
 from typing import Optional
 from urllib.parse import urlparse
 
+from wscan import url_scope
+
 
 _BLANK_URLS = frozenset({"", "about:blank", "chrome://newtab/", "about:newtab"})
 
 
 def _url_origin(url: str) -> str:
-    """URL から比較用の scheme://host[:port] を抽出する。"""
+    """URL から比較用の scheme://host[:port] を抽出する（``url_scope.origin_string`` が正典）。
+
+    netloc を持たない入力（scheme だけ・相対 URL）は "" に倒す。
+    """
     try:
         parsed = urlparse(str(url or "").strip())
-        hostname = parsed.hostname
-        port = parsed.port
     except (TypeError, ValueError):
         return ""
-    if not parsed.scheme or not parsed.netloc or not hostname:
+    if not parsed.netloc:
         return ""
-    normalized_host = hostname.lower()
-    try:
-        normalized_host = normalized_host.encode("idna").decode("ascii")
-    except UnicodeError:
-        # 壊れたホスト名でもスコープ判定自体は例外にせず、従来の小文字表現へ戻す。
-        pass
-    if ":" in normalized_host:
-        normalized_host = f"[{normalized_host}]"
-    scheme = parsed.scheme.lower()
-    default_ports = {"http": 80, "https": 443}
-    port_suffix = (
-        f":{port}"
-        if port is not None and port != default_ports.get(scheme)
-        else ""
-    )
-    return f"{scheme}://{normalized_host}{port_suffix}"
+    return url_scope.origin_string(url)
 
 
 def effective_origin_url(current_url: str, intended_url: str) -> str:
