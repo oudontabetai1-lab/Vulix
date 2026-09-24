@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from wscan import url_scope
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
     ScannerContract, StateChangeClass,
@@ -105,21 +106,15 @@ def url_userinfo_secrets(target: str) -> tuple[str, ...]:
 
 
 def redact_url(target: str) -> str:
-    """URL から userinfo（Basic 認証資格情報）を除去する（純粋・#157 P2）。
+    """URL から userinfo（Basic 認証資格情報）と機微 query 値を除去する（純粋・#157 P2）。
 
     probe は userinfo 付き URL で行うが、finding.url・request-pair・reproduction 等
     **永続化する証跡**にはこの redacted URL を使う（checkpoint/レポート/ダッシュボードへ
-    資格情報を残さない）。解析不能時は安全側として userinfo らしき前置を素朴に除去する。
+    資格情報を残さない）。判定は正典の ``url_scope.redact_url``。userinfo は ``<redacted>@`` を
+    残さず**丸ごと除去**する（証跡 URL をそのまま再実行できる形に保つ意図的な差・#157 P2）。
+    page probe は query を保持するため、access_token 等の機微 query 値も同時に伏せる（#157 P1）。
     """
-    from wscan.request_logger import redact_url as _canonical_redact_url
-    try:
-        stripped = str(httpx.URL(target).copy_with(username=None, password=None))
-    except Exception:
-        # 念のためのフォールバック：scheme://userinfo@host... の userinfo を落とす。
-        stripped = re.sub(r"^([a-zA-Z][\w+.-]*://)[^/@]*@", r"\1", target)
-    # page probe は query を保持するため、access_token 等の機微 query 値も正典の redaction で
-    # 伏せてから永続化する（Codex #157 P1）。
-    return _canonical_redact_url(stripped)
+    return url_scope.redact_url(target, drop_userinfo=True)
 
 
 def url_query_secrets(target: str) -> list[str]:
@@ -128,9 +123,8 @@ def url_query_secrets(target: str) -> list[str]:
     TRACE 反射本文にも URL 由来の秘密（``?access_token=...``）が載り得るため、同じ値を本文でも伏せる。
     """
     from urllib.parse import parse_qsl, urlsplit
-    from wscan.request_logger import redact_url as _canonical_redact_url
     try:
-        orig, red = urlsplit(target), urlsplit(_canonical_redact_url(target))
+        orig, red = urlsplit(target), urlsplit(url_scope.redact_url(target))
     except Exception:
         return []
     out: list[str] = []
@@ -270,7 +264,7 @@ class HttpMethodsScanner(BaseScanner):
         # 見逃さない）。fragment だけ落とす。query は保持する（/index.php?route=dav のように query で
         # リソースを振り分けるアプリで別リソースを probe し tested 扱いにしない・Codex #157 P2）。
         # `;params`（/dav;jsessionid=...）も crawl したリソースの一部なので保持する（Codex #157 P2）。
-        _path = (parsed.path or "/") + (f";{parsed.params}" if parsed.params else "")
+        _path = url_scope.request_path(url)
         page_target = (
             origin if _path == "/" and not parsed.query
             else f"{origin}{_path}" + (f"?{parsed.query}" if parsed.query else "")
