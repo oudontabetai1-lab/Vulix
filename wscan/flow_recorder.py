@@ -35,6 +35,19 @@ from pathlib import Path
 from typing import Optional
 
 
+def _make_navigate_step(prev_steps: list[dict], url: str) -> dict:
+    """記録用 navigate step を作る純粋関数（Codex #179）。
+
+    直前 step が click なら、この main-frame 遷移はその click が起こしたもの。navigate step は
+    `_match_pre_attack_flows` の照合（最後の navigate URL）用に残しつつ via_click を付し、replay 側は
+    実行を skip して二重ロード（click 自身の遷移＋navigate の再 GET）を防ぐ。ceiling: click→AJAX→
+    後発の meta refresh 等、click 起因でない遷移も直前が click だと誤って via_click 化しうる稀ケースは
+    許容する（実害は再 GET 1 回の欠落）。"""
+    step = {"action": "navigate", "url": url}
+    if prev_steps and prev_steps[-1].get("action") == "click":
+        step["via_click"] = True
+    return step
+
 
 # click 記録で「操作を意味する」祖先とみなすセレクタ（vault 0078）。closest でこのいずれかに
 # 一致した要素だけを click ステップとして記録し、装飾 div 等の無関係なクリックは拾わない。
@@ -163,16 +176,25 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                     }}
                     const label = target.closest('label');
                     if (label && label.control) {{
-                        const controlType = (label.control.type || '').toLowerCase();
-                        if (controlType === 'file' || controlType === 'image') {{
-                            if (typeof window['{fn_notify}'] === 'function') {{
-                                window['{fn_notify}'](
-                                    controlType + ' input はリプレイ不可のため記録しません: ' + __wscanPath(label.control)
-                                );
+                        // クリックが label の control を実際に活性化するときだけ記録抑止する。
+                        // label 内に独立した操作要素（リンク/ボタン/[onclick] 等 control 以外の
+                        // clickable 子孫）があり、その内側をクリックした場合、HTML 仕様上 control は
+                        // トグルされず子孫自身の副作用（遷移/AJAX）が走る。closest(CLICKABLE) が
+                        // label 自身を指す＝独立操作要素を経由していない＝control 活性化のときだけ
+                        // 抑止し、独立要素へのクリックは下の通常記録へ流す（Codex #179）。
+                        const inner = target.closest(__WSCAN_CLICKABLE_SEL);
+                        if (inner === label) {{
+                            const controlType = (label.control.type || '').toLowerCase();
+                            if (controlType === 'file' || controlType === 'image') {{
+                                if (typeof window['{fn_notify}'] === 'function') {{
+                                    window['{fn_notify}'](
+                                        controlType + ' input はリプレイ不可のため記録しません: ' + __wscanPath(label.control)
+                                    );
+                                }}
+                                return;
                             }}
-                            return;
+                            if (controlType === 'checkbox' || controlType === 'radio') return;
                         }}
-                        if (controlType === 'checkbox' || controlType === 'radio') return;
                     }}
                     const el = target.closest(__WSCAN_CLICKABLE_SEL);
                     if (el && el.tagName !== 'BODY' && el.tagName !== 'HTML') {{
@@ -180,7 +202,21 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                         if (sel && typeof window['{fn_click}'] === 'function') {{
                             __wscanClickRecorded = true;
                             setTimeout(() => {{ __wscanClickRecorded = false; }}, 0);
-                            window['{fn_click}'](sel);
+                            // 座標依存要素（canvas・offsetX/offsetY を使う大きな div 等）は要素中心の
+                            // 再生では別動作になり得るため、相対クリック座標を保存し replay で渡す
+                            // （page.click(position=...)）。ただし座標を常に付すと、inline/小要素では
+                            // 記録 offset の hit-test が親要素へずれて replay が別要素を click し得る
+                            // （委譲メニューの span 等）。座標志向とみなせる canvas / block 要素のときだけ、
+                            // かつ offset が有限・非負のときだけ付す（Codex #179）。
+                            let ox = e.offsetX, oy = e.offsetY;
+                            let coordLike = false;
+                            try {{
+                                const cs = window.getComputedStyle(target);
+                                coordLike = target.tagName === 'CANVAS' || (cs && cs.display === 'block');
+                            }} catch (err) {{ coordLike = target.tagName === 'CANVAS'; }}
+                            const hasPos = coordLike
+                                && Number.isFinite(ox) && Number.isFinite(oy) && ox >= 0 && oy >= 0;
+                            window['{fn_click}'](sel, hasPos ? ox : null, hasPos ? oy : null);
                         }}
                     }}
                 }}, true);
@@ -249,7 +285,7 @@ class FlowRecorder:
                         if steps and steps[0].get("action") == "navigate":
                             steps[0]["landed_url"] = url
                     return
-                steps.append({"action": "navigate", "url": url})
+                steps.append(_make_navigate_step(steps, url))
 
             page.on("framenavigated", on_navigate)
 
@@ -265,9 +301,16 @@ class FlowRecorder:
             await page.expose_function(_fn_fill, lambda selector, value: steps.append(
                 {"action": "fill", "selector": selector, "value": value}
             ))
-            await page.expose_function(_fn_click, lambda selector: steps.append(
-                {"action": "click", "selector": selector}
-            ))
+            # click は相対座標付き（座標依存要素の replay 用）。x/y は有限・非負のときだけ付す
+            # （記録スクリプトが offsetX/offsetY を検査して None 化する・Codex #179）。
+            def _record_click(selector, x=None, y=None):
+                step = {"action": "click", "selector": selector}
+                if x is not None and y is not None:
+                    step["x"] = x
+                    step["y"] = y
+                steps.append(step)
+
+            await page.expose_function(_fn_click, _record_click)
             await page.expose_function(_fn_submit, lambda selector: steps.append(
                 {"action": "submit", "selector": selector}
             ))
@@ -347,6 +390,9 @@ class FlowRecorder:
             action = step.get("action", "")
 
             if action == "navigate":
+                # via_click な navigate は click step が既に遷移させるため再実行しない（Codex #179）。
+                if step.get("via_click"):
+                    continue
                 url = step.get("url", "")
                 if url:
                     await browser.navigate(url)
@@ -383,9 +429,12 @@ class FlowRecorder:
             elif action == "click":
                 selector = step.get("selector", "")
                 if selector:
+                    # 座標依存要素は記録した相対座標で click する（要素中心 click だと別動作・Codex #179）。
+                    x, y = step.get("x"), step.get("y")
+                    click_kw = {"position": {"x": x, "y": y}} if x is not None and y is not None else {}
                     try:
                         req_ts = time.time()
-                        await browser.page.click(selector, timeout=5000)
+                        await browser.page.click(selector, timeout=5000, **click_kw)
                         await asyncio.sleep(0.5)
                         resp_ts = time.time()
                         html = await browser.page.content()
