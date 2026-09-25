@@ -119,9 +119,12 @@ class FieldBudgetTimeboxTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _FakePage:
-    def __init__(self):
+    def __init__(self, session_json="", origin=""):
         self.closed = False
         self.wired: list = []
+        self.init_scripts: list = []
+        self._session_json = session_json
+        self._origin = origin
 
     def set_default_timeout(self, t):
         pass
@@ -131,6 +134,16 @@ class _FakePage:
 
     def is_closed(self):
         return self.closed
+
+    async def add_init_script(self, script):
+        self.init_scripts.append(script)
+
+    async def evaluate(self, script, *args):
+        if "sessionStorage" in script and "stringify" in script:
+            return self._session_json
+        if "location.origin" in script:
+            return self._origin
+        return None
 
     async def close(self):
         self.closed = True
@@ -180,6 +193,107 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         bm._context = None
         bm.page = _FakePage()
         self.assertFalse(await bm.recreate_page())  # 復旧不能＝安全側 False
+
+    async def test_reset_dialog_keeps_wedge_signal(self):
+        """#6: reset_dialog は wedge signal（dialog_dismiss_failed）を消さない。
+
+        XSS 等が payload 毎に reset_dialog を呼ぶため、ここで消すと初回 dismiss 失敗の
+        wedge が recover 検査前に消え page が再生成されない。dialog_fired 等は消す。
+        """
+        bm = self._bm()
+        bm.page = _FakePage()
+        bm.dialog_fired = True
+        bm.dialog_message = "XSS"
+        bm.dialog_dismiss_failed = True
+
+        bm.reset_dialog()
+
+        self.assertFalse(bm.dialog_fired)             # 通常の dialog 状態はリセット
+        self.assertEqual(bm.dialog_message, "")
+        self.assertTrue(bm.dialog_dismiss_failed)     # wedge signal は保持
+
+    async def test_recreate_seeds_session_storage_via_init_script(self):
+        """#2: recreate_page は退避 sessionStorage を init script として仕込む
+        （navigate 後の evaluate 復元では SPA bootstrap に間に合わないため）。"""
+        bm = self._bm()
+        old = _FakePage(session_json='{"token":"abc123"}', origin="http://t")
+        bm.page = old
+
+        ok = await bm.recreate_page()
+
+        self.assertTrue(ok)
+        self.assertIsNone(bm._pending_session_storage)          # 消費済み
+        self.assertEqual(len(bm.page.init_scripts), 1)          # 新 page に仕込む
+        script = bm.page.init_scripts[0]
+        self.assertIn("http://t", script)                      # 該当 origin ガード
+        self.assertIn("abc123", script)                        # 退避値を seed
+        self.assertIn("getItem", script)                       # 未設定キーのみ復元
+
+    async def test_recreate_skips_init_script_without_snapshot(self):
+        """sessionStorage が空なら init script を仕込まない（従来挙動）。"""
+        bm = self._bm()
+        bm.page = _FakePage(session_json="{}", origin="http://t")
+        ok = await bm.recreate_page()
+        self.assertTrue(ok)
+        self.assertEqual(bm.page.init_scripts, [])
+
+
+class _GateEngine(_Engine):
+    pass
+
+
+class _ProbeScanner(BaseScanner):
+    """直接 transport（_apply_ip を経由しない）経路の gate 回帰用。"""
+    CHECK_TYPE = "sqli"
+
+    def __init__(self, engine):
+        super().__init__(engine)
+        self.applied = 0
+
+    async def scan_field(self, *a, **k):
+        return []
+
+    async def _apply_payload(self, url, form_index, field_name, payload, is_url_param):
+        self.applied += 1
+        return "SRC", {"response": {"body": ""}}
+
+    async def log_payload_test(self, *a, **k):
+        pass
+
+
+class DirectTransportGateTests(unittest.IsolatedAsyncioTestCase):
+    """#3: _apply_ip を迂回する送信経路（equivalence probe / evolution probe）も
+    フィールド時間ボックスで短絡する。"""
+
+    async def test_equivalence_probe_short_circuits_after_deadline(self):
+        engine = _GateEngine()
+        scanner = _ProbeScanner(engine)
+        with _Budget(time.monotonic() - 1.0):
+            result = await scanner.run_equivalence_probe(
+                "http://t/", 0, "q", is_url_param=True, context="sql"
+            )
+            self.assertIsNone(result)                       # 6 発送らず短絡
+            self.assertEqual(scanner.applied, 0)            # transport に到達しない
+            self.assertIn("sqli", eng._FIELD_BUDGET_TRUNCATED.get())
+
+    async def test_equivalence_probe_runs_without_deadline(self):
+        engine = _GateEngine()
+        scanner = _ProbeScanner(engine)
+        with _Budget(None):
+            await scanner.run_equivalence_probe(
+                "http://t/", 0, "q", is_url_param=True, context="sql"
+            )
+            self.assertGreater(scanner.applied, 0)          # 従来どおり投入
+
+    async def test_evolution_probe_short_circuits_after_deadline(self):
+        engine = _GateEngine()
+        scanner = _ProbeScanner(engine)
+        with _Budget(time.monotonic() - 1.0):
+            src, surviving, context = await scanner._evolution_probe(
+                "http://t/", 0, "q", is_url_param=True
+            )
+            self.assertEqual((src, surviving, context), ("", set(), {}))
+            self.assertIn("sqli", eng._FIELD_BUDGET_TRUNCATED.get())
 
 
 if __name__ == "__main__":

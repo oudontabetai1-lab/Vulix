@@ -1272,7 +1272,10 @@ class BrowserManager:
 
     def reset_dialog(self):
         self.dialog_fired = False
-        self.dialog_dismiss_failed = False
+        # F06/0059: dialog_dismiss_failed は wedge signal。XSS 等の scanner が payload 毎に
+        # reset_dialog() を呼ぶため、ここでクリアすると初回 dismiss 失敗の wedge が
+        # _recover_if_dialog_flood の検査前に消え、以降 dialog が開けず dialog_total も
+        # 伸びないまま page が再生成されない。実際に復旧した recreate_page() でのみクリアする。
         self.dialog_message = ""
         self.dialog_screenshot_b64 = ""
 
@@ -1310,6 +1313,29 @@ class BrowserManager:
             self.page = await self._context.new_page()
             await self._wire_current_page()
             self.reset_dialog()
+            # F06/0059(#6): wedge signal は「実際に復旧した」ここでのみクリアする。
+            self.dialog_dismiss_failed = False
+            # F06/0059(#2): sessionStorage は document script 実行前に seed する必要がある。
+            # navigate 後の復元では、認証SPA が bootstrap 中に sessionStorage を読む前に未認証
+            # リクエスト/login redirect を出した後になり遅い。init script は各遷移で page 自前の
+            # script より前に走るので、該当 origin かつ未設定キーのときだけ復元する（app が
+            # 再ログイン後に書いた新値は上書きしない）。
+            _pend = getattr(self, "_pending_session_storage", None)
+            if _pend:
+                self._pending_session_storage = None
+                try:
+                    _p_origin, _p_snap = _pend
+                    await self.page.add_init_script(
+                        "(() => { try {"
+                        f" if (location.origin !== {json.dumps(_p_origin)}) return;"
+                        f" const d = JSON.parse({json.dumps(_p_snap)});"
+                        " for (const k in d) { try {"
+                        " if (sessionStorage.getItem(k) === null)"
+                        " sessionStorage.setItem(k, d[k]);"
+                        " } catch (e) {} } } catch (e) {} })()"
+                    )
+                except Exception:
+                    pass
             if old is not None:
                 try:
                     await old.close()
@@ -1521,24 +1547,8 @@ class BrowserManager:
                         await self.settle_spa()
                     except Exception:
                         pass
-                # F06/0059: recreate_page が退避した sessionStorage を、同一 origin へ遷移した
-                # このタイミングで best-effort 復元する（認証SPA の bearer/前提状態の喪失を緩和）。
-                _pend = getattr(self, "_pending_session_storage", None)
-                if _pend:
-                    self._pending_session_storage = None
-                    try:
-                        _p_origin, _p_snap = _pend
-                        _cur = await asyncio.wait_for(
-                            self.page.evaluate("() => location.origin"), timeout=1.5
-                        )
-                        if _cur == _p_origin:
-                            await asyncio.wait_for(self.page.evaluate(
-                                "(s) => { const d = JSON.parse(s);"
-                                " for (const k in d) { try { sessionStorage.setItem(k, d[k]); } catch (e) {} } }",
-                                _p_snap,
-                            ), timeout=1.5)
-                    except Exception:
-                        pass
+                # F06/0059(#2): sessionStorage の復元は recreate_page が仕掛けた init script が
+                # 遷移前に seed する（navigate 後の evaluate 復元は SPA bootstrap に間に合わない）。
                 return True
             except Exception as e:
                 self.last_navigation_error = f"{type(e).__name__}: {e}"

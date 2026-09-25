@@ -151,6 +151,12 @@ class StoredXSSScanner(BaseScanner):
         """Inject probe payloads that carry a unique marker for later detection."""
         field_name = field.get("name", "unknown")
 
+        # F06/0059: stored-XSS の probe 注入は browser を直叩きして _apply_ip の gate を
+        # 通らないため、フィールド時間ボックス超過後もそのままだと 3 発の flood を続けて
+        # しまう。gate で短絡して注入しない（truncated 記録は _field_budget_gate 内）。
+        if self._field_budget_gate():
+            return []
+
         if self.monitor:
             await self.monitor.emit_status(
                 f"Stored-XSS probe injection: {field_name} on {url}"

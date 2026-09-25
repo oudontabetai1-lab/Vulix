@@ -117,6 +117,31 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             engine._checkpoint_mark_done.call_args_list,
         )
 
+    async def test_deadline_exceeded_does_not_mark_adaptive_done(self):
+        """#5(F06/0059): フィールド時間ボックス超過中は adaptive を完了化しない。
+
+        期限切れ deadline 下では送信が gate されて空振りするため、checkpoint を完了化すると
+        resume が adaptive payload を恒久 skip する。break で未完のまま残す（resume 回収）。
+        """
+        import time as _time
+        import wscan.engine as _eng
+
+        engine = self._engine(["<svg/onload=alert(1)>"])  # 期限がなければ mark done される内容
+        _tok = _eng._FIELD_ATTACK_DEADLINE.set(_time.monotonic() - 1.0)
+        try:
+            result = await engine._adaptive_attack_field(
+                "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+            )
+        finally:
+            _eng._FIELD_ATTACK_DEADLINE.reset(_tok)
+
+        self.assertNotIn(
+            call("https://example.test", "q", 0, "(adaptive:xss)", False),
+            engine._checkpoint_mark_done.call_args_list,
+        )
+        # LLM 生成にも到達しない（超過時は送信・生成せず短絡）。
+        engine.adaptive_engine.generate.assert_not_awaited()
+
     async def test_adaptive_scanner_error_returns_none_and_stays_incomplete(self):
         engine = self._engine(
             ["<svg/onload=alert(1)>"],

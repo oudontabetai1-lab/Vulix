@@ -1366,6 +1366,12 @@ class BaseScanner(ABC):
         SQLi / XSS の両スキャナから再利用する共通ロジック。投入は各スキャナの
         ``_apply_payload`` に委譲するため、フォーム/URLパラメータ双方に対応する。
         """
+        # F06/0059: 等価性 probe は _apply_ip を通らず _apply_payload へ直送するため、
+        # フィールド時間ボックス超過後もそのままだと 6 発送信してしまう。gate で短絡し
+        # 送信しない（truncated 記録は _field_budget_gate 内で行い当該 check の checkpoint
+        # 完了化を抑止＝resume で再試行させる）。
+        if self._field_budget_gate():
+            return None
         from wscan import equivalence_probe as eqp
 
         builders = {
@@ -1424,6 +1430,10 @@ class BaseScanner(ABC):
         個別 scanner の検知判定は呼ばず、marker 付き文字列の反射状態だけを
         観測する。失敗時は呼び出し側が従来挙動へ戻れるよう空値を返す。
         """
+        # F06/0059: 生存 probe も browser を直叩きして _apply_ip の gate を通らないため、
+        # フィールド時間ボックス超過後は送らず空観測を返す（従来の失敗時と同じ空値）。
+        if self._field_budget_gate():
+            return "", set(), {}
         try:
             from wscan import context_mutator
 

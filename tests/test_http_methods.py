@@ -194,6 +194,10 @@ class _FakeEngine:
         # main が _attack_one_page 冒頭に足したプロファイルログ呼び出しの最小スタブ。
         return None
 
+    async def _recover_if_dialog_flood(self, since):
+        # F06/0059(#4): page-level 区間末の dialog flood 回復呼び出しの最小スタブ。
+        return since
+
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
     def _scanner(self):

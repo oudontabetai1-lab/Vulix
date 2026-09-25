@@ -5623,6 +5623,11 @@ class ScanEngine:
         # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
         self._save_checkpoint()
 
+        # F06/0059(#4): page-level(scan_page) 区間の flood/wedge をここで回復する。入力の無い
+        # stored-XSS 観測ページは直後に早期 return するため、field 攻撃前の回復には到達しない。
+        # 早期 return より前・後続の再認証/flow navigate より前に回復し、wedge を持ち越さない。
+        await self._recover_if_dialog_flood(_dlg_pagelevel)
+
         if not page.forms and not page.url_params:
             return
 
@@ -5676,9 +5681,6 @@ class ScanEngine:
                 self._check_page_for_flags(attack_html, page.url)
             except Exception:
                 pass
-
-        # F06/0059: page-level(scan_page) 区間で flood/wedge していたら field 攻撃の前に回復する。
-        await self._recover_if_dialog_flood(_dlg_pagelevel)
 
         console.print(f"\n  [bold]Attacking:[/bold] {page.url}")
         plan = plans.get(page.url)
@@ -5774,7 +5776,6 @@ class ScanEngine:
         # This prevents overcounting when multiple concurrent workers process
         # pages with overlapping URL params.
 
-        _dialog_before = getattr(self.browser, "dialog_total", 0)
         for fi, dom, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
             self._profile(f"  field: {field_name} @ {page.url}")
@@ -5804,6 +5805,10 @@ class ScanEngine:
             # AbortScan propagates up
 
             field_plan = plan.get_field_plan(field_name, fi, is_url_param) if plan else None
+            # F06/0059(#1): 回復判定は field 毎の dialog_total スナップショットで行う。ループ末に
+            # 1 度だけだと、早い field の flood/wedge した page で後続 field の navigate/submit が
+            # timeout/未送達になり見逃す。各 field 走査の直後（restore navigate の前）に回復する。
+            _dlg_field = getattr(self.browser, "dialog_total", 0)
             try:
                 await self._scan_field(
                     page.url,
@@ -5819,7 +5824,12 @@ class ScanEngine:
                 raise
             except Exception as e:
                 console.print(f"  [dim red]Field scan error ({field_name}): {e}[/dim red]")
+                # 例外途中で flood/wedge していても次 field へ持ち越さない。
+                await self._recover_if_dialog_flood(_dlg_field)
                 continue
+
+            # restore navigate は wedge した page に対しては hang/失敗するため、その前に回復する。
+            await self._recover_if_dialog_flood(_dlg_field)
 
             if not is_url_param:
                 if not await self.browser.navigate(page.url, retries=self.navigation_retries):
@@ -5829,9 +5839,6 @@ class ScanEngine:
                         note="Could not restore page after field scan: "
                         + self._navigation_failure_note(),
                     )
-
-        # F06/0059: このフィールド攻撃区間で alert flood/wedge が起きたら page を作り直して回復する。
-        await self._recover_if_dialog_flood(_dialog_before)
 
     async def _recover_if_dialog_flood(self, since: int) -> int:
         """dialog flood/wedge を検知したら現在の browser の page を作り直す（F06/0059）。
@@ -6401,6 +6408,15 @@ class ScanEngine:
             adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
             if self._checkpoint_is_done_ip(ip, adaptive_checkpoint_check):
                 continue
+
+            # F06/0059(#5): フィールド時間ボックス超過中は adaptive を実行/完了化しない。
+            # 同じ期限切れ deadline 下では送信が _field_budget_gate で短絡され空振りするだけで、
+            # ここで checkpoint を完了化すると resume が adaptive payload を恒久 skip して見逃す。
+            # 未完のまま残し（mark_done しない）resume で回収する。deadline は monotonic 単調増加
+            # なので、超過したら残りの check も超過＝break で以降を未完のまま残す。
+            _dl = _FIELD_ATTACK_DEADLINE.get()
+            if _dl is not None and time.monotonic() > _dl:
+                break
 
             # 別 field/check の恒久失敗で可用性キャッシュが倒れた場合も、以降は
             # LLM を呼ばずフォールバック完了として収束させる。
