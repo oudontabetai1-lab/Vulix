@@ -794,6 +794,33 @@ class BaseScanner(ABC):
             ip.legacy_is_url_param(),
         )
 
+    def _field_budget_gate(self) -> bool:
+        """F06/0059: フィールド単位 attack 時間ボックス超過なら True（呼び出し側は注入せず
+        ``("", {})`` を返す）。超過時は観測ノートを (フィールド×check) 毎に 1 回だけ記録し、当該
+        check を truncated 集合へ入れて engine._scan_field の checkpoint 完了化を抑止する（＝resume で
+        再試行させ見逃しを防ぐ）。状態は task-local ContextVar（並行ワーカーで汚染しない）。deadline
+        未設定/未超過や engine 参照不能なら False（従来どおり注入・verify 中は deadline=None で対象外）。
+        base._apply_ip と SQLi baseline の独自 browser 送信分岐の双方から呼ぶ。"""
+        try:
+            from wscan.engine import (
+                _FIELD_ATTACK_DEADLINE as _DL,
+                _FIELD_BUDGET_NOTES as _NOTES,
+                _FIELD_BUDGET_TRUNCATED as _TRUNC,
+            )
+            _deadline = _DL.get()
+        except Exception:
+            return False
+        if _deadline is None or time.monotonic() <= _deadline:
+            return False
+        _notes = _NOTES.get()
+        if _notes is not None and self.CHECK_TYPE not in _notes:
+            self._record_scan_note(f"field_budget_exceeded:{self.CHECK_TYPE}")
+            _notes.add(self.CHECK_TYPE)
+        _trunc = _TRUNC.get()
+        if _trunc is not None:
+            _trunc.add(self.CHECK_TYPE)
+        return True
+
     async def _apply_ip(
         self,
         ip: InjectionPoint,
@@ -813,17 +840,9 @@ class BaseScanner(ABC):
         # に限る。form/url の例外は従来どおりスキャナ側（baseline_unavailable 等）へ伝播させる。
         if not self.may_scan_injection_point(ip):
             return "", {}
-        # F06/0059: フィールド単位 attack 時間ボックス。deadline 超過後は追加注入を止めて
-        # 観測ノートを (フィールド×check) ごとに 1 回だけ残す。stored sink の alert flood で
-        # 単一フィールドが以降を starve させる回帰を防ぐ（engine._scan_field が deadline を設定・
-        # verify では None＝対象外）。baseline は deadline 前に実行済みのため必須検出は保たれる。
-        _engine = getattr(self, "engine", None)
-        _deadline = getattr(_engine, "_field_attack_deadline", None)
-        if _deadline is not None and time.monotonic() > _deadline:
-            _notes = getattr(_engine, "_field_budget_notes", None)
-            if _notes is not None and self.CHECK_TYPE not in _notes:
-                self._record_scan_note(f"field_budget_exceeded:{self.CHECK_TYPE}")
-                _notes.add(self.CHECK_TYPE)
+        # F06/0059: フィールド単位 attack 時間ボックス。超過後は追加注入を止める（SQLi baseline の
+        # 独自 browser 送信分岐も同じ gate を通すため共通ヘルパに切り出し）。
+        if self._field_budget_gate():
             return "", {}
         if ip.location == "json_body":
             if not self.SUPPORTS_JSON_BODY:

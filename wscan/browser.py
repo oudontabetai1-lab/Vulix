@@ -562,6 +562,10 @@ class BrowserManager:
         # 累積ダイアログ発火数（reset_dialog では戻さない）。stored-XSS flood の検知に使い、
         # 1 ページの attack で閾値超え発火したら recreate_page で wedge をクリアする（F06/0059）。
         self.dialog_total: int = 0
+        # dismiss 失敗（未解消で wedge した可能性）の直接フラグ（F06/0059・recreate 判定に使用）。
+        self.dialog_dismiss_failed: bool = False
+        # recreate_page が退避した sessionStorage（origin, JSON文字列）。次 navigate 後に復元（F06/0059）。
+        self._pending_session_storage = None
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
         # 初回セットアップの scoped-header 方針（_wire_current_page が参照）。
@@ -654,11 +658,16 @@ class BrowserManager:
         await self._wire_current_page()
 
     async def _wire_current_page(self) -> None:
-        """self.page に既定 timeout・ネットワーク傍受・dialog ハンドラを配線する（初回セットアップ）。"""
-        if self._use_scoped_headers:
+        """self.page に既定 timeout・ネットワーク傍受・dialog ハンドラを配線する（初回セットアップ）。
+
+        F06/0059: recreate_page から WorkerBrowser（BrowserManager.__init__ を経ず _use_scoped_headers
+        等を持たない並行ワーカー）でも呼ばれるため、__init__ 専用フィールドは getattr 既定で参照し
+        AttributeError で配線が丸ごと失敗（新 page が timeout/network/dialog 未配線のまま残る）のを防ぐ。
+        """
+        if getattr(self, "_use_scoped_headers", False):
             # 最初のナビゲーションより前に Fetch.enable の完了を保証する。
             await self._activate_scoped_header_interception(self.page)
-            if self._header_intercept_mode == "cdp":
+            if getattr(self, "_header_intercept_mode", "none") == "cdp":
                 # 失敗時は context の page イベントによる現行方式を維持する。
                 await self._activate_header_target_auto_attach()
         self.page.set_default_timeout(self.timeout)
@@ -1227,7 +1236,10 @@ class BrowserManager:
         except Exception:
             # timeout（未応答）や、並行 worker がページを navigate/close 済みのケースを含む。
             # dialog 発火の signal 自体は evidence として有効なので握りつぶして続行する。
-            pass
+            # F06/0059: dismiss 失敗＝dialog が未解消で page が wedge した可能性。直接フラグに残し、
+            # _attack_one_page の recreate 判定が「_fired>3」到達を待たずに復旧できるようにする
+            # （初回 alert の dismiss が wedge すると以降 dialog が開けず _fired が増えないため）。
+            self.dialog_dismiss_failed = True
 
     async def update_extra_headers(self, headers: dict) -> None:
         """Replace extra HTTP headers used by the refresh task."""
@@ -1260,6 +1272,7 @@ class BrowserManager:
 
     def reset_dialog(self):
         self.dialog_fired = False
+        self.dialog_dismiss_failed = False
         self.dialog_message = ""
         self.dialog_screenshot_b64 = ""
 
@@ -1278,6 +1291,22 @@ class BrowserManager:
             if self._context is None:
                 return False
             old = self.page
+            # F06/0059: 認証SPA が sessionStorage に bearer/前提状態を持つ場合、page 再生成で失われ
+            # 次遷移で 401/login になり得る（cookie/localStorage は context 側で残る）。best-effort で
+            # 退避し、次の navigate 成功後に同一 origin へ復元する。ただし wedge した page（本復旧の
+            # 主因＝dialog 未解消）からの evaluate は返らないため有界化し、取れなければ諦めて続行する。
+            if old is not None:
+                try:
+                    snap = await asyncio.wait_for(
+                        old.evaluate("() => JSON.stringify(sessionStorage)"), timeout=1.5
+                    )
+                    origin = await asyncio.wait_for(
+                        old.evaluate("() => location.origin"), timeout=1.5
+                    )
+                    if snap and snap not in ("{}", "null") and origin:
+                        self._pending_session_storage = (origin, snap)
+                except Exception:
+                    pass
             self.page = await self._context.new_page()
             await self._wire_current_page()
             self.reset_dialog()
@@ -1490,6 +1519,24 @@ class BrowserManager:
                 if getattr(self, "spa_settle", False):
                     try:
                         await self.settle_spa()
+                    except Exception:
+                        pass
+                # F06/0059: recreate_page が退避した sessionStorage を、同一 origin へ遷移した
+                # このタイミングで best-effort 復元する（認証SPA の bearer/前提状態の喪失を緩和）。
+                _pend = getattr(self, "_pending_session_storage", None)
+                if _pend:
+                    self._pending_session_storage = None
+                    try:
+                        _p_origin, _p_snap = _pend
+                        _cur = await asyncio.wait_for(
+                            self.page.evaluate("() => location.origin"), timeout=1.5
+                        )
+                        if _cur == _p_origin:
+                            await asyncio.wait_for(self.page.evaluate(
+                                "(s) => { const d = JSON.parse(s);"
+                                " for (const k in d) { try { sessionStorage.setItem(k, d[k]); } catch (e) {} } }",
+                                _p_snap,
+                            ), timeout=1.5)
                     except Exception:
                         pass
                 return True
