@@ -47,9 +47,19 @@ const rejected = [
   'https://example.test/?APIKEY=SECRET',
   'https://example.test/?access_key=SECRET',
   'https://example.test/?auth-token=SECRET',
+  'https://example.test/object?X-Amz-Credential=SECRET&X-Amz-Signature=SECRET',
+  'https://example.test/object?X-Amz-Security-Token=SECRET',
+  'https://example.test/object?X-Goog-Credential=SECRET',
+  'https://example.test/object?X-Goog-Signature=SECRET',
+  'https://example.test/object?sig=SECRET',
+  'https://example.test/object?signature=SECRET',
+  'https://example.test/object?client_credential=SECRET',
   'https://example.test/#key=SECRET',
+  'https://example.test/#sig=SECRET',
   'not-a-url?key=SECRET',
   'not-a-url?%6bey=SECRET',
+  'not-a-url?X-Amz-Signature=SECRET',
+  'not-a-url?%73ig=SECRET',
 ];
 for (const url of rejected) {{
   if (safeUrlForStorage(url) !== undefined) throw new Error(url);
@@ -57,6 +67,7 @@ for (const url of rejected) {{
 const kept = [
   'https://example.test/?monkey=banana',
   'https://example.test/?keyboard=us',
+  'https://example.test/?signal=green',
   'not-a-url?monkey=banana',
   'localhost:8080',
 ];

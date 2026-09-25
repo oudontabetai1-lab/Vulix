@@ -3424,7 +3424,7 @@ const CONFIG_SECRET_KEYS = [
   'mfa_totp_uri', 'mfa_totp_secret', 'mfa_totp_qr', 'mfa_email_imap_password',
 ];
 
-const CONFIG_SENSITIVE_URL_KEY = /(?:^key$|(?:api|access|auth)[_-]?key|password|passwd|pwd|secret|token|session[_-]?id|csrf|xsrf)/i;
+const CONFIG_SENSITIVE_URL_KEY = /(?:^key$|(?:api|access|auth)[_-]?key|password|passwd|pwd|secret|token|session[_-]?id|csrf|xsrf|credentials?|signature|(?:^|[_-])sig(?:$|[_-]))/i;
 
 function safeUrlForStorage(value) {
   // URL userinfo と token/password 等を query/fragment に含む URL は、値の一部だけを
