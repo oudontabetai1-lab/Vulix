@@ -3118,6 +3118,8 @@ function submitScanConfig() {
     // （配信される scan_started は伏字版なので、そこからは復元できないため）。
     _markOwnScan(config);
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
+    // スキャン開始時に非秘匿設定を localStorage へ保存し、リロードで復元する。
+    saveConfigToStorage();
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('スキャン開始リクエスト送信中...', 'running');
   } else {
@@ -3385,6 +3387,7 @@ function submitAgentScan() {
     // 再実行のためフル config をローカル保持（配信は伏字版のため）。
     _markOwnScan(config);
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
+    saveConfigToStorage();
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('Agent Browser スキャン開始リクエスト送信中...', 'running');
   } else {
@@ -3393,23 +3396,109 @@ function submitAgentScan() {
 }
 
 // ─── Restore saved config from localStorage ─────────────────────
+// localStorage に保存してよい非秘匿キーの allowlist。ここに列挙したキーだけを
+// 永続化するため、秘匿値（パスワード/トークン/Bearer/TOTP secret/認証・カスタム
+// ヘッダ値/証明書パスワード/IMAP パスワード/QRパス/Cookie 等）や、新規に追加した
+// フィールドは「明示的に列挙しない限り漏れない」。TLS の *_cert/_key/_pfx/_ca は
+// ファイルパスであり秘密そのものではないため保存する（cert_password のみ除外）。
+const CONFIG_SAVE_ALLOWLIST = [
+  'url', 'restore_target', 'depth', 'timeout', 'llm_timeout_seconds', 'llm_stream_timeout_seconds',
+  'max_forms', 'concurrency', 'max_payloads', 'request_delay', 'navigation_retries', 'proxy',
+  'tls_client_cert', 'tls_client_key', 'tls_client_pfx', 'tls_ca_cert',
+  'state_profile', 'toggles',
+  'llm', 'ollama_model', 'openai_model', 'gemini_model', 'claude_model',
+  'openai_base_url', 'role_models',
+  'auth_user', 'login_url', 'login_user_field', 'login_pass_field', 'login_success_indicator',
+  'mfa_type', 'mfa_field', 'mfa_email_account',
+  'mfa_email_address', 'mfa_email_imap_host', 'mfa_email_imap_port',
+  'mfa_email_imap_user', 'mfa_email_imap_ssl',
+  'mfa_selector', 'mfa_totp_digits', 'mfa_totp_period', 'mfa_totp_algorithm',
+  'allowed_hours', 'forbidden_hours',
+  'exclude_fields', 'exclude_urls', 'target_urls', 'access_urls',
+  'ctf_flag_pattern', 'manual_crawl_file', 'manual_crawl_output', 'auto_register_count', 'checks',
+];
+// 旧バージョンが localStorage に残した可能性のある秘匿キー。読込時に検出したら
+// 破棄して allowlist だけで上書き保存する（後方互換の後始末）。
+const CONFIG_SECRET_KEYS = [
+  'auth_pass', 'tls_client_cert_password', 'bearer', 'headers', 'cookies',
+  'mfa_totp_uri', 'mfa_totp_secret', 'mfa_totp_qr', 'mfa_email_imap_password',
+];
+
+// 資格情報らしい URL パラメータ名。汎用語（auth/session/otp/ticket）は誤除外を抑えるため
+// キー全体か区切り後の末尾だけを対象にし、セッション ID 名は区切り単位で照合する。
+const CONFIG_SENSITIVE_URL_KEY = /(?:^key$|(?:api|access|auth)[_-]?key|password|passwd|pwd|secret|token|session[_-]?id|csrf|xsrf|credentials?|signature|samlresponse|(?:^|[._-])(?:sid|sessid|jwt|sig|jsessionid|phpsessid|bearer)(?:$|[._-])|(?:^|[._-])aspsessionid[a-z]*(?:$|[._-])|(?:^|[._-])(?:auth|authorization|session|otp|ticket)$)/i;
+const CONFIG_SECRET_FIELD_IDS = [
+  'cfgAuthPass', 'cfgBearer', 'cfgHeaders', 'cfgCookies', 'cfgLowPrivCookies',
+  'cfgTlsClientCertPassword', 'cfgMfaTotpUri', 'cfgMfaTotpSecret', 'cfgMfaTotpQr',
+  'cfgMfaEmailImapPassword',
+];
+
+function hasSensitiveMatrixParam(path) {
+  // path/matrix の ;name=value と ASP.NET cookieless の /(S(id))/ も資格情報として扱う。
+  const decoded = path.replace(/%3b/ig, ';');
+  if (/\/\((?:[A-Z]\([^)]*\))+\)(?:\/|$)/i.test(decoded)) return true;
+  return decoded.split('/').some(segment => segment.split(';').slice(1).some(param => {
+    const equals = param.indexOf('=');
+    return equals >= 0 && CONFIG_SENSITIVE_URL_KEY.test(
+      new URLSearchParams(`${param.slice(0, equals)}=`).keys().next().value
+    );
+  }));
+}
+
+function safeUrlForStorage(value) {
+  // URL userinfo と資格情報を含む query/fragment/path は、値の一部だけを
+  // 加工して別 endpoint に化けさせず、設定項目ごと保存しない。parse 不能でも資格情報らしい
+  // authority/query/path を含む値は fail-closed で除外する（proxy の host:port 表記は保持）。
+  const raw = String(value || '').trim();
+  if (!raw) return raw;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.username || parsed.password || hasSensitiveMatrixParam(parsed.pathname)) return undefined;
+    for (const key of parsed.searchParams.keys()) {
+      if (CONFIG_SENSITIVE_URL_KEY.test(key)) return undefined;
+    }
+    const fragment = parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash;
+    for (const key of new URLSearchParams(fragment).keys()) {
+      if (CONFIG_SENSITIVE_URL_KEY.test(key)) return undefined;
+    }
+    return raw;
+  } catch (_) {
+    if (/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*@/i.test(raw)
+        || hasSensitiveMatrixParam(raw.split(/[?#]/, 1)[0])
+        || [...raw.matchAll(/[?#&]([^=&#]*)=/g)].some(([, key]) =>
+          CONFIG_SENSITIVE_URL_KEY.test(new URLSearchParams(`${key}=`).keys().next().value))) {
+      return undefined;
+    }
+    return raw;
+  }
+}
+
+function safeUrlListForStorage(value) {
+  return String(value || '').split('\n').map(safeUrlForStorage)
+    .filter(v => v !== undefined && v !== '').join('\n');
+}
+
 function saveConfigToStorage() {
   try {
-    const cfg = {
-      url: document.getElementById('cfgInputUrl').value,
+    // まず全フィールドを集めてから allowlist で絞り込む。秘匿値を含む spread
+    // （mfaTotpFields/authHeaderFields 等）が返すキーも、列挙外は自動的に落ちる。
+    const full = {
+      url: safeUrlForStorage(document.getElementById('cfgInputUrl').value),
+      restore_target: !CONFIG_SECRET_FIELD_IDS.some(id =>
+        !!document.getElementById(id)?.value?.trim()),
       depth: document.getElementById('cfgDepth').value,
       timeout: document.getElementById('cfgTimeoutInput').value,
       llm_timeout_seconds: document.getElementById('cfgLlmTimeoutInput')?.value,
       llm_stream_timeout_seconds: document.getElementById('cfgLlmStreamTimeoutInput')?.value,
       max_forms: document.getElementById('cfgMaxForms').value,
       concurrency: document.getElementById('cfgConcurrency').value,
+      max_payloads: document.getElementById('cfgMaxPayloads').value,
       request_delay: document.getElementById('cfgDelay').value,
       navigation_retries: document.getElementById('cfgNavigationRetries').value,
-      proxy: document.getElementById('cfgProxy').value,
+      proxy: safeUrlForStorage(document.getElementById('cfgProxy').value),
       tls_client_cert: document.getElementById('cfgTlsClientCert').value,
       tls_client_key: document.getElementById('cfgTlsClientKey').value,
       tls_client_pfx: document.getElementById('cfgTlsClientPfx').value,
-      tls_client_cert_password: document.getElementById('cfgTlsClientCertPassword').value,
       tls_ca_cert: document.getElementById('cfgTlsCaCert').value,
       state_profile: document.getElementById('cfgStateProfile').value,
       toggles: {...cfgToggles},
@@ -3419,38 +3508,31 @@ function saveConfigToStorage() {
       gemini_model: document.getElementById('cfgGeminiModel').value,
       claude_model: document.getElementById('cfgClaudeModel').value,
       openai_base_url: (document.getElementById('cfgLlm').value === 'openai_compatible'
-        ? document.getElementById('cfgLlmBaseUrl').value : ''),
+        ? safeUrlForStorage(document.getElementById('cfgLlmBaseUrl').value) : ''),
       role_models: collectRoleModels(),
       auth_user: document.getElementById('cfgAuthUser').value,
-      auth_pass: document.getElementById('cfgAuthPass').value,
-      login_url: document.getElementById('cfgLoginUrl').value,
+      login_url: safeUrlForStorage(document.getElementById('cfgLoginUrl').value),
       login_user_field: document.getElementById('cfgLoginUserField').value,
       login_pass_field: document.getElementById('cfgLoginPassField').value,
-      login_success_indicator: document.getElementById('cfgLoginSuccess').value,
+      login_success_indicator: safeUrlForStorage(document.getElementById('cfgLoginSuccess').value),
       mfa_type: document.getElementById('cfgMfaType').value,
       mfa_field: document.getElementById('cfgMfaField').value,
       mfa_email_account: document.getElementById('cfgMfaEmailAccount').value,
       ...mfaImapFields(),
       ...mfaTotpFields(),
-      ...authHeaderFields(),
       ...timeWindowFields(),
-      cookies: document.getElementById('cfgCookies').value,
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
-      target_urls: document.getElementById('cfgTargetUrls').value,
-      access_urls: document.getElementById('cfgAccessUrls').value,
+      target_urls: safeUrlListForStorage(document.getElementById('cfgTargetUrls').value),
+      access_urls: safeUrlListForStorage(document.getElementById('cfgAccessUrls').value),
       ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value,
       manual_crawl_file: document.getElementById('cfgManualCrawlFile').value,
       manual_crawl_output: document.getElementById('manualCrawlOutput').value,
+      auto_register_count: document.getElementById('cfgAutoRegisterCount').value,
       checks: getSelectedChecks(),
-      flows: collectFlows(),
     };
-    // localStorageにもTOTP登録情報・Bearer・カスタムヘッダ値・QRパスを残さない。
-    delete cfg.mfa_totp_uri;
-    delete cfg.mfa_totp_secret;
-    delete cfg.mfa_totp_qr;
-    delete cfg.bearer;
-    delete cfg.headers;
+    const cfg = {};
+    CONFIG_SAVE_ALLOWLIST.forEach(k => { if (full[k] !== undefined) cfg[k] = full[k]; });
     localStorage.setItem('wscan_config', JSON.stringify(cfg));
   } catch(e) {}
 }
@@ -3460,13 +3542,15 @@ function loadConfigFromStorage() {
     const raw = localStorage.getItem('wscan_config');
     if (!raw) return;
     const cfg = JSON.parse(raw);
-    if (cfg.url) document.getElementById('cfgInputUrl').value = cfg.url;
+    const restoreTarget = cfg.restore_target === true;
+    if (restoreTarget && cfg.url && safeUrlForStorage(cfg.url) !== undefined) document.getElementById('cfgInputUrl').value = cfg.url;
     if (cfg.depth) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
     if (cfg.llm_timeout_seconds != null) document.getElementById('cfgLlmTimeoutInput').value = cfg.llm_timeout_seconds;
     if (cfg.llm_stream_timeout_seconds != null) document.getElementById('cfgLlmStreamTimeoutInput').value = cfg.llm_stream_timeout_seconds;
     if (cfg.max_forms) document.getElementById('cfgMaxForms').value = cfg.max_forms;
     if (cfg.concurrency) document.getElementById('cfgConcurrency').value = cfg.concurrency;
+    if (cfg.max_payloads != null) document.getElementById('cfgMaxPayloads').value = cfg.max_payloads;
     if (cfg.request_delay != null) document.getElementById('cfgDelay').value = cfg.request_delay;
     if (cfg.navigation_retries != null) document.getElementById('cfgNavigationRetries').value = cfg.navigation_retries;
     if (cfg.proxy) document.getElementById('cfgProxy').value = cfg.proxy;
@@ -3501,12 +3585,13 @@ function loadConfigFromStorage() {
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
-    if (cfg.target_urls) document.getElementById('cfgTargetUrls').value = cfg.target_urls;
-    if (cfg.access_urls) document.getElementById('cfgAccessUrls').value = cfg.access_urls;
+    if (restoreTarget && cfg.target_urls) document.getElementById('cfgTargetUrls').value = safeUrlListForStorage(cfg.target_urls);
+    if (restoreTarget && cfg.access_urls) document.getElementById('cfgAccessUrls').value = safeUrlListForStorage(cfg.access_urls);
     if (cfg.ctf_flag_pattern) document.getElementById('cfgCtfFlagPattern').value = cfg.ctf_flag_pattern;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
     if (cfg.state_profile) document.getElementById('cfgStateProfile').value = cfg.state_profile;
     if (cfg.manual_crawl_output) document.getElementById('manualCrawlOutput').value = cfg.manual_crawl_output;
+    if (cfg.auto_register_count != null) document.getElementById('cfgAutoRegisterCount').value = cfg.auto_register_count;
     if (cfg.flows && cfg.flows.length) restoreFlows(cfg.flows);
     // Restore toggle UI
     Object.keys(cfgToggles).forEach(k => {
@@ -3520,6 +3605,9 @@ function loadConfigFromStorage() {
         else el.classList.remove('checked');
       });
     }
+    // 後方互換: 旧バージョンが平文で残した秘匿値があれば破棄し、allowlist だけで
+    // 上書き保存する（フィールドへは復元済みなので当セッションの利用は保てる）。
+    if (CONFIG_SECRET_KEYS.some(k => k in cfg)) saveConfigToStorage();
   } catch(e) {}
 }
 
@@ -5239,6 +5327,7 @@ function submitHybridScan() {
   // nonce を刻んで自分の scan_started を識別し、フル config をローカル保持する。
   _markOwnScan(config);
   state.ws.send(JSON.stringify({ action: 'start_scan', config }));
+  saveConfigToStorage();
   document.getElementById('scanConfigOverlay').classList.remove('active');
   setStatus('🔀 ハイブリッドスキャン開始リクエスト送信中...', 'running');
 }
