@@ -28,7 +28,7 @@ def _chromium_available() -> bool:
 _RECORD_HTML = (
     "data:text/html,"
     "<!doctype html><html><body>"
-    "<div id='addcart' role='button'><span>Add to cart</span></div>"
+    "<div id='addcart' role='button'><span id='addcart-child'>Add to cart</span></div>"
     "<input id='btn' type='button' value='Btn'>"
     "<label id='lbl' for='chk'>Agree</label>"
     "<input id='chk' type='checkbox' style='display:none'>"
@@ -87,13 +87,13 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
 
         # BODY の inline handler は descendant click の closest 候補になるが、root は記録不能。
         await page.evaluate("() => document.body.setAttribute('onclick', 'void 0')")
-        for sel in ("#addcart", "#btn", "#lbl", "#standalone", "#upload-label", "#onc", "#plain", "#deco"):
+        for sel in ("#addcart-child", "#btn", "#lbl", "#standalone", "#upload-label", "#onc", "#plain", "#deco"):
             await page.click(sel)
         await page.wait_for_timeout(150)  # expose_function IPC の到達待ち
 
         clicked = {s["selector"] for s in steps if s["action"] == "click"}
-        # カスタム操作要素は closest 解決で記録される（子 span をクリックしても祖先 #addcart）。
-        self.assertIn("#addcart", clicked)
+        self.assertIn("#addcart-child", clicked)
+        self.assertNotIn("#addcart", clicked)
         self.assertIn("#btn", clicked)
         self.assertIn("#standalone", clicked)
         self.assertIn("#onc", clicked)
@@ -108,6 +108,96 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         # 装飾 span は操作要素セレクタに一致せず記録されない。
         self.assertNotIn("#deco", clicked)
         await page.close()
+
+    async def _recording_page(self, html: str):
+        steps: list[dict] = []
+        notices: list[str] = []
+        page = await self._context.new_page()
+        await page.expose_function("F", lambda selector, value: steps.append(
+            {"action": "fill", "selector": selector, "value": value}))
+        await page.expose_function("C", lambda selector: steps.append(
+            {"action": "click", "selector": selector}))
+        await page.expose_function("S", lambda selector: steps.append(
+            {"action": "submit", "selector": selector}))
+        await page.expose_function("N", lambda message: notices.append(message))
+        await page.add_init_script(_build_recorder_script("F", "C", "S", "N"))
+        await page.goto(html)
+        return page, steps, notices
+
+    async def test_direct_checkbox_radio_file_and_image_are_not_click_steps(self):
+        """直接一致する checkbox/radio/file/image input は click step を残さない。"""
+        page, steps, notices = await self._recording_page(
+            "data:text/html,<!doctype html><html><body><form onsubmit='return false'>"
+            "<input id='chk' type='checkbox' tabindex='0' onclick='void 0'>"
+            "<input id='rad' type='radio' name='r' tabindex='0' onclick='void 0'>"
+            "<input id='file' type='file' tabindex='0' onclick='event.preventDefault()'>"
+            "<input id='img' type='image' alt='go' tabindex='0'>"
+            "</form></body></html>"
+        )
+        for sel in ("#chk", "#rad", "#file", "#img"):
+            await page.click(sel)
+        await page.wait_for_timeout(150)
+
+        clicks = [s["selector"] for s in steps if s["action"] == "click"]
+        self.assertEqual(clicks.count("#chk"), 1)
+        self.assertEqual(clicks.count("#rad"), 1)
+        self.assertNotIn("#file", clicks)
+        self.assertNotIn("#img", clicks)
+        self.assertTrue(any("file input" in message and "#file" in message for message in notices))
+        self.assertTrue(any("image input" in message and "#img" in message for message in notices))
+        await page.close()
+
+    async def test_request_submit_from_click_records_only_click(self):
+        """click handler 内の submitter なし requestSubmit は click と二重記録しない。"""
+        page, steps, _notices = await self._recording_page(
+            "data:text/html,<!doctype html><html><body>"
+            "<form id='f' onsubmit='event.preventDefault()'>"
+            "<input id='btn' type='button' value='Save' onclick='this.form.requestSubmit()'>"
+            "<div id='role' role='button' onclick=\"document.getElementById('f').requestSubmit()\">Role</div>"
+            "</form></body></html>"
+        )
+        await page.click("#btn")
+        await page.click("#role")
+        await page.wait_for_timeout(150)
+
+        self.assertEqual([s["action"] for s in steps], ["click", "click"])
+        self.assertEqual([s["selector"] for s in steps], ["#btn", "#role"])
+        await page.press("body", "Enter")
+        await page.evaluate("() => document.getElementById('f').requestSubmit()")
+        await page.wait_for_timeout(150)
+        self.assertEqual(steps[-1]["action"], "submit")
+        await page.close()
+
+    async def test_replay_preserves_delegated_child_target(self):
+        """委譲ハンドラの子要素 click は子を再生し、祖先 handler の event.target を保つ。"""
+        page, steps, _notices = await self._recording_page(
+            "data:text/html,<!doctype html><html><body>"
+            "<div id='menu' onclick=\"document.title=event.target.id\">"
+            "<span id='first'>First</span><span id='second' style='margin-left:120px'>Second</span>"
+            "</div></body></html>"
+        )
+        await page.click("#second")
+        await page.wait_for_timeout(150)
+        self.assertEqual(steps, [{"action": "click", "selector": "#second"}])
+        await page.close()
+
+        replay_page = await self._context.new_page()
+        runner = FlowRunner(_PageBrowser(replay_page))
+        flow = ScanFlow.from_dict({
+            "name": "delegated-child",
+            "steps": [
+                {"action": "navigate", "url": (
+                    "data:text/html,<!doctype html><html><body>"
+                    "<div id='menu' onclick=\"document.title=event.target.id\">"
+                    "<span id='first'>First</span><span id='second' style='margin-left:120px'>Second</span>"
+                    "</div></body></html>"
+                )},
+                steps[0],
+            ],
+        })
+        self.assertTrue(await runner.run(flow))
+        self.assertEqual(await replay_page.title(), "second")
+        await replay_page.close()
 
     async def test_replay_clicks_custom_element(self):
         """記録した click ステップを FlowRunner が再生し、要素の onclick が実行される。"""

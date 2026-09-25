@@ -42,7 +42,7 @@ from typing import Optional
 # 既存の button/a/submit 系は後方互換のため維持する。
 CLICKABLE_ANCESTOR_SELECTOR = (
     "button, a, "
-    "input[type=submit], input[type=button], input[type=reset], input[type=image], "
+    "input[type=submit], input[type=button], input[type=reset], "
     "[type=submit], "
     "label, [onclick], [tabindex], "
     "[role=button], [role=link], [role=menuitem], [role=tab]"
@@ -140,45 +140,46 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                         }}
                     }}
                 }}, true);
-                // Enter キー等の暗黙送信も記録する。送信ボタンがある form の暗黙送信は既定ボタンへの
-                // click として click listener が記録済み（e.submitter が立つ）なので、submitter の
-                // 無い送信だけを記録して二重送信を避ける（Codex #170 P2）。
+                let __wscanClickRecorded = false;
                 document.addEventListener('submit', function(e) {{
                     const form = e.target;
-                    if (!form || form.tagName !== 'FORM' || e.submitter) return;
+                    if (!form || form.tagName !== 'FORM' || e.submitter || __wscanClickRecorded) return;
                     if (typeof window['{fn_submit}'] === 'function') {{
                         window['{fn_submit}'](__wscanPath(form));
                     }}
                 }}, true);
                 document.addEventListener('click', function(e) {{
-                    // クリック対象がボタン/リンク内の子要素（アイコン span 等）でも、
-                    // closest で実際の操作要素へ解決してから一意セレクタを記録する。
-                    // 「操作を意味する」祖先（button/a、submit系、role=button 等の操作 role、
-                    // input[type=button|reset|image]、label、[onclick]、[tabindex]）に closest で
-                    // 一致した要素だけを記録し、装飾 div 等の無関係なクリックは拾わない（vault 0078）。
-                    const el = e.target && e.target.closest
-                        ? e.target.closest(__WSCAN_CLICKABLE_SEL)
-                        : null;
-                    if (el && el.tagName !== 'BODY' && el.tagName !== 'HTML') {{
-                        // label が checkbox/radio を作動させる場合は直後の change handler が
-                        // 実 input の click/fill を記録する。label click まで残すと replay で二重に
-                        // toggle して元と逆になる。file input は再現不能なので既存の skip-notify
-                        // 方針を label 経由にも適用する。
-                        if (el.tagName === 'LABEL' && el.control) {{
-                            const controlType = (el.control.type || '').toLowerCase();
-                            if (controlType === 'file') {{
-                                if (typeof window['{fn_notify}'] === 'function') {{
-                                    window['{fn_notify}'](
-                                        'file input はリプレイ不可のため記録しません: ' + __wscanPath(el.control)
-                                    );
-                                }}
-                                return;
-                            }}
-                            if (controlType === 'checkbox' || controlType === 'radio') return;
+                    const target = e.target;
+                    if (!target || !target.closest) return;
+                    const inputType = target.tagName === 'INPUT' ? target.type.toLowerCase() : '';
+                    if (inputType === 'checkbox' || inputType === 'radio') return;
+                    if (inputType === 'file' || inputType === 'image') {{
+                        if (typeof window['{fn_notify}'] === 'function') {{
+                            window['{fn_notify}'](
+                                inputType + ' input はリプレイ不可のため記録しません: ' + __wscanPath(target)
+                            );
                         }}
-                        const sel = __wscanPath(el);
-                        // BODY/HTML や path を構築できない root 要素は replay 不能なので保存しない。
+                        return;
+                    }}
+                    const label = target.closest('label');
+                    if (label && label.control) {{
+                        const controlType = (label.control.type || '').toLowerCase();
+                        if (controlType === 'file' || controlType === 'image') {{
+                            if (typeof window['{fn_notify}'] === 'function') {{
+                                window['{fn_notify}'](
+                                    controlType + ' input はリプレイ不可のため記録しません: ' + __wscanPath(label.control)
+                                );
+                            }}
+                            return;
+                        }}
+                        if (controlType === 'checkbox' || controlType === 'radio') return;
+                    }}
+                    const el = target.closest(__WSCAN_CLICKABLE_SEL);
+                    if (el && el.tagName !== 'BODY' && el.tagName !== 'HTML') {{
+                        const sel = __wscanPath(target);
                         if (sel && typeof window['{fn_click}'] === 'function') {{
+                            __wscanClickRecorded = true;
+                            setTimeout(() => {{ __wscanClickRecorded = false; }}, 0);
                             window['{fn_click}'](sel);
                         }}
                     }}
