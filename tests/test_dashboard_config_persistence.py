@@ -81,3 +81,40 @@ if (safeUrlListForStorage('https://example.test/?key=SECRET\\nhttps://example.te
         [shutil.which("node"), "-e", script], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="Node.js is required for dashboard JS test")
+def test_login_success_indicator_credentials_are_not_persisted():
+    start = SOURCE.index("const CONFIG_SAVE_ALLOWLIST =")
+    end = SOURCE.index("function loadConfigFromStorage()", start)
+    script = f"""
+{SOURCE[start:end]}
+const fields = new Map();
+const document = {{ getElementById: id => ({{ value: fields.get(id) || '' }}) }};
+const cfgToggles = {{}};
+const collectRoleModels = () => ({{}});
+const mfaImapFields = () => ({{}});
+const mfaTotpFields = () => ({{}});
+const timeWindowFields = () => ({{}});
+const getSelectedChecks = () => [];
+let saved;
+const localStorage = {{ setItem: (_, value) => {{ saved = JSON.parse(value); }} }};
+for (const indicator of [
+  'https://user:password@example.test/landing',
+  'https://example.test/callback?access_token=SECRET',
+  'not-a-url?access_token=SECRET',
+]) {{
+  fields.set('cfgLoginSuccess', indicator);
+  saveConfigToStorage();
+  if (Object.hasOwn(saved, 'login_success_indicator')) throw new Error(indicator);
+}}
+for (const indicator of ['Welcome back', 'dashboard', 'https://example.test/home']) {{
+  fields.set('cfgLoginSuccess', indicator);
+  saveConfigToStorage();
+  if (saved.login_success_indicator !== indicator) throw new Error(indicator);
+}}
+"""
+    result = subprocess.run(
+        [shutil.which("node"), "-e", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
