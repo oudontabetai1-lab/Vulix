@@ -6,8 +6,30 @@ from __future__ import annotations
 
 import unittest
 
-from wscan.flow_recorder import _build_recorder_script
-from wscan.flow_runner import FlowRunner, ScanFlow
+from wscan.flow_recorder import _build_recorder_script, _make_navigate_step
+from wscan.flow_runner import FlowRunner, FlowStep, ScanFlow
+
+
+class MakeNavigateStepTests(unittest.TestCase):
+    """click 起因遷移の via_click 相関（純粋関数・Chromium 不要）。"""
+
+    def test_marks_via_click_when_prev_is_click(self):
+        steps = [{"action": "click", "selector": "#go"}]
+        self.assertTrue(_make_navigate_step(steps, "http://x/p2").get("via_click"))
+
+    def test_no_via_click_when_prev_is_navigate_or_empty(self):
+        self.assertNotIn("via_click", _make_navigate_step([], "http://x/p1"))
+        prev = [{"action": "navigate", "url": "http://x/p1"}]
+        self.assertNotIn("via_click", _make_navigate_step(prev, "http://x/p2"))
+
+    def test_flowstep_roundtrips_pos_and_via_click(self):
+        d = {"action": "click", "selector": "#c", "x": 12.5, "y": 7.0}
+        s = FlowStep.from_dict(d)
+        self.assertEqual((s.pos_x, s.pos_y), (12.5, 7.0))
+        self.assertEqual(s.to_dict()["x"], 12.5)
+        nav = FlowStep.from_dict({"action": "navigate", "url": "http://x", "via_click": True})
+        self.assertTrue(nav.via_click)
+        self.assertTrue(nav.to_dict()["via_click"])
 
 
 def _chromium_available() -> bool:
@@ -76,8 +98,9 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         page = await self._context.new_page()
         await page.expose_function("F", lambda selector, value: steps.append(
             {"action": "fill", "selector": selector, "value": value}))
-        await page.expose_function("C", lambda selector: steps.append(
-            {"action": "click", "selector": selector}))
+        await page.expose_function("C", lambda selector, x=None, y=None: steps.append(
+            {"action": "click", "selector": selector,
+             **({"x": x, "y": y} if x is not None and y is not None else {})}))
         await page.expose_function("S", lambda selector: steps.append(
             {"action": "submit", "selector": selector}))
         notices: list[str] = []
@@ -115,8 +138,9 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         page = await self._context.new_page()
         await page.expose_function("F", lambda selector, value: steps.append(
             {"action": "fill", "selector": selector, "value": value}))
-        await page.expose_function("C", lambda selector: steps.append(
-            {"action": "click", "selector": selector}))
+        await page.expose_function("C", lambda selector, x=None, y=None: steps.append(
+            {"action": "click", "selector": selector,
+             **({"x": x, "y": y} if x is not None and y is not None else {})}))
         await page.expose_function("S", lambda selector: steps.append(
             {"action": "submit", "selector": selector}))
         await page.expose_function("N", lambda message: notices.append(message))
@@ -178,7 +202,9 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         )
         await page.click("#second")
         await page.wait_for_timeout(150)
-        self.assertEqual(steps, [{"action": "click", "selector": "#second"}])
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["action"], "click")
+        self.assertEqual(steps[0]["selector"], "#second")
         await page.close()
 
         replay_page = await self._context.new_page()
@@ -261,6 +287,99 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertFalse(await runner.run(flow))
         await page.close()
+
+    async def test_label_independent_descendant_is_recorded(self):
+        """label 内の独立操作要素（control でない a）への click は記録し、副作用を残す（Codex #179）。"""
+        page, steps, _notices = await self._recording_page(
+            "data:text/html,<!doctype html><html><body>"
+            "<label id='terms'><input id='chk' type='checkbox'>Agree "
+            "<a id='tos' href='javascript:void 0' onclick=\"window.__tos=true\">Terms</a>"
+            "</label></body></html>"
+        )
+        # label 内の独立リンク：control をトグルせずリンク自身の副作用が走る → 記録必須。
+        await page.click("#tos")
+        # label のテキスト部（control 活性化）：click は抑止し change で checkbox 状態を記録。
+        await page.click("#terms", position={"x": 5, "y": 8})
+        await page.wait_for_timeout(150)
+
+        clicked = {s["selector"] for s in steps if s["action"] == "click"}
+        self.assertIn("#tos", clicked)              # 独立リンクは記録
+        self.assertNotIn("#terms", clicked)         # label 本体の control 活性化 click は抑止
+        # checkbox は change 経由（click ではなく fill/click いずれかで状態記録）で拾われる。
+        self.assertTrue(any(s.get("selector") == "#chk" for s in steps))
+        await page.close()
+
+    async def test_click_position_recorded_and_replayed(self):
+        """座標依存要素（[onclick] div）は相対座標を記録し、replay が同座標で click する（Codex #179）。"""
+        page, steps, _notices = await self._recording_page(
+            "data:text/html,<!doctype html><html><body>"
+            "<div id='pad' style='width:200px;height:200px' "
+            "onclick=\"document.title='x='+Math.round(event.offsetX)+',y='+Math.round(event.offsetY)\">pad</div>"
+            "</body></html>"
+        )
+        await page.click("#pad", position={"x": 30, "y": 40})
+        await page.wait_for_timeout(150)
+        pad_steps = [s for s in steps if s.get("selector") == "#pad"]
+        self.assertEqual(len(pad_steps), 1)
+        self.assertIn("x", pad_steps[0])
+        self.assertIn("y", pad_steps[0])
+        self.assertAlmostEqual(pad_steps[0]["x"], 30, delta=1)
+        self.assertAlmostEqual(pad_steps[0]["y"], 40, delta=1)
+        await page.close()
+
+        # 記録座標で replay → offset 依存の onclick が同じ座標で発火する。
+        replay_page = await self._context.new_page()
+        runner = FlowRunner(_PageBrowser(replay_page))
+        html = (
+            "data:text/html,<!doctype html><html><body>"
+            "<div id='pad' style='width:200px;height:200px' "
+            "onclick=\"document.title='x='+Math.round(event.offsetX)+',y='+Math.round(event.offsetY)\">pad</div>"
+            "</body></html>"
+        )
+        flow = ScanFlow.from_dict({
+            "name": "pos-click",
+            "steps": [{"action": "navigate", "url": html}, pad_steps[0]],
+        })
+        self.assertTrue(await runner.run(flow))
+        self.assertEqual(await replay_page.title(), "x=30,y=40")
+        await replay_page.close()
+
+    async def test_via_click_navigate_is_not_re_executed_on_replay(self):
+        """via_click navigate は click が遷移させるため replay で再実行せず二重ロードしない（Codex #179）。"""
+        page1 = (
+            "data:text/html,<!doctype html><html><body>"
+            "<div id='go' role='button' onclick=\"location.href='"
+            "data:text/html,<body>PAGE2</body>'\">go</div></body></html>"
+        )
+        page2 = "data:text/html,<body>PAGE2</body>"
+
+        class _CountingBrowser(_PageBrowser):
+            def __init__(self, pg):
+                super().__init__(pg)
+                self.nav_count = 0
+
+            async def navigate(self, url: str) -> bool:
+                self.nav_count += 1
+                await self.page.goto(url)
+                return True
+
+        replay_page = await self._context.new_page()
+        browser = _CountingBrowser(replay_page)
+        runner = FlowRunner(browser)
+        # click が page2 へ遷移させ、続く navigate は via_click（照合用に残すが実行 skip）。
+        flow = ScanFlow.from_dict({
+            "name": "via-click",
+            "steps": [
+                {"action": "navigate", "url": page1},
+                {"action": "click", "selector": "#go"},
+                {"action": "navigate", "url": page2, "via_click": True},
+            ],
+        })
+        self.assertTrue(await runner.run(flow))
+        # navigate 呼び出しは初期ページのみ（via_click は skip、click が遷移させる）。
+        self.assertEqual(browser.nav_count, 1)
+        self.assertIn("PAGE2", await replay_page.content())
+        await replay_page.close()
 
     async def test_replay_rejects_missing_click_target(self):
         """存在しない selector の timeout は actionability skip に丸めない。"""
