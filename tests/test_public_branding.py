@@ -1,8 +1,20 @@
 import unittest
+import subprocess
+import sys
 from pathlib import Path
 
 
 class PublicBrandingTests(unittest.TestCase):
+    def test_vulix_help_exposes_explore_alias(self):
+        proc = subprocess.run(
+            [sys.executable, "-m", "vulix", "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("explore (alias for scan)", proc.stdout)
+
     def test_public_ui_and_docs_do_not_name_reference_products(self):
         public_files = [
             Path("templates/dashboard.html"),
