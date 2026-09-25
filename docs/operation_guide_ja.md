@@ -1,6 +1,6 @@
-# WScan 実検査運用ガイド
+# Vulix 実検査運用ガイド
 
-このドキュメントは、WScan を実際の検査業務や検証環境で使う前に確認する運用手順をまとめたものです。画面操作そのものは [dashboard_usage_ja.md](dashboard_usage_ja.md) を参照してください。
+このドキュメントは、Vulix（旧称 WScan）を実際の検査業務や検証環境で使う前に確認する運用手順をまとめたものです。画面操作そのものは [dashboard_usage_ja.md](dashboard_usage_ja.md) を参照してください。
 
 ## 基本方針
 
