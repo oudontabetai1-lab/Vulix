@@ -26,7 +26,14 @@ def _normalize_location(raw: str) -> str:
 # probe が transport 層で握りつぶされた/template が実行不能だった check を示す観測ノート
 # （engine.wave_errors、0007 D1）。status="tested" でも実際には probe が送達していない場合がある
 # ため、劣化した check の行は exercised から除く（Codex #134 P1）。
-_DEGRADATION_PREFIXES = ("transport_error:", "unexecutable_template:")
+# field_budget_exceeded: はフィールド時間ボックス超過で注入を打ち切った check（_field_budget_gate、
+# F06/0059）。gate は ('',{}) を返すため _scan_field が status="tested" を記録するが未送信 probe が
+# 残る＝送達していない。degraded 扱いにし NOT_REACHED にする（見逃しを FN に化けさせない・0059/F06）。
+_DEGRADATION_PREFIXES = (
+    "transport_error:",
+    "unexecutable_template:",
+    "field_budget_exceeded:",
+)
 
 
 def _degraded_checks(wave_errors) -> frozenset:

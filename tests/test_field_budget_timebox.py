@@ -149,6 +149,12 @@ class _FakePage:
         self.closed = True
 
 
+class _WedgedPage(_FakePage):
+    """dialog 未解消で wedge した page。evaluate が返らない（例外）状況を模す。"""
+    async def evaluate(self, script, *args):
+        raise RuntimeError("page is wedged")
+
+
 class _FakeContext:
     def __init__(self):
         self.created: list = []
@@ -213,29 +219,65 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bm.dialog_dismiss_failed)     # wedge signal は保持
 
     async def test_recreate_seeds_session_storage_via_init_script(self):
-        """#2: recreate_page は退避 sessionStorage を init script として仕込む
-        （navigate 後の evaluate 復元では SPA bootstrap に間に合わないため）。"""
+        """#3: recreate_page は navigate 成功時に控えた最新スナップショットを init script として仕込む。
+        wedge した old page（evaluate が返らない）からの読取に依存しない。"""
         bm = self._bm()
-        old = _FakePage(session_json='{"token":"abc123"}', origin="http://t")
+        bm._last_session_storage = ("http://t", '{"token":"abc123"}')
+        old = _WedgedPage()  # evaluate が例外＝旧 page から読めない状況
         bm.page = old
 
         ok = await bm.recreate_page()
 
         self.assertTrue(ok)
-        self.assertIsNone(bm._pending_session_storage)          # 消費済み
         self.assertEqual(len(bm.page.init_scripts), 1)          # 新 page に仕込む
         script = bm.page.init_scripts[0]
         self.assertIn("http://t", script)                      # 該当 origin ガード
-        self.assertIn("abc123", script)                        # 退避値を seed
+        self.assertIn("abc123", script)                        # 控えた値を seed
         self.assertIn("getItem", script)                       # 未設定キーのみ復元
 
     async def test_recreate_skips_init_script_without_snapshot(self):
-        """sessionStorage が空なら init script を仕込まない（従来挙動）。"""
+        """スナップショットが無ければ init script を仕込まない（従来挙動）。"""
         bm = self._bm()
         bm.page = _FakePage(session_json="{}", origin="http://t")
         ok = await bm.recreate_page()
         self.assertTrue(ok)
         self.assertEqual(bm.page.init_scripts, [])
+
+    async def test_snapshot_captures_nonempty_session_storage(self):
+        """#3: navigate 成功時の best-effort スナップショットが非空 sessionStorage を控える。"""
+        bm = self._bm()
+        bm.page = _FakePage(session_json='{"token":"abc"}', origin="http://t")
+        await bm._snapshot_session_storage()
+        self.assertEqual(bm._last_session_storage, ("http://t", '{"token":"abc"}'))
+
+    async def test_snapshot_keeps_last_nonempty_on_empty_page(self):
+        """#3: login redirect 等で空になったページでは直近の非空スナップショットを上書きしない。"""
+        bm = self._bm()
+        bm._last_session_storage = ("http://t", '{"token":"old"}')
+        bm.page = _FakePage(session_json="{}", origin="http://t")
+        await bm._snapshot_session_storage()
+        self.assertEqual(bm._last_session_storage, ("http://t", '{"token":"old"}'))
+
+    async def test_worker_recreate_reattaches_scoped_headers(self):
+        """#5: worker の recreate_page は create_worker と同じ経路で CDP scoped header interception を
+        同期的に再 attach する（_use_scoped_headers を持たない worker でも置換 page へ配線）。"""
+        from wscan.browser import BrowserManager, WorkerBrowser
+        real = BrowserManager()
+        real._context = _FakeContext()
+        real._header_intercept_mode = "cdp"
+        attached: list = []
+
+        async def fake_attach(page):
+            attached.append(page)
+
+        real._attach_header_interception = fake_attach
+        worker = WorkerBrowser(real, _FakePage())
+
+        ok = await worker.recreate_page()
+
+        self.assertTrue(ok)
+        self.assertEqual(attached, [worker.page])   # 置換 page へ同期 attach
+        self.assertIn("dialog", worker.page.wired)  # 通常の配線も維持
 
 
 class _GateEngine(_Engine):
@@ -259,6 +301,15 @@ class _ProbeScanner(BaseScanner):
 
     async def log_payload_test(self, *a, **k):
         pass
+
+
+class _MidLoopProbeScanner(_ProbeScanner):
+    """最初の送信中に deadline を失効させ、ループ内 gate 再チェックの回帰を作る。"""
+    async def _apply_payload(self, url, form_index, field_name, payload, is_url_param):
+        self.applied += 1
+        # 送信中に期限切れになった状況を模す（同一 context なので次の gate が拾う）。
+        eng._FIELD_ATTACK_DEADLINE.set(time.monotonic() - 1.0)
+        return "SRC", {"response": {"body": ""}}
 
 
 class DirectTransportGateTests(unittest.IsolatedAsyncioTestCase):
@@ -294,6 +345,73 @@ class DirectTransportGateTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual((src, surviving, context), ("", set(), {}))
             self.assertIn("sqli", eng._FIELD_BUDGET_TRUNCATED.get())
+
+    async def test_equivalence_probe_stops_when_deadline_expires_mid_loop(self):
+        """#2: 入口 gate 通過後（deadline は未来）に最初の送信中に期限切れになっても、各 request 前の
+        再チェックで残りの probe を送らない（sql は 6 発 → 1 発だけ送って打ち切る）。"""
+        engine = _GateEngine()
+        scanner = _MidLoopProbeScanner(engine)
+        with _Budget(time.monotonic() + 30.0):  # 入口では有効
+            await scanner.run_equivalence_probe(
+                "http://t/", 0, "q", is_url_param=True, context="sql"
+            )
+            self.assertEqual(scanner.applied, 1)   # 1 発送信後に失効→残りを送らない
+            self.assertIn("sqli", eng._FIELD_BUDGET_TRUNCATED.get())
+
+
+class AttackPageRestoreRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """#1(F06/0059): restore navigate 自体が stored-XSS listing で再 flood/wedge しうるため、
+    restore の後にも回復し、次 field が健全 page で走るようにする。"""
+
+    async def test_recovers_after_restore_navigate(self):
+        import asyncio as _asyncio
+        import types
+        from unittest.mock import AsyncMock
+        from wscan.engine import CrawledPage, ScanEngine
+
+        recover_calls: list = []
+
+        async def _recover(since):
+            recover_calls.append(since)
+            return 0
+
+        page = CrawledPage(
+            url="http://t/list",
+            html="",
+            forms=[{
+                "index": 0, "method": "GET", "action": "/list",
+                "inputs": [{"name": "q", "type": "text"}],
+            }],
+            url_params=[],
+            depth=0,
+        )
+        engine = types.SimpleNamespace(
+            _is_url_excluded=lambda url: False,
+            max_forms=5,
+            skip_registration=False,
+            exclude_urls=None,
+            _profile=lambda msg: None,
+            scanned_forms=set(),
+            _scanned_forms_lock=_asyncio.Lock(),
+            total_fields=0,
+            exclude_fields=set(),
+            controller=types.SimpleNamespace(checkpoint=AsyncMock()),
+            _scan_field=AsyncMock(),
+            browser=types.SimpleNamespace(
+                dialog_total=0,
+                navigate=AsyncMock(return_value=True),
+            ),
+            navigation_retries=0,
+            _recover_if_dialog_flood=_recover,
+            _record_unscannable_url=lambda *a, **k: None,
+            _navigation_failure_note=lambda: "",
+        )
+        engine._attack_page = types.MethodType(ScanEngine._attack_page, engine)
+
+        await engine._attack_page(page, None)
+
+        # 1 フィールドにつき 2 回回復する：scan 直後 + restore navigate 後（新規 #1）。
+        self.assertEqual(len(recover_calls), 2)
 
 
 if __name__ == "__main__":

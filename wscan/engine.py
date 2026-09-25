@@ -5832,6 +5832,11 @@ class ScanEngine:
             await self._recover_if_dialog_flood(_dlg_field)
 
             if not is_url_param:
+                # F06/0059(#1): restore navigate 自体が stored-XSS listing で再 flood/wedge しうる。
+                # 直前の baseline から回復すると次 field が degraded page で走る（次 field の baseline は
+                # 走査直前ではなく _scan_field 呼び出し前に取るため、restore の劣化を検知できない）。
+                # restore の直前で baseline を取り直し、restore 後にも回復して次 field を健全 page で走らせる。
+                _dlg_restore = getattr(self.browser, "dialog_total", 0)
                 if not await self.browser.navigate(page.url, retries=self.navigation_retries):
                     self._record_unscannable_url(
                         page.url,
@@ -5839,6 +5844,7 @@ class ScanEngine:
                         note="Could not restore page after field scan: "
                         + self._navigation_failure_note(),
                     )
+                await self._recover_if_dialog_flood(_dlg_restore)
 
     async def _recover_if_dialog_flood(self, since: int) -> int:
         """dialog flood/wedge を検知したら現在の browser の page を作り直す（F06/0059）。
@@ -6512,9 +6518,17 @@ class ScanEngine:
                 generation_failed = True
                 console.print(f"    [yellow]Adaptive scanner error ({check_name}): {e}[/yellow]")
             else:
-                self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
-                # 後続 check の失敗やプロセス中断でも部分成功を保持する。
-                self._save_checkpoint()
+                # F06/0059(#4): pre-check で deadline 有効でも scan 実行中に期限切れになると、
+                # scanner 側 gate が payload を短絡し _FIELD_BUDGET_TRUNCATED に記録して正常 return する。
+                # ここで truncated を再チェックせず mark_done すると resume が未送信 adaptive payload を
+                # 恒久 skip して見逃す。truncated なら完了化せず未完のまま残す（resume で回収）。
+                _truncated = _FIELD_BUDGET_TRUNCATED.get() or set()
+                if check_name in _truncated:
+                    generation_failed = True
+                else:
+                    self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
+                    # 後続 check の失敗やプロセス中断でも部分成功を保持する。
+                    self._save_checkpoint()
             finally:
                 _FIELD_PAYLOAD_OVERRIDES.reset(_adaptive_token)
 

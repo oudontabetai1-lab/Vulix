@@ -403,6 +403,20 @@ def test_degraded_checks_excluded_from_exercised():
     )
 
 
+def test_field_budget_exceeded_excluded_from_exercised():
+    """#6(F06/0059): フィールド時間ボックス超過で打ち切った check の tested 行は exercised から除く。
+
+    _field_budget_gate は ('',{}) を返すため _scan_field が status="tested" を記録するが、未送信
+    probe が残る＝送達していない。field_budget_exceeded: を degraded 扱いにし NOT_REACHED にすることで、
+    見逃しを FN でなく NOT_REACHED として recall 計測から正しく除外する。"""
+    from wscan.benchmark_scan import _exercised_from_scan_matrix, _degraded_checks
+    degraded = _degraded_checks(["field_budget_exceeded:sqli"])
+    assert degraded == frozenset({"sqli"})
+    tested = [{"check": "sqli", "url": "http://h/s?q=1", "field_name": "q",
+               "location": "form field", "status": "tested"}]
+    assert _exercised_from_scan_matrix(tested, degraded_checks=degraded) == frozenset()
+
+
 def test_degraded_passive_page_row_excluded():
     """passive の page-level tested 行も、その check が劣化していれば exercised から除く（Codex #142 P2）。
 

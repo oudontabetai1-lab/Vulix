@@ -163,6 +163,10 @@ class StoredXSSScanner(BaseScanner):
             )
 
         for _ in range(3):  # inject 3 different format probes
+            # F06/0059(#2): 入口 1 回だけの gate では、最初の probe 注入中に期限切れになっても
+            # 残りの flood を続けてしまう。各注入前に再チェックし、超過後は残りを送らない。
+            if self._field_budget_gate():
+                break
             marker = f"{_PROBE_PREFIX}{uuid.uuid4().hex[:8]}"
             # Payloads that survive common HTML-encoding but still carry the marker
             payload = f'<script id="{marker}">/*{marker}*/</script>'

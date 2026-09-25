@@ -142,6 +142,37 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         # LLM 生成にも到達しない（超過時は送信・生成せず短絡）。
         engine.adaptive_engine.generate.assert_not_awaited()
 
+    async def test_truncation_during_scan_does_not_mark_adaptive_done(self):
+        """#4(F06/0059): pre-check で deadline 有効でも adaptive scan 実行中に期限切れになると
+        scanner gate が _FIELD_BUDGET_TRUNCATED に記録し正常 return する。ここで mark_done すると
+        resume が未送信 adaptive payload を恒久 skip する。truncated を再チェックし完了化しない。"""
+        import wscan.engine as _eng
+
+        engine = self._engine(["<svg/onload=alert(1)>"])
+        _trunc: set = set()
+
+        async def scan_and_truncate(ip, field):
+            _trunc.add("xss")  # scan 中に gate が truncated 記録した状況を模す
+            return []
+
+        engine.scanners["xss"].scan_injection_point = AsyncMock(
+            side_effect=scan_and_truncate
+        )
+        _tok = _eng._FIELD_BUDGET_TRUNCATED.set(_trunc)
+        try:
+            result = await engine._adaptive_attack_field(
+                "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+            )
+        finally:
+            _eng._FIELD_BUDGET_TRUNCATED.reset(_tok)
+
+        self.assertIsNone(result)  # 未完（resume 回収対象）
+        engine.adaptive_engine.generate.assert_awaited()  # pre-check は valid＝生成には到達
+        self.assertNotIn(
+            call("https://example.test", "q", 0, "(adaptive:xss)", False),
+            engine._checkpoint_mark_done.call_args_list,
+        )
+
     async def test_adaptive_scanner_error_returns_none_and_stays_incomplete(self):
         engine = self._engine(
             ["<svg/onload=alert(1)>"],

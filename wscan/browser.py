@@ -564,8 +564,9 @@ class BrowserManager:
         self.dialog_total: int = 0
         # dismiss 失敗（未解消で wedge した可能性）の直接フラグ（F06/0059・recreate 判定に使用）。
         self.dialog_dismiss_failed: bool = False
-        # recreate_page が退避した sessionStorage（origin, JSON文字列）。次 navigate 後に復元（F06/0059）。
-        self._pending_session_storage = None
+        # navigate 成功時に best-effort で控える直近の sessionStorage（origin, JSON文字列）。
+        # recreate_page が wedge した old page 読取に依存せずこれを init script で seed する（F06/0059#3）。
+        self._last_session_storage = None
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
         # 初回セットアップの scoped-header 方針（_wire_current_page が参照）。
@@ -1279,6 +1280,29 @@ class BrowserManager:
         self.dialog_message = ""
         self.dialog_screenshot_b64 = ""
 
+    async def _snapshot_session_storage(self) -> None:
+        """健全な page から sessionStorage を best-effort で控える（F06/0059#3）。
+
+        recreate_page が wedge した old page を読めない前提の設計。非空スナップショットだけを
+        保持し、login redirect 等で一時的に空になったページで上書きしない（復元は init script が
+        未設定キーのみ seed するため stale でも安全側）。有界化し例外は握りつぶす（加算的・観測用）。
+        """
+        page = self.page
+        if page is None:
+            return
+        try:
+            snap = await asyncio.wait_for(
+                page.evaluate("() => JSON.stringify(sessionStorage)"), timeout=1.0
+            )
+            if snap and snap not in ("{}", "null"):
+                origin = await asyncio.wait_for(
+                    page.evaluate("() => location.origin"), timeout=1.0
+                )
+                if origin:
+                    self._last_session_storage = (origin, snap)
+        except Exception:
+            pass
+
     async def recreate_page(self) -> bool:
         """現在の page を捨てて context から新しい page を張り直す（F06/0059）。
 
@@ -1294,23 +1318,18 @@ class BrowserManager:
             if self._context is None:
                 return False
             old = self.page
-            # F06/0059: 認証SPA が sessionStorage に bearer/前提状態を持つ場合、page 再生成で失われ
-            # 次遷移で 401/login になり得る（cookie/localStorage は context 側で残る）。best-effort で
-            # 退避し、次の navigate 成功後に同一 origin へ復元する。ただし wedge した page（本復旧の
-            # 主因＝dialog 未解消）からの evaluate は返らないため有界化し、取れなければ諦めて続行する。
-            if old is not None:
+            self.page = await self._context.new_page()
+            # F06/0059(#5): concurrency>1 の worker は共有 context の CDP scoped header interception を
+            # 持つ（create_worker が _attach_header_interception を await して張る）。置換 page は
+            # _wire_current_page の _use_scoped_headers 経路を通らない（worker では未初期化）ため、
+            # ここで create_worker と同じ経路を同期的に再 attach し、次 navigation が interception 未設定
+            # のまま先行する race（認証ヘッダ欠落）を防ぐ。
+            _real = getattr(self, "_real", None)
+            if _real is not None and getattr(_real, "_header_intercept_mode", "none") == "cdp":
                 try:
-                    snap = await asyncio.wait_for(
-                        old.evaluate("() => JSON.stringify(sessionStorage)"), timeout=1.5
-                    )
-                    origin = await asyncio.wait_for(
-                        old.evaluate("() => location.origin"), timeout=1.5
-                    )
-                    if snap and snap not in ("{}", "null") and origin:
-                        self._pending_session_storage = (origin, snap)
+                    await _real._attach_header_interception(self.page)
                 except Exception:
                     pass
-            self.page = await self._context.new_page()
             await self._wire_current_page()
             self.reset_dialog()
             # F06/0059(#6): wedge signal は「実際に復旧した」ここでのみクリアする。
@@ -1320,9 +1339,10 @@ class BrowserManager:
             # リクエスト/login redirect を出した後になり遅い。init script は各遷移で page 自前の
             # script より前に走るので、該当 origin かつ未設定キーのときだけ復元する（app が
             # 再ログイン後に書いた新値は上書きしない）。
-            _pend = getattr(self, "_pending_session_storage", None)
+            # F06/0059(#3): wedge した old page からの読取に依存せず、navigate 成功時に控えた
+            # 最新スナップショットを使う。
+            _pend = getattr(self, "_last_session_storage", None)
             if _pend:
-                self._pending_session_storage = None
                 try:
                     _p_origin, _p_snap = _pend
                     await self.page.add_init_script(
@@ -1549,6 +1569,10 @@ class BrowserManager:
                         pass
                 # F06/0059(#2): sessionStorage の復元は recreate_page が仕掛けた init script が
                 # 遷移前に seed する（navigate 後の evaluate 復元は SPA bootstrap に間に合わない）。
+                # F06/0059(#3): 健全な navigate 成功時に sessionStorage を控えておく。recreate_page は
+                # wedge した old page（本復旧の主因＝dialog 未解消で evaluate が返らない）から読むと
+                # 空になり認証SPA が未認証化するため、この最新スナップショットを init script で seed する。
+                await self._snapshot_session_storage()
                 return True
             except Exception as e:
                 self.last_navigation_error = f"{type(e).__name__}: {e}"

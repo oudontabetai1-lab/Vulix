@@ -1388,6 +1388,11 @@ class BaseScanner(ABC):
         responses: dict[str, str] = {}
         pairs: dict[str, dict] = {}
         for probe in probe_set.probes:
+            # F06/0059(#2): 入口 1 回だけの gate では、最初の遅い probe 送信中に期限切れになっても
+            # 残り最大 6 発を送ってしまう。各 request 送信前に再チェックし、超過後は残りを送らない
+            # （送った分だけで evaluate する。判定ロジックは不変）。
+            if self._field_budget_gate():
+                break
             # Log probe payloads to the audit trail just like the normal scanner
             # loops, so payloads.jsonl can reproduce a verdict's matched payload.
             await self.log_payload_test(
