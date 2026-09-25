@@ -91,5 +91,67 @@ class FieldBudgetTimeboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.wave_errors, [])
 
 
+class _FakePage:
+    def __init__(self):
+        self.closed = False
+        self.wired: list = []
+
+    def set_default_timeout(self, t):
+        pass
+
+    def on(self, ev, cb):
+        self.wired.append(ev)
+
+    def is_closed(self):
+        return self.closed
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeContext:
+    def __init__(self):
+        self.created: list = []
+
+    async def new_page(self):
+        p = _FakePage()
+        self.created.append(p)
+        return p
+
+
+class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
+    """F06/0059: stored-XSS flood で wedge した page を作り直す recreate_page の回帰。"""
+
+    def _bm(self):
+        from wscan.browser import BrowserManager
+        bm = BrowserManager()
+        bm._context = _FakeContext()
+        bm._use_scoped_headers = False
+        return bm
+
+    async def test_recreate_swaps_page_and_resets_dialog(self):
+        bm = self._bm()
+        old = _FakePage()
+        bm.page = old
+        bm.dialog_fired = True
+        bm.dialog_message = "XSS"
+        bm.dialog_total = 9
+
+        ok = await bm.recreate_page()
+
+        self.assertTrue(ok)
+        self.assertIsNot(bm.page, old)          # 新しい page に差し替え
+        self.assertTrue(old.closed)             # 旧 page は閉じる
+        self.assertIn("dialog", bm.page.wired)  # 新 page に dialog ハンドラ再配線
+        self.assertFalse(bm.dialog_fired)       # dialog 状態はリセット
+        self.assertEqual(bm.dialog_total, 9)    # 累積カウンタは保持（flood 検知の連続性）
+
+    async def test_recreate_returns_false_when_no_context(self):
+        bm = self._bm()
+        bm._context = None
+        bm.page = _FakePage()
+        self.assertFalse(await bm.recreate_page())  # 復旧不能＝安全側 False
+
+
 if __name__ == "__main__":
     unittest.main()

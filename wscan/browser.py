@@ -559,6 +559,9 @@ class BrowserManager:
         self.request_logger = request_logger
         self.network = NetworkCapture(logger=request_logger)
         self.dialog_fired: bool = False
+        # 累積ダイアログ発火数（reset_dialog では戻さない）。stored-XSS flood の検知に使い、
+        # 1 ページの attack で閾値超え発火したら recreate_page で wedge をクリアする（F06/0059）。
+        self.dialog_total: int = 0
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
         # 初回セットアップの scoped-header 方針（_wire_current_page が参照）。
@@ -1193,6 +1196,8 @@ class BrowserManager:
     async def _on_dialog(self, dialog):
         """Capture alert dialogs (XSS indicator)."""
         self.dialog_fired = True
+        # 累積（flood 検知用・F06/0059）。__init__ を経ないテスト用インスタンスでも壊れないよう getattr。
+        self.dialog_total = getattr(self, "dialog_total", 0) + 1
         self.dialog_message = dialog.message
         # Capture an evidence screenshot, but NEVER let it wedge the scan. While
         # a dialog is open Playwright blocks the page, and ``page.screenshot``
@@ -1257,6 +1262,33 @@ class BrowserManager:
         self.dialog_fired = False
         self.dialog_message = ""
         self.dialog_screenshot_b64 = ""
+
+    async def recreate_page(self) -> bool:
+        """現在の page を捨てて context から新しい page を張り直す（F06/0059）。
+
+        stored-XSS の alert flood は未解消ダイアログで page を wedge させ、以降の
+        goto/content/フォーム操作が全て ~上限まで張り付く（実測: flood 後の各ページが
+        3s→26s に劣化し、後続フィールドの injection が無言失敗＝recall 崩壊）。page は
+        ``is_closed()``=False のまま劣化するため閉塞検知では復旧できない。dialog を撒いた
+        ページの直後にこれで page を作り直すと、wedge/pending dialog を確実に捨てて次ページを
+        健全な状態から攻撃できる。context 生存前提（cookie は context 側に残り再適用不要）。
+        復旧不能（context/browser 死亡）なら False を返し、呼び出し側は従来経路（安全側）。
+        """
+        try:
+            if self._context is None:
+                return False
+            old = self.page
+            self.page = await self._context.new_page()
+            await self._wire_current_page()
+            self.reset_dialog()
+            if old is not None:
+                try:
+                    await old.close()
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            return False
 
     _DIALOG_HANDLER_JS = r"""
         (() => {

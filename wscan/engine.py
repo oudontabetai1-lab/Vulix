@@ -5753,6 +5753,7 @@ class ScanEngine:
         # This prevents overcounting when multiple concurrent workers process
         # pages with overlapping URL params.
 
+        _dialog_before = getattr(self.browser, "dialog_total", 0)
         for fi, dom, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
             self._profile(f"  field: {field_name} @ {page.url}")
@@ -5807,6 +5808,18 @@ class ScanEngine:
                         note="Could not restore page after field scan: "
                         + self._navigation_failure_note(),
                     )
+
+        # F06/0059: このページの attack で alert flood（stored-XSS）が起きたら page を作り直して
+        # wedge を解消する。未解消ダイアログは以降のページの goto/inject を全て張り付かせ、
+        # post-flood の全フィールドが無言で未攻撃＝偽陰性になる（実測: flood 後 3s→26s/page に劣化し
+        # post-comment ページの payload 投入がゼロ化）。page は is_closed()=False のまま劣化するため
+        # 閉塞検知では復旧できず、flood ページ直後の能動再生成で次ページを健全化する。
+        try:
+            _fired = getattr(self.browser, "dialog_total", 0) - _dialog_before
+            if _fired > 3 and await self.browser.recreate_page():
+                self.wave_errors.append(f"page_recreated_after_dialog_flood:{_fired}")
+        except Exception:
+            pass
 
     # =========================================================================
     # Phase 3d: Multi-parameter simultaneous injection
