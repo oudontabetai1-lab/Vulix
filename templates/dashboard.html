@@ -3402,7 +3402,7 @@ function submitAgentScan() {
 // フィールドは「明示的に列挙しない限り漏れない」。TLS の *_cert/_key/_pfx/_ca は
 // ファイルパスであり秘密そのものではないため保存する（cert_password のみ除外）。
 const CONFIG_SAVE_ALLOWLIST = [
-  'url', 'depth', 'timeout', 'llm_timeout_seconds', 'llm_stream_timeout_seconds',
+  'url', 'restore_target', 'depth', 'timeout', 'llm_timeout_seconds', 'llm_stream_timeout_seconds',
   'max_forms', 'concurrency', 'max_payloads', 'request_delay', 'navigation_retries', 'proxy',
   'tls_client_cert', 'tls_client_key', 'tls_client_pfx', 'tls_ca_cert',
   'state_profile', 'toggles',
@@ -3424,17 +3424,36 @@ const CONFIG_SECRET_KEYS = [
   'mfa_totp_uri', 'mfa_totp_secret', 'mfa_totp_qr', 'mfa_email_imap_password',
 ];
 
-const CONFIG_SENSITIVE_URL_KEY = /(?:^key$|(?:api|access|auth)[_-]?key|password|passwd|pwd|secret|token|session[_-]?id|csrf|xsrf|credentials?|signature|(?:^|[_-])sig(?:$|[_-]))/i;
+// 資格情報らしい URL パラメータ名。汎用語（auth/session/otp/ticket）は誤除外を抑えるため
+// キー全体か区切り後の末尾だけを対象にし、セッション ID 名は区切り単位で照合する。
+const CONFIG_SENSITIVE_URL_KEY = /(?:^key$|(?:api|access|auth)[_-]?key|password|passwd|pwd|secret|token|session[_-]?id|csrf|xsrf|credentials?|signature|samlresponse|(?:^|[._-])(?:sid|sessid|jwt|sig|jsessionid|phpsessid|bearer)(?:$|[._-])|(?:^|[._-])aspsessionid[a-z]*(?:$|[._-])|(?:^|[._-])(?:auth|authorization|session|otp|ticket)$)/i;
+const CONFIG_SECRET_FIELD_IDS = [
+  'cfgAuthPass', 'cfgBearer', 'cfgHeaders', 'cfgCookies', 'cfgLowPrivCookies',
+  'cfgTlsClientCertPassword', 'cfgMfaTotpUri', 'cfgMfaTotpSecret', 'cfgMfaTotpQr',
+  'cfgMfaEmailImapPassword',
+];
+
+function hasSensitiveMatrixParam(path) {
+  // path/matrix の ;name=value と ASP.NET cookieless の /(S(id))/ も資格情報として扱う。
+  const decoded = path.replace(/%3b/ig, ';');
+  if (/\/\((?:[A-Z]\([^)]*\))+\)(?:\/|$)/i.test(decoded)) return true;
+  return decoded.split('/').some(segment => segment.split(';').slice(1).some(param => {
+    const equals = param.indexOf('=');
+    return equals >= 0 && CONFIG_SENSITIVE_URL_KEY.test(
+      new URLSearchParams(`${param.slice(0, equals)}=`).keys().next().value
+    );
+  }));
+}
 
 function safeUrlForStorage(value) {
-  // URL userinfo と token/password 等を query/fragment に含む URL は、値の一部だけを
+  // URL userinfo と資格情報を含む query/fragment/path は、値の一部だけを
   // 加工して別 endpoint に化けさせず、設定項目ごと保存しない。parse 不能でも資格情報らしい
-  // authority/query を含む値は fail-closed で除外する（proxy の host:port 表記は保持）。
+  // authority/query/path を含む値は fail-closed で除外する（proxy の host:port 表記は保持）。
   const raw = String(value || '').trim();
   if (!raw) return raw;
   try {
     const parsed = new URL(raw);
-    if (parsed.username || parsed.password) return undefined;
+    if (parsed.username || parsed.password || hasSensitiveMatrixParam(parsed.pathname)) return undefined;
     for (const key of parsed.searchParams.keys()) {
       if (CONFIG_SENSITIVE_URL_KEY.test(key)) return undefined;
     }
@@ -3445,6 +3464,7 @@ function safeUrlForStorage(value) {
     return raw;
   } catch (_) {
     if (/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*@/i.test(raw)
+        || hasSensitiveMatrixParam(raw.split(/[?#]/, 1)[0])
         || [...raw.matchAll(/[?#&]([^=&#]*)=/g)].some(([, key]) =>
           CONFIG_SENSITIVE_URL_KEY.test(new URLSearchParams(`${key}=`).keys().next().value))) {
       return undefined;
@@ -3464,6 +3484,8 @@ function saveConfigToStorage() {
     // （mfaTotpFields/authHeaderFields 等）が返すキーも、列挙外は自動的に落ちる。
     const full = {
       url: safeUrlForStorage(document.getElementById('cfgInputUrl').value),
+      restore_target: !CONFIG_SECRET_FIELD_IDS.some(id =>
+        !!document.getElementById(id)?.value?.trim()),
       depth: document.getElementById('cfgDepth').value,
       timeout: document.getElementById('cfgTimeoutInput').value,
       llm_timeout_seconds: document.getElementById('cfgLlmTimeoutInput')?.value,
@@ -3520,7 +3542,8 @@ function loadConfigFromStorage() {
     const raw = localStorage.getItem('wscan_config');
     if (!raw) return;
     const cfg = JSON.parse(raw);
-    if (cfg.url) document.getElementById('cfgInputUrl').value = cfg.url;
+    const restoreTarget = cfg.restore_target === true;
+    if (restoreTarget && cfg.url && safeUrlForStorage(cfg.url) !== undefined) document.getElementById('cfgInputUrl').value = cfg.url;
     if (cfg.depth) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
     if (cfg.llm_timeout_seconds != null) document.getElementById('cfgLlmTimeoutInput').value = cfg.llm_timeout_seconds;
@@ -3562,8 +3585,8 @@ function loadConfigFromStorage() {
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
-    if (cfg.target_urls) document.getElementById('cfgTargetUrls').value = cfg.target_urls;
-    if (cfg.access_urls) document.getElementById('cfgAccessUrls').value = cfg.access_urls;
+    if (restoreTarget && cfg.target_urls) document.getElementById('cfgTargetUrls').value = safeUrlListForStorage(cfg.target_urls);
+    if (restoreTarget && cfg.access_urls) document.getElementById('cfgAccessUrls').value = safeUrlListForStorage(cfg.access_urls);
     if (cfg.ctf_flag_pattern) document.getElementById('cfgCtfFlagPattern').value = cfg.ctf_flag_pattern;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
     if (cfg.state_profile) document.getElementById('cfgStateProfile').value = cfg.state_profile;
