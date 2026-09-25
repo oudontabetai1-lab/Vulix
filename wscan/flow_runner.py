@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 from rich.console import Console
 from rich.markup import escape
@@ -63,6 +63,11 @@ class FlowStep:
     timeout: float = 5.0 # wait duration (s) or click timeout (s)
     # record 時の初期 redirect の実着地 URL（照合用メタデータ・実行はしない）。
     landed_url: str = ""
+    # click の相対クリック座標（座標依存要素の replay 用）。両方 None のとき要素中心 click（Codex #179）。
+    pos_x: Optional[float] = None
+    pos_y: Optional[float] = None
+    # この navigate は直前の click が起こした遷移。照合用に残すが replay では実行を skip する（Codex #179）。
+    via_click: bool = False
 
     def to_dict(self) -> dict:
         d: dict = {"action": self.action}
@@ -71,6 +76,10 @@ class FlowStep:
         if self.value:    d["value"]    = self.value
         if self.selector: d["selector"] = self.selector
         if self.landed_url: d["landed_url"] = self.landed_url
+        if self.pos_x is not None and self.pos_y is not None:
+            d["x"] = self.pos_x
+            d["y"] = self.pos_y
+        if self.via_click: d["via_click"] = True
         if self.action == "wait" or self.action == "click":
             d["timeout"] = self.timeout
         return d
@@ -83,6 +92,7 @@ class FlowStep:
         # スキャン全体が停止する。click の 0 は既定の有界値に置き換える（wait の 0 秒は許可・Codex #170 P2）。
         if action == "click" and timeout == 0:
             timeout = 5.0
+        x, y = d.get("x"), d.get("y")
         return cls(
             action=action,
             landed_url=str(d.get("landed_url", "") or ""),
@@ -91,6 +101,9 @@ class FlowStep:
             value=d.get("value", ""),
             selector=d.get("selector", ""),
             timeout=timeout,
+            pos_x=float(x) if x is not None else None,
+            pos_y=float(y) if y is not None else None,
+            via_click=bool(d.get("via_click", False)),
         )
 
 
@@ -194,6 +207,11 @@ class FlowRunner:
             self._assert_landing_in_scope()
 
         if step.action == "navigate":
+            if step.via_click:
+                # 直前 click が既に遷移を起こしているため再ロードしない（二重ロード防止・Codex #179）。
+                # 照合には last navigate step の URL を使うので step 自体は残す。
+                console.print(f"  [dim]{label} navigate (click 起因・skip) → {escape(step.url)}[/dim]")
+                return
             console.print(f"  [dim]{label} navigate → {escape(step.url)}[/dim]")
             # navigate は 4xx/timeout で False を返す（例外は投げない）。破棄すると失敗した
             # 遷移を成功扱いし、前提未達のまま後続/攻撃へ進む（F10・Codex #167 P1）。
@@ -322,7 +340,39 @@ class FlowRunner:
         elif step.action == "click":
             sel = step.selector or step.field
             console.print(f"  [dim]{label} click \\[{escape(sel)}][/dim]")
-            await self.browser.page.click(sel, timeout=int(step.timeout * 1000))
+            # 座標依存要素（canvas・offsetX/offsetY を使う div 等）は記録した相対座標で click する。
+            # 無記録なら要素中心（従来動作）。ceiling: 記録後に要素が大きく変形すると座標が外れ得る（Codex #179）。
+            click_kw = (
+                {"position": {"x": step.pos_x, "y": step.pos_y}}
+                if step.pos_x is not None and step.pos_y is not None
+                else {}
+            )
+            try:
+                await self.browser.page.click(sel, timeout=int(step.timeout * 1000), **click_kw)
+            except Exception as exc:
+                # 記録した操作要素（role=button/label/[onclick] 等のカスタム操作要素も含む）が
+                # Playwright の actionability 検査を通らない場合（非表示の実体・overlay に隠れる・
+                # 遷移で消えた等）は、file input skip-notify や非表示 label→input の方針とそろえ、
+                # notify した上で当該ステップを skip する。前提操作が1つ抜けても flow 全体は落とさず
+                # 後続手順とページ検査を継続する（vault 0078）。
+                from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+                if not isinstance(exc, PlaywrightTimeoutError):
+                    # selector 構文不正、page/browser close、transport failure 等まで成功扱いすると、
+                    # 必須の前提操作を欠いた状態で scan/checkpoint を進めてしまう（Codex #179 P1）。
+                    raise FlowStepError(f"click failed for {sel!r}: {exc}") from exc
+                try:
+                    target_count = await self.browser.page.locator(sel).count()
+                except Exception as inspect_exc:
+                    raise FlowStepError(f"click target inspection failed for {sel!r}: {inspect_exc}") from inspect_exc
+                if target_count == 0:
+                    # 「存在するが overlay/非表示で actionability を満たさない」場合だけ skip 可。
+                    # 対象自体の欠落は必須前提の欠落なので F10 と同様に flow を失敗させる。
+                    raise FlowStepError(f"click target not found: {sel!r}") from exc
+                console.print(
+                    f"  [yellow]{label} click \\[{escape(sel)}] skip"
+                    f"（クリック不能: {escape(str(exc))}）[/yellow]"
+                )
+                return
             try:
                 await self.browser.page.wait_for_load_state(
                     "domcontentloaded", timeout=10_000

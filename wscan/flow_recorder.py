@@ -35,98 +35,43 @@ from pathlib import Path
 from typing import Optional
 
 
-class FlowRecorder:
-    """Playwright 操作を JSON ステップとして記録・再生する。"""
+def _make_navigate_step(prev_steps: list[dict], url: str) -> dict:
+    """記録用 navigate step を作る純粋関数（Codex #179）。
 
-    def __init__(self):
-        self._steps: list[dict] = []
+    直前 step が click なら、この main-frame 遷移はその click が起こしたもの。navigate step は
+    `_match_pre_attack_flows` の照合（最後の navigate URL）用に残しつつ via_click を付し、replay 側は
+    実行を skip して二重ロード（click 自身の遷移＋navigate の再 GET）を防ぐ。ceiling: click→AJAX→
+    後発の meta refresh 等、click 起因でない遷移も直前が click だと誤って via_click 化しうる稀ケースは
+    許容する（実害は再 GET 1 回の欠落）。"""
+    step = {"action": "navigate", "url": url}
+    if prev_steps and prev_steps[-1].get("action") == "click":
+        step["via_click"] = True
+    return step
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Recording
-    # ──────────────────────────────────────────────────────────────────────────
 
-    async def record_interactive(
-        self,
-        start_url: str,
-        output_path: str,
-        headless: bool = False,
-    ) -> list[dict]:
-        """
-        非ヘッドレスで Playwright を起動し、ユーザー操作を記録する。
-        Ctrl+C で記録終了 → JSON 保存。
+# click 記録で「操作を意味する」祖先とみなすセレクタ（vault 0078）。closest でこのいずれかに
+# 一致した要素だけを click ステップとして記録し、装飾 div 等の無関係なクリックは拾わない。
+# role は操作を表すものだけ（button/link/menuitem/tab）を明示列挙して過剰記録を避ける。
+# 既存の button/a/submit 系は後方互換のため維持する。
+CLICKABLE_ANCESTOR_SELECTOR = (
+    "button, a, "
+    "input[type=submit], input[type=button], input[type=reset], "
+    "[type=submit], "
+    "label, [onclick], [tabindex], "
+    "[role=button], [role=link], [role=menuitem], [role=tab]"
+)
 
-        Returns
-        -------
-        記録されたステップのリスト
-        """
-        from playwright.async_api import async_playwright
 
-        print(f"[FlowRecorder] 記録開始: {start_url}")
-        print("[FlowRecorder] 操作を行い、終了したら Ctrl+C を押してください。")
-        steps: list[dict] = [{"action": "navigate", "url": start_url}]
+def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notify: str) -> str:
+    """記録側の監視スクリプト（change/submit/click を捕捉）を組み立てる純粋関数。
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=headless)
-            page = await browser.new_page()
-
-            # ナビゲーション追跡。初期 goto（steps[0] と重複）だけを除き、いったん離れて
-            # start_url へ**戻ってきた**遷移は記録する。全 start_url 遷移を潰すと、最後の
-            # navigate が中間ページのままになり _match_pre_attack_flows が誤ったページへ flow を
-            # 適用してしまう（Codex #170 P2）。
-            _initial_load = {"seen": False}
-
-            def on_navigate(frame):
-                if frame != page.main_frame:
-                    return
-                url = frame.url
-                if not url or url == "about:blank":
-                    return
-                # 最初の main-frame ナビゲーション（初期 goto）は steps[0] と重複するので新規
-                # append しない。ただし初期 goto が別 scheme/host/path へ **redirect** した場合は、
-                # 実着地 URL を steps[0] に反映する。さもないと最後の navigate が pre-redirect の
-                # start_url のままになり _match_pre_attack_flows が crawl 済み着地ページと結び付けられ
-                # ない／最終 target チェックで弾かれる（Codex #170 P2）。
-                if not _initial_load["seen"]:
-                    _initial_load["seen"] = True
-                    if url != start_url:
-                        # steps[0]（start_url への navigate）は残す。redirect 応答が SSO callback/
-                        # magic link の Set-Cookie 等の前提 state を作るため、置換すると replay が
-                        # それを受け取れない（Codex #170 P2）。実着地は**実行しない照合用メタデータ**
-                        # として steps[0] に持たせる。別 navigate として追記すると replay が着地ページを
-                        # 二重に GET し、one-shot の確認/コールバック token を消費してしまう（Codex #170 P2）。
-                        if steps and steps[0].get("action") == "navigate":
-                            steps[0]["landed_url"] = url
-                    return
-                steps.append({"action": "navigate", "url": url})
-
-            page.on("framenavigated", on_navigate)
-
-            # フォーム送信の追跡 (input change)
-            # Use random token in function names so malicious page JS cannot
-            # inject fake steps by calling the predictable global names.
-            _tok = secrets.token_hex(12)
-            _fn_fill = f"__wscan_fill_{_tok}__"
-            _fn_click = f"__wscan_click_{_tok}__"
-            _fn_submit = f"__wscan_submit_{_tok}__"
-            _fn_notify = f"__wscan_notify_{_tok}__"
-
-            await page.expose_function(_fn_fill, lambda selector, value: steps.append(
-                {"action": "fill", "selector": selector, "value": value}
-            ))
-            await page.expose_function(_fn_click, lambda selector: steps.append(
-                {"action": "click", "selector": selector}
-            ))
-            await page.expose_function(_fn_submit, lambda selector: steps.append(
-                {"action": "submit", "selector": selector}
-            ))
-            # ページ側の警告（file input skip 等）を **記録プロセスの stdout** へ出す。ページの
-            # console.warn だけだと DevTools 非表示の headed recorder では操作者に届かない（Codex #170 P2）。
-            await page.expose_function(
-                _fn_notify, lambda message: print(f"[FlowRecorder][warn] {message}")
-            )
-
-            # ページに監視スクリプト注入
-            await page.add_init_script(f"""
+    fn_* は expose_function で公開したページ側グローバル名。ブラウザ非依存でテストできるよう
+    record_interactive から切り出してある（vault 0078）。
+    """
+    # __WSCAN_CLICKABLE_SEL は closest 対象セレクタ（上記定数を JS 文字列リテラルへ埋め込む）。
+    click_sel_literal = json.dumps(CLICKABLE_ANCESTOR_SELECTOR)
+    return f"""
+                const __WSCAN_CLICKABLE_SEL = {click_sel_literal};
                 // id 無し要素の一意な CSS パスを組み立てる。`button[type=submit]`（type 無しの
                 // 既定 submit ボタンに一致しない）や `a`（先頭リンクを掴む）では replay が別要素を
                 // click し得るため、祖先 id か nth-of-type チェーンで一意化する（Codex #170 P2）。
@@ -189,49 +134,196 @@ class FlowRecorder:
                             const cs = window.getComputedStyle(el);
                             const hidden = !el.getClientRects().length || cs.visibility === 'hidden';
                             if (hidden) {{
-                                if (typeof window['{_fn_fill}'] === 'function') {{
-                                    window['{_fn_fill}'](sel, el.checked ? 'true' : 'false');
+                                if (typeof window['{fn_fill}'] === 'function') {{
+                                    window['{fn_fill}'](sel, el.checked ? 'true' : 'false');
                                 }}
-                            }} else if (typeof window['{_fn_click}'] === 'function') {{
-                                window['{_fn_click}'](sel);
+                            }} else if (typeof window['{fn_click}'] === 'function') {{
+                                window['{fn_click}'](sel);
                             }}
                         }} else if (el.type === 'file') {{
                             // file input は録画しない。ブラウザは value を "C:\\fakepath\\..." で返し、
                             // replay で type=file の value 代入は InvalidStateError で拒否され flow 全体が
                             // 失敗＝ページの全検査を skip してしまう（Codex #170 P2）。skip を記録
                             // プロセスへ通知して操作者に見えるようにする（console.warn だけでは埋もれる）。
-                            if (typeof window['{_fn_notify}'] === 'function') {{
-                                window['{_fn_notify}']('file input はリプレイ不可のため記録しません: ' + sel);
+                            if (typeof window['{fn_notify}'] === 'function') {{
+                                window['{fn_notify}']('file input はリプレイ不可のため記録しません: ' + sel);
                             }}
-                        }} else if (typeof window['{_fn_fill}'] === 'function') {{
-                            window['{_fn_fill}'](sel, el.value);
+                        }} else if (typeof window['{fn_fill}'] === 'function') {{
+                            window['{fn_fill}'](sel, el.value);
                         }}
                     }}
                 }}, true);
-                // Enter キー等の暗黙送信も記録する。送信ボタンがある form の暗黙送信は既定ボタンへの
-                // click として click listener が記録済み（e.submitter が立つ）なので、submitter の
-                // 無い送信だけを記録して二重送信を避ける（Codex #170 P2）。
+                let __wscanClickRecorded = false;
                 document.addEventListener('submit', function(e) {{
                     const form = e.target;
-                    if (!form || form.tagName !== 'FORM' || e.submitter) return;
-                    if (typeof window['{_fn_submit}'] === 'function') {{
-                        window['{_fn_submit}'](__wscanPath(form));
+                    if (!form || form.tagName !== 'FORM' || e.submitter || __wscanClickRecorded) return;
+                    if (typeof window['{fn_submit}'] === 'function') {{
+                        window['{fn_submit}'](__wscanPath(form));
                     }}
                 }}, true);
                 document.addEventListener('click', function(e) {{
-                    // クリック対象がボタン/リンク内の子要素（アイコン span 等）でも、
-                    // closest で実際の操作要素へ解決してから一意セレクタを記録する。
-                    const el = e.target && e.target.closest
-                        ? e.target.closest('button, a, input[type=submit], [type=submit]')
-                        : null;
-                    if (el) {{
-                        const sel = __wscanPath(el);
-                        if (typeof window['{_fn_click}'] === 'function') {{
-                            window['{_fn_click}'](sel);
+                    const target = e.target;
+                    if (!target || !target.closest) return;
+                    const inputType = target.tagName === 'INPUT' ? target.type.toLowerCase() : '';
+                    if (inputType === 'checkbox' || inputType === 'radio') return;
+                    if (inputType === 'file' || inputType === 'image') {{
+                        if (typeof window['{fn_notify}'] === 'function') {{
+                            window['{fn_notify}'](
+                                inputType + ' input はリプレイ不可のため記録しません: ' + __wscanPath(target)
+                            );
+                        }}
+                        return;
+                    }}
+                    const label = target.closest('label');
+                    if (label && label.control) {{
+                        // クリックが label の control を実際に活性化するときだけ記録抑止する。
+                        // label 内に独立した操作要素（リンク/ボタン/[onclick] 等 control 以外の
+                        // clickable 子孫）があり、その内側をクリックした場合、HTML 仕様上 control は
+                        // トグルされず子孫自身の副作用（遷移/AJAX）が走る。closest(CLICKABLE) が
+                        // label 自身を指す＝独立操作要素を経由していない＝control 活性化のときだけ
+                        // 抑止し、独立要素へのクリックは下の通常記録へ流す（Codex #179）。
+                        const inner = target.closest(__WSCAN_CLICKABLE_SEL);
+                        if (inner === label) {{
+                            const controlType = (label.control.type || '').toLowerCase();
+                            if (controlType === 'file' || controlType === 'image') {{
+                                if (typeof window['{fn_notify}'] === 'function') {{
+                                    window['{fn_notify}'](
+                                        controlType + ' input はリプレイ不可のため記録しません: ' + __wscanPath(label.control)
+                                    );
+                                }}
+                                return;
+                            }}
+                            if (controlType === 'checkbox' || controlType === 'radio') return;
+                        }}
+                    }}
+                    const el = target.closest(__WSCAN_CLICKABLE_SEL);
+                    if (el && el.tagName !== 'BODY' && el.tagName !== 'HTML') {{
+                        const sel = __wscanPath(target);
+                        if (sel && typeof window['{fn_click}'] === 'function') {{
+                            __wscanClickRecorded = true;
+                            setTimeout(() => {{ __wscanClickRecorded = false; }}, 0);
+                            // 座標依存要素（canvas・offsetX/offsetY を使う大きな div 等）は要素中心の
+                            // 再生では別動作になり得るため、相対クリック座標を保存し replay で渡す
+                            // （page.click(position=...)）。ただし座標を常に付すと、inline/小要素では
+                            // 記録 offset の hit-test が親要素へずれて replay が別要素を click し得る
+                            // （委譲メニューの span 等）。座標志向とみなせる canvas / block 要素のときだけ、
+                            // かつ offset が有限・非負のときだけ付す（Codex #179）。
+                            let ox = e.offsetX, oy = e.offsetY;
+                            let coordLike = false;
+                            try {{
+                                const cs = window.getComputedStyle(target);
+                                coordLike = target.tagName === 'CANVAS' || (cs && cs.display === 'block');
+                            }} catch (err) {{ coordLike = target.tagName === 'CANVAS'; }}
+                            const hasPos = coordLike
+                                && Number.isFinite(ox) && Number.isFinite(oy) && ox >= 0 && oy >= 0;
+                            window['{fn_click}'](sel, hasPos ? ox : null, hasPos ? oy : null);
                         }}
                     }}
                 }}, true);
-            """)
+            """
+
+
+class FlowRecorder:
+    """Playwright 操作を JSON ステップとして記録・再生する。"""
+
+    def __init__(self):
+        self._steps: list[dict] = []
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Recording
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def record_interactive(
+        self,
+        start_url: str,
+        output_path: str,
+        headless: bool = False,
+    ) -> list[dict]:
+        """
+        非ヘッドレスで Playwright を起動し、ユーザー操作を記録する。
+        Ctrl+C で記録終了 → JSON 保存。
+
+        Returns
+        -------
+        記録されたステップのリスト
+        """
+        from playwright.async_api import async_playwright
+
+        print(f"[FlowRecorder] 記録開始: {start_url}")
+        print("[FlowRecorder] 操作を行い、終了したら Ctrl+C を押してください。")
+        steps: list[dict] = [{"action": "navigate", "url": start_url}]
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=headless)
+            page = await browser.new_page()
+
+            # ナビゲーション追跡。初期 goto（steps[0] と重複）だけを除き、いったん離れて
+            # start_url へ**戻ってきた**遷移は記録する。全 start_url 遷移を潰すと、最後の
+            # navigate が中間ページのままになり _match_pre_attack_flows が誤ったページへ flow を
+            # 適用してしまう（Codex #170 P2）。
+            _initial_load = {"seen": False}
+
+            def on_navigate(frame):
+                if frame != page.main_frame:
+                    return
+                url = frame.url
+                if not url or url == "about:blank":
+                    return
+                # 最初の main-frame ナビゲーション（初期 goto）は steps[0] と重複するので新規
+                # append しない。ただし初期 goto が別 scheme/host/path へ **redirect** した場合は、
+                # 実着地 URL を steps[0] に反映する。さもないと最後の navigate が pre-redirect の
+                # start_url のままになり _match_pre_attack_flows が crawl 済み着地ページと結び付けられ
+                # ない／最終 target チェックで弾かれる（Codex #170 P2）。
+                if not _initial_load["seen"]:
+                    _initial_load["seen"] = True
+                    if url != start_url:
+                        # steps[0]（start_url への navigate）は残す。redirect 応答が SSO callback/
+                        # magic link の Set-Cookie 等の前提 state を作るため、置換すると replay が
+                        # それを受け取れない（Codex #170 P2）。実着地は**実行しない照合用メタデータ**
+                        # として steps[0] に持たせる。別 navigate として追記すると replay が着地ページを
+                        # 二重に GET し、one-shot の確認/コールバック token を消費してしまう（Codex #170 P2）。
+                        if steps and steps[0].get("action") == "navigate":
+                            steps[0]["landed_url"] = url
+                    return
+                steps.append(_make_navigate_step(steps, url))
+
+            page.on("framenavigated", on_navigate)
+
+            # フォーム送信の追跡 (input change)
+            # Use random token in function names so malicious page JS cannot
+            # inject fake steps by calling the predictable global names.
+            _tok = secrets.token_hex(12)
+            _fn_fill = f"__wscan_fill_{_tok}__"
+            _fn_click = f"__wscan_click_{_tok}__"
+            _fn_submit = f"__wscan_submit_{_tok}__"
+            _fn_notify = f"__wscan_notify_{_tok}__"
+
+            await page.expose_function(_fn_fill, lambda selector, value: steps.append(
+                {"action": "fill", "selector": selector, "value": value}
+            ))
+            # click は相対座標付き（座標依存要素の replay 用）。x/y は有限・非負のときだけ付す
+            # （記録スクリプトが offsetX/offsetY を検査して None 化する・Codex #179）。
+            def _record_click(selector, x=None, y=None):
+                step = {"action": "click", "selector": selector}
+                if x is not None and y is not None:
+                    step["x"] = x
+                    step["y"] = y
+                steps.append(step)
+
+            await page.expose_function(_fn_click, _record_click)
+            await page.expose_function(_fn_submit, lambda selector: steps.append(
+                {"action": "submit", "selector": selector}
+            ))
+            # ページ側の警告（file input skip 等）を **記録プロセスの stdout** へ出す。ページの
+            # console.warn だけだと DevTools 非表示の headed recorder では操作者に届かない（Codex #170 P2）。
+            await page.expose_function(
+                _fn_notify, lambda message: print(f"[FlowRecorder][warn] {message}")
+            )
+
+            # ページに監視スクリプト注入
+            await page.add_init_script(
+                _build_recorder_script(_fn_fill, _fn_click, _fn_submit, _fn_notify)
+            )
 
             await page.goto(start_url)
 
@@ -298,6 +390,9 @@ class FlowRecorder:
             action = step.get("action", "")
 
             if action == "navigate":
+                # via_click な navigate は click step が既に遷移させるため再実行しない（Codex #179）。
+                if step.get("via_click"):
+                    continue
                 url = step.get("url", "")
                 if url:
                     await browser.navigate(url)
@@ -334,9 +429,12 @@ class FlowRecorder:
             elif action == "click":
                 selector = step.get("selector", "")
                 if selector:
+                    # 座標依存要素は記録した相対座標で click する（要素中心 click だと別動作・Codex #179）。
+                    x, y = step.get("x"), step.get("y")
+                    click_kw = {"position": {"x": x, "y": y}} if x is not None and y is not None else {}
                     try:
                         req_ts = time.time()
-                        await browser.page.click(selector, timeout=5000)
+                        await browser.page.click(selector, timeout=5000, **click_kw)
                         await asyncio.sleep(0.5)
                         resp_ts = time.time()
                         html = await browser.page.content()
