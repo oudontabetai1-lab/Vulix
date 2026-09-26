@@ -145,5 +145,90 @@ class CookieDomainSyncTests(unittest.TestCase):
         self.assertEqual(result, "")
 
 
+class ParallelWorkerCookieIsolationTests(unittest.TestCase):
+    """並列 worker の pre-attack flow 後 Cookie が worker task 内に閉じることの検証（0067）。
+
+    共有 engine を複数 task が同時に使っても、_sync_cookies_from_browser の書き込みが
+    task-local な ContextVar に閉じ、別 worker（と直列用 self.cookies）を汚染しないこと。
+    ブラウザ非依存（cookie jar は _Ctx スタブ）。
+    """
+
+    def test_store_and_effective_routing(self):
+        # 直列（ContextVar 未種付け）: 共有 self.cookies へ書き、そこから読む。
+        from wscan.engine import _store_synced_cookies, _effective_cookies
+        eng = types.SimpleNamespace(cookies="base=1")
+        self.assertEqual(_effective_cookies(eng), "base=1")
+        _store_synced_cookies(eng, "serial=2")
+        self.assertEqual(eng.cookies, "serial=2")
+        self.assertEqual(_effective_cookies(eng), "serial=2")
+
+    def test_worker_context_does_not_touch_shared(self):
+        # worker task 内（ContextVar 種付け済み）: 書き込みは ContextVar に閉じ、
+        # 共有 self.cookies は不変。
+        from wscan.engine import (
+            _store_synced_cookies, _effective_cookies, _WORKER_COOKIES,
+        )
+
+        async def _worker():
+            token = _WORKER_COOKIES.set(_effective_cookies(eng))  # baseline を種付け
+            try:
+                _store_synced_cookies(eng, "flow=worker")
+                # task-local には反映、共有 self.cookies は不変
+                self.assertEqual(_effective_cookies(eng), "flow=worker")
+                self.assertEqual(eng.cookies, "shared=base")
+            finally:
+                _WORKER_COOKIES.reset(token)
+
+        eng = types.SimpleNamespace(cookies="shared=base")
+        asyncio.run(_worker())
+        # worker 退出後、共有 self.cookies は依然不変（直列読みは baseline）
+        self.assertEqual(eng.cookies, "shared=base")
+        self.assertEqual(_effective_cookies(eng), "shared=base")
+
+    def test_two_workers_do_not_contaminate_each_other(self):
+        # 共有 engine を 2 worker が同時使用。各 worker が自分の browser jar から
+        # 別セッション Cookie を sync し、自分の auth_headers にだけ載ることを検証。
+        from wscan.engine import _WORKER_COOKIES
+
+        eng = types.SimpleNamespace(
+            cookies="",  # 初期ログイン Cookie（本テストでは空）
+            target_url="https://example.com/",
+            header_manager=types.SimpleNamespace(current=lambda: {}),
+        )
+
+        def _browser(jar):
+            return types.SimpleNamespace(page=types.SimpleNamespace(context=_Ctx(jar)))
+
+        async def _run_worker(name, jar):
+            # worker_loop 相当: task-local Cookie を共有 baseline で種付け
+            token = _WORKER_COOKIES.set(eng.cookies)
+            try:
+                # pre-attack flow 後の sync（browser jar → task-local Cookie）
+                await ScanEngine._sync_cookies_from_browser(
+                    eng, _browser(jar), for_url="https://example.com/app"
+                )
+                # 他 worker に yield させて交錯を誘発
+                await asyncio.sleep(0)
+                # HTTP scanner が使う auth_headers の Cookie を採取
+                headers = ScanEngine.auth_headers(eng)
+                return headers.get("Cookie", "")
+            finally:
+                _WORKER_COOKIES.reset(token)
+
+        async def _main():
+            jar_a = [{"name": "sid", "value": "AAA", "domain": "example.com", "path": "/"}]
+            jar_b = [{"name": "sid", "value": "BBB", "domain": "example.com", "path": "/"}]
+            return await asyncio.gather(
+                _run_worker("A", jar_a),
+                _run_worker("B", jar_b),
+            )
+
+        cookie_a, cookie_b = asyncio.run(_main())
+        self.assertEqual(cookie_a, "sid=AAA")
+        self.assertEqual(cookie_b, "sid=BBB")
+        # 共有 self.cookies は両 worker の同期に汚染されず初期のまま
+        self.assertEqual(eng.cookies, "")
+
+
 if __name__ == "__main__":
     unittest.main()
