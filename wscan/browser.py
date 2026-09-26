@@ -44,6 +44,9 @@ _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _PAGE_CONTENT_TIMEOUT = 30.0
 # dialog.dismiss() は native timeout を持たないため asyncio.wait_for で有界化する上限（F06/0059）。
 _DIALOG_DISMISS_TIMEOUT = 3.0
+# playwright.stop() は close() 時に稀にハングする（TargetClosedError 起因で内部 wait が
+# timeout=None のまま閉じたループ上に残る）。close は best-effort なので有界化して抜ける（F06/0059）。
+_PLAYWRIGHT_STOP_TIMEOUT = 10.0
 
 
 async def _bounded_page_content(page) -> str:
@@ -556,6 +559,14 @@ class BrowserManager:
         self.request_logger = request_logger
         self.network = NetworkCapture(logger=request_logger)
         self.dialog_fired: bool = False
+        # 累積ダイアログ発火数（reset_dialog では戻さない）。stored-XSS flood の検知に使い、
+        # 1 ページの attack で閾値超え発火したら recreate_page で wedge をクリアする（F06/0059）。
+        self.dialog_total: int = 0
+        # dismiss 失敗（未解消で wedge した可能性）の直接フラグ（F06/0059・recreate 判定に使用）。
+        self.dialog_dismiss_failed: bool = False
+        # navigate 成功時に best-effort で控える直近の sessionStorage（origin, JSON文字列）。
+        # recreate_page が wedge した old page 読取に依存せずこれを init script で seed する（F06/0059#3）。
+        self._last_session_storage = None
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
         # 初回セットアップの scoped-header 方針（_wire_current_page が参照）。
@@ -648,11 +659,16 @@ class BrowserManager:
         await self._wire_current_page()
 
     async def _wire_current_page(self) -> None:
-        """self.page に既定 timeout・ネットワーク傍受・dialog ハンドラを配線する（初回セットアップ）。"""
-        if self._use_scoped_headers:
+        """self.page に既定 timeout・ネットワーク傍受・dialog ハンドラを配線する（初回セットアップ）。
+
+        F06/0059: recreate_page から WorkerBrowser（BrowserManager.__init__ を経ず _use_scoped_headers
+        等を持たない並行ワーカー）でも呼ばれるため、__init__ 専用フィールドは getattr 既定で参照し
+        AttributeError で配線が丸ごと失敗（新 page が timeout/network/dialog 未配線のまま残る）のを防ぐ。
+        """
+        if getattr(self, "_use_scoped_headers", False):
             # 最初のナビゲーションより前に Fetch.enable の完了を保証する。
             await self._activate_scoped_header_interception(self.page)
-            if self._header_intercept_mode == "cdp":
+            if getattr(self, "_header_intercept_mode", "none") == "cdp":
                 # 失敗時は context の page イベントによる現行方式を維持する。
                 await self._activate_header_target_auto_attach()
         self.page.set_default_timeout(self.timeout)
@@ -1190,6 +1206,8 @@ class BrowserManager:
     async def _on_dialog(self, dialog):
         """Capture alert dialogs (XSS indicator)."""
         self.dialog_fired = True
+        # 累積（flood 検知用・F06/0059）。__init__ を経ないテスト用インスタンスでも壊れないよう getattr。
+        self.dialog_total = getattr(self, "dialog_total", 0) + 1
         self.dialog_message = dialog.message
         # Capture an evidence screenshot, but NEVER let it wedge the scan. While
         # a dialog is open Playwright blocks the page, and ``page.screenshot``
@@ -1219,7 +1237,10 @@ class BrowserManager:
         except Exception:
             # timeout（未応答）や、並行 worker がページを navigate/close 済みのケースを含む。
             # dialog 発火の signal 自体は evidence として有効なので握りつぶして続行する。
-            pass
+            # F06/0059: dismiss 失敗＝dialog が未解消で page が wedge した可能性。直接フラグに残し、
+            # _attack_one_page の recreate 判定が「_fired>3」到達を待たずに復旧できるようにする
+            # （初回 alert の dismiss が wedge すると以降 dialog が開けず _fired が増えないため）。
+            self.dialog_dismiss_failed = True
 
     async def update_extra_headers(self, headers: dict) -> None:
         """Replace extra HTTP headers used by the refresh task."""
@@ -1252,8 +1273,108 @@ class BrowserManager:
 
     def reset_dialog(self):
         self.dialog_fired = False
+        # F06/0059: dialog_dismiss_failed は wedge signal。XSS 等の scanner が payload 毎に
+        # reset_dialog() を呼ぶため、ここでクリアすると初回 dismiss 失敗の wedge が
+        # _recover_if_dialog_flood の検査前に消え、以降 dialog が開けず dialog_total も
+        # 伸びないまま page が再生成されない。実際に復旧した recreate_page() でのみクリアする。
         self.dialog_message = ""
         self.dialog_screenshot_b64 = ""
+
+    async def _snapshot_session_storage(self) -> None:
+        """健全な page から sessionStorage を best-effort で控える（F06/0059#3）。
+
+        recreate_page が wedge した old page を読めない前提の設計。非空スナップショットだけを
+        保持し、login redirect 等で一時的に空になったページで上書きしない（復元は init script が
+        未設定キーのみ seed するため stale でも安全側）。有界化し例外は握りつぶす（加算的・観測用）。
+        """
+        page = self.page
+        if page is None:
+            return
+        try:
+            snap = await asyncio.wait_for(
+                page.evaluate("() => JSON.stringify(sessionStorage)"), timeout=1.0
+            )
+            if snap and snap not in ("{}", "null"):
+                origin = await asyncio.wait_for(
+                    page.evaluate("() => location.origin"), timeout=1.0
+                )
+                if origin:
+                    self._last_session_storage = (origin, snap)
+        except Exception:
+            pass
+
+    async def recreate_page(self) -> bool:
+        """現在の page を捨てて context から新しい page を張り直す（F06/0059）。
+
+        stored-XSS の alert flood は未解消ダイアログで page を wedge させ、以降の
+        goto/content/フォーム操作が全て ~上限まで張り付く（実測: flood 後の各ページが
+        3s→26s に劣化し、後続フィールドの injection が無言失敗＝recall 崩壊）。page は
+        ``is_closed()``=False のまま劣化するため閉塞検知では復旧できない。dialog を撒いた
+        ページの直後にこれで page を作り直すと、wedge/pending dialog を確実に捨てて次ページを
+        健全な状態から攻撃できる。context 生存前提（cookie は context 側に残り再適用不要）。
+        復旧不能（context/browser 死亡）なら False を返し、呼び出し側は従来経路（安全側）。
+        """
+        try:
+            if self._context is None:
+                return False
+            old = self.page
+            self.page = await self._context.new_page()
+            # F06/0059(#5): concurrency>1 の worker は共有 context の CDP scoped header interception を
+            # 持つ（create_worker が _attach_header_interception を await して張る）。置換 page は
+            # _wire_current_page の _use_scoped_headers 経路を通らない（worker では未初期化）ため、
+            # ここで create_worker と同じ経路を同期的に再 attach し、次 navigation が interception 未設定
+            # のまま先行する race（認証ヘッダ欠落）を防ぐ。
+            _real = getattr(self, "_real", None)
+            if _real is not None and getattr(_real, "_header_intercept_mode", "none") == "cdp":
+                try:
+                    await _real._attach_header_interception(self.page)
+                except Exception:
+                    pass
+            await self._wire_current_page()
+            self.reset_dialog()
+            # F06/0059(#6): wedge signal は「実際に復旧した」ここでのみクリアする。
+            self.dialog_dismiss_failed = False
+            # F06/0059(#2): sessionStorage は document script 実行前に seed する必要がある。
+            # navigate 後の復元では、認証SPA が bootstrap 中に sessionStorage を読む前に未認証
+            # リクエスト/login redirect を出した後になり遅い。init script は各遷移で page 自前の
+            # script より前に走るので、該当 origin かつ未設定キーのときだけ復元する（app が
+            # 再ログイン後に書いた新値は上書きしない）。
+            # F06/0059(#3): wedge した old page からの読取に依存せず、navigate 成功時に控えた
+            # 最新スナップショットを使う。
+            # F06/0059(R4#4): init script は置換 page の以後の全 document で走る。無条件に
+            # getItem(k)===null を復元すると、app が logout/期限切れ/正常完了で消した auth/one-time
+            # key が次 navigation で stale 値に蘇る。sentinel key で「一度 seed 済み」を記録し、
+            # 以後は復元しない（該当 origin での二重 seed を防ぐ・復元済みフラグ方式）。
+            # ponytail: app が sessionStorage.clear() すると sentinel も消え 1 度だけ再 seed しうる
+            # （個別 removeItem では蘇らない）。全消し logout での再 seed が問題化するなら CDP の
+            # removeScriptToEvaluateOnNewDocument で init script 自体を外す方式へ上げる。
+            _pend = getattr(self, "_last_session_storage", None)
+            if _pend:
+                try:
+                    _p_origin, _p_snap = _pend
+                    await self.page.add_init_script(
+                        "(() => { try {"
+                        f" if (location.origin !== {json.dumps(_p_origin)}) return;"
+                        ' const S = "__wscan_seeded__";'
+                        " if (sessionStorage.getItem(S) !== null) return;"
+                        f" const d = JSON.parse({json.dumps(_p_snap)});"
+                        " for (const k in d) { try {"
+                        " if (sessionStorage.getItem(k) === null)"
+                        " sessionStorage.setItem(k, d[k]);"
+                        " } catch (e) {} }"
+                        " try { sessionStorage.setItem(S, '1'); } catch (e) {}"
+                        " } catch (e) {} })()"
+                    )
+                except Exception:
+                    pass
+            if old is not None:
+                try:
+                    await old.close()
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            return False
 
     _DIALOG_HANDLER_JS = r"""
         (() => {
@@ -1457,6 +1578,12 @@ class BrowserManager:
                         await self.settle_spa()
                     except Exception:
                         pass
+                # F06/0059(#2): sessionStorage の復元は recreate_page が仕掛けた init script が
+                # 遷移前に seed する（navigate 後の evaluate 復元は SPA bootstrap に間に合わない）。
+                # F06/0059(#3): 健全な navigate 成功時に sessionStorage を控えておく。recreate_page は
+                # wedge した old page（本復旧の主因＝dialog 未解消で evaluate が返らない）から読むと
+                # 空になり認証SPA が未認証化するため、この最新スナップショットを init script で seed する。
+                await self._snapshot_session_storage()
                 return True
             except Exception as e:
                 self.last_navigation_error = f"{type(e).__name__}: {e}"
@@ -2933,7 +3060,9 @@ class BrowserManager:
             if self._browser:
                 await self._browser.close()
             if self._playwright:
-                await self._playwright.stop()
+                await asyncio.wait_for(
+                    self._playwright.stop(), timeout=_PLAYWRIGHT_STOP_TIMEOUT
+                )
         except Exception:
             pass
 

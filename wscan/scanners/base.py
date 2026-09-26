@@ -794,6 +794,48 @@ class BaseScanner(ABC):
             ip.legacy_is_url_param(),
         )
 
+    def _field_budget_gate(self) -> bool:
+        """F06/0059: フィールド単位 attack 時間ボックス超過なら True（呼び出し側は注入せず
+        ``("", {})`` を返す）。超過時は観測ノートを (フィールド×check) 毎に 1 回だけ記録し、当該
+        check を truncated 集合へ入れて engine._scan_field の checkpoint 完了化を抑止する（＝resume で
+        再試行させ見逃しを防ぐ）。状態は task-local ContextVar（並行ワーカーで汚染しない）。deadline
+        未設定/未超過や engine 参照不能なら False（従来どおり注入・verify 中は deadline=None で対象外）。
+        base._apply_ip と SQLi baseline の独自 browser 送信分岐の双方から呼ぶ。"""
+        try:
+            from wscan.engine import (
+                _FIELD_ATTACK_DEADLINE as _DL,
+                _FIELD_BUDGET_NOTES as _NOTES,
+                _FIELD_BUDGET_TRUNCATED as _TRUNC,
+                _FIELD_BUDGET_IDENT as _IDENT,
+            )
+            _deadline = _DL.get()
+        except Exception:
+            return False
+        if _deadline is None or time.monotonic() <= _deadline:
+            return False
+        _notes = _NOTES.get()
+        if _notes is not None and self.CHECK_TYPE not in _notes:
+            self._record_scan_note(self._field_budget_note(_IDENT.get()))
+            _notes.add(self.CHECK_TYPE)
+        _trunc = _TRUNC.get()
+        if _trunc is not None:
+            _trunc.add(self.CHECK_TYPE)
+        return True
+
+    def _field_budget_note(self, ident) -> str:
+        """time-box 打ち切りノートを ``field_budget_exceeded:<check>[:<path>|<field>]`` で作る。
+
+        ident=(url, field) があれば injection point 情報を付し、benchmark が per-IP に degradation を
+        絞れるようにする（同 check の別 field の完全実行行を巻き込まない・0059/F06 R4#2）。ident が
+        None/不正なら check だけの旧形式へフォールバック（観測系は先頭 `:` までしか見ないので不変）。"""
+        base = f"field_budget_exceeded:{self.CHECK_TYPE}"
+        try:
+            url, field = ident
+            from urllib.parse import urlparse
+            return f"{base}:{urlparse(url).path}|{field}"
+        except Exception:
+            return base
+
     async def _apply_ip(
         self,
         ip: InjectionPoint,
@@ -812,6 +854,10 @@ class BaseScanner(ABC):
         # 脱落記録は `_apply_json_payload` の**既存**の swallow 点（transport_error/unexecutable_template）
         # に限る。form/url の例外は従来どおりスキャナ側（baseline_unavailable 等）へ伝播させる。
         if not self.may_scan_injection_point(ip):
+            return "", {}
+        # F06/0059: フィールド単位 attack 時間ボックス。超過後は追加注入を止める（SQLi baseline の
+        # 独自 browser 送信分岐も同じ gate を通すため共通ヘルパに切り出し）。
+        if self._field_budget_gate():
             return "", {}
         if ip.location == "json_body":
             if not self.SUPPORTS_JSON_BODY:
@@ -1335,6 +1381,12 @@ class BaseScanner(ABC):
         SQLi / XSS の両スキャナから再利用する共通ロジック。投入は各スキャナの
         ``_apply_payload`` に委譲するため、フォーム/URLパラメータ双方に対応する。
         """
+        # F06/0059: 等価性 probe は _apply_ip を通らず _apply_payload へ直送するため、
+        # フィールド時間ボックス超過後もそのままだと 6 発送信してしまう。gate で短絡し
+        # 送信しない（truncated 記録は _field_budget_gate 内で行い当該 check の checkpoint
+        # 完了化を抑止＝resume で再試行させる）。
+        if self._field_budget_gate():
+            return None
         from wscan import equivalence_probe as eqp
 
         builders = {
@@ -1351,6 +1403,11 @@ class BaseScanner(ABC):
         responses: dict[str, str] = {}
         pairs: dict[str, dict] = {}
         for probe in probe_set.probes:
+            # F06/0059(#2): 入口 1 回だけの gate では、最初の遅い probe 送信中に期限切れになっても
+            # 残り最大 6 発を送ってしまう。各 request 送信前に再チェックし、超過後は残りを送らない
+            # （送った分だけで evaluate する。判定ロジックは不変）。
+            if self._field_budget_gate():
+                break
             # Log probe payloads to the audit trail just like the normal scanner
             # loops, so payloads.jsonl can reproduce a verdict's matched payload.
             await self.log_payload_test(
@@ -1369,6 +1426,13 @@ class BaseScanner(ABC):
             pairs[probe.name] = pair or {}
             body = (pair.get("response", {}) or {}).get("body") or source or ""
             responses[probe.name] = body
+
+        # F06/0059(R4#5): broken-quote 対照 probe は probe 群の末尾にあり、時間ボックスで打ち切ると
+        # 送信前に break しうる。対照応答が欠けたまま evaluate すると broken_collapsed=False と誤解して
+        # 「対照でも弾かれる入力正規化」を脆弱と誤報（FP）する。対照が揃わなければ evaluate せず None
+        # を返す（部分結果で判定しない＝当該 probe は truncated 扱いで finding を出さない）。
+        if any(p.name not in responses for p in probe_set.by_role("broken")):
+            return None
 
         verdict = eqp.evaluate(probe_set, responses)
         if verdict.injectable:
@@ -1393,6 +1457,10 @@ class BaseScanner(ABC):
         個別 scanner の検知判定は呼ばず、marker 付き文字列の反射状態だけを
         観測する。失敗時は呼び出し側が従来挙動へ戻れるよう空値を返す。
         """
+        # F06/0059: 生存 probe も browser を直叩きして _apply_ip の gate を通らないため、
+        # フィールド時間ボックス超過後は送らず空観測を返す（従来の失敗時と同じ空値）。
+        if self._field_budget_gate():
+            return "", set(), {}
         try:
             from wscan import context_mutator
 

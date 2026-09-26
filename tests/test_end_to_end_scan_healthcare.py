@@ -64,7 +64,21 @@ _FIELD_LENIENT_CHECKS = {"stored_xss"}
 
 # payload mutation wave（未検出フィールドでバイパス変種を追加投入）でスキャンが重くなるため
 # 既存 E2E より長めに確保する。
-SCAN_TIMEOUT_S = 1500
+# F06/0059: 旧来 healthcare は単一 stored sink（/community/posts の comment）へ反射スキャナ＋
+# evolution/mutation wave が alert flood を積み、1 フィールドだけで ~2587s を消費 → attack 途中で
+# timeout 発火 → finally の verify+report 追加 → 計 4108s/4 ERROR で完走不能だった。
+# 根本対処は 2 段構え:
+#  (1) engine のフィールド単位 attack 時間ボックス（WSCAN_FIELD_BUDGET 既定 120s／base `_apply_ip`）で
+#      comment の alert flood を打ち切る（2587s→334s）。
+#  (2) flood ページ直後に `browser.recreate_page()` で page を作り直し、未解消ダイアログによる
+#      wedge を解消する（`_on_dialog` 記載どおり flood 中は同ページの全操作がブロックされ、以降の
+#      ページが is_closed()=False のまま 3s→26s に劣化し post-flood の injection が無言失敗＝recall
+#      崩壊していた。recreate で healthy に戻り recall 6→16 に回復＝実測）。
+# 健全化の結果、全ページを実際に攻撃するため full-recall scan は実測 ~5278s（attack ~3598s＋
+# verify 16 件 ~1677s）。SCAN_TIMEOUT はこれを完走させる 6000s（~1.14 倍 headroom）に置く。
+# NOTE(perf follow-up): verify per-finding（~105s）と attack の右サイズ化（max_payloads 等）で
+# wall-time を短縮するのは別タスク（recall を落とさず高速化する measure-first が必要）。
+SCAN_TIMEOUT_S = 6000
 
 
 def _free_port() -> int:

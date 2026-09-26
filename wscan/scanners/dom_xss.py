@@ -217,6 +217,12 @@ class DOMXSSScanner(BaseScanner):
                 f"DOM-XSS testing: {field_name} on {ip.url}"
             )
 
+        # F06/0059(R4#1): DOM-XSS は独自シグネチャの _apply_payload を直送し base._apply_ip の
+        # 時間ボックス gate を通らない。フィールド期限超過後は初期 probe も送らず短絡する
+        # （truncated 記録は _field_budget_gate 内。equivalence/evolution/stored_xss と同扱い）。
+        if self._field_budget_gate():
+            return findings
+
         uid = uuid.uuid4().hex[:8]
         payload = _DOM_XSS_PAYLOAD.replace("{uid}", uid)
         marker = f"__WSCAN_DOMXSS__{uid}"
@@ -319,6 +325,10 @@ class DOMXSSScanner(BaseScanner):
                 dom_index=ip.submit_index,
             )
             for raw_payload in extra_payloads:
+                # F06/0059(R4#1): evolved payload も直送のため各送信前に gate を再チェックし、
+                # 期限超過後は残りを送らず打ち切る（送信済み分の findings は返す）。
+                if self._field_budget_gate():
+                    break
                 payload = marker + raw_payload
                 await self.log_payload_test(
                     field_name, payload, "dom_xss_evolved", ip.url
@@ -383,6 +393,10 @@ class DOMXSSScanner(BaseScanner):
         dom_index: int | None = None,
     ) -> tuple[str, set[str], dict]:
         """文脈 probe の判定を保ち、非標準 3 引数 transport で送信する。"""
+        # F06/0059(R4#1): この override も browser を直叩きして base._apply_ip の gate を通らない。
+        # フィールド期限超過後は送らず空観測を返す（base._evolution_probe / 従来の失敗時と同扱い）。
+        if self._field_budget_gate():
+            return "", set(), {}
         try:
             from wscan import context_mutator
 
