@@ -1,0 +1,78 @@
+schema_version: 1
+suite_id: realistic_api_page_observation
+fixture_id: realistic_api
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# realistic_api（Acme Cloud Console）の page 観測系 check の vulnerable + safe twin。
+# いずれも注入点を持たずページ/レスポンス自体を観測するため injection を宣言せず、match は
+# canonical page identity（field="(page)"/location="page-level"）で宣言する。scorer は passive case を
+# (check, path) で採点し、exercised は _attack_one_page が刻む page-level 行を要求する。全 vulnerable/
+# safe エンドポイントは _NAV にリンクされておりクロール到達可能。EXPECTED_FINDINGS / SAFE_ENDPOINTS
+# を正本にする。
+# 収録 check:
+#   - csrf: 状態変更 POST フォームに CSRF トークンが無い（scan_page がフォーム DOM を構造解析）。
+#   - jwt: HS256 JWT を弱い秘密鍵 "secret" で署名して body に露出（jwt scanner が weak secret を確証。
+#          finding check_type=jwt_weak_secret は jwt ファミリに属する）。safe twin は十分長い秘密鍵。
+#   - info_disclosure: 詳細エラーページに Python Traceback を露出（_check_error_page が現在ページ HTML を
+#          監査）。safe twin は汎用メッセージのみ。.env 系（/.env vs /safe/.env）は safe twin が _NAV 非
+#          リンク＝scan_page 対象外で NOT_REACHED になるため採点対象にせず、クロール到達する error-page
+#          ペアを正本にする。
+# 注: 同 fixture の session（脆弱 candidate FN。session scanner が browser context の cookie を name で
+# dedup するため、永続する insecure cookie の finding が /api/v1/session/issue に安定して紐づかない。
+# 加えて safe twin の Secure cookie は HTTP 上で拒否される）は scanner の attribution/recall 課題のため
+# 本ゲートには含めない（別途対応。benchmark_gaps.yaml に残す）。
+cases:
+  # ── csrf（状態変更 POST フォームに CSRF トークンが無い）─────────────────────
+  - case_id: realistic_api_page_observation.csrf.payment_method.vulnerable
+    expected: vulnerable
+    check: csrf
+    request: {method: GET, path: /console/billing/payment-method}
+    match: {path: /console/billing/payment-method, field: "(page)", location: page-level}
+    twin_id: realistic_api_page_observation.csrf.payment_method_safe.safe
+    taxonomy: [csrf, unauthenticated]
+    gate: observed
+  - case_id: realistic_api_page_observation.csrf.payment_method_safe.safe
+    expected: safe
+    check: csrf
+    request: {method: GET, path: /console/billing/payment-method-safe}
+    match: {path: /console/billing/payment-method-safe, field: "(page)", location: page-level}
+    twin_id: realistic_api_page_observation.csrf.payment_method.vulnerable
+    taxonomy: [csrf, unauthenticated]
+    gate: observed
+
+  # ── jwt（HS256 を弱い秘密鍵で署名して body に露出）─────────────────────────
+  - case_id: realistic_api_page_observation.jwt.bootstrap.vulnerable
+    expected: vulnerable
+    check: jwt
+    request: {method: GET, path: /api/v1/session/bootstrap}
+    match: {path: /api/v1/session/bootstrap, field: "(page)", location: page-level}
+    twin_id: realistic_api_page_observation.jwt.bootstrap_safe.safe
+    taxonomy: [jwt, unauthenticated]
+    gate: observed
+  - case_id: realistic_api_page_observation.jwt.bootstrap_safe.safe
+    expected: safe
+    check: jwt
+    request: {method: GET, path: /api/v1/session/bootstrap-safe}
+    match: {path: /api/v1/session/bootstrap-safe, field: "(page)", location: page-level}
+    twin_id: realistic_api_page_observation.jwt.bootstrap.vulnerable
+    taxonomy: [jwt, unauthenticated]
+    gate: observed
+
+  # ── info_disclosure（詳細エラーページに Python Traceback を露出）─────────────
+  - case_id: realistic_api_page_observation.info_disclosure.debug_error.vulnerable
+    expected: vulnerable
+    check: info_disclosure
+    request: {method: GET, path: /console/debug-error}
+    match: {path: /console/debug-error, field: "(page)", location: page-level}
+    twin_id: realistic_api_page_observation.info_disclosure.safe_error.safe
+    taxonomy: [info_leak, unauthenticated]
+    gate: observed
+  - case_id: realistic_api_page_observation.info_disclosure.safe_error.safe
+    expected: safe
+    check: info_disclosure
+    request: {method: GET, path: /console/safe-error}
+    match: {path: /console/safe-error, field: "(page)", location: page-level}
+    twin_id: realistic_api_page_observation.info_disclosure.debug_error.vulnerable
+    taxonomy: [info_leak, unauthenticated]
+    gate: observed
