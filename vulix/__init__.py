@@ -11,5 +11,14 @@
 from wscan import __version__
 from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator
+from wscan.scanners.base import Finding, BaseScanner
+from wscan.intervention import ScanController
 
-__all__ = ["ScanEngine", "PayloadGenerator", "__version__"]
+__all__ = [
+    "ScanEngine",
+    "PayloadGenerator",
+    "Finding",
+    "BaseScanner",
+    "ScanController",
+    "__version__",
+]
