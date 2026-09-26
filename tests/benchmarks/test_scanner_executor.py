@@ -417,6 +417,42 @@ def test_field_budget_exceeded_excluded_from_exercised():
     assert _exercised_from_scan_matrix(tested, degraded_checks=degraded) == frozenset()
 
 
+def test_field_budget_degradation_scoped_per_injection_point():
+    """R4#2(0059/F06): IP 情報付き field_budget note は当該 injection point だけを NOT_REACHED にし、
+    同 check の別 field の完全実行行を巻き込まない（check 全体 degrade で誤 NOT_REACHED 化しない）。"""
+    from wscan.benchmark_scan import (
+        _exercised_from_scan_matrix, _degraded_checks, _field_budget_degraded_ips,
+    )
+    wave = ["field_budget_exceeded:sqli:/slow|q"]
+    # 新形式は check 全体 degrade には入れない（per-IP で扱う）。
+    assert _degraded_checks(wave) == frozenset()
+    assert _field_budget_degraded_ips(wave) == frozenset({("sqli", "/slow", "q")})
+
+    rows = [
+        # 打ち切られた IP の tested → 除外。
+        {"check": "sqli", "url": "http://h/slow?q=1", "field_name": "q",
+         "location": "URL param", "status": "tested"},
+        # 同 check の別 field（完全実行）→ 残す（巻き込まない）。
+        {"check": "sqli", "url": "http://h/fast?id=1", "field_name": "id",
+         "location": "URL param", "status": "tested"},
+    ]
+    ex = _exercised_from_scan_matrix(
+        rows,
+        degraded_checks=_degraded_checks(wave),
+        field_budget_ips=_field_budget_degraded_ips(wave),
+    )
+    assert ("sqli", "/fast", "id", "url_param") in ex
+    assert ("sqli", "/slow", "q", "url_param") not in ex
+
+
+def test_field_budget_legacy_note_degrades_whole_check():
+    """後方互換: IP 情報の無い旧形式 field_budget note はどの field か特定できないので check 全体 degrade。"""
+    from wscan.benchmark_scan import _degraded_checks, _field_budget_degraded_ips
+    wave = ["field_budget_exceeded:sqli"]
+    assert _degraded_checks(wave) == frozenset({"sqli"})
+    assert _field_budget_degraded_ips(wave) == frozenset()
+
+
 def test_degraded_passive_page_row_excluded():
     """passive の page-level tested 行も、その check が劣化していれば exercised から除く（Codex #142 P2）。
 

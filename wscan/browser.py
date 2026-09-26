@@ -1341,6 +1341,13 @@ class BrowserManager:
             # 再ログイン後に書いた新値は上書きしない）。
             # F06/0059(#3): wedge した old page からの読取に依存せず、navigate 成功時に控えた
             # 最新スナップショットを使う。
+            # F06/0059(R4#4): init script は置換 page の以後の全 document で走る。無条件に
+            # getItem(k)===null を復元すると、app が logout/期限切れ/正常完了で消した auth/one-time
+            # key が次 navigation で stale 値に蘇る。sentinel key で「一度 seed 済み」を記録し、
+            # 以後は復元しない（該当 origin での二重 seed を防ぐ・復元済みフラグ方式）。
+            # ponytail: app が sessionStorage.clear() すると sentinel も消え 1 度だけ再 seed しうる
+            # （個別 removeItem では蘇らない）。全消し logout での再 seed が問題化するなら CDP の
+            # removeScriptToEvaluateOnNewDocument で init script 自体を外す方式へ上げる。
             _pend = getattr(self, "_last_session_storage", None)
             if _pend:
                 try:
@@ -1348,11 +1355,15 @@ class BrowserManager:
                     await self.page.add_init_script(
                         "(() => { try {"
                         f" if (location.origin !== {json.dumps(_p_origin)}) return;"
+                        ' const S = "__wscan_seeded__";'
+                        " if (sessionStorage.getItem(S) !== null) return;"
                         f" const d = JSON.parse({json.dumps(_p_snap)});"
                         " for (const k in d) { try {"
                         " if (sessionStorage.getItem(k) === null)"
                         " sessionStorage.setItem(k, d[k]);"
-                        " } catch (e) {} } } catch (e) {} })()"
+                        " } catch (e) {} }"
+                        " try { sessionStorage.setItem(S, '1'); } catch (e) {}"
+                        " } catch (e) {} })()"
                     )
                 except Exception:
                     pass

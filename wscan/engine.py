@@ -57,9 +57,13 @@ _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", def
 #  - _FIELD_ATTACK_DEADLINE: monotonic 締切（None=無効）
 #  - _FIELD_BUDGET_NOTES: 観測ノート重複抑止用の check 集合（フィールド毎に新規）
 #  - _FIELD_BUDGET_TRUNCATED: budget 超過で注入を打ち切った check 集合（checkpoint 完了抑止に使用）
+#  - _FIELD_BUDGET_IDENT: 現フィールドの (url, field_name)。time-box 打ち切りノートに injection point
+#    情報を載せ、benchmark が「同 check の別 field の完全実行行」を巻き込まず per-IP に degradation を
+#    絞れるようにする（0059/F06 Codex R4#2）。
 _FIELD_ATTACK_DEADLINE: ContextVar = ContextVar("wscan_field_deadline", default=None)
 _FIELD_BUDGET_NOTES: ContextVar = ContextVar("wscan_field_budget_notes", default=None)
 _FIELD_BUDGET_TRUNCATED: ContextVar = ContextVar("wscan_field_budget_truncated", default=None)
+_FIELD_BUDGET_IDENT: ContextVar = ContextVar("wscan_field_budget_ident", default=None)
 
 
 def _observability_warning_text(summary: dict) -> str:
@@ -5960,6 +5964,11 @@ class ScanEngine:
                 # 停止(abort)/一時停止を尊重し、残りの結合 payload を送り続けないようにする。
                 await self.controller.wait_if_paused_or_abort()
 
+                # F06/0059(R4#3): 各結合送信の直前に dialog baseline を控える。1 回で phase 全体を
+                # bracket すると、最初の XSS 組合せが flood/wedge した page で後続 SQLi/SSTI 組合せや
+                # 追加フォームが navigate 失敗・skip され偽陰性化する。組合せ毎に回復する。
+                _dlg_combo = getattr(self.browser, "dialog_total", 0)
+
                 ok = await self.browser.navigate(page.url, retries=self.navigation_retries)
                 if not ok:
                     self._record_unscannable_url(
@@ -6040,6 +6049,10 @@ class ScanEngine:
                         )
                         self._record_finding(f, source="multi-param")
 
+                # F06/0059(R4#3): この結合送信で flood/wedge したら次の組合せ/フォームへ持ち越さず
+                # ここで page を作り直す（外側の 1 回 bracket では後続組合せが wedge page で走る）。
+                await self._recover_if_dialog_flood(_dlg_combo)
+
     def _adaptive_rerank(self, new_findings: list, remaining_pages: list, plans: dict):
         """
         Elevate risk scores on remaining pages for fields matching the newly found
@@ -6085,6 +6098,7 @@ class ScanEngine:
         _dl_token = _FIELD_ATTACK_DEADLINE.set(_deadline)
         _notes_token = _FIELD_BUDGET_NOTES.set(set())
         _trunc_token = _FIELD_BUDGET_TRUNCATED.set(set())
+        _ident_token = _FIELD_BUDGET_IDENT.set((url, field_name))
         ip = self._injection_point_for(
             url, field_name, form_index, is_url_param, dom_index, field
         )
@@ -6278,6 +6292,7 @@ class ScanEngine:
         _FIELD_ATTACK_DEADLINE.reset(_dl_token)
         _FIELD_BUDGET_NOTES.reset(_notes_token)
         _FIELD_BUDGET_TRUNCATED.reset(_trunc_token)
+        _FIELD_BUDGET_IDENT.reset(_ident_token)
 
         self.completed_fields += 1
         # フィールド完了ごとに進捗を永続化（中断しても次回ここから再開できる）

@@ -50,20 +50,29 @@ def _ip():
 
 
 class _Budget:
-    """ContextVar を張って/戻すヘルパ（task-local 時間ボックスの設定を模す）。"""
-    def __init__(self, deadline):
+    """ContextVar を張って/戻すヘルパ（task-local 時間ボックスの設定を模す）。
+
+    ``ident``=(url, field) を渡すと _FIELD_BUDGET_IDENT も張る（note の per-IP スコープ確認用）。
+    未指定なら IDENT は張らず、note は check だけの旧形式へフォールバックする（既存テスト互換）。"""
+    def __init__(self, deadline, ident=None):
         self.deadline = deadline
+        self.ident = ident
 
     def __enter__(self):
         self._dl = eng._FIELD_ATTACK_DEADLINE.set(self.deadline)
         self._notes = eng._FIELD_BUDGET_NOTES.set(set())
         self._trunc = eng._FIELD_BUDGET_TRUNCATED.set(set())
+        self._ident = (
+            eng._FIELD_BUDGET_IDENT.set(self.ident) if self.ident is not None else None
+        )
         return self
 
     def __exit__(self, *a):
         eng._FIELD_ATTACK_DEADLINE.reset(self._dl)
         eng._FIELD_BUDGET_NOTES.reset(self._notes)
         eng._FIELD_BUDGET_TRUNCATED.reset(self._trunc)
+        if self._ident is not None:
+            eng._FIELD_BUDGET_IDENT.reset(self._ident)
 
 
 class FieldBudgetTimeboxTests(unittest.IsolatedAsyncioTestCase):
@@ -102,6 +111,16 @@ class FieldBudgetTimeboxTests(unittest.IsolatedAsyncioTestCase):
             await scanner._apply_ip(_ip(), "payload")
             self.assertEqual(scanner.applied, 1)
             self.assertEqual(engine.wave_errors, [])
+
+    async def test_note_carries_injection_point_when_ident_set(self):
+        """R4#2: IDENT が張られていれば note に injection point 情報（<check>:<path>|<field>）を載せ、
+        benchmark が per-IP に degradation を絞れるようにする。観測系は先頭 `:` までで category を取る
+        ため category は変わらない（field_budget_exceeded）。"""
+        engine = _Engine()
+        scanner = _RecordingScanner(engine)
+        with _Budget(time.monotonic() - 1.0, ident=("http://h/search?q=1", "q")):
+            await scanner._apply_ip(_ip(), "x")
+            self.assertIn("field_budget_exceeded:xss:/search|q", engine.wave_errors)
 
     async def test_deadline_is_task_local(self):
         """別タスクで張った deadline は本タスクへ漏れない（並行ワーカー汚染防止）。"""
@@ -234,6 +253,19 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://t", script)                      # 該当 origin ガード
         self.assertIn("abc123", script)                        # 控えた値を seed
         self.assertIn("getItem", script)                       # 未設定キーのみ復元
+
+    async def test_seed_init_script_guards_with_sentinel(self):
+        """R4#4: init script は sentinel key で「一度 seed 済み」を記録し、以後の document では
+        復元しない。無条件復元だと app が消した auth/one-time key が次 navigation で stale 蘇生する。"""
+        bm = self._bm()
+        bm._last_session_storage = ("http://t", '{"token":"abc123"}')
+        bm.page = _WedgedPage()
+        ok = await bm.recreate_page()
+        self.assertTrue(ok)
+        script = bm.page.init_scripts[0]
+        self.assertIn("__wscan_seeded__", script)                 # sentinel を使う
+        self.assertIn('getItem(S) !== null) return', script)      # seed 済みなら復元しない
+        self.assertIn("setItem(S", script)                        # seed 後に sentinel を立てる
 
     async def test_recreate_skips_init_script_without_snapshot(self):
         """スナップショットが無ければ init script を仕込まない（従来挙動）。"""
@@ -412,6 +444,164 @@ class AttackPageRestoreRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         # 1 フィールドにつき 2 回回復する：scan 直後 + restore navigate 後（新規 #1）。
         self.assertEqual(len(recover_calls), 2)
+
+
+class _CollapseUntilBrokenScanner(_ProbeScanner):
+    """R4#5: baseline+equivalent は collapse（injectable に見える）させるが、broken 対照 probe の
+    送信直前に deadline を失効させ broken を送らせない。gate 修正が無いと evaluate が broken 欠如を
+    非 collapse と誤解し injectable=True（FP）を返す。"""
+    async def _apply_payload(self, url, form_index, field_name, payload, is_url_param):
+        self.applied += 1
+        # 隣接文字列リテラルが結合＝collapse シグナル（equivalence_probe の想定と同じ模擬）。
+        if "' '" in payload and payload.count("'") == 2:
+            body = "r:" + payload.replace("' '", "")   # AA' 'BB → AABB(=marker)
+        else:
+            body = "r:" + payload                        # baseline/broken は verbatim 反射
+        # sql probe は 6 発（baseline+4 equivalent+broken）。deadline が有効な run に限り 5 発送信後に
+        # 失効させ 6 発目(broken)を止める（deadline 無効の run では全 6 発送る）。
+        if self.applied >= 5 and eng._FIELD_ATTACK_DEADLINE.get() is not None:
+            eng._FIELD_ATTACK_DEADLINE.set(time.monotonic() - 1.0)
+        return body, {"response": {"body": body}}
+
+
+class EquivalenceControlTruncationTests(unittest.IsolatedAsyncioTestCase):
+    """R4#5: broken-quote 対照 probe が揃う前に truncate したら evaluate せず None を返す（FP 防止）。"""
+
+    async def test_no_finding_when_control_truncated(self):
+        engine = _GateEngine()
+        scanner = _CollapseUntilBrokenScanner(engine)
+        with _Budget(time.monotonic() + 30.0):   # 入口では有効
+            result = await scanner.run_equivalence_probe(
+                "http://t/", 0, "q", is_url_param=True, context="sql"
+            )
+            self.assertIsNone(result)              # 部分結果で誤検知（injectable）を出さない
+            self.assertEqual(scanner.applied, 5)   # broken(6 発目)は送らず打ち切り
+            self.assertIn("sqli", eng._FIELD_BUDGET_TRUNCATED.get())
+
+    async def test_finding_when_all_probes_sent(self):
+        """対照(broken)まで全 probe 送れば従来どおり judgment する（guard が過剰抑止しない確認）。"""
+        engine = _GateEngine()
+        scanner = _CollapseUntilBrokenScanner(engine)
+        with _Budget(None):                        # 時間ボックス無効＝全 probe 送信
+            result = await scanner.run_equivalence_probe(
+                "http://t/", 0, "q", is_url_param=True, context="sql"
+            )
+            self.assertIsNotNone(result)           # collapse 観測＋broken 非 collapse → injectable
+            self.assertEqual(scanner.applied, 6)
+
+
+class DomXssGateTests(unittest.IsolatedAsyncioTestCase):
+    """R4#1: DOM-XSS の独自 _apply_payload 直送経路も時間ボックス gate で短絡する。"""
+
+    def _scanner(self):
+        from wscan.scanners.dom_xss import DOMXSSScanner
+        engine = _Engine()
+        engine.browser = object()   # gate 前に触れたら AttributeError で気づける
+        sc = DOMXSSScanner(engine)
+        sc.applied = 0
+
+        async def _ap(*a, **k):
+            sc.applied += 1
+            return "", {}
+
+        async def _hook():
+            pass
+
+        sc._apply_payload = _ap
+        sc._ensure_hook = _hook
+        return sc
+
+    async def test_scan_injection_point_short_circuits_after_deadline(self):
+        sc = self._scanner()
+        ip = InjectionPoint.for_url_param("http://t/", "q")
+        with _Budget(time.monotonic() - 1.0):
+            out = await sc.scan_injection_point(ip, {"name": "q"})
+            self.assertEqual(out, [])
+            self.assertEqual(sc.applied, 0)          # 初期 probe すら送らない
+            self.assertIn("dom_xss", eng._FIELD_BUDGET_TRUNCATED.get())
+
+    async def test_evolution_probe_override_short_circuits(self):
+        sc = self._scanner()
+        with _Budget(time.monotonic() - 1.0):
+            res = await sc._evolution_probe("http://t/", 0, "q", is_url_param=True)
+            self.assertEqual(res, ("", set(), {}))
+            self.assertIn("dom_xss", eng._FIELD_BUDGET_TRUNCATED.get())
+
+
+class MultiParamRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """R4#3: _phase_multi_param は各結合送信の後で dialog flood/wedge を回復する
+    （外側 1 回 bracket では最初の組合せが wedge した page で後続組合せが走る）。"""
+
+    async def test_recovers_after_each_combined_submission(self):
+        import asyncio as _asyncio
+        import types
+        from unittest.mock import AsyncMock
+        from wscan.engine import CrawledPage, ScanEngine
+
+        recover_calls: list = []
+
+        async def _recover(since):
+            recover_calls.append(since)
+            return 0
+
+        # 2 フィールドのフォーム 1 つ → xss/sqli の 2 組合せが submit される。
+        page = CrawledPage(
+            url="http://t/form",
+            html="",
+            forms=[{
+                "index": 0, "method": "POST", "action": "/form",
+                "inputs": [
+                    {"name": "a", "type": "text"},
+                    {"name": "b", "type": "text"},
+                ],
+            }],
+            url_params=[],
+            depth=0,
+        )
+
+        class _Scanner:
+            def may_scan_injection_point(self, ip):
+                return True
+
+        class _PG:
+            default_payloads = {"xss": ["<x>"], "sqli": ["' or 1=1"], "ssti": ["{{7*7}}"]}
+
+        engine = types.SimpleNamespace(
+            max_forms=5,
+            exclude_fields=set(),
+            scanners={"xss": _Scanner(), "sqli": _Scanner(), "ssti": _Scanner()},
+            payload_gen=_PG(),
+            controller=types.SimpleNamespace(wait_if_paused_or_abort=AsyncMock()),
+            navigation_retries=0,
+            _effective_delay=0,
+            flag_finder=None,
+            _recover_if_dialog_flood=_recover,
+            _record_unscannable_url=lambda *a, **k: None,
+            _navigation_failure_note=lambda: "",
+            _record_finding=lambda *a, **k: None,
+            _check_page_for_flags=lambda *a, **k: None,
+            browser=types.SimpleNamespace(
+                dialog_total=0,
+                dialog_fired=False,
+                dialog_message="",
+                navigate=AsyncMock(return_value=True),
+                reset_dialog=lambda: None,
+                fill_and_submit_form_multi=AsyncMock(return_value=("", {})),
+            ),
+        )
+        engine._phase_multi_param = types.MethodType(
+            ScanEngine._phase_multi_param, engine
+        )
+
+        await engine._phase_multi_param(page, None)
+
+        # xss と sqli の 2 組合せそれぞれの後で回復する（ssti は default はあるが field_payloads を
+        # 満たすので 3 組合せになりうる）。少なくとも各送信後に呼ばれる＝送信回数と一致。
+        self.assertEqual(
+            len(recover_calls),
+            engine.browser.fill_and_submit_form_multi.await_count,
+        )
+        self.assertGreaterEqual(len(recover_calls), 2)
 
 
 if __name__ == "__main__":

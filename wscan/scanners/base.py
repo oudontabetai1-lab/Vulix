@@ -806,6 +806,7 @@ class BaseScanner(ABC):
                 _FIELD_ATTACK_DEADLINE as _DL,
                 _FIELD_BUDGET_NOTES as _NOTES,
                 _FIELD_BUDGET_TRUNCATED as _TRUNC,
+                _FIELD_BUDGET_IDENT as _IDENT,
             )
             _deadline = _DL.get()
         except Exception:
@@ -814,12 +815,26 @@ class BaseScanner(ABC):
             return False
         _notes = _NOTES.get()
         if _notes is not None and self.CHECK_TYPE not in _notes:
-            self._record_scan_note(f"field_budget_exceeded:{self.CHECK_TYPE}")
+            self._record_scan_note(self._field_budget_note(_IDENT.get()))
             _notes.add(self.CHECK_TYPE)
         _trunc = _TRUNC.get()
         if _trunc is not None:
             _trunc.add(self.CHECK_TYPE)
         return True
+
+    def _field_budget_note(self, ident) -> str:
+        """time-box 打ち切りノートを ``field_budget_exceeded:<check>[:<path>|<field>]`` で作る。
+
+        ident=(url, field) があれば injection point 情報を付し、benchmark が per-IP に degradation を
+        絞れるようにする（同 check の別 field の完全実行行を巻き込まない・0059/F06 R4#2）。ident が
+        None/不正なら check だけの旧形式へフォールバック（観測系は先頭 `:` までしか見ないので不変）。"""
+        base = f"field_budget_exceeded:{self.CHECK_TYPE}"
+        try:
+            url, field = ident
+            from urllib.parse import urlparse
+            return f"{base}:{urlparse(url).path}|{field}"
+        except Exception:
+            return base
 
     async def _apply_ip(
         self,
@@ -1411,6 +1426,13 @@ class BaseScanner(ABC):
             pairs[probe.name] = pair or {}
             body = (pair.get("response", {}) or {}).get("body") or source or ""
             responses[probe.name] = body
+
+        # F06/0059(R4#5): broken-quote 対照 probe は probe 群の末尾にあり、時間ボックスで打ち切ると
+        # 送信前に break しうる。対照応答が欠けたまま evaluate すると broken_collapsed=False と誤解して
+        # 「対照でも弾かれる入力正規化」を脆弱と誤報（FP）する。対照が揃わなければ evaluate せず None
+        # を返す（部分結果で判定しない＝当該 probe は truncated 扱いで finding を出さない）。
+        if any(p.name not in responses for p in probe_set.by_role("broken")):
+            return None
 
         verdict = eqp.evaluate(probe_set, responses)
         if verdict.injectable:
