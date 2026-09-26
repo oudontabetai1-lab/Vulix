@@ -1,0 +1,31 @@
+schema_version: 1
+suite_id: realistic_healthcare_stored_xss
+fixture_id: realistic_healthcare
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# 格納型 XSS の vulnerable + safe twin。realistic_healthcare の POST /community/posts は投稿を
+# 無エスケープで格納し、GET /community/posts で生描画する（chain_scanner の observation pass が
+# 格納 payload の実行/dialog を検出）。安全ツイン /community/announcements は html.escape して
+# 格納・描画する。carrier/location は POST フォーム＝form で宣言し、実 injection_location は E2E で
+# 検証する。EXPECTED_FINDINGS(/community/posts comment, difficulty=high)・
+# SAFE_ENDPOINTS(/community/announcements comment) を正本にする。
+cases:
+  - case_id: realistic_healthcare_stored_xss.posts.comment.vulnerable
+    expected: vulnerable
+    check: stored_xss
+    request: {method: POST, path: /community/posts}
+    injection: {carrier: form, parameter_id: comment, value_kind: string}
+    match: {path: /community/posts, field: comment, location: form}
+    twin_id: realistic_healthcare_stored_xss.announcements.comment.safe
+    taxonomy: [stored_xss, unauthenticated]
+    gate: observed
+  - case_id: realistic_healthcare_stored_xss.announcements.comment.safe
+    expected: safe
+    check: stored_xss
+    request: {method: POST, path: /community/announcements}
+    injection: {carrier: form, parameter_id: comment, value_kind: string}
+    match: {path: /community/announcements, field: comment, location: form}
+    twin_id: realistic_healthcare_stored_xss.posts.comment.vulnerable
+    taxonomy: [stored_xss, unauthenticated]
+    gate: observed
