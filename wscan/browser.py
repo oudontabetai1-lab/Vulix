@@ -1291,15 +1291,17 @@ class BrowserManager:
         if page is None:
             return
         try:
-            snap = await asyncio.wait_for(
-                page.evaluate("() => JSON.stringify(sessionStorage)"), timeout=1.0
+            # origin と storage を 1 回の evaluate で原子的に取る（遷移を跨いで別 origin をラベルしない・
+            # Codex #181 P1）。
+            res = await asyncio.wait_for(
+                page.evaluate(
+                    "() => [location.origin, JSON.stringify(sessionStorage)]"
+                ),
+                timeout=1.0,
             )
-            if snap and snap not in ("{}", "null"):
-                origin = await asyncio.wait_for(
-                    page.evaluate("() => location.origin"), timeout=1.0
-                )
-                if origin:
-                    self._last_session_storage = (origin, snap)
+            origin, snap = res
+            if origin and snap and snap not in ("{}", "null"):
+                self._last_session_storage = (origin, snap)
         except Exception:
             pass
 
@@ -1326,10 +1328,18 @@ class BrowserManager:
             # のまま先行する race（認証ヘッダ欠落）を防ぐ。
             _real = getattr(self, "_real", None)
             if _real is not None and getattr(_real, "_header_intercept_mode", "none") == "cdp":
+                # 失敗を握りつぶすと Authorization 無しの page を成功扱いで受理し、401/ログイン応答を
+                # 「完了スキャン」にしてしまう（偽陰性・Codex #181 P1）。失敗は置換 page を
+                # 捨てて old を戻し False を返す＝呼び出し側は従来経路。
                 try:
                     await _real._attach_header_interception(self.page)
                 except Exception:
-                    pass
+                    bad, self.page = self.page, old
+                    try:
+                        await bad.close()
+                    except Exception:
+                        pass
+                    return False
             await self._wire_current_page()
             self.reset_dialog()
             # F06/0059(#6): wedge signal は「実際に復旧した」ここでのみクリアする。

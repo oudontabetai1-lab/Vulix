@@ -122,6 +122,14 @@ class FieldBudgetTimeboxTests(unittest.IsolatedAsyncioTestCase):
             await scanner._apply_ip(_ip(), "x")
             self.assertIn("field_budget_exceeded:xss:/search|q", engine.wave_errors)
 
+    async def test_note_carries_carrier_location(self):
+        """Codex #181 P2: ident 第3要素の carrier を note 末尾に載せる。"""
+        engine = _Engine()
+        scanner = _RecordingScanner(engine)
+        with _Budget(time.monotonic() - 1.0, ident=("http://h/s?q=1", "q", "URL param")):
+            await scanner._apply_ip(_ip(), "x")
+            self.assertIn("field_budget_exceeded:xss:/s|q|URL param", engine.wave_errors)
+
     async def test_deadline_is_task_local(self):
         """別タスクで張った deadline は本タスクへ漏れない（並行ワーカー汚染防止）。"""
         import asyncio
@@ -158,6 +166,8 @@ class _FakePage:
         self.init_scripts.append(script)
 
     async def evaluate(self, script, *args):
+        if "location.origin" in script and "stringify" in script:
+            return [self._origin, self._session_json]  # 原子的取得（1 回の evaluate）
         if "sessionStorage" in script and "stringify" in script:
             return self._session_json
         if "location.origin" in script:
@@ -310,6 +320,51 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertEqual(attached, [worker.page])   # 置換 page へ同期 attach
         self.assertIn("dialog", worker.page.wired)  # 通常の配線も維持
+
+    async def test_worker_recreate_fails_when_scoped_header_attach_fails(self):
+        """Codex #181 P1: scoped header 再 attach 失敗を握りつぶして成功扱いにしない。
+        置換 page は捨て、old page を戻して False（Authorization 無し page で完了扱いにする偽陰性防止）。"""
+        from wscan.browser import BrowserManager, WorkerBrowser
+        real = BrowserManager()
+        real._context = _FakeContext()
+        real._header_intercept_mode = "cdp"
+
+        async def failing_attach(page):
+            raise RuntimeError("cdp attach failed")
+
+        real._attach_header_interception = failing_attach
+        old = _FakePage()
+        worker = WorkerBrowser(real, old)
+
+        self.assertFalse(await worker.recreate_page())
+        self.assertIs(worker.page, old)
+        self.assertTrue(real._context.created[0].closed)
+
+    async def test_snapshot_uses_single_evaluate(self):
+        """Codex #181 P1: origin と storage は 1 回の evaluate で取る（遷移を跨いだ誤ラベル防止）。"""
+        bm = self._bm()
+        calls: list = []
+
+        class _P(_FakePage):
+            async def evaluate(self, script, *args):
+                calls.append(script)
+                return ["http://t", '{"k":"v"}']
+
+        bm.page = _P()
+        await bm._snapshot_session_storage()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(bm._last_session_storage, ("http://t", '{"k":"v"}'))
+
+
+class AdaptiveEntryGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expired_deadline_returns_before_setup(self):
+        """Codex #181 P1: deadline 超過なら LLM probe / page.content() の前に None（未完）で戻る。
+        属性を一切持たない engine でも落ちない＝setup に触れていない。"""
+        from wscan.engine import ScanEngine
+        eng = object.__new__(ScanEngine)
+        with _Budget(time.monotonic() - 1.0):
+            r = await eng._adaptive_attack_field("http://h/", 0, {"name": "q"}, False, ["xss"], None)
+        self.assertIsNone(r)
 
 
 class _GateEngine(_Engine):

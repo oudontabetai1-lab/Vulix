@@ -23,6 +23,9 @@ def _normalize_location(raw: str) -> str:
     return _LOCATION_NORMALIZE.get(str(raw or "").strip().lower(), str(raw or ""))
 
 
+_KNOWN_LOCATIONS = frozenset(_LOCATION_NORMALIZE.values())
+
+
 # probe が transport 層で握りつぶされた/template が実行不能だった check を示す観測ノート
 # （engine.wave_errors、0007 D1）。status="tested" でも実際には probe が送達していない場合がある
 # ため、劣化した check の行は exercised から除く（Codex #134 P1）。これらは check 全体を疑う
@@ -66,7 +69,7 @@ def _degraded_checks(wave_errors) -> frozenset:
 
 
 def _field_budget_degraded_ips(wave_errors) -> frozenset:
-    """IP 情報付き field_budget note から (check, path, field) 集合を作る（純粋・R4#2）。
+    """IP 情報付き field_budget note から (check, path, field, location) 集合を作る（純粋・R4#2）。
 
     時間ボックスで打ち切った当該 injection point の tested 行だけを NOT_REACHED にし、同 check の
     別 field の完全実行行を巻き込まないためのキー。"""
@@ -77,8 +80,13 @@ def _field_budget_degraded_ips(wave_errors) -> frozenset:
         check, sep, ipinfo = note[len(_FIELD_BUDGET_PREFIX):].partition(":")
         if not (sep and "|" in ipinfo):
             continue
-        path, _, field = ipinfo.partition("|")
-        ips.add((check.strip(), path, field))
+        path, _, rest = ipinfo.partition("|")
+        # 末尾 |<location> があれば carrier 込みのキー、無ければ location "" （全 carrier 対象＝旧形式）。
+        field, sep, loc = rest.rpartition("|")
+        loc = _normalize_location(loc)
+        if not sep or loc not in _KNOWN_LOCATIONS:
+            field, loc = rest, ""
+        ips.add((check.strip(), path, field, loc))
     return frozenset(ips)
 
 
@@ -98,12 +106,16 @@ def _row_exercised(row, degraded_checks, field_budget_ips=frozenset()) -> bool:
         check = str(row.get("check", ""))
         if check in degraded_checks:
             return False
-        ip = (
+        base = (
             check,
             urlparse(str(row.get("url", "") or "")).path,
             str(row.get("field_name", "")),
         )
-        return ip not in field_budget_ips
+        # carrier 単位キーと location 無し旧形式キー（全 carrier）の両方を見る。
+        return (
+            base + (_normalize_location(row.get("location", "")),) not in field_budget_ips
+            and base + ("",) not in field_budget_ips
+        )
     return False
 
 

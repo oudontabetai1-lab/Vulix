@@ -426,7 +426,7 @@ def test_field_budget_degradation_scoped_per_injection_point():
     wave = ["field_budget_exceeded:sqli:/slow|q"]
     # 新形式は check 全体 degrade には入れない（per-IP で扱う）。
     assert _degraded_checks(wave) == frozenset()
-    assert _field_budget_degraded_ips(wave) == frozenset({("sqli", "/slow", "q")})
+    assert _field_budget_degraded_ips(wave) == frozenset({("sqli", "/slow", "q", "")})
 
     rows = [
         # 打ち切られた IP の tested → 除外。
@@ -443,6 +443,21 @@ def test_field_budget_degradation_scoped_per_injection_point():
     )
     assert ("sqli", "/fast", "id", "url_param") in ex
     assert ("sqli", "/slow", "q", "url_param") not in ex
+
+
+def test_field_budget_degradation_scoped_per_carrier():
+    """Codex #181 P2: 同 path/field 名の form と URL param のうち、打ち切った carrier だけ NOT_REACHED。"""
+    from wscan.benchmark_scan import _exercised_from_scan_matrix, _field_budget_degraded_ips
+    wave = ["field_budget_exceeded:sqli:/p|q|URL param"]
+    ips = _field_budget_degraded_ips(wave)
+    assert ips == frozenset({("sqli", "/p", "q", "url_param")})
+    rows = [
+        {"check": "sqli", "url": "http://h/p?q=1", "field_name": "q", "location": "URL param", "status": "tested"},
+        {"check": "sqli", "url": "http://h/p", "field_name": "q", "location": "form field", "status": "tested"},
+    ]
+    ex = _exercised_from_scan_matrix(rows, field_budget_ips=ips)
+    assert ("sqli", "/p", "q", "form") in ex
+    assert ("sqli", "/p", "q", "url_param") not in ex
 
 
 def test_field_budget_legacy_note_degrades_whole_check():

@@ -6098,7 +6098,10 @@ class ScanEngine:
         _dl_token = _FIELD_ATTACK_DEADLINE.set(_deadline)
         _notes_token = _FIELD_BUDGET_NOTES.set(set())
         _trunc_token = _FIELD_BUDGET_TRUNCATED.set(set())
-        _ident_token = _FIELD_BUDGET_IDENT.set((url, field_name))
+        # 第3要素は carrier（scan_matrix の location と同語彙）。form/URL param 同名でも区別する（Codex #181 P2）。
+        _ident_token = _FIELD_BUDGET_IDENT.set(
+            (url, field_name, "URL param" if is_url_param else "form field")
+        )
         ip = self._injection_point_for(
             url, field_name, form_index, is_url_param, dom_index, field
         )
@@ -6348,6 +6351,13 @@ class ScanEngine:
         For each check type, get current page HTML, ask LLM to generate
         context-aware bypass payloads, then run the scanner again with those payloads.
         """
+        # F06/0059(Codex #181 P1): 時間ボックス超過なら LLM 可用性 probe / page.content() の前に戻る。
+        # dialog-wedge 中の page.content() は無有界にブロックしうるため、setup 後のチェックでは
+        # 元の stall を防げない。checkpoint は完了化しない（None＝未完・resume で回収）。
+        _dl0 = _FIELD_ATTACK_DEADLINE.get()
+        if _dl0 is not None and time.monotonic() > _dl0:
+            return None
+
         field_name = field.get("name", "unknown")
         ip = self._injection_point_for(
             url, field_name, form_index, is_url_param, dom_index, field

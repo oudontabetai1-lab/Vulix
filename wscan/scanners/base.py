@@ -830,9 +830,11 @@ class BaseScanner(ABC):
         None/不正なら check だけの旧形式へフォールバック（観測系は先頭 `:` までしか見ないので不変）。"""
         base = f"field_budget_exceeded:{self.CHECK_TYPE}"
         try:
-            url, field = ident
+            url, field, *rest = ident
             from urllib.parse import urlparse
-            return f"{base}:{urlparse(url).path}|{field}"
+            note = f"{base}:{urlparse(url).path}|{field}"
+            # carrier（form/URL param）を末尾に付す。同名 field の別 carrier を巻き込まないため。
+            return f"{note}|{rest[0]}" if rest and rest[0] else note
         except Exception:
             return base
 
