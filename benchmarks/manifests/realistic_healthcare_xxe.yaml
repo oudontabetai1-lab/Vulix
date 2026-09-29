@@ -6,26 +6,30 @@ mode: normal-deterministic
 source_kind: first_party
 # XXE の vulnerable + safe twin。realistic_healthcare の POST /records/import は取込 XML を
 # 外部実体を有効にして解析し /etc/passwd を反映する。安全ツイン /records/import-safe は DTD/
-# 外部実体を無効化（defused 相当）して弾く。fixture は textarea "xml" を持つ POST フォームなので
-# carrier/location は form（intranet_injection の「POST フォーム=form」規約に倣う）で宣言し、
-# 実 injection_location は E2E で検証する。EXPECTED_FINDINGS(/records/import xml, difficulty=medium)・
-# SAFE_ENDPOINTS(/records/import-safe xml) を正本にする。
+# 外部実体を無効化（defused 相当）して弾く。XXEScanner は XML body 全体を Content-Type:
+# application/xml で送る（CONTRACT は XML のみ SUPPORTED・FORM は UNSUPPORTED）ため carrier は xml。
+# scanner-backed scorer は xml carrier の実行 identity を持たず UNSUPPORTED になる＝計測できない
+# ので gate=gap で明示し、benchmark_gaps.yaml の xxe gap も維持する（executor が XML identity を
+# 採点できるようになったら gate を observed へ戻して gap を外す）。EXPECTED_FINDINGS
+# (/records/import xml, difficulty=medium)・SAFE_ENDPOINTS(/records/import-safe xml) を正本にする。
 cases:
   - case_id: realistic_healthcare_xxe.import.xml.vulnerable
     expected: vulnerable
     check: xxe
     request: {method: POST, path: /records/import}
-    injection: {carrier: form, parameter_id: xml, value_kind: string}
-    match: {path: /records/import, field: xml, location: form}
+    injection: {carrier: xml, parameter_id: xml, value_kind: string}
+    match: {path: /records/import, field: xml, location: xml}
     twin_id: realistic_healthcare_xxe.import_safe.xml.safe
     taxonomy: [xxe, unauthenticated]
-    gate: observed
+    gate: gap
+    gap: {reason: XML carrier の実行 identity を scanner-backed scorer が採点できない（UNSUPPORTED）, owner_task: "0034", deadline: "2026-12-31"}
   - case_id: realistic_healthcare_xxe.import_safe.xml.safe
     expected: safe
     check: xxe
     request: {method: POST, path: /records/import-safe}
-    injection: {carrier: form, parameter_id: xml, value_kind: string}
-    match: {path: /records/import-safe, field: xml, location: form}
+    injection: {carrier: xml, parameter_id: xml, value_kind: string}
+    match: {path: /records/import-safe, field: xml, location: xml}
     twin_id: realistic_healthcare_xxe.import.xml.vulnerable
     taxonomy: [xxe, unauthenticated]
-    gate: observed
+    gate: gap
+    gap: {reason: XML carrier の実行 identity を scanner-backed scorer が採点できない（UNSUPPORTED）, owner_task: "0034", deadline: "2026-12-31"}
