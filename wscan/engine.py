@@ -5943,6 +5943,13 @@ class ScanEngine:
             if not await self.browser.navigate(page.url, retries=self.navigation_retries):
                 self.wave_errors.append(f"page_recreate_failed:{page.url}:navigate")
                 return False
+            # navigate は login/error への 200 redirect でも True を返す（session 復元失敗時など）。
+            # 実際に target へ着地したかを確認し、ずれていれば不健全＝後続 scanner に wrong document を
+            # 検査・checkpoint させない（Codex #181 P1）。
+            landed = getattr(getattr(self.browser, "page", None), "url", "") or ""
+            if not self._urls_same_page(landed, page.url):
+                self.wave_errors.append(f"page_recreate_failed:{page.url}:landed={landed}")
+                return False
         return True
 
     def _dialog_wedged_since(self, since: int) -> bool:

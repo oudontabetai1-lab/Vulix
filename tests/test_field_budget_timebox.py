@@ -438,10 +438,11 @@ class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
         from wscan.engine import ScanEngine
 
         br = SimpleNamespace(dialog_total=0, dialog_dismiss_failed=False, recreated=0,
-                             navigated=[])
+                             navigated=[], page=SimpleNamespace(url="http://t/p"))
 
         async def _nav(url, retries=0):
             br.navigated.append(url)
+            br.page.url = url   # 既定は target へ着地（着地先検証を通す）
             return True
         br.navigate = _nav
 
@@ -471,6 +472,7 @@ class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
         for n in ("_recover_if_dialog_flood", "_page_recovery_failed", "_dialog_wedged_since",
                   "_page_level_page_healthy"):
             setattr(e, n, getattr(ScanEngine, n).__get__(e))
+        e._urls_same_page = ScanEngine._urls_same_page   # staticmethod（着地先検証で使用）
         e._match_pre_attack_flows = lambda page: []
         e._profile = lambda *a, **k: None
         e._maybe_relogin_for_page = mock.AsyncMock()
@@ -530,6 +532,20 @@ class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
         await self._run(e)
         self.assertEqual(e.scanners["a"].ran, 0)
         self.assertEqual(e.scanners["b"].ran, 0)
+        e._checkpoint_mark_done.assert_not_called()
+
+    async def test_recovery_landing_on_login_is_unhealthy(self):
+        """Codex #181 round-9 P1: recreate 後 navigate が login/error へ 200 redirect（True）でも、
+        着地先が target と異なれば不健全＝後続 scanner に wrong document を検査させない。"""
+        e = self._engine(recreate_ok=True)
+
+        async def _nav(url, retries=0):
+            e.browser.navigated.append(url)
+            e.browser.page.url = "http://t/login"   # session 復元失敗で login へ redirect
+            return True
+        e.browser.navigate = _nav
+        await self._run(e)
+        self.assertEqual(e.scanners["b"].ran, 0)       # wrong document で後続 scanner を走らせない
         e._checkpoint_mark_done.assert_not_called()
 
 
