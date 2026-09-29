@@ -611,6 +611,7 @@ class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):
         await engine._attack_page(page, None)
         self.assertEqual(engine._scan_field.await_count, 1)  # 2 field 目は未走査
         self.assertTrue(any(n.startswith("page_recreate_failed:") for n in engine.wave_errors))
+        self.assertTrue(engine.browser._recovery_failed)  # 外側ガード（multi-param skip）へ伝播
 
 
 class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
@@ -990,6 +991,11 @@ class MultiParamRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 fill_and_submit_form_multi=AsyncMock(return_value=("", {})),
             ),
         )
+        engine.wave_errors = []
+        engine._urls_same_page = lambda a, b: a == b
+        engine.browser.page = types.SimpleNamespace(url=page.url)
+        for _n in ("_recovered_page_healthy", "_landed_on_target"):
+            setattr(engine, _n, getattr(ScanEngine, _n).__get__(engine))
         engine._phase_multi_param = types.MethodType(
             ScanEngine._phase_multi_param, engine
         )
@@ -1003,6 +1009,127 @@ class MultiParamRecoveryTests(unittest.IsolatedAsyncioTestCase):
             engine.browser.fill_and_submit_form_multi.await_count,
         )
         self.assertGreaterEqual(len(recover_calls), 2)
+
+    async def test_recreate_in_multi_param_returns_to_page_and_stops_on_bad_landing(self):
+        """round-11 C: 組合せ末の recreate 後は page.url へ戻る。login へ着地したら以降の組合せを走らせず
+        _recovery_failed を立てる（about:blank/wrong page を次ページへ持ち越さない）。"""
+        import types
+        from unittest.mock import AsyncMock
+        from wscan.engine import CrawledPage, ScanEngine
+
+        for landed, expect_stop in (("http://t/form", False), ("http://t/login", True)):
+            page = CrawledPage(
+                url="http://t/form", html="",
+                forms=[{"index": 0, "method": "POST", "action": "/form",
+                        "inputs": [{"name": "a", "type": "text"}, {"name": "b", "type": "text"}]}],
+                url_params=[], depth=0)
+            first = {"n": 0}
+
+            async def _recover(since, first=first):
+                first["n"] += 1
+                eng_.browser._page_recreated = first["n"] == 1
+                eng_.browser._recovery_failed = False
+                return 0
+
+            class _Sc:
+                def may_scan_injection_point(self, ip):
+                    return True
+
+            class _PG:
+                default_payloads = {"xss": ["<x>"], "sqli": ["' or 1"]}
+            eng_ = types.SimpleNamespace(
+                max_forms=5, exclude_fields=set(), scanners={"xss": _Sc(), "sqli": _Sc()},
+                payload_gen=_PG(),
+                controller=types.SimpleNamespace(wait_if_paused_or_abort=AsyncMock()),
+                navigation_retries=0, _effective_delay=0, flag_finder=None,
+                _recover_if_dialog_flood=_recover, wave_errors=[],
+                _page_recovery_failed=lambda w: False, _urls_same_page=lambda a, b: a == b,
+                _record_unscannable_url=lambda *a, **k: None, _navigation_failure_note=lambda: "",
+                _record_finding=lambda *a, **k: None, _check_page_for_flags=lambda *a, **k: None,
+                browser=types.SimpleNamespace(
+                    dialog_total=0, dialog_fired=False, dialog_message="",
+                    navigate=AsyncMock(return_value=True), reset_dialog=lambda: None,
+                    fill_and_submit_form_multi=AsyncMock(return_value=("", {})),
+                    page=types.SimpleNamespace(url=landed)),
+            )
+            for _n in ("_recovered_page_healthy", "_landed_on_target"):
+                setattr(eng_, _n, getattr(ScanEngine, _n).__get__(eng_))
+            await ScanEngine._phase_multi_param(eng_, page, None)
+            submits = eng_.browser.fill_and_submit_form_multi.await_count
+            if expect_stop:
+                self.assertEqual(submits, 1)
+                self.assertTrue(eng_.browser._recovery_failed)
+            else:
+                self.assertEqual(submits, 2)
+                self.assertFalse(getattr(eng_.browser, "_recovery_failed", False))
+
+
+class HeaderStateCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recreate_forgets_old_page_header_state(self):
+        """round-11 E: 置換で close した old page の id を scoped-header 状態から除去する。"""
+        from wscan.browser import BrowserManager
+
+        class _Cdp:
+            detached = False
+
+            async def detach(self):
+                _Cdp.detached = True
+        bm = BrowserManager()
+        bm._context = _FakeContext()
+        old = _FakePage()
+        bm.page = old
+        bm._header_attached_page_ids.add(id(old))
+        bm._header_cdp_sessions[id(old)] = _Cdp()
+        self.assertTrue(await bm.recreate_page())
+        self.assertNotIn(id(old), bm._header_attached_page_ids)
+        self.assertNotIn(id(old), bm._header_cdp_sessions)
+        self.assertTrue(_Cdp.detached)
+
+
+class EntryNavigateFloodTests(unittest.IsolatedAsyncioTestCase):
+    async def test_entry_navigate_flood_is_recovered_before_attack(self):
+        """round-11 D: 入口 navigate で dialog が 4+ 発火（全 dismiss 成功）でも _attack_page 前に復旧する。"""
+        from types import SimpleNamespace
+        from unittest import mock
+        from wscan.engine import ScanEngine
+
+        order = []
+        br = SimpleNamespace(dialog_total=0, dialog_dismiss_failed=False)
+
+        async def nav(url, retries=0):
+            br.dialog_total += 5  # flood だが dismiss 成功
+            return True
+        br.navigate = nav
+        br.page = SimpleNamespace(url="http://t/p")
+
+        e = SimpleNamespace(
+            browser=br, wave_errors=[], scanners={}, navigation_retries=0, concurrency=1,
+            flows=[], flag_finder=None, _urls_same_page=lambda a, b: a == b,
+        )
+
+        async def recreate():
+            order.append("recreate")
+            return True
+        br.recreate_page = recreate
+        for n in ("_recover_if_dialog_flood", "_page_recovery_failed", "_recovered_page_healthy",
+                  "_landed_on_target", "_dialog_wedged_since"):
+            setattr(e, n, getattr(ScanEngine, n).__get__(e))
+
+        async def attack(page, plan):
+            order.append("attack")
+        e._attack_page = attack
+        e._phase_multi_param = mock.AsyncMock()
+        e._match_pre_attack_flows = lambda page: []
+        e._profile = lambda *a, **k: None
+        e._maybe_relogin_for_page = mock.AsyncMock()
+        e._ensure_authenticated = mock.AsyncMock()
+        e._checkpoint_is_done = mock.Mock(return_value=False)
+        e._checkpoint_mark_done = mock.Mock()
+        e._save_checkpoint = mock.Mock()
+        e._record_scan_matrix = mock.Mock()
+        page = SimpleNamespace(url="http://t/p", forms=[{"x": 1}], url_params={})
+        await ScanEngine._attack_one_page(e, page, {})
+        self.assertEqual(order[:2], ["recreate", "attack"])
 
 
 if __name__ == "__main__":

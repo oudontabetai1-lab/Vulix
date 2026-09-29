@@ -5673,6 +5673,10 @@ class ScanEngine:
         # ため browser が target ページに居ることを確認し、ずれていれば復帰する。
         # matched_flows は常に定義済み（空リスト可）。flow を1本でも再生したときだけ確認する
         # （単数 matched_flow は _match_pre_attack_flows へのリネームで廃止・Codex #170 P1）。
+        # attack-phase の入口 navigate（flow 復帰 / 再認証+goto）が stored-XSS sink を読んで 4+ dialog を
+        # 発火し全 dismiss 成功すると dialog_dismiss_failed は立たず、以降の baseline は navigate 後に
+        # 取るため delta 0＝flood 未検知になる。入口をここで bracket する（正常時 fired<=3 で不変）。
+        _dlg_entry = getattr(self.browser, "dialog_total", 0)
         if matched_flows:
             # Verify the browser ended on the intended target page.
             # A failed step in the flow may leave the browser on the wrong URL.
@@ -5711,6 +5715,11 @@ class ScanEngine:
                     note="Attack phase could not load page: " + self._navigation_failure_note(),
                 )
                 return
+
+        await self._recover_if_dialog_flood(_dlg_entry)
+        if not await self._recovered_page_healthy(page):
+            self._save_checkpoint()
+            return
 
         # CTF: re-check page after navigating (dynamic content may differ from crawl)
         if self.flag_finder:
@@ -5897,6 +5906,7 @@ class ScanEngine:
                     # recreate 後の blank から target へ戻れていない（失敗 or login/error への redirect）。
                     # 次 field を about:blank/wrong page で走らせ tested 化する偽陰性を防ぐ（未走査で止める）。
                     self.wave_errors.append(f"page_recreate_failed:{page.url}:restore")
+                    self.browser._recovery_failed = True
                     return
                 await self._recover_if_dialog_flood(_dlg_restore)
                 # restore 直後に再 flood して再生成した場合も target へ戻し着地まで検証する。
@@ -5941,11 +5951,15 @@ class ScanEngine:
 
         復旧失敗なら False。recreate した場合は tab が about:blank なので page.url へ戻し、戻れなければ
         False（blank を検査して空 tested を checkpoint 化する偽陰性を防ぐ）。復旧不要なら True。"""
+        # 失敗時は browser._recovery_failed を立て、caller の return が外側ガード（multi-param skip 等）
+        # へ一律に伝播するようにする。正常経路では立てない。
         if self._page_recovery_failed(page.url):
+            self.browser._recovery_failed = True
             return False
         if getattr(self.browser, "_page_recreated", False):
             if not await self.browser.navigate(page.url, retries=self.navigation_retries):
                 self.wave_errors.append(f"page_recreate_failed:{page.url}:navigate")
+                self.browser._recovery_failed = True
                 return False
             # navigate は login/error への 200 redirect でも True を返す（session 復元失敗時など）。
             # 実際に target へ着地したかを確認し、ずれていれば不健全＝後続 scanner に wrong document を
@@ -5953,6 +5967,7 @@ class ScanEngine:
             if not self._landed_on_target(page):
                 landed = getattr(getattr(self.browser, "page", None), "url", "") or ""
                 self.wave_errors.append(f"page_recreate_failed:{page.url}:landed={landed}")
+                self.browser._recovery_failed = True
                 return False
         return True
 
@@ -6089,7 +6104,7 @@ class ScanEngine:
                     # navigate 自体が stored-XSS sink で dialog wedge して失敗しうる。復旧せず continue
                     # すると以降の全組合せが wedge page で未攻撃になる（偽陰性）。
                     await self._recover_if_dialog_flood(_dlg_combo)
-                    if self._page_recovery_failed(page.url):
+                    if not await self._recovered_page_healthy(page):
                         return
                     continue
                 self.browser.reset_dialog()
@@ -6166,7 +6181,7 @@ class ScanEngine:
                 # F06/0059(R4#3): この結合送信で flood/wedge したら次の組合せ/フォームへ持ち越さず
                 # ここで page を作り直す（外側の 1 回 bracket では後続組合せが wedge page で走る）。
                 await self._recover_if_dialog_flood(_dlg_combo)
-                if self._page_recovery_failed(page.url):
+                if not await self._recovered_page_healthy(page):
                     return
 
     def _adaptive_rerank(self, new_findings: list, remaining_pages: list, plans: dict):

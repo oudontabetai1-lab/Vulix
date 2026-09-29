@@ -1339,6 +1339,10 @@ class BrowserManager:
                         await bad.close()
                     except Exception:
                         pass
+                    try:
+                        await _real._forget_header_page(bad)
+                    except Exception:
+                        pass
                     return False
             await self._wire_current_page()
             self.reset_dialog()
@@ -1382,9 +1386,27 @@ class BrowserManager:
                     await old.close()
                 except Exception:
                     pass
+                # close 例外でも scoped-header 状態は掃除する（id(page) は再利用されうるため、残すと
+                # 新 page が「attach 済み」と誤判定される）。
+                try:
+                    await (_real or self)._forget_header_page(old)
+                except Exception:
+                    pass
             return True
         except Exception:
             return False
+
+    async def _forget_header_page(self, page) -> None:
+        """closed page の scoped-header 状態（attach 済み id / CDP session / task）を除去する。"""
+        pid = id(page)
+        self._header_attached_page_ids.discard(pid)
+        self._header_attach_tasks.pop(pid, None)
+        cdp = self._header_cdp_sessions.pop(pid, None)
+        if cdp is not None:
+            try:
+                await cdp.detach()
+            except Exception:
+                pass
 
     _DIALOG_HANDLER_JS = r"""
         (() => {
