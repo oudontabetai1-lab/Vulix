@@ -5588,6 +5588,9 @@ class ScanEngine:
             if self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
                 continue
             page_errored = False
+            # この scanner 実行中に wedge したか（recover と同じ判定。正常時は False で分岐しない）。
+            _dlg_scanner = getattr(self.browser, "dialog_total", 0)
+            page_wedged = False
             try:
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
@@ -5599,17 +5602,25 @@ class ScanEngine:
                 page_findings = page_findings or []
                 for f in page_findings:
                     self._record_finding(f, source="page-level")
+                page_wedged = self._dialog_wedged_since(_dlg_scanner)
                 self._record_scan_matrix(
                     url=page.url,
                     field_name="(page)",
                     check_name=check_name,
-                    status="finding" if page_findings else "tested",
+                    # wedge 中の空結果は blocked read の可能性があり「tested」にしない
+                    # （finding は陽性証拠なので残す）。
+                    status=(
+                        "finding" if page_findings
+                        else "error" if page_wedged else "tested"
+                    ),
                     location="page-level",
                     severity=_top_severity(page_findings),
                     finding_count=len(page_findings),
+                    note="page-level scan ran on a dialog-wedged page" if page_wedged else "",
                 )
             except Exception as e:
                 page_errored = True
+                page_wedged = self._dialog_wedged_since(_dlg_scanner)
                 # 例外前に得ていた partial finding の副作用（通知/監視 emit 等）を回す。
                 # record_finding で all_findings には既登録だが、engine 側の _record_finding を
                 # 通さないと webhook 等が走らない（Codex #157 P2）。dedup 済みなので二重にならない。
@@ -5626,8 +5637,17 @@ class ScanEngine:
                     location="page-level",
                     note=f"page-level scan raised: {type(e).__name__}: {e}",
                 )
-            if not page_errored:
+            if not page_errored and not page_wedged:
                 self._checkpoint_mark_done(cp_url, "(page)", 0, check_name)
+            if page_wedged:
+                # wedge した scanner は checkpoint 完了化せず（resume で再実行。finding は dedup 済み）、
+                # 後続 scanner が blocked page を掴んで空 tested になる前にここで復旧する。
+                # 復旧後は since 基準を進め、区間末の復旧が累積 dialog_total を再カウントして
+                # 健全 page を二重再生成するのを避ける。
+                _dlg_pagelevel = await self._recover_if_dialog_flood(_dlg_scanner)
+                if self._page_recovery_failed(page.url):
+                    self._save_checkpoint()
+                    return  # 残 scanner は未 checkpoint＝resume 回収
         # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
         self._save_checkpoint()
 
@@ -5839,6 +5859,8 @@ class ScanEngine:
                 await self._recover_if_dialog_flood(_dlg_field)
                 if self._page_recovery_failed(page.url):
                     return
+                if getattr(self.browser, "_page_recreated", False):
+                    await self.browser.navigate(page.url, retries=self.navigation_retries)
                 continue
 
             # restore navigate は wedge した page に対しては hang/失敗するため、その前に回復する。
@@ -5846,7 +5868,10 @@ class ScanEngine:
             if self._page_recovery_failed(page.url):
                 return  # 残 field は未走査＝未完（checkpoint 完了化しない）
 
-            if not is_url_param:
+            # recreate 後の page は blank。carrier 問わず target へ戻す（url_param 後の form field が
+            # navigate 無しの SQLi baseline を blank page で取って失敗するのを防ぐ）。非 recreate の
+            # url_param は従来どおり navigate しない。
+            if not is_url_param or getattr(self.browser, "_page_recreated", False):
                 # F06/0059(#1): restore navigate 自体が stored-XSS listing で再 flood/wedge しうる。
                 # 直前の baseline から回復すると次 field が degraded page で走る（次 field の baseline は
                 # 走査直前ではなく _scan_field 呼び出し前に取るため、restore の劣化を検知できない）。
@@ -5862,6 +5887,9 @@ class ScanEngine:
                 await self._recover_if_dialog_flood(_dlg_restore)
                 if self._page_recovery_failed(page.url):
                     return
+                if getattr(self.browser, "_page_recreated", False):
+                    # restore 直後に再 flood して再生成した場合も target へ戻して次 field を健全に走らせる。
+                    await self.browser.navigate(page.url, retries=self.navigation_retries)
 
     async def _recover_if_dialog_flood(self, since: int) -> int:
         """dialog flood/wedge を検知したら現在の browser の page を作り直す（F06/0059）。
@@ -5880,8 +5908,10 @@ class ScanEngine:
             wedged = getattr(br, "dialog_dismiss_failed", False)
             # 直近呼び出しの復旧失敗を browser（worker 毎）に保持する（呼び出し側が _page_recovery_failed で参照）。
             br._recovery_failed = False
+            br._page_recreated = False
             if fired > 3 or wedged:
                 if await br.recreate_page():
+                    br._page_recreated = True  # 呼び出し側が blank page から target へ復帰する目印
                     self.wave_errors.append(
                         f"page_recreated_after_dialog_flood:fired={fired},wedged={wedged}"
                     )
@@ -5893,6 +5923,16 @@ class ScanEngine:
             except Exception:
                 pass
         return getattr(br, "dialog_total", 0)
+
+    def _dialog_wedged_since(self, since: int) -> bool:
+        """``_recover_if_dialog_flood`` と同じ flood/wedge 判定（純粋な観測・副作用なし）。"""
+        br = self.browser
+        try:
+            return (getattr(br, "dialog_total", 0) - since > 3) or bool(
+                getattr(br, "dialog_dismiss_failed", False)
+            )
+        except Exception:
+            return False
 
     def _page_recovery_failed(self, where: str) -> bool:
         """直前の ``_recover_if_dialog_flood`` が復旧に失敗していれば True（記録つき）。

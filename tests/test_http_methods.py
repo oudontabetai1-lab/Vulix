@@ -201,6 +201,9 @@ class _FakeEngine:
     def _page_recovery_failed(self, where):
         return False
 
+    def _dialog_wedged_since(self, since):
+        return False
+
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
     def _scanner(self):

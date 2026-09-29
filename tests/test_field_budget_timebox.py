@@ -429,6 +429,104 @@ class RecoveryFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scan.await_count, 1)  # 2 field 目は走らない
 
 
+class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
+    """Codex #181 round-7 P1: page-level scanner が wedge したら tested/checkpoint 化せず、per-scanner で復旧する。"""
+
+    def _engine(self, recreate_ok):
+        from unittest import mock
+        from types import SimpleNamespace
+        from wscan.engine import ScanEngine
+
+        br = SimpleNamespace(dialog_total=0, dialog_dismiss_failed=False, recreated=0)
+
+        async def recreate():
+            br.recreated += 1
+            if recreate_ok:
+                br.dialog_dismiss_failed = False
+            return recreate_ok
+        br.recreate_page = recreate
+
+        class _S:
+            HAS_PAGE_LEVEL = True
+
+            def __init__(self, wedge):
+                self.wedge, self.ran = wedge, 0
+
+            async def scan_page(self_, url):
+                self_.ran += 1
+                if self_.wedge:
+                    br.dialog_dismiss_failed = True
+                return []
+
+        e = SimpleNamespace(
+            browser=br, wave_errors=[], scanners={"a": _S(True), "b": _S(False)},
+            navigation_retries=0, concurrency=1, flows=[],
+        )
+        for n in ("_recover_if_dialog_flood", "_page_recovery_failed", "_dialog_wedged_since"):
+            setattr(e, n, getattr(ScanEngine, n).__get__(e))
+        e._match_pre_attack_flows = lambda page: []
+        e._profile = lambda *a, **k: None
+        e._maybe_relogin_for_page = mock.AsyncMock()
+        e._checkpoint_is_done = mock.Mock(return_value=False)
+        e._checkpoint_mark_done = mock.Mock()
+        e._save_checkpoint = mock.Mock()
+        e._record_scan_matrix = mock.Mock()
+        e._record_finding = mock.Mock()
+        return e
+
+    async def _run(self, e):
+        from types import SimpleNamespace
+        from wscan.engine import ScanEngine
+        page = SimpleNamespace(url="http://t/p", forms=[], url_params=[])
+        await ScanEngine._attack_one_page(e, page, {})
+
+    async def test_wedged_scanner_not_checkpointed_and_recovery_failure_stops(self):
+        e = self._engine(recreate_ok=False)
+        await self._run(e)
+        self.assertEqual(e.scanners["b"].ran, 0)              # 残 scanner は走らない（未 checkpoint）
+        e._checkpoint_mark_done.assert_not_called()           # wedge scanner も完了化しない
+        self.assertEqual(e._record_scan_matrix.call_args.kwargs["status"], "error")
+
+    async def test_recovery_success_continues_and_only_healthy_scanner_checkpointed(self):
+        e = self._engine(recreate_ok=True)
+        await self._run(e)
+        self.assertEqual(e.scanners["b"].ran, 1)
+        self.assertEqual(e._checkpoint_mark_done.call_count, 1)   # b のみ
+        self.assertEqual(e.browser.recreated, 1)                  # 区間末で二重再生成しない
+
+
+class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_navigates_to_page_after_recreate_for_url_param(self):
+        """Codex #181 round-7 P2: url_param field の復旧後も page.url へ戻す。非 recreate は従来どおり navigate しない。"""
+        import asyncio as _asyncio
+        import types
+        from unittest.mock import AsyncMock
+        from wscan.engine import CrawledPage, ScanEngine
+
+        for recreated in (True, False):
+            nav = AsyncMock(return_value=True)
+            br = types.SimpleNamespace(dialog_total=0, navigate=nav)
+
+            async def _recover(since, br=br, recreated=recreated):
+                # 最初の区間（scan 直後）だけ recreate。restore 後は健全。
+                br._page_recreated = recreated and not getattr(br, "_done", False)
+                br._done = True
+                return 0
+            page = CrawledPage(url="http://t/l?q=1", html="", forms=[], url_params={"q": "1"}, depth=0)
+            engine = types.SimpleNamespace(
+                _is_url_excluded=lambda url: False, max_forms=5, skip_registration=False,
+                exclude_urls=None, _profile=lambda msg: None, scanned_forms=set(),
+                _scanned_forms_lock=_asyncio.Lock(), total_fields=0, exclude_fields=set(),
+                controller=types.SimpleNamespace(checkpoint=AsyncMock()),
+                _scan_field=AsyncMock(), browser=br, navigation_retries=0,
+                _recover_if_dialog_flood=_recover, _page_recovery_failed=lambda w: False,
+                _record_unscannable_url=lambda *a, **k: None, _navigation_failure_note=lambda: "",
+            )
+            engine._attack_page = types.MethodType(ScanEngine._attack_page, engine)
+            await engine._attack_page(page, None)
+            self.assertEqual(nav.await_count, 1 if recreated else 0, recreated)
+
+
 class BudgetEnvTests(unittest.TestCase):
     def test_non_finite_budget_falls_back(self):
         import os
