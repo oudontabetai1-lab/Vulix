@@ -71,7 +71,8 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
                 )
             ),
             browser=types.SimpleNamespace(
-                page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>"))
+                page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>")),
+                get_page_source=AsyncMock(return_value="<html></html>"),
             ),
             waf_detector=types.SimpleNamespace(_detected=None),
             completed_fields=0,
@@ -248,7 +249,7 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.scanners["xss"].scan_field.await_count, 2)
         engine.payload_gen._check_llm_available.assert_awaited_once()
         engine.adaptive_engine.generate.assert_not_awaited()
-        engine.browser.page.content.assert_not_awaited()
+        engine.browser.get_page_source.assert_not_awaited()
 
     async def test_unavailable_llm_returns_empty_success(self):
         engine = self._engine(None)
@@ -378,7 +379,8 @@ class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
             _adaptive_llm_availability_lock=asyncio.Lock(),
             adaptive_engine=types.SimpleNamespace(generate=AsyncMock(side_effect=generate)),
             browser=types.SimpleNamespace(
-                page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>"))
+                page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>")),
+                get_page_source=AsyncMock(return_value="<html></html>"),
             ),
             waf_detector=types.SimpleNamespace(_detected=None),
             completed_fields=0,

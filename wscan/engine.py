@@ -25,6 +25,7 @@ import datetime
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -1342,6 +1343,9 @@ class ScanEngine:
         try:
             self._field_attack_budget_s = float(os.environ.get("WSCAN_FIELD_BUDGET", "120") or "120")
         except (TypeError, ValueError):
+            self._field_attack_budget_s = 120.0
+        # nan は `> 0` が偽で保護を黙って無効化、inf は失効しない deadline になる。非有限は既定へ。
+        if not math.isfinite(self._field_attack_budget_s):
             self._field_attack_budget_s = 120.0
         self._finding_dedup: set[tuple] = set()     # (url, field_name, check_type) — prevent duplicates
         self.attack_plans: list = []
@@ -5631,6 +5635,8 @@ class ScanEngine:
         # stored-XSS 観測ページは直後に早期 return するため、field 攻撃前の回復には到達しない。
         # 早期 return より前・後続の再認証/flow navigate より前に回復し、wedge を持ち越さない。
         await self._recover_if_dialog_flood(_dlg_pagelevel)
+        if self._page_recovery_failed(page.url):
+            return  # wedge page のまま field 攻撃しない（未攻撃 field は未完のまま resume で回収）
 
         if not page.forms and not page.url_params:
             return
@@ -5690,14 +5696,15 @@ class ScanEngine:
         plan = plans.get(page.url)
 
         # Phase 3a + 3b: individual field scan + adaptive AI
+        self.browser._recovery_failed = False  # 前ページの stale 値を持ち込まない
         await self._attack_page(page, plan)
+        if getattr(self.browser, "_recovery_failed", False):
+            return  # _attack_page 内で復旧失敗済み（記録済み）。wedge page で multi-param しない
 
         # Phase 3d: multi-parameter simultaneous injection
-        # F06/0059: multi_param 区間の flood/wedge も回復対象（field 区間の後に走るため
-        # _attack_page の回復ではカバーされない）。前後で dialog_total を測って劣化を持ち越さない。
-        _dlg_mp = getattr(self.browser, "dialog_total", 0)
+        # 組合せ毎に _phase_multi_param 内で回復する（P2-E: phase 末の外側回復は累積 dialog_total を
+        # 再カウントして回復済みの健全 page を二重に再生成するため削除）。
         await self._phase_multi_param(page, plan)
-        await self._recover_if_dialog_flood(_dlg_mp)
 
     async def _attack_page(self, page: CrawledPage, plan: Optional[PageAttackPlan]):
         """Run all scanners on all fields of a single page."""
@@ -5830,10 +5837,14 @@ class ScanEngine:
                 console.print(f"  [dim red]Field scan error ({field_name}): {e}[/dim red]")
                 # 例外途中で flood/wedge していても次 field へ持ち越さない。
                 await self._recover_if_dialog_flood(_dlg_field)
+                if self._page_recovery_failed(page.url):
+                    return
                 continue
 
             # restore navigate は wedge した page に対しては hang/失敗するため、その前に回復する。
             await self._recover_if_dialog_flood(_dlg_field)
+            if self._page_recovery_failed(page.url):
+                return  # 残 field は未走査＝未完（checkpoint 完了化しない）
 
             if not is_url_param:
                 # F06/0059(#1): restore navigate 自体が stored-XSS listing で再 flood/wedge しうる。
@@ -5849,6 +5860,8 @@ class ScanEngine:
                         + self._navigation_failure_note(),
                     )
                 await self._recover_if_dialog_flood(_dlg_restore)
+                if self._page_recovery_failed(page.url):
+                    return
 
     async def _recover_if_dialog_flood(self, since: int) -> int:
         """dialog flood/wedge を検知したら現在の browser の page を作り直す（F06/0059）。
@@ -5865,13 +5878,32 @@ class ScanEngine:
         try:
             fired = getattr(br, "dialog_total", 0) - since
             wedged = getattr(br, "dialog_dismiss_failed", False)
-            if (fired > 3 or wedged) and await br.recreate_page():
-                self.wave_errors.append(
-                    f"page_recreated_after_dialog_flood:fired={fired},wedged={wedged}"
-                )
+            # 直近呼び出しの復旧失敗を browser（worker 毎）に保持する（呼び出し側が _page_recovery_failed で参照）。
+            br._recovery_failed = False
+            if fired > 3 or wedged:
+                if await br.recreate_page():
+                    self.wave_errors.append(
+                        f"page_recreated_after_dialog_flood:fired={fired},wedged={wedged}"
+                    )
+                else:
+                    br._recovery_failed = True
         except Exception:
-            pass
+            try:
+                br._recovery_failed = True
+            except Exception:
+                pass
         return getattr(br, "dialog_total", 0)
+
+    def _page_recovery_failed(self, where: str) -> bool:
+        """直前の ``_recover_if_dialog_flood`` が復旧に失敗していれば True（記録つき）。
+
+        wedge した page のまま残作業を走らせると空/timeout 応答を tested として checkpoint 完了化し
+        サイレント偽陰性になる。True のとき呼び出し側は残作業を打ち切り、checkpoint を完了化しない
+        （＝resume で回収）。"""
+        if not getattr(self.browser, "_recovery_failed", False):
+            return False
+        self.wave_errors.append(f"page_recreate_failed:{where}")
+        return True
 
     # =========================================================================
     # Phase 3d: Multi-parameter simultaneous injection
@@ -5977,6 +6009,11 @@ class ScanEngine:
                         note="Multi-parameter scan could not load page: "
                         + self._navigation_failure_note(),
                     )
+                    # navigate 自体が stored-XSS sink で dialog wedge して失敗しうる。復旧せず continue
+                    # すると以降の全組合せが wedge page で未攻撃になる（偽陰性）。
+                    await self._recover_if_dialog_flood(_dlg_combo)
+                    if self._page_recovery_failed(page.url):
+                        return
                     continue
                 self.browser.reset_dialog()
 
@@ -6052,6 +6089,8 @@ class ScanEngine:
                 # F06/0059(R4#3): この結合送信で flood/wedge したら次の組合せ/フォームへ持ち越さず
                 # ここで page を作り直す（外側の 1 回 bracket では後続組合せが wedge page で走る）。
                 await self._recover_if_dialog_flood(_dlg_combo)
+                if self._page_recovery_failed(page.url):
+                    return
 
     def _adaptive_rerank(self, new_findings: list, remaining_pages: list, plans: dict):
         """
@@ -6410,7 +6449,11 @@ class ScanEngine:
 
         # Get current page HTML as probe context
         try:
-            page_html = await self.browser.page.content()
+            # 有界版（無限ハング時は ""）。事前 deadline チェック後に始めた read が wedge で
+            # 永久ブロックしないよう、かつ "" は取得不能として中断（未完）扱いにする。
+            page_html = await self.browser.get_page_source()
+            if not page_html:
+                return None
         except Exception:
             return None
 

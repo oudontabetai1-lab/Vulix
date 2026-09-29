@@ -367,6 +367,101 @@ class AdaptiveEntryGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(r)
 
 
+class RecoveryFailureTests(unittest.IsolatedAsyncioTestCase):
+    """Codex #181 round-6 P1-C: recreate 失敗を握り潰さず、残作業を完了化させない。"""
+
+    def _eng(self, recreate_ok):
+        from wscan.engine import ScanEngine
+
+        class _Br:
+            dialog_total = 10
+            dialog_dismiss_failed = True
+
+            async def recreate_page(self_):
+                return recreate_ok
+
+        e = object.__new__(ScanEngine)
+        e._browser = _Br()
+        e.wave_errors = []
+        return e
+
+    async def test_recreate_failure_is_recorded_and_flagged(self):
+        e = self._eng(False)
+        await e._recover_if_dialog_flood(0)
+        self.assertTrue(e._page_recovery_failed("http://h/p"))
+        self.assertIn("page_recreate_failed:http://h/p", e.wave_errors)
+
+    async def test_recreate_success_not_flagged(self):
+        e = self._eng(True)
+        await e._recover_if_dialog_flood(0)
+        self.assertFalse(e._page_recovery_failed("http://h/p"))
+
+    async def test_attack_page_stops_and_does_not_scan_remaining_fields(self):
+        """復旧失敗後は残 field を _scan_field（＝tested checkpoint 化）へ進めない。"""
+        import asyncio as _asyncio
+        import types
+        from unittest.mock import AsyncMock
+        from wscan.engine import CrawledPage, ScanEngine
+
+        async def _recover(since):
+            return 0
+
+        page = CrawledPage(
+            url="http://t/list", html="",
+            forms=[{"index": 0, "method": "GET", "action": "/list",
+                    "inputs": [{"name": "a", "type": "text"}, {"name": "b", "type": "text"}]}],
+            url_params=[], depth=0,
+        )
+        scan = AsyncMock()
+        engine = types.SimpleNamespace(
+            _is_url_excluded=lambda url: False, max_forms=5, skip_registration=False,
+            exclude_urls=None, _profile=lambda msg: None, scanned_forms=set(),
+            _scanned_forms_lock=_asyncio.Lock(), total_fields=0, exclude_fields=set(),
+            controller=types.SimpleNamespace(checkpoint=AsyncMock()),
+            _scan_field=scan,
+            browser=types.SimpleNamespace(dialog_total=0, navigate=AsyncMock(return_value=True)),
+            navigation_retries=0, _recover_if_dialog_flood=_recover,
+            _page_recovery_failed=lambda where: True,
+            _record_unscannable_url=lambda *a, **k: None, _navigation_failure_note=lambda: "",
+        )
+        engine._attack_page = types.MethodType(ScanEngine._attack_page, engine)
+        await engine._attack_page(page, None)
+        self.assertEqual(scan.await_count, 1)  # 2 field 目は走らない
+
+
+class BudgetEnvTests(unittest.TestCase):
+    def test_non_finite_budget_falls_back(self):
+        import os
+        from unittest import mock
+        from wscan.engine import ScanEngine
+        for bad in ("nan", "inf", "-inf"):
+            with mock.patch.dict(os.environ, {"WSCAN_FIELD_BUDGET": bad}):
+                e = ScanEngine("http://127.0.0.1:1/", checks=["xss"], llm_provider="none",
+                               open_report=False)
+                self.assertEqual(e._field_attack_budget_s, 120.0, bad)
+
+
+class XssBaselineGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_xss_skips_baseline_navigation_after_budget(self):
+        from wscan.scanners.xss import XSSScanner
+
+        class _Br:
+            navigated = 0
+
+            async def navigate(self, *a, **k):
+                _Br.navigated += 1
+                return True
+
+        engine = _Engine()
+        engine.browser = _Br()
+        sc = XSSScanner(engine)
+        ip = _ip()
+        with _Budget(time.monotonic() - 1.0):
+            r = await sc.scan_injection_point(ip, {"name": "q"})
+        self.assertEqual(r, [])
+        self.assertEqual(_Br.navigated, 0)
+
+
 class _GateEngine(_Engine):
     pass
 
@@ -490,6 +585,7 @@ class AttackPageRestoreRecoveryTests(unittest.IsolatedAsyncioTestCase):
             ),
             navigation_retries=0,
             _recover_if_dialog_flood=_recover,
+            _page_recovery_failed=lambda where: False,
             _record_unscannable_url=lambda *a, **k: None,
             _navigation_failure_note=lambda: "",
         )
@@ -631,6 +727,7 @@ class MultiParamRecoveryTests(unittest.IsolatedAsyncioTestCase):
             _effective_delay=0,
             flag_finder=None,
             _recover_if_dialog_flood=_recover,
+            _page_recovery_failed=lambda where: False,
             _record_unscannable_url=lambda *a, **k: None,
             _navigation_failure_note=lambda: "",
             _record_finding=lambda *a, **k: None,

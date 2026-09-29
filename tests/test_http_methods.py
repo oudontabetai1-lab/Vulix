@@ -198,6 +198,9 @@ class _FakeEngine:
         # F06/0059(#4): page-level 区間末の dialog flood 回復呼び出しの最小スタブ。
         return since
 
+    def _page_recovery_failed(self, where):
+        return False
+
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
     def _scanner(self):
