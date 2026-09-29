@@ -127,14 +127,17 @@ class PathTraversalScanner(BaseScanner):
         await self.log_payload_test(
             field_name, "baseline_test_value", "path_traversal_baseline", ip.url
         )
-        baseline_source, baseline_pair = await self._apply_ip(
-            ip, "baseline_test_value"
-        )
+        # 0035-D1: typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま
+        # 取り出す（非 SENT でも source が非空のことがある＝pair 未捕捉のフォーム送信。
+        # state で分岐して捨てると偽陰性になるため判定は従来どおり source/pair のみ）。
+        baseline_result = await self.dispatch(ip, "baseline_test_value")
+        baseline_source, baseline_pair = baseline_result.source, baseline_result.pair
 
         async def _test_payload(payload: str, check_label: str = "path_traversal") -> bool:
             await self.log_payload_test(field_name, payload, check_label, ip.url)
 
-            source, pair = await self._apply_ip(ip, payload)
+            result = await self.dispatch(ip, payload)
+            source, pair = result.source, result.pair
             await asyncio.sleep(0.2 * self.sleep_factor)
 
             match = self.check_response_for_patterns(source, PATH_TRAVERSAL_PATTERNS)
