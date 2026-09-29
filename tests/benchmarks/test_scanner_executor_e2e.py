@@ -182,6 +182,10 @@ def test_realistic_healthcare_stored_xss_scanner_scorecard():
     """格納型 XSS を脆弱=TP・エスケープ安全ツイン=TN で実採点する。
 
     xxe は XML carrier が採点不能のため gap（E2E 対象外）。
+
+    脆弱ケースは格納型 XSS のページ単位 marker 観測で検出する（注入フォームのページとは別の
+    クロール済みページで注入 marker を観測）。エスケープ済み安全ツインは実 DOM 要素が生成されず
+    finding にならない。
     """
     _require_chromium()
     out = _run_manifest("realistic_healthcare_stored_xss.yaml", {"stored_xss"})

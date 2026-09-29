@@ -265,6 +265,7 @@ class ChainScanner:
         安全に escape された格納はテキストノードになり要素にならないので False。生タグとして
         描画された HTML injection のときだけ True（部分文字列一致の安全ツイン FP を防ぐ・#184）。
         uid は ``uuid4().hex`` 断片＝英数字のみで CSS セレクタとして安全。
+        注: DOM 要素照合は iframe / shadow DOM 内を貫通しない（escape 済みテキストの FP 防止を優先した許容トレードオフ）。
         """
         try:
             el = await self.browser.page.query_selector(f"#wscc_{uid}")
