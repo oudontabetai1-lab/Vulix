@@ -1,0 +1,70 @@
+"""0035-D1: ldap_injection が typed dispatch() 経由でも従来判定と同一であることを守る。"""
+import unittest
+from unittest.mock import AsyncMock
+
+from wscan.dispatch_result import DispatchResult, DispatchState
+from wscan.injection_point import InjectionPoint
+from wscan.scanner_contract import Carrier
+from wscan.scanners.ldap_injection import LDAPScanner
+from tests.test_baseline_and_timing_guards import _DummyEngine
+
+URL = "http://fixture.test/page?q=a"
+def _vuln(url, fi, name, payload, is_url):
+    if payload == "normaluser":
+        return "login form", {"response": {"body": "login"}}
+    return "javax.naming.directory.InvalidSearchFilterException", {"response": {"body": "e"}}
+
+
+def _safe(url, fi, name, payload, is_url):
+    return "login form", {"response": {"body": "login"}}
+
+
+def _scanner(fn):
+    s = LDAPScanner(_DummyEngine())
+    s.get_payloads = AsyncMock(return_value=["; id"])
+    s._apply_payload = AsyncMock(side_effect=fn)
+    return s
+
+
+def _ip():
+    return InjectionPoint.for_url_param(URL, "q")
+
+
+class LDAPScannerDispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scan_goes_through_dispatch(self):
+        s = _scanner(_vuln)
+        real = s.dispatch
+        s.dispatch = AsyncMock(side_effect=real)
+        await s.scan_injection_point(_ip(), {"name": "q"})
+        self.assertGreaterEqual(s.dispatch.await_count, 2)  # baseline + payload
+
+    async def test_vulnerable_twin_detected(self):
+        f = await _scanner(_vuln).scan_injection_point(_ip(), {"name": "q"})
+        self.assertEqual(len(f), 1)
+
+    async def test_safe_twin_not_detected(self):
+        f = await _scanner(_safe).scan_injection_point(_ip(), {"name": "q"})
+        self.assertEqual(f, [])
+
+    async def test_transport_exception_propagation_unchanged(self):
+        # LDAP は baseline/probe の例外を既存 except で握って [] を返す（従来挙動を維持）。
+        def boom(url, fi, name, payload, is_url):
+            raise RuntimeError("boom")
+        f = await _scanner(boom).scan_injection_point(_ip(), {"name": "q"})
+        self.assertEqual(f, [])
+
+    async def test_non_sent_body_kept_as_legacy(self):
+        # pair 空でも本文があれば source が保持され判定に使われる（baseline 空 pair でも検出）。
+        f = await _scanner(lambda *a: (_vuln(*a)[0], {})).scan_injection_point(
+            _ip(), {"name": "q"}
+        )
+        self.assertEqual(len(f), 1)
+
+    async def test_blocked_result_is_no_match(self):
+        s = _scanner(_vuln)
+        s.dispatch = AsyncMock(
+            return_value=DispatchResult(state=DispatchState.BLOCKED, carrier=Carrier.QUERY)
+        )
+        f = await s.scan_injection_point(_ip(), {"name": "q"})
+        self.assertEqual(f, [])
+        s._apply_payload.assert_not_called()
