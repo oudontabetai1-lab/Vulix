@@ -13,12 +13,20 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
+  csrf:
+    reason: DOM 依存 page-level scanner が navigation 前に実行され宣言ページを観測しない（engine._attack_one_page の順序課題・Codex #183 P1）。修正後に case 追加
+    owner_task: "0034"
+    deadline: "2026-12-31"
   deserialization:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
   graphql:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  info_disclosure:
+    reason: DOM 依存 page-level scanner が navigation 前に実行され宣言ページを観測しない（engine._attack_one_page の順序課題・Codex #183 P1）。修正後に case 追加
     owner_task: "0034"
     deadline: "2026-12-31"
   mail_header:
