@@ -637,6 +637,11 @@ class SQLiScanner(BaseScanner):
         if baseline and ip.location != "json_body":
             if not self.may_scan_injection_point(ip):
                 return "", {}
+            # F06/0059: baseline は base._apply_ip を経由せず browser を直叩きするため、時間ボックス
+            # gate をここにも適用する（さもないと budget 枯渇後も baseline 2回投入で同じ stored sink を
+            # 再 flood しうる）。超過なら注入せず truncated 記録して短絡。
+            if self._field_budget_gate():
+                return "", {}
             if ip.location == "url_param":
                 return await self.browser.test_url_param(
                     ip.url, ip.parameter_id, payload

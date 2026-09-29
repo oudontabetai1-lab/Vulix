@@ -202,6 +202,11 @@ class XSSScanner(BaseScanner):
         if ip.location == "json_body":
             return []
 
+        # F06/0059: baseline も browser を直叩きする（_apply_ip 非経由）ため時間ボックス gate を先に通す。
+        # 超過なら alert-flooding sink を再訪せず truncated 記録して未完扱い（SQLi baseline と同流儀）。
+        if self._field_budget_gate():
+            return []
+
         findings = []
         field_name = ip.parameter_id
         payloads = await self.get_payloads(field_name, ip.url, ip=ip)

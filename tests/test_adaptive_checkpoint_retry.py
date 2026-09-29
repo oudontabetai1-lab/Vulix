@@ -71,7 +71,8 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
                 )
             ),
             browser=types.SimpleNamespace(
-                page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>"))
+                page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>")),
+                get_page_source=AsyncMock(return_value="<html></html>"),
             ),
             waf_detector=types.SimpleNamespace(_detected=None),
             completed_fields=0,
@@ -113,6 +114,62 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn(
+            call("https://example.test", "q", 0, "(adaptive:xss)", False),
+            engine._checkpoint_mark_done.call_args_list,
+        )
+
+    async def test_deadline_exceeded_does_not_mark_adaptive_done(self):
+        """#5(F06/0059): フィールド時間ボックス超過中は adaptive を完了化しない。
+
+        期限切れ deadline 下では送信が gate されて空振りするため、checkpoint を完了化すると
+        resume が adaptive payload を恒久 skip する。break で未完のまま残す（resume 回収）。
+        """
+        import time as _time
+        import wscan.engine as _eng
+
+        engine = self._engine(["<svg/onload=alert(1)>"])  # 期限がなければ mark done される内容
+        _tok = _eng._FIELD_ATTACK_DEADLINE.set(_time.monotonic() - 1.0)
+        try:
+            result = await engine._adaptive_attack_field(
+                "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+            )
+        finally:
+            _eng._FIELD_ATTACK_DEADLINE.reset(_tok)
+
+        self.assertNotIn(
+            call("https://example.test", "q", 0, "(adaptive:xss)", False),
+            engine._checkpoint_mark_done.call_args_list,
+        )
+        # LLM 生成にも到達しない（超過時は送信・生成せず短絡）。
+        engine.adaptive_engine.generate.assert_not_awaited()
+
+    async def test_truncation_during_scan_does_not_mark_adaptive_done(self):
+        """#4(F06/0059): pre-check で deadline 有効でも adaptive scan 実行中に期限切れになると
+        scanner gate が _FIELD_BUDGET_TRUNCATED に記録し正常 return する。ここで mark_done すると
+        resume が未送信 adaptive payload を恒久 skip する。truncated を再チェックし完了化しない。"""
+        import wscan.engine as _eng
+
+        engine = self._engine(["<svg/onload=alert(1)>"])
+        _trunc: set = set()
+
+        async def scan_and_truncate(ip, field):
+            _trunc.add("xss")  # scan 中に gate が truncated 記録した状況を模す
+            return []
+
+        engine.scanners["xss"].scan_injection_point = AsyncMock(
+            side_effect=scan_and_truncate
+        )
+        _tok = _eng._FIELD_BUDGET_TRUNCATED.set(_trunc)
+        try:
+            result = await engine._adaptive_attack_field(
+                "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+            )
+        finally:
+            _eng._FIELD_BUDGET_TRUNCATED.reset(_tok)
+
+        self.assertIsNone(result)  # 未完（resume 回収対象）
+        engine.adaptive_engine.generate.assert_awaited()  # pre-check は valid＝生成には到達
+        self.assertNotIn(
             call("https://example.test", "q", 0, "(adaptive:xss)", False),
             engine._checkpoint_mark_done.call_args_list,
         )
@@ -192,7 +249,7 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.scanners["xss"].scan_field.await_count, 2)
         engine.payload_gen._check_llm_available.assert_awaited_once()
         engine.adaptive_engine.generate.assert_not_awaited()
-        engine.browser.page.content.assert_not_awaited()
+        engine.browser.get_page_source.assert_not_awaited()
 
     async def test_unavailable_llm_returns_empty_success(self):
         engine = self._engine(None)
@@ -322,7 +379,8 @@ class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
             _adaptive_llm_availability_lock=asyncio.Lock(),
             adaptive_engine=types.SimpleNamespace(generate=AsyncMock(side_effect=generate)),
             browser=types.SimpleNamespace(
-                page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>"))
+                page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>")),
+                get_page_source=AsyncMock(return_value="<html></html>"),
             ),
             waf_detector=types.SimpleNamespace(_detected=None),
             completed_fields=0,

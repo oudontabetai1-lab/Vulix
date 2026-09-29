@@ -25,8 +25,10 @@ import datetime
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
+import time
 import warnings
 import xml.etree.ElementTree as _ET
 from collections import Counter, deque
@@ -50,6 +52,20 @@ _CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
 # Per-task payload override: maps check_type → list[str].  Set for the duration
 # of a single scan_field call so parallel workers never clobber each other.
 _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", default=None)
+# F06/0059: フィールド単位 attack 時間ボックスの task-local 状態。engine 属性だと
+# --concurrency>1 の並行ワーカー（各 _scan_field は別タスク）が共有 deadline を上書きし合い、
+# 遅い stored-sink の deadline が前進し続けて budget が効かなくなる。payload override と同じく
+# ContextVar でタスクローカル化する。base._apply_ip が遅延 import で参照する。
+#  - _FIELD_ATTACK_DEADLINE: monotonic 締切（None=無効）
+#  - _FIELD_BUDGET_NOTES: 観測ノート重複抑止用の check 集合（フィールド毎に新規）
+#  - _FIELD_BUDGET_TRUNCATED: budget 超過で注入を打ち切った check 集合（checkpoint 完了抑止に使用）
+#  - _FIELD_BUDGET_IDENT: 現フィールドの (url, field_name)。time-box 打ち切りノートに injection point
+#    情報を載せ、benchmark が「同 check の別 field の完全実行行」を巻き込まず per-IP に degradation を
+#    絞れるようにする（0059/F06 Codex R4#2）。
+_FIELD_ATTACK_DEADLINE: ContextVar = ContextVar("wscan_field_deadline", default=None)
+_FIELD_BUDGET_NOTES: ContextVar = ContextVar("wscan_field_budget_notes", default=None)
+_FIELD_BUDGET_TRUNCATED: ContextVar = ContextVar("wscan_field_budget_truncated", default=None)
+_FIELD_BUDGET_IDENT: ContextVar = ContextVar("wscan_field_budget_ident", default=None)
 
 
 def _observability_warning_text(summary: dict) -> str:
@@ -1308,6 +1324,21 @@ class ScanEngine:
         # State
         self.all_findings: list = []
         self.wave_errors: list = []                  # 検出力低下事象の観測ログ（base から共有）
+        # F06/0059: フィールド単位の attack 時間ボックス。stored sink（コメント欄等）で反射
+        # スキャナ＋evolution/mutation wave が alert flood を積み、単一フィールドが数千秒を消費して
+        # 以降のフィールドを SCAN_TIMEOUT で starve させる回帰を防ぐ（実測: comment 1 件で 2587s）。
+        # deadline/notes/truncated 状態は task-local な ContextVar（_FIELD_ATTACK_DEADLINE 等）に持ち、
+        # _scan_field が張り直す（並行ワーカーで汚染しない）。deadline 超過後は base._apply_ip が
+        # 追加注入を止め、当該 check を truncated に記録して checkpoint 完了化を防ぐ（baseline は先に
+        # 実行済み・stored_xss は独自送信で不影響・verify は対象外）。既定 120s は実測の最遅正常
+        # フィールド(~45s)の 2.6 倍。WSCAN_FIELD_BUDGET=0 で無効化。
+        try:
+            self._field_attack_budget_s = float(os.environ.get("WSCAN_FIELD_BUDGET", "120") or "120")
+        except (TypeError, ValueError):
+            self._field_attack_budget_s = 120.0
+        # nan は `> 0` が偽で保護を黙って無効化、inf は失効しない deadline になる。非有限は既定へ。
+        if not math.isfinite(self._field_attack_budget_s):
+            self._field_attack_budget_s = 120.0
         self._finding_dedup: set[tuple] = set()     # (url, field_name, check_type) — prevent duplicates
         self.attack_plans: list = []
         self.visited_urls: set = set()
@@ -2885,6 +2916,10 @@ class ScanEngine:
             # snapshot — verifiers near token expiry would 401 and mark real
             # findings unconfirmed.
             try:
+                # F06/0059: verify は時間ボックス対象外（attack フィールドの stale deadline が
+                # verify_finding の再注入を誤って skip し finding を落とすのを防ぐ）。ContextVar は
+                # 通常 _scan_field 末尾で reset 済みだが、例外離脱時の漏れに備えた安全ネット。
+                _FIELD_ATTACK_DEADLINE.set(None)
                 self._profile("verify: start")
                 await self._phase_verify()
                 self._profile("verify: done")
@@ -5512,6 +5547,9 @@ class ScanEngine:
             await self._refresh_page_after_flow(page)
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
+        # F06/0059: 入力の無い stored-XSS 観測ページは scan_page 中に alert flood/wedge しうる。
+        # ここで dialog_total を控え、page-level 区間末で回復して field 攻撃へ劣化を持ち越さない。
+        _dlg_pagelevel = getattr(self.browser, "dialog_total", 0)
         for check_name, scanner in self.scanners.items():
             # API テンプレート専用スキャナ（mass_assignment）はここで動かさない。
             # body-operation の URL は crawl キューにも入るため、GET 可能なら本ループと
@@ -5539,6 +5577,17 @@ class ScanEngine:
             if self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
                 continue
             page_errored = False
+            # この scanner 実行中に wedge したか（recover と同じ判定。正常時は False で分岐しない）。
+            _dlg_scanner = getattr(self.browser, "dialog_total", 0)
+            page_wedged = False
+            # scan_page の前に既存の sticky wedge（前段 navigation/flow の dismissal 失敗）を解消する。
+            # blocked page で無有界 page.content() を掴むと post-scan 復旧に到達できない。sticky でない
+            # 通常時はこの分岐に入らない。
+            if getattr(self.browser, "dialog_dismiss_failed", False):
+                _dlg_pagelevel = await self._recover_if_dialog_flood(_dlg_scanner)
+                if not await self._recovered_page_healthy(page):
+                    self._save_checkpoint()
+                    return
             try:
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
@@ -5550,17 +5599,25 @@ class ScanEngine:
                 page_findings = page_findings or []
                 for f in page_findings:
                     self._record_finding(f, source="page-level")
+                page_wedged = self._dialog_wedged_since(_dlg_scanner)
                 self._record_scan_matrix(
                     url=page.url,
                     field_name="(page)",
                     check_name=check_name,
-                    status="finding" if page_findings else "tested",
+                    # wedge 中の空結果は blocked read の可能性があり「tested」にしない
+                    # （finding は陽性証拠なので残す）。
+                    status=(
+                        "finding" if page_findings
+                        else "error" if page_wedged else "tested"
+                    ),
                     location="page-level",
                     severity=_top_severity(page_findings),
                     finding_count=len(page_findings),
+                    note="page-level scan ran on a dialog-wedged page" if page_wedged else "",
                 )
             except Exception as e:
                 page_errored = True
+                page_wedged = self._dialog_wedged_since(_dlg_scanner)
                 # 例外前に得ていた partial finding の副作用（通知/監視 emit 等）を回す。
                 # record_finding で all_findings には既登録だが、engine 側の _record_finding を
                 # 通さないと webhook 等が走らない（Codex #157 P2）。dedup 済みなので二重にならない。
@@ -5577,10 +5634,26 @@ class ScanEngine:
                     location="page-level",
                     note=f"page-level scan raised: {type(e).__name__}: {e}",
                 )
-            if not page_errored:
+            if not page_errored and not page_wedged:
                 self._checkpoint_mark_done(cp_url, "(page)", 0, check_name)
+            if page_wedged:
+                # wedge した scanner は checkpoint 完了化せず（resume で再実行。finding は dedup 済み）、
+                # 後続 scanner が blocked page を掴んで空 tested になる前にここで復旧する。
+                # 復旧後は since 基準を進め、区間末の復旧が累積 dialog_total を再カウントして
+                # 健全 page を二重再生成するのを避ける。
+                _dlg_pagelevel = await self._recover_if_dialog_flood(_dlg_scanner)
+                if not await self._recovered_page_healthy(page):
+                    self._save_checkpoint()
+                    return  # 残 scanner は未 checkpoint＝resume 回収
         # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
         self._save_checkpoint()
+
+        # F06/0059(#4): page-level(scan_page) 区間の flood/wedge をここで回復する。入力の無い
+        # stored-XSS 観測ページは直後に早期 return するため、field 攻撃前の回復には到達しない。
+        # 早期 return より前・後続の再認証/flow navigate より前に回復し、wedge を持ち越さない。
+        await self._recover_if_dialog_flood(_dlg_pagelevel)
+        if self._page_recovery_failed(page.url):
+            return  # wedge page のまま field 攻撃しない（未攻撃 field は未完のまま resume で回収）
 
         if not page.forms and not page.url_params:
             return
@@ -5589,6 +5662,10 @@ class ScanEngine:
         # ため browser が target ページに居ることを確認し、ずれていれば復帰する。
         # matched_flows は常に定義済み（空リスト可）。flow を1本でも再生したときだけ確認する
         # （単数 matched_flow は _match_pre_attack_flows へのリネームで廃止・Codex #170 P1）。
+        # attack-phase の入口 navigate（flow 復帰 / 再認証+goto）が stored-XSS sink を読んで 4+ dialog を
+        # 発火し全 dismiss 成功すると dialog_dismiss_failed は立たず、以降の baseline は navigate 後に
+        # 取るため delta 0＝flood 未検知になる。入口をここで bracket する（正常時 fired<=3 で不変）。
+        _dlg_entry = getattr(self.browser, "dialog_total", 0)
         if matched_flows:
             # Verify the browser ended on the intended target page.
             # A failed step in the flow may leave the browser on the wrong URL.
@@ -5628,6 +5705,11 @@ class ScanEngine:
                 )
                 return
 
+        await self._recover_if_dialog_flood(_dlg_entry)
+        if not await self._recovered_page_healthy(page):
+            self._save_checkpoint()
+            return
+
         # CTF: re-check page after navigating (dynamic content may differ from crawl)
         if self.flag_finder:
             try:
@@ -5640,9 +5722,14 @@ class ScanEngine:
         plan = plans.get(page.url)
 
         # Phase 3a + 3b: individual field scan + adaptive AI
+        self.browser._recovery_failed = False  # 前ページの stale 値を持ち込まない
         await self._attack_page(page, plan)
+        if getattr(self.browser, "_recovery_failed", False):
+            return  # _attack_page 内で復旧失敗済み（記録済み）。wedge page で multi-param しない
 
         # Phase 3d: multi-parameter simultaneous injection
+        # 組合せ毎に _phase_multi_param 内で回復する（P2-E: phase 末の外側回復は累積 dialog_total を
+        # 再カウントして回復済みの健全 page を二重に再生成するため削除）。
         await self._phase_multi_param(page, plan)
 
     async def _attack_page(self, page: CrawledPage, plan: Optional[PageAttackPlan]):
@@ -5755,6 +5842,10 @@ class ScanEngine:
             # AbortScan propagates up
 
             field_plan = plan.get_field_plan(field_name, fi, is_url_param) if plan else None
+            # F06/0059(#1): 回復判定は field 毎の dialog_total スナップショットで行う。ループ末に
+            # 1 度だけだと、早い field の flood/wedge した page で後続 field の navigate/submit が
+            # timeout/未送達になり見逃す。各 field 走査の直後（restore navigate の前）に回復する。
+            _dlg_field = getattr(self.browser, "dialog_total", 0)
             try:
                 await self._scan_field(
                     page.url,
@@ -5770,16 +5861,130 @@ class ScanEngine:
                 raise
             except Exception as e:
                 console.print(f"  [dim red]Field scan error ({field_name}): {e}[/dim red]")
+                # 例外途中で flood/wedge していても次 field へ持ち越さない。
+                await self._recover_if_dialog_flood(_dlg_field)
+                # 復旧失敗・recreate 後 navigate 失敗・着地 off-target なら残 field を未走査で止める。
+                if not await self._recovered_page_healthy(page):
+                    return
                 continue
 
-            if not is_url_param:
-                if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+            # restore navigate は wedge した page に対しては hang/失敗するため、その前に回復する。
+            await self._recover_if_dialog_flood(_dlg_field)
+            if self._page_recovery_failed(page.url):
+                return  # 残 field は未走査＝未完（checkpoint 完了化しない）
+
+            # recreate 後の page は blank。carrier 問わず target へ戻す（url_param 後の form field が
+            # navigate 無しの SQLi baseline を blank page で取って失敗するのを防ぐ）。非 recreate の
+            # url_param は従来どおり navigate しない。
+            if not is_url_param or getattr(self.browser, "_page_recreated", False):
+                # F06/0059(#1): restore navigate 自体が stored-XSS listing で再 flood/wedge しうる。
+                # 直前の baseline から回復すると次 field が degraded page で走る（次 field の baseline は
+                # 走査直前ではなく _scan_field 呼び出し前に取るため、restore の劣化を検知できない）。
+                # restore の直前で baseline を取り直し、restore 後にも回復して次 field を健全 page で走らせる。
+                _was_recreated = getattr(self.browser, "_page_recreated", False)
+                _dlg_restore = getattr(self.browser, "dialog_total", 0)
+                _restored = await self.browser.navigate(page.url, retries=self.navigation_retries)
+                if not _restored:
                     self._record_unscannable_url(
                         page.url,
                         field_name=field_name,
                         note="Could not restore page after field scan: "
                         + self._navigation_failure_note(),
                     )
+                if _was_recreated and (not _restored or not self._landed_on_target(page)):
+                    # recreate 後の blank から target へ戻れていない（失敗 or login/error への redirect）。
+                    # 次 field を about:blank/wrong page で走らせ tested 化する偽陰性を防ぐ（未走査で止める）。
+                    self.wave_errors.append(f"page_recreate_failed:{page.url}:restore")
+                    self.browser._recovery_failed = True
+                    return
+                await self._recover_if_dialog_flood(_dlg_restore)
+                # restore 直後に再 flood して再生成した場合も target へ戻し着地まで検証する。
+                if not await self._recovered_page_healthy(page):
+                    return
+
+    async def _recover_if_dialog_flood(self, since: int) -> int:
+        """dialog flood/wedge を検知したら現在の browser の page を作り直す（F06/0059）。
+
+        トリガは (1) この区間で dialog が閾値超え発火（flood）または (2) dismiss 失敗フラグ
+        （初回 alert が未解消で wedge＝以降 dialog が開けず件数が伸びないケースを直接捕捉）。
+        stored-XSS の未解消ダイアログは以降のページの goto/inject を張り付かせ、post-flood の全
+        フィールドを無言で未攻撃＝偽陰性化させる（page は is_closed()=False のまま劣化するため閉塞
+        検知では復旧できない）。page-level(scan_page)・field・multi-param の各区間末で呼び、劣化した
+        page を次区間/次ページへ持ち越さない。新しい dialog_total baseline を返す。例外は復旧を試みる
+        だけで scan を止めない（加算的・安全側）。
+        """
+        br = self.browser
+        try:
+            fired = getattr(br, "dialog_total", 0) - since
+            wedged = getattr(br, "dialog_dismiss_failed", False)
+            # 直近呼び出しの復旧失敗を browser（worker 毎）に保持する（呼び出し側が _page_recovery_failed で参照）。
+            br._recovery_failed = False
+            br._page_recreated = False
+            if fired > 3 or wedged:
+                if await br.recreate_page():
+                    br._page_recreated = True  # 呼び出し側が blank page から target へ復帰する目印
+                    self.wave_errors.append(
+                        f"page_recreated_after_dialog_flood:fired={fired},wedged={wedged}"
+                    )
+                else:
+                    br._recovery_failed = True
+        except Exception:
+            try:
+                br._recovery_failed = True
+            except Exception:
+                pass
+        return getattr(br, "dialog_total", 0)
+
+    async def _recovered_page_healthy(self, page) -> bool:
+        """直前の復旧後、次の browser 依存 page-level scanner を走らせてよいか。
+
+        復旧失敗なら False。recreate した場合は tab が about:blank なので page.url へ戻し、戻れなければ
+        False（blank を検査して空 tested を checkpoint 化する偽陰性を防ぐ）。復旧不要なら True。"""
+        # 失敗時は browser._recovery_failed を立て、caller の return が外側ガード（multi-param skip 等）
+        # へ一律に伝播するようにする。正常経路では立てない。
+        if self._page_recovery_failed(page.url):
+            self.browser._recovery_failed = True
+            return False
+        if getattr(self.browser, "_page_recreated", False):
+            if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+                self.wave_errors.append(f"page_recreate_failed:{page.url}:navigate")
+                self.browser._recovery_failed = True
+                return False
+            # navigate は login/error への 200 redirect でも True を返す（session 復元失敗時など）。
+            # 実際に target へ着地したかを確認し、ずれていれば不健全＝後続 scanner に wrong document を
+            # 検査・checkpoint させない（Codex #181 P1）。
+            if not self._landed_on_target(page):
+                landed = getattr(getattr(self.browser, "page", None), "url", "") or ""
+                self.wave_errors.append(f"page_recreate_failed:{page.url}:landed={landed}")
+                self.browser._recovery_failed = True
+                return False
+        return True
+
+    def _landed_on_target(self, page) -> bool:
+        """browser が page.url に着地しているか（fragment 差は同一扱い）。"""
+        landed = getattr(getattr(self.browser, "page", None), "url", "") or ""
+        return self._urls_same_page(landed, page.url)
+
+    def _dialog_wedged_since(self, since: int) -> bool:
+        """``_recover_if_dialog_flood`` と同じ flood/wedge 判定（純粋な観測・副作用なし）。"""
+        br = self.browser
+        try:
+            return (getattr(br, "dialog_total", 0) - since > 3) or bool(
+                getattr(br, "dialog_dismiss_failed", False)
+            )
+        except Exception:
+            return False
+
+    def _page_recovery_failed(self, where: str) -> bool:
+        """直前の ``_recover_if_dialog_flood`` が復旧に失敗していれば True（記録つき）。
+
+        wedge した page のまま残作業を走らせると空/timeout 応答を tested として checkpoint 完了化し
+        サイレント偽陰性になる。True のとき呼び出し側は残作業を打ち切り、checkpoint を完了化しない
+        （＝resume で回収）。"""
+        if not getattr(self.browser, "_recovery_failed", False):
+            return False
+        self.wave_errors.append(f"page_recreate_failed:{where}")
+        return True
 
     # =========================================================================
     # Phase 3d: Multi-parameter simultaneous injection
@@ -5872,6 +6077,11 @@ class ScanEngine:
                 # 停止(abort)/一時停止を尊重し、残りの結合 payload を送り続けないようにする。
                 await self.controller.wait_if_paused_or_abort()
 
+                # F06/0059(R4#3): 各結合送信の直前に dialog baseline を控える。1 回で phase 全体を
+                # bracket すると、最初の XSS 組合せが flood/wedge した page で後続 SQLi/SSTI 組合せや
+                # 追加フォームが navigate 失敗・skip され偽陰性化する。組合せ毎に回復する。
+                _dlg_combo = getattr(self.browser, "dialog_total", 0)
+
                 ok = await self.browser.navigate(page.url, retries=self.navigation_retries)
                 if not ok:
                     self._record_unscannable_url(
@@ -5880,6 +6090,11 @@ class ScanEngine:
                         note="Multi-parameter scan could not load page: "
                         + self._navigation_failure_note(),
                     )
+                    # navigate 自体が stored-XSS sink で dialog wedge して失敗しうる。復旧せず continue
+                    # すると以降の全組合せが wedge page で未攻撃になる（偽陰性）。
+                    await self._recover_if_dialog_flood(_dlg_combo)
+                    if not await self._recovered_page_healthy(page):
+                        return
                     continue
                 self.browser.reset_dialog()
 
@@ -5952,6 +6167,12 @@ class ScanEngine:
                         )
                         self._record_finding(f, source="multi-param")
 
+                # F06/0059(R4#3): この結合送信で flood/wedge したら次の組合せ/フォームへ持ち越さず
+                # ここで page を作り直す（外側の 1 回 bracket では後続組合せが wedge page で走る）。
+                await self._recover_if_dialog_flood(_dlg_combo)
+                if not await self._recovered_page_healthy(page):
+                    return
+
     def _adaptive_rerank(self, new_findings: list, remaining_pages: list, plans: dict):
         """
         Elevate risk scores on remaining pages for fields matching the newly found
@@ -5990,6 +6211,17 @@ class ScanEngine:
     ):
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
+        # F06/0059: このフィールドの attack 時間ボックスを task-local に張り直す（フィールド毎に fresh・
+        # 並行ワーカー間で汚染しない）。token は関数末尾で reset（verify 側でも安全ネットで None 化）。
+        _budget = getattr(self, "_field_attack_budget_s", 0.0) or 0.0
+        _deadline = (time.monotonic() + _budget) if _budget > 0 else None
+        _dl_token = _FIELD_ATTACK_DEADLINE.set(_deadline)
+        _notes_token = _FIELD_BUDGET_NOTES.set(set())
+        _trunc_token = _FIELD_BUDGET_TRUNCATED.set(set())
+        # 第3要素は carrier（scan_matrix の location と同語彙）。form/URL param 同名でも区別する（Codex #181 P2）。
+        _ident_token = _FIELD_BUDGET_IDENT.set(
+            (url, field_name, "URL param" if is_url_param else "form field")
+        )
         ip = self._injection_point_for(
             url, field_name, form_index, is_url_param, dom_index, field
         )
@@ -6055,6 +6287,22 @@ class ScanEngine:
                 checks_skipped_done += 1
                 continue
 
+            # 中央 budget gate: 予算超過後は scanner を呼ばない（_apply_ip を経由しない legacy 直送
+            # scanner も一律保護）。gate が truncated 集合へ入れるため checkpoint は完了化されず
+            # resume で再試行される。executed 計上前に continue（adaptive 条件と整合）。
+            # deadline 未超過なら False で従来と完全同一。per-scanner の gate は冪等の保険として残す。
+            _budget_gate = getattr(scanner, "_field_budget_gate", None)
+            if callable(_budget_gate) and _budget_gate():
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="error",
+                    location=location,
+                    note="field attack budget exceeded before scan (time-box)",
+                )
+                continue
+
             # 注意: 以前はこのフィールドで critical finding が確定すると残りの
             # チェックをスキップしていた。しかし critical が過検知（false positive）
             # の場合、他の本物の脆弱性を取りこぼしてしまう。過検知の可能性がある以上、
@@ -6117,7 +6365,11 @@ class ScanEngine:
                 # ただし例外で終わった単位は「未完了」のまま残し、再開時に再試行する
                 # （一時的なブラウザ/ネットワーク障害で取りこぼした検査を resume が
                 # 飛ばしてしまわないようにする — 再開の網羅性を守る）。
-                if not check_errored:
+                # F06/0059: budget 超過で注入を打ち切った check は「完了」にしない（空応答と同じ
+                # ('',{}) が返るため放置すると tested 扱い→_checkpoint_mark_done_ip され、resume が
+                # 未送信/一部送信の check を恒久スキップして見逃す）。truncated は resume で再試行する。
+                _truncated = _FIELD_BUDGET_TRUNCATED.get() or set()
+                if not check_errored and check_name not in _truncated:
                     self._checkpoint_mark_done_ip(ip, check_name)
 
         # CTF: check page source after all scanners ran on this field
@@ -6175,6 +6427,12 @@ class ScanEngine:
                         f"adaptive payloads generated: {len(adaptive_payloads)}件"
                     )
 
+        # F06/0059: このフィールドの task-local 時間ボックス状態を解除（次フィールド/verify へ漏らさない）。
+        _FIELD_ATTACK_DEADLINE.reset(_dl_token)
+        _FIELD_BUDGET_NOTES.reset(_notes_token)
+        _FIELD_BUDGET_TRUNCATED.reset(_trunc_token)
+        _FIELD_BUDGET_IDENT.reset(_ident_token)
+
         self.completed_fields += 1
         # フィールド完了ごとに進捗を永続化（中断しても次回ここから再開できる）
         self._save_checkpoint()
@@ -6229,6 +6487,13 @@ class ScanEngine:
         For each check type, get current page HTML, ask LLM to generate
         context-aware bypass payloads, then run the scanner again with those payloads.
         """
+        # F06/0059(Codex #181 P1): 時間ボックス超過なら LLM 可用性 probe / page.content() の前に戻る。
+        # dialog-wedge 中の page.content() は無有界にブロックしうるため、setup 後のチェックでは
+        # 元の stall を防げない。checkpoint は完了化しない（None＝未完・resume で回収）。
+        _dl0 = _FIELD_ATTACK_DEADLINE.get()
+        if _dl0 is not None and time.monotonic() > _dl0:
+            return None
+
         field_name = field.get("name", "unknown")
         ip = self._injection_point_for(
             url, field_name, form_index, is_url_param, dom_index, field
@@ -6281,7 +6546,11 @@ class ScanEngine:
 
         # Get current page HTML as probe context
         try:
-            page_html = await self.browser.page.content()
+            # 有界版（無限ハング時は ""）。事前 deadline チェック後に始めた read が wedge で
+            # 永久ブロックしないよう、かつ "" は取得不能として中断（未完）扱いにする。
+            page_html = await self.browser.get_page_source()
+            if not page_html:
+                return None
         except Exception:
             return None
 
@@ -6310,6 +6579,15 @@ class ScanEngine:
             adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
             if self._checkpoint_is_done_ip(ip, adaptive_checkpoint_check):
                 continue
+
+            # F06/0059(#5): フィールド時間ボックス超過中は adaptive を実行/完了化しない。
+            # 同じ期限切れ deadline 下では送信が _field_budget_gate で短絡され空振りするだけで、
+            # ここで checkpoint を完了化すると resume が adaptive payload を恒久 skip して見逃す。
+            # 未完のまま残し（mark_done しない）resume で回収する。deadline は monotonic 単調増加
+            # なので、超過したら残りの check も超過＝break で以降を未完のまま残す。
+            _dl = _FIELD_ATTACK_DEADLINE.get()
+            if _dl is not None and time.monotonic() > _dl:
+                break
 
             # 別 field/check の恒久失敗で可用性キャッシュが倒れた場合も、以降は
             # LLM を呼ばずフォールバック完了として収束させる。
@@ -6405,9 +6683,17 @@ class ScanEngine:
                 generation_failed = True
                 console.print(f"    [yellow]Adaptive scanner error ({check_name}): {e}[/yellow]")
             else:
-                self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
-                # 後続 check の失敗やプロセス中断でも部分成功を保持する。
-                self._save_checkpoint()
+                # F06/0059(#4): pre-check で deadline 有効でも scan 実行中に期限切れになると、
+                # scanner 側 gate が payload を短絡し _FIELD_BUDGET_TRUNCATED に記録して正常 return する。
+                # ここで truncated を再チェックせず mark_done すると resume が未送信 adaptive payload を
+                # 恒久 skip して見逃す。truncated なら完了化せず未完のまま残す（resume で回収）。
+                _truncated = _FIELD_BUDGET_TRUNCATED.get() or set()
+                if check_name in _truncated:
+                    generation_failed = True
+                else:
+                    self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
+                    # 後続 check の失敗やプロセス中断でも部分成功を保持する。
+                    self._save_checkpoint()
             finally:
                 _FIELD_PAYLOAD_OVERRIDES.reset(_adaptive_token)
 
