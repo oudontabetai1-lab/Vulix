@@ -4669,11 +4669,14 @@ class ScanEngine:
                 # 汚染しない。slot 0（メインブラウザ・_CURRENT_WORKER=None）も独立して種付けされる。
                 cookie_seed = None
                 cookie_token = None
-                # flow 付きページは共有 cookie jar を書き換えるため他ページと排他実行する。
-                exclusive = bool(self._match_pre_attack_flows(page))
+                exclusive = False
                 gate_held = False
                 skip_this_page = False
                 try:
+                    # flow 付きページは共有 cookie jar を書き換えるため他ページと排他実行する。
+                    # 判定が例外を投げても finally（task_done/pool 返却/token reset）を必ず通すため
+                    # try 内で行う（外だと page_queue.join() がハングする）。
+                    exclusive = bool(self._match_pre_attack_flows(page))
                     await flow_gate.acquire(exclusive)
                     gate_held = True
                     # gate 通過後に共有 baseline で種付けする。並列フェーズ中に共有 self._cookies を
