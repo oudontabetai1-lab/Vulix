@@ -183,9 +183,10 @@ def test_realistic_healthcare_stored_xss_scanner_scorecard():
 
     xxe は XML carrier が採点不能のため gap（E2E 対象外）。
 
-    脆弱ケースは格納型 XSS のページ単位 marker 観測で検出する（注入フォームのページとは別の
-    クロール済みページで注入 marker を観測）。エスケープ済み安全ツインは実 DOM 要素が生成されず
-    finding にならない。
+    脆弱ケースの TP は、単独の格納型 XSS スキャナが、注入フォームのページとは別 URL のクロール済み
+    クエリパラメータ変種（posts ページ）で注入 marker を観測して得る（ページ跨ぎの second-order 要件を
+    満たす）。chain スキャナ由来ではない（stored_xss のみ有効時は同一ページ probe は実行されない）。
+    エスケープ済み安全ツインは実 DOM 要素が生成されず finding にならない。
     """
     _require_chromium()
     out = _run_manifest("realistic_healthcare_stored_xss.yaml", {"stored_xss"})
