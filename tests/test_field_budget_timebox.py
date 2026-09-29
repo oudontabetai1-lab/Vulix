@@ -470,7 +470,7 @@ class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
             navigation_retries=0, concurrency=1, flows=[],
         )
         for n in ("_recover_if_dialog_flood", "_page_recovery_failed", "_dialog_wedged_since",
-                  "_page_level_page_healthy"):
+                  "_recovered_page_healthy", "_landed_on_target"):
             setattr(e, n, getattr(ScanEngine, n).__get__(e))
         e._urls_same_page = ScanEngine._urls_same_page   # staticmethod（着地先検証で使用）
         e._match_pre_attack_flows = lambda page: []
@@ -563,35 +563,114 @@ class OpenRedirectBudgetGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):
-    async def test_navigates_to_page_after_recreate_for_url_param(self):
-        """Codex #181 round-7 P2: url_param field の復旧後も page.url へ戻す。非 recreate は従来どおり navigate しない。"""
+    def _engine(self, recreated, landed_url, params):
         import asyncio as _asyncio
         import types
         from unittest.mock import AsyncMock
-        from wscan.engine import CrawledPage, ScanEngine
+        from wscan.engine import ScanEngine
 
+        nav = AsyncMock(return_value=True)
+        br = types.SimpleNamespace(dialog_total=0, navigate=nav,
+                                   page=types.SimpleNamespace(url=landed_url))
+
+        async def _recover(since):
+            # 最初の区間（scan 直後）だけ recreate。restore 後は健全。
+            br._page_recreated = recreated and not getattr(br, "_done", False)
+            br._done = True
+            return 0
+        engine = types.SimpleNamespace(
+            _is_url_excluded=lambda url: False, max_forms=5, skip_registration=False,
+            exclude_urls=None, _profile=lambda msg: None, scanned_forms=set(),
+            _scanned_forms_lock=_asyncio.Lock(), total_fields=0, exclude_fields=set(),
+            controller=types.SimpleNamespace(checkpoint=AsyncMock()),
+            _scan_field=AsyncMock(), browser=br, navigation_retries=0, wave_errors=[],
+            _recover_if_dialog_flood=_recover, _page_recovery_failed=lambda w: False,
+            _urls_same_page=lambda a, b: a == b,
+            _record_unscannable_url=lambda *a, **k: None, _navigation_failure_note=lambda: "",
+        )
+        for n in ("_recovered_page_healthy", "_landed_on_target"):
+            setattr(engine, n, getattr(ScanEngine, n).__get__(engine))
+        engine._attack_page = types.MethodType(ScanEngine._attack_page, engine)
+        return engine, nav
+
+    async def test_navigates_to_page_after_recreate_for_url_param(self):
+        """Codex #181 round-7 P2: url_param field の復旧後も page.url へ戻す。非 recreate は従来どおり navigate しない。"""
+        from wscan.engine import CrawledPage
         for recreated in (True, False):
-            nav = AsyncMock(return_value=True)
-            br = types.SimpleNamespace(dialog_total=0, navigate=nav)
-
-            async def _recover(since, br=br, recreated=recreated):
-                # 最初の区間（scan 直後）だけ recreate。restore 後は健全。
-                br._page_recreated = recreated and not getattr(br, "_done", False)
-                br._done = True
-                return 0
+            engine, nav = self._engine(recreated, "http://t/l?q=1", {"q": "1"})
             page = CrawledPage(url="http://t/l?q=1", html="", forms=[], url_params={"q": "1"}, depth=0)
-            engine = types.SimpleNamespace(
-                _is_url_excluded=lambda url: False, max_forms=5, skip_registration=False,
-                exclude_urls=None, _profile=lambda msg: None, scanned_forms=set(),
-                _scanned_forms_lock=_asyncio.Lock(), total_fields=0, exclude_fields=set(),
-                controller=types.SimpleNamespace(checkpoint=AsyncMock()),
-                _scan_field=AsyncMock(), browser=br, navigation_retries=0,
-                _recover_if_dialog_flood=_recover, _page_recovery_failed=lambda w: False,
-                _record_unscannable_url=lambda *a, **k: None, _navigation_failure_note=lambda: "",
-            )
-            engine._attack_page = types.MethodType(ScanEngine._attack_page, engine)
             await engine._attack_page(page, None)
             self.assertEqual(nav.await_count, 1 if recreated else 0, recreated)
+
+    async def test_recreate_landing_off_target_stops_remaining_fields(self):
+        """round-10: recreate 後の navigate が login へ着地したら次 field を走らせない（未 checkpoint）。"""
+        from wscan.engine import CrawledPage
+        engine, nav = self._engine(True, "http://t/login", {"q": "1", "r": "2"})
+        page = CrawledPage(url="http://t/l?q=1&r=2", html="", forms=[],
+                           url_params={"q": "1", "r": "2"}, depth=0)
+        await engine._attack_page(page, None)
+        self.assertEqual(engine._scan_field.await_count, 1)  # 2 field 目は未走査
+        self.assertTrue(any(n.startswith("page_recreate_failed:") for n in engine.wave_errors))
+
+
+class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_budget_exceeded_skips_legacy_scanner_and_not_checkpointed(self):
+        """round-10: 予算超過後は scan_injection_point を持つ legacy 直送 scanner も呼ばず、error 記録・未完。"""
+        class _Legacy(BaseScanner):
+            CHECK_TYPE = "file_upload"
+
+            def __init__(self, engine):
+                super().__init__(engine)
+                self.called = 0
+
+            async def scan_field(self, *a, **k):
+                return []
+
+            async def scan_injection_point(self, ip, field):
+                self.called += 1
+                return []
+
+        eng_ = _Engine()
+        sc = _Legacy(eng_)
+        # 中央 gate（_scan_field が scanner 呼び出し前に叩く _field_budget_gate）の契約:
+        # 超過時 True＝scanner を呼ばず、truncated へ入れて checkpoint 完了化を抑止。正常時は False。
+        with _Budget(time.monotonic() - 1.0):
+            self.assertTrue(sc._field_budget_gate())
+            self.assertIn("file_upload", eng._FIELD_BUDGET_TRUNCATED.get())
+        with _Budget(time.monotonic() + 60.0):
+            self.assertFalse(sc._field_budget_gate())
+            self.assertEqual(eng._FIELD_BUDGET_TRUNCATED.get(), set())
+        self.assertEqual(sc.called, 0)
+
+    async def test_scan_field_skips_legacy_scanner_when_budget_exhausted(self):
+        """実 _scan_field: 予算 0 近傍で legacy 直送 scanner が呼ばれず error 行が残り checkpoint 未完了。"""
+        from wscan.engine import ScanEngine
+
+        class _Legacy(BaseScanner):
+            CHECK_TYPE = "file_upload"
+
+            def __init__(self, engine):
+                super().__init__(engine)
+                self.called = 0
+
+            async def scan_field(self, *a, **k):
+                return []
+
+            async def scan_injection_point(self, ip, field):
+                self.called += 1
+                return []
+
+        e = ScanEngine("http://127.0.0.1:1/", checks=["xss"], llm_provider="none", open_report=False)
+        sc = _Legacy(e)
+        e.scanners = {"file_upload": sc}
+        e._field_attack_budget_s = 1e-9  # 即超過
+        e.use_planner = False
+        await e._scan_field("http://127.0.0.1:1/u", 0, {"name": "f", "type": "file"})
+        self.assertEqual(sc.called, 0)
+        rows = [r for r in e.scan_matrix if r["check"] == "file_upload"]
+        self.assertEqual([r["status"] for r in rows], ["error"])
+        ip = e._injection_point_for("http://127.0.0.1:1/u", "f", 0, False, -1, {"name": "f", "type": "file"})
+        self.assertFalse(e._checkpoint_is_done_ip(ip, "file_upload"))
 
 
 class BudgetEnvTests(unittest.TestCase):
@@ -754,6 +833,11 @@ class AttackPageRestoreRecoveryTests(unittest.IsolatedAsyncioTestCase):
             _record_unscannable_url=lambda *a, **k: None,
             _navigation_failure_note=lambda: "",
         )
+        engine.wave_errors = []
+        engine._urls_same_page = lambda a, b: a == b
+        engine._page_recovery_failed = lambda w: False
+        for _n in ("_recovered_page_healthy", "_landed_on_target"):
+            setattr(engine, _n, getattr(ScanEngine, _n).__get__(engine))
         engine._attack_page = types.MethodType(ScanEngine._attack_page, engine)
 
         await engine._attack_page(page, None)

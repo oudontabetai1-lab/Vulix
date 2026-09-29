@@ -5596,7 +5596,7 @@ class ScanEngine:
             # 通常時はこの分岐に入らない。
             if getattr(self.browser, "dialog_dismiss_failed", False):
                 _dlg_pagelevel = await self._recover_if_dialog_flood(_dlg_scanner)
-                if not await self._page_level_page_healthy(page):
+                if not await self._recovered_page_healthy(page):
                     self._save_checkpoint()
                     return
             try:
@@ -5653,7 +5653,7 @@ class ScanEngine:
                 # 復旧後は since 基準を進め、区間末の復旧が累積 dialog_total を再カウントして
                 # 健全 page を二重再生成するのを避ける。
                 _dlg_pagelevel = await self._recover_if_dialog_flood(_dlg_scanner)
-                if not await self._page_level_page_healthy(page):
+                if not await self._recovered_page_healthy(page):
                     self._save_checkpoint()
                     return  # 残 scanner は未 checkpoint＝resume 回収
         # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
@@ -5865,10 +5865,9 @@ class ScanEngine:
                 console.print(f"  [dim red]Field scan error ({field_name}): {e}[/dim red]")
                 # 例外途中で flood/wedge していても次 field へ持ち越さない。
                 await self._recover_if_dialog_flood(_dlg_field)
-                if self._page_recovery_failed(page.url):
+                # 復旧失敗・recreate 後 navigate 失敗・着地 off-target なら残 field を未走査で止める。
+                if not await self._recovered_page_healthy(page):
                     return
-                if getattr(self.browser, "_page_recreated", False):
-                    await self.browser.navigate(page.url, retries=self.navigation_retries)
                 continue
 
             # restore navigate は wedge した page に対しては hang/失敗するため、その前に回復する。
@@ -5884,20 +5883,25 @@ class ScanEngine:
                 # 直前の baseline から回復すると次 field が degraded page で走る（次 field の baseline は
                 # 走査直前ではなく _scan_field 呼び出し前に取るため、restore の劣化を検知できない）。
                 # restore の直前で baseline を取り直し、restore 後にも回復して次 field を健全 page で走らせる。
+                _was_recreated = getattr(self.browser, "_page_recreated", False)
                 _dlg_restore = getattr(self.browser, "dialog_total", 0)
-                if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+                _restored = await self.browser.navigate(page.url, retries=self.navigation_retries)
+                if not _restored:
                     self._record_unscannable_url(
                         page.url,
                         field_name=field_name,
                         note="Could not restore page after field scan: "
                         + self._navigation_failure_note(),
                     )
-                await self._recover_if_dialog_flood(_dlg_restore)
-                if self._page_recovery_failed(page.url):
+                if _was_recreated and (not _restored or not self._landed_on_target(page)):
+                    # recreate 後の blank から target へ戻れていない（失敗 or login/error への redirect）。
+                    # 次 field を about:blank/wrong page で走らせ tested 化する偽陰性を防ぐ（未走査で止める）。
+                    self.wave_errors.append(f"page_recreate_failed:{page.url}:restore")
                     return
-                if getattr(self.browser, "_page_recreated", False):
-                    # restore 直後に再 flood して再生成した場合も target へ戻して次 field を健全に走らせる。
-                    await self.browser.navigate(page.url, retries=self.navigation_retries)
+                await self._recover_if_dialog_flood(_dlg_restore)
+                # restore 直後に再 flood して再生成した場合も target へ戻し着地まで検証する。
+                if not await self._recovered_page_healthy(page):
+                    return
 
     async def _recover_if_dialog_flood(self, since: int) -> int:
         """dialog flood/wedge を検知したら現在の browser の page を作り直す（F06/0059）。
@@ -5932,7 +5936,7 @@ class ScanEngine:
                 pass
         return getattr(br, "dialog_total", 0)
 
-    async def _page_level_page_healthy(self, page) -> bool:
+    async def _recovered_page_healthy(self, page) -> bool:
         """直前の復旧後、次の browser 依存 page-level scanner を走らせてよいか。
 
         復旧失敗なら False。recreate した場合は tab が about:blank なので page.url へ戻し、戻れなければ
@@ -5946,11 +5950,16 @@ class ScanEngine:
             # navigate は login/error への 200 redirect でも True を返す（session 復元失敗時など）。
             # 実際に target へ着地したかを確認し、ずれていれば不健全＝後続 scanner に wrong document を
             # 検査・checkpoint させない（Codex #181 P1）。
-            landed = getattr(getattr(self.browser, "page", None), "url", "") or ""
-            if not self._urls_same_page(landed, page.url):
+            if not self._landed_on_target(page):
+                landed = getattr(getattr(self.browser, "page", None), "url", "") or ""
                 self.wave_errors.append(f"page_recreate_failed:{page.url}:landed={landed}")
                 return False
         return True
+
+    def _landed_on_target(self, page) -> bool:
+        """browser が page.url に着地しているか（fragment 差は同一扱い）。"""
+        landed = getattr(getattr(self.browser, "page", None), "url", "") or ""
+        return self._urls_same_page(landed, page.url)
 
     def _dialog_wedged_since(self, since: int) -> bool:
         """``_recover_if_dialog_flood`` と同じ flood/wedge 判定（純粋な観測・副作用なし）。"""
@@ -6272,6 +6281,22 @@ class ScanEngine:
                     note="Skipped — already completed in a previous run (resume).",
                 )
                 checks_skipped_done += 1
+                continue
+
+            # 中央 budget gate: 予算超過後は scanner を呼ばない（_apply_ip を経由しない legacy 直送
+            # scanner も一律保護）。gate が truncated 集合へ入れるため checkpoint は完了化されず
+            # resume で再試行される。executed 計上前に continue（adaptive 条件と整合）。
+            # deadline 未超過なら False で従来と完全同一。per-scanner の gate は冪等の保険として残す。
+            _budget_gate = getattr(scanner, "_field_budget_gate", None)
+            if callable(_budget_gate) and _budget_gate():
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="error",
+                    location=location,
+                    note="field attack budget exceeded before scan (time-box)",
+                )
                 continue
 
             # 注意: 以前はこのフィールドで critical finding が確定すると残りの
