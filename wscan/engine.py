@@ -120,6 +120,8 @@ class _FlowGate:
                     await self._cond.wait_for(lambda: not self._writer and self._readers == 0)
                 finally:
                     self._waiting_writers -= 1
+                    # writer が待機中に cancel されても、_waiting_writers==0 待ちの reader を必ず起こす。
+                    self._cond.notify_all()
                 self._writer = True
             else:
                 await self._cond.wait_for(
@@ -2710,6 +2712,13 @@ class ScanEngine:
             browser, status=status, final_url=final_url, body=body, for_url=url
         )
         if relogged:
+            if self.concurrency > 1:
+                # 並列時は worker が同一 BrowserContext（cookie jar）を共有するため、再ログインによる
+                # jar の書き換えが並行ページへ波及しうる。既知の残余競合を黙殺せず記録する。
+                errors = getattr(self, "wave_errors", None)
+                if errors is None:
+                    self.wave_errors = errors = []
+                errors.append("cookie_jar_shared_relogin:concurrency_gt_1")
             # 認証済みコンテンツを攻撃で見るため、対象ページへ再遷移する。
             try:
                 await browser.navigate(url, retries=self.navigation_retries)
@@ -4667,7 +4676,10 @@ class ScanEngine:
                 try:
                     await flow_gate.acquire(exclusive)
                     gate_held = True
-                    # gate 通過後に種付け（排他ページの flow 完了後の最新 Cookie を拾う）。
+                    # gate 通過後に共有 baseline で種付けする。並列フェーズ中に共有 self._cookies を
+                    # 書く経路は無い（worker-local 値は意図的に昇格しない）ので、これは常に baseline。
+                    # flow が発行した Cookie は _attack_one_page 冒頭の per-page 再同期で jar から
+                    # 取り込まれる。グローバル昇格を足すと URL スコープ違いの Cookie が混線する。
                     cookie_seed = self._cookies
                     cookie_token = _WORKER_COOKIES.set(cookie_seed)
                     try:
@@ -7114,8 +7126,13 @@ class ScanEngine:
                     # Cookie を browser jar から都度再スコープする（worker-local 値は捨てられている）。
                     # 再同期失敗時（Codex P2）は前 finding の scoped Cookie が残るため、別ホスト/
                     # path のセッションで検証（漏えい＋偽陰性）せず下の except で skipped へ倒す。
-                    if not await self._sync_cookies_from_browser(
-                        self._browser, for_url=getattr(finding, "url", "") or ""
+                    # 再同期自体も wedge しうる（page.context.cookies()）ため verify 1 件と同じ上限で有界化し、
+                    # TimeoutError は下の except で skipped へ倒す。
+                    if not await asyncio.wait_for(
+                        self._sync_cookies_from_browser(
+                            self._browser, for_url=getattr(finding, "url", "") or ""
+                        ),
+                        timeout=verify_budget,
                     ):
                         raise RuntimeError("per-finding cookie 再同期に失敗（誤セッション検証を回避）")
                 # 1 件の finding 検証が wedge しても verify フェーズ全体（＝スキャン）を

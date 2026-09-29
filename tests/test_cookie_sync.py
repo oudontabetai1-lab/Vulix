@@ -324,6 +324,88 @@ class WorkerCookieAccessorTests(unittest.TestCase):
         self.assertEqual(f.verification_state, "skipped")
         self.assertEqual(len(eng.all_findings), 1)
 
+    def test_verify_resync_hang_is_bounded_and_skipped(self):
+        # verify 時の cookie 再同期が wedge しても timeout で有界化され skipped になる。
+        import wscan.engine as E
+        from wscan.engine import Finding
+        eng = self._engine("base=1")
+
+        class _Hang:
+            async def cookies(self):
+                await asyncio.sleep(3600)
+
+        eng._browser = types.SimpleNamespace(page=types.SimpleNamespace(context=_Hang()))
+        eng._concurrent_attack_ran = True
+        eng.monitor = None
+        eng.wave_errors = []
+        seen = []
+
+        async def _verify_one(finding):
+            seen.append(1)
+            return "reproduced"
+
+        eng._verify_one = _verify_one
+        f = Finding(check_type="sqli", url="https://example.com/x", field_name="q",
+                    payload="'", evidence="e", severity="high")
+        eng.all_findings = [f]
+        old = E._VERIFY_ONE_TIMEOUT_S
+        E._VERIFY_ONE_TIMEOUT_S = 0.05
+        try:
+            asyncio.run(asyncio.wait_for(eng._phase_verify(), timeout=5))
+        finally:
+            E._VERIFY_ONE_TIMEOUT_S = old
+        self.assertEqual(seen, [])
+        self.assertEqual(f.verification_state, "skipped")
+
+    def test_flow_gate_cancelled_writer_wakes_readers(self):
+        from wscan.engine import _FlowGate
+
+        async def _main():
+            gate = _FlowGate()
+            await gate.acquire(False)  # reader 保持中
+            writer = asyncio.ensure_future(gate.acquire(True))
+            await asyncio.sleep(0.01)
+            reader2 = asyncio.ensure_future(gate.acquire(False))  # writer 待ちでブロック
+            await asyncio.sleep(0.01)
+            self.assertFalse(reader2.done())
+            writer.cancel()
+            await asyncio.wait_for(reader2, timeout=1)  # cancel 後に起床する
+
+        asyncio.run(_main())
+
+    def test_relogin_under_concurrency_records_note(self):
+        eng = ScanEngine("https://example.com/", checks=["xss"], concurrency=2)
+        eng.relogin_on_expiry = True
+        eng.login_url = "https://example.com/login"
+        eng.wave_errors = []
+
+        class _B:
+            auth_user = "u"
+            auth_pass = "p"
+            page = types.SimpleNamespace(url="https://example.com/a", content=None)
+
+            async def navigate(self, *a, **k):
+                return True
+
+            async def auto_login(self, *a, **k):
+                return True
+
+        async def _content():
+            return "<html>body</html>"
+
+        b = _B()
+        b.page.content = _content
+        eng._browser = b
+        eng.browser  # 文脈対応 property の存在確認
+
+        async def _relogin(*a, **k):
+            return True
+
+        eng._relogin_if_needed = _relogin
+        eng._is_login_target_url = lambda u: False
+        asyncio.run(eng._maybe_relogin_for_page("https://example.com/a"))
+        self.assertIn("cookie_jar_shared_relogin:concurrency_gt_1", eng.wave_errors)
+
     def test_flow_gate_exclusive_waits_for_shared(self):
         from wscan.engine import _FlowGate
 
