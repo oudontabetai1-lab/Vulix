@@ -230,5 +230,83 @@ class ParallelWorkerCookieIsolationTests(unittest.TestCase):
         self.assertEqual(eng.cookies, "")
 
 
+class WorkerCookieAccessorTests(unittest.TestCase):
+    """0067 Codex P1: 直読み consumer の worker-local 経由・排他ゲート。"""
+
+    def _engine(self, cookies="base=1"):
+        return ScanEngine("https://example.com/", cookies=cookies, checks=["xss"])
+
+    def test_direct_cookies_read_is_worker_local(self):
+        from wscan.engine import _WORKER_COOKIES
+        eng = self._engine()
+        self.assertEqual(eng.cookies, "base=1")
+        token = _WORKER_COOKIES.set("base=1")
+        try:
+            eng.cookies = "flow=2"
+            # getattr 経由（cms/jwt 等の直読み）も worker-local を返し、共有は不変
+            self.assertEqual(getattr(eng, "cookies", ""), "flow=2")
+            self.assertEqual(eng._cookies, "base=1")
+        finally:
+            _WORKER_COOKIES.reset(token)
+        self.assertEqual(eng.cookies, "base=1")
+
+    def test_serial_setter_writes_shared(self):
+        eng = self._engine()
+        eng.cookies = "new=3"
+        self.assertEqual(eng._cookies, "new=3")
+
+    def test_worker_cookie_not_promoted_and_verify_rescopes_from_jar(self):
+        from wscan.engine import _WORKER_COOKIES
+        eng = self._engine("base=1")
+        eng.target_url = "https://example.com/"
+        jar = [{"name": "sid", "value": "PUB", "domain": "example.com", "path": "/"}]
+        b = types.SimpleNamespace(page=types.SimpleNamespace(context=_Ctx(jar)))
+
+        async def _worker():
+            tok = _WORKER_COOKIES.set(eng._cookies)
+            try:
+                eng.cookies = "sid=ADMIN"
+            finally:
+                _WORKER_COOKIES.reset(tok)
+
+        asyncio.run(_worker())
+        self.assertEqual(eng._cookies, "base=1")  # global へ昇格しない
+
+        async def _verify():
+            await eng._sync_cookies_from_browser(b, for_url="https://example.com/public")
+            return eng.auth_headers().get("Cookie")
+
+        self.assertEqual(asyncio.run(_verify()), "sid=PUB")  # jar から URL 毎に再スコープ
+
+    def test_flow_gate_exclusive_waits_for_shared(self):
+        from wscan.engine import _FlowGate
+
+        async def _main():
+            gate = _FlowGate()
+            log = []
+
+            async def shared(n, delay):
+                await gate.acquire(False)
+                log.append(f"s{n}+")
+                await asyncio.sleep(delay)
+                log.append(f"s{n}-")
+                await gate.release(False)
+
+            async def excl():
+                await asyncio.sleep(0.01)
+                await gate.acquire(True)
+                log.append("x+")
+                await asyncio.sleep(0.02)
+                log.append("x-")
+                await gate.release(True)
+
+            await asyncio.gather(shared(1, 0.05), shared(2, 0.05), excl())
+            return log
+
+        log = asyncio.run(_main())
+        # 排他は shared 全退出後に開始（重なりなし）
+        self.assertLess(max(log.index("s1-"), log.index("s2-")), log.index("x+"))
+
+
 if __name__ == "__main__":
     unittest.main()

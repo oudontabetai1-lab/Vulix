@@ -87,10 +87,53 @@ def _store_synced_cookies(engine, value: str) -> None:
         engine.cookies = value
 
 
+def _effective_cookies_of(engine) -> str:
+    override = _WORKER_COOKIES.get(_COOKIES_UNSET)
+    return engine._cookies if override is _COOKIES_UNSET else override
+
+
 def _effective_cookies(engine) -> str:
     """auth_headers が使う実効 Cookie 文字列を返す（worker 内なら task-local を優先）。"""
     override = _WORKER_COOKIES.get(_COOKIES_UNSET)
     return engine.cookies if override is _COOKIES_UNSET else override
+
+
+class _FlowGate:
+    """pre-attack flow 付きページを排他実行する読み書きゲート（0067 Codex P1）。
+
+    worker は同一 BrowserContext（= cookie jar）を共有するため、flow が jar を書き換える間に
+    他 worker が動くと別 flow の Cookie を拾う。flow を持つページ（exclusive）は他ページが
+    全て退出するのを待って単独で走り、それ以外（shared）は同時実行する。
+    """
+
+    def __init__(self) -> None:
+        self._cond = asyncio.Condition()
+        self._readers = 0
+        self._writer = False
+        self._waiting_writers = 0
+
+    async def acquire(self, exclusive: bool) -> None:
+        async with self._cond:
+            if exclusive:
+                self._waiting_writers += 1
+                try:
+                    await self._cond.wait_for(lambda: not self._writer and self._readers == 0)
+                finally:
+                    self._waiting_writers -= 1
+                self._writer = True
+            else:
+                await self._cond.wait_for(
+                    lambda: not self._writer and self._waiting_writers == 0
+                )
+                self._readers += 1
+
+    async def release(self, exclusive: bool) -> None:
+        async with self._cond:
+            if exclusive:
+                self._writer = False
+            else:
+                self._readers -= 1
+            self._cond.notify_all()
 
 
 def _observability_warning_text(summary: dict) -> str:
@@ -865,7 +908,7 @@ class ScanEngine:
         # fast_mode forces 0; ctf_mode halves the delay
         self._effective_delay: float = request_delay * self.sleep_factor
         self.navigation_retries: int = max(0, int(navigation_retries))
-        self.cookies = cookies
+        self._cookies: str = cookies
         self.cookie_list: list = list(cookie_list or [])
         # Normalise low-privilege cookies: prefer list form when both are given
         self.low_priv_cookies: str = low_priv_cookies
@@ -1904,6 +1947,22 @@ class ScanEngine:
         if headers_allowed_for_url(url, self._header_scope_origins):
             return headers
         return {}
+
+    @property
+    def cookies(self) -> str:
+        """実効 Cookie 文字列。並列 worker task 内なら task-local 値を返す。
+
+        auth_headers だけでなく ``engine.cookies`` を直読みする全 consumer（cms/jwt/graphql/
+        privesc 等）が worker-local 値を見るよう、アクセサ自体を worker-aware にする（0067）。
+        """
+        return _effective_cookies_of(self)
+
+    @cookies.setter
+    def cookies(self, value: str) -> None:
+        if _WORKER_COOKIES.get(_COOKIES_UNSET) is not _COOKIES_UNSET:
+            _WORKER_COOKIES.set(value)
+        else:
+            self._cookies = value
 
     def auth_headers(
         self,
@@ -4571,6 +4630,8 @@ class ScanEngine:
         for w in extra_workers:
             await worker_pool.put(w)
 
+        flow_gate = _FlowGate()
+        self._concurrent_attack_ran = True
         page_queue: asyncio.Queue = asyncio.Queue()
         for p in pages:
             await page_queue.put(p)
@@ -4595,9 +4656,18 @@ class ScanEngine:
                 # 以降 _sync_cookies_from_browser はこの ContextVar へ書き（_store_synced_cookies）、
                 # pre-attack flow 後・per-page 再スコープの Cookie が task 内に閉じて別 worker を
                 # 汚染しない。slot 0（メインブラウザ・_CURRENT_WORKER=None）も独立して種付けされる。
-                cookie_token = _WORKER_COOKIES.set(self.cookies)
+                cookie_seed = None
+                cookie_token = None
+                # flow 付きページは共有 cookie jar を書き換えるため他ページと排他実行する。
+                exclusive = bool(self._match_pre_attack_flows(page))
+                gate_held = False
                 skip_this_page = False
                 try:
+                    await flow_gate.acquire(exclusive)
+                    gate_held = True
+                    # gate 通過後に種付け（排他ページの flow 完了後の最新 Cookie を拾う）。
+                    cookie_seed = self._cookies
+                    cookie_token = _WORKER_COOKIES.set(cookie_seed)
                     try:
                         await self.controller.checkpoint()
                     except SkipPage:
@@ -4617,7 +4687,15 @@ class ScanEngine:
                 except Exception as exc:
                     console.print(f"  [yellow][Worker] Error on {page.url}: {exc}[/yellow]")
                 finally:
-                    _WORKER_COOKIES.reset(cookie_token)
+                    # task-local Cookie は global self._cookies へ昇格させない（URL スコープ違いの
+                    # Cookie が並行ページ/verification へ混線するため）。verification は URL 毎に
+                    # browser jar から再スコープする（_phase_verify）。
+                    # 既知の残課題(follow-up): 再ログイン/応答 Set-Cookie による共有 jar の競合は
+                    # per-worker BrowserContext が必要。本実装は read 隔離＋flow ページ直列化まで。
+                    if cookie_token is not None:
+                        _WORKER_COOKIES.reset(cookie_token)
+                    if gate_held:
+                        await flow_gate.release(exclusive)
                     _CURRENT_WORKER.reset(token)
                     await worker_pool.put(worker_browser)
                     page_queue.task_done()
@@ -7028,6 +7106,15 @@ class ScanEngine:
                 f"  verify #{i+1}/{len(to_verify)}: {getattr(finding, 'check_type', '?')} "
                 f"@ {getattr(finding, 'url', '?')}"
             )
+            if getattr(self, "_concurrent_attack_ran", False):
+                # 並列 attack 後は global cookie が baseline のままなので、finding URL 宛の
+                # Cookie を browser jar から都度再スコープする（worker-local 値は捨てられている）。
+                try:
+                    await self._sync_cookies_from_browser(
+                        self._browser, for_url=getattr(finding, "url", "") or ""
+                    )
+                except Exception:
+                    pass
             try:
                 # 1 件の finding 検証が wedge しても verify フェーズ全体（＝スキャン）を
                 # 止めないよう有界化する。verify_finding は navigate/baseline/apply/fire を
