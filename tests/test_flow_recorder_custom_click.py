@@ -15,12 +15,25 @@ class MakeNavigateStepTests(unittest.TestCase):
 
     def test_marks_via_click_when_prev_is_click(self):
         steps = [{"action": "click", "selector": "#go"}]
-        self.assertTrue(_make_navigate_step(steps, "http://x/p2").get("via_click"))
+        self.assertTrue(_make_navigate_step(steps, "http://x/p2", 0.5).get("via_click"))
+
+    def test_no_via_click_when_click_is_stale_or_age_unknown(self):
+        """AJAX のみの click 後、時間窓外の遷移（アドレスバー等）は via_click にしない（Codex #179 P1）。"""
+        steps = [{"action": "click", "selector": "#go"}]
+        self.assertNotIn("via_click", _make_navigate_step(steps, "http://x/p2", 60.0))
+        self.assertNotIn("via_click", _make_navigate_step(steps, "http://x/p2"))
+
+    def test_click_was_dispatched_distinguishes_navigation_timeout(self):
+        from wscan.flow_runner import _click_was_dispatched
+        nav = Exception("Timeout 5000ms exceeded.\n  - click action done\n  - waiting for scheduled navigations to finish")
+        act = Exception("Timeout 5000ms exceeded.\n  - waiting for locator\n  - element is not visible")
+        self.assertTrue(_click_was_dispatched(nav))
+        self.assertFalse(_click_was_dispatched(act))
 
     def test_no_via_click_when_prev_is_navigate_or_empty(self):
         self.assertNotIn("via_click", _make_navigate_step([], "http://x/p1"))
         prev = [{"action": "navigate", "url": "http://x/p1"}]
-        self.assertNotIn("via_click", _make_navigate_step(prev, "http://x/p2"))
+        self.assertNotIn("via_click", _make_navigate_step(prev, "http://x/p2", 0.1))
 
     def test_flowstep_roundtrips_pos_and_via_click(self):
         d = {"action": "click", "selector": "#c", "x": 12.5, "y": 7.0}

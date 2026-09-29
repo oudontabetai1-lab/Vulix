@@ -52,6 +52,14 @@ class FlowStepError(Exception):
 # Data model
 # ---------------------------------------------------------------------------
 
+def _click_was_dispatched(exc: Exception) -> bool:
+    """Playwright の click timeout が dispatch 後（遷移待ち）で起きたかを call log から判定する純粋関数。
+    actionability 段階の timeout は "performing click action" 前に発生し "click action done" /
+    "waiting for scheduled navigations" を含まない（Codex #179 P1）。"""
+    msg = str(exc)
+    return "click action done" in msg or "scheduled navigations" in msg
+
+
 @dataclass
 class FlowStep:
     """A single step inside a ScanFlow."""
@@ -360,19 +368,24 @@ class FlowRunner:
                     # selector 構文不正、page/browser close、transport failure 等まで成功扱いすると、
                     # 必須の前提操作を欠いた状態で scan/checkpoint を進めてしまう（Codex #179 P1）。
                     raise FlowStepError(f"click failed for {sel!r}: {exc}") from exc
-                try:
-                    target_count = await self.browser.page.locator(sel).count()
-                except Exception as inspect_exc:
-                    raise FlowStepError(f"click target inspection failed for {sel!r}: {inspect_exc}") from inspect_exc
-                if target_count == 0:
-                    # 「存在するが overlay/非表示で actionability を満たさない」場合だけ skip 可。
-                    # 対象自体の欠落は必須前提の欠落なので F10 と同様に flow を失敗させる。
-                    raise FlowStepError(f"click target not found: {sel!r}") from exc
-                console.print(
-                    f"  [yellow]{label} click \\[{escape(sel)}] skip"
-                    f"（クリック不能: {escape(str(exc))}）[/yellow]"
-                )
-                return
+                if _click_was_dispatched(exc):
+                    # click 自体は発火済みで、後続の遷移待ちが timeout しただけ。actionability skip
+                    # ではないので握り潰さず、下の load-state / scope 検査へ進める（Codex #179 P1）。
+                    console.print(f"  [yellow]{label} click 後の遷移待ち timeout（続行）[/yellow]")
+                else:
+                    try:
+                        target_count = await self.browser.page.locator(sel).count()
+                    except Exception as inspect_exc:
+                        raise FlowStepError(f"click target inspection failed for {sel!r}: {inspect_exc}") from inspect_exc
+                    if target_count == 0:
+                        # 「存在するが overlay/非表示で actionability を満たさない」場合だけ skip 可。
+                        # 対象自体の欠落は必須前提の欠落なので F10 と同様に flow を失敗させる。
+                        raise FlowStepError(f"click target not found: {sel!r}") from exc
+                    console.print(
+                        f"  [yellow]{label} click \\[{escape(sel)}] skip"
+                        f"（クリック不能: {escape(str(exc))}）[/yellow]"
+                    )
+                    return
             try:
                 await self.browser.page.wait_for_load_state(
                     "domcontentloaded", timeout=10_000

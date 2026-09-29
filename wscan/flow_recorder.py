@@ -35,16 +35,25 @@ from pathlib import Path
 from typing import Optional
 
 
-def _make_navigate_step(prev_steps: list[dict], url: str) -> dict:
+# click から main-frame 遷移までを「click 起因」とみなす上限秒数（Codex #179 P1）。
+VIA_CLICK_WINDOW_S = 3.0
+
+
+def _make_navigate_step(prev_steps: list[dict], url: str, click_age: Optional[float] = None) -> dict:
     """記録用 navigate step を作る純粋関数（Codex #179）。
 
-    直前 step が click なら、この main-frame 遷移はその click が起こしたもの。navigate step は
-    `_match_pre_attack_flows` の照合（最後の navigate URL）用に残しつつ via_click を付し、replay 側は
-    実行を skip して二重ロード（click 自身の遷移＋navigate の再 GET）を防ぐ。ceiling: click→AJAX→
-    後発の meta refresh 等、click 起因でない遷移も直前が click だと誤って via_click 化しうる稀ケースは
-    許容する（実害は再 GET 1 回の欠落）。"""
+    直前 step が click **かつ** その click から click_age 秒以内（VIA_CLICK_WINDOW_S）の遷移だけを
+    click 起因とみなし via_click を付す。navigate step 自体は `_match_pre_attack_flows` の照合用に残し、
+    replay 側は via_click を実行 skip して二重ロードを防ぐ。AJAX のみの click の後に操作者が
+    アドレスバー等で遷移した場合は時間窓外になり通常 navigate として残る。
+    ceiling: 窓内の無関係な遅延 redirect は誤って via_click 化しうる（欠落は再 GET 1 回）。"""
     step = {"action": "navigate", "url": url}
-    if prev_steps and prev_steps[-1].get("action") == "click":
+    if (
+        prev_steps
+        and prev_steps[-1].get("action") == "click"
+        and click_age is not None
+        and click_age <= VIA_CLICK_WINDOW_S
+    ):
         step["via_click"] = True
     return step
 
@@ -262,6 +271,7 @@ class FlowRecorder:
             # navigate が中間ページのままになり _match_pre_attack_flows が誤ったページへ flow を
             # 適用してしまう（Codex #170 P2）。
             _initial_load = {"seen": False}
+            _last_click: dict = {"t": None}  # 直近 click 記録の monotonic 時刻（via_click の時間窓判定用）
 
             def on_navigate(frame):
                 if frame != page.main_frame:
@@ -285,7 +295,8 @@ class FlowRecorder:
                         if steps and steps[0].get("action") == "navigate":
                             steps[0]["landed_url"] = url
                     return
-                steps.append(_make_navigate_step(steps, url))
+                age = time.monotonic() - _last_click["t"] if _last_click["t"] is not None else None
+                steps.append(_make_navigate_step(steps, url, age))
 
             page.on("framenavigated", on_navigate)
 
@@ -308,6 +319,7 @@ class FlowRecorder:
                 if x is not None and y is not None:
                     step["x"] = x
                     step["y"] = y
+                _last_click["t"] = time.monotonic()
                 steps.append(step)
 
             await page.expose_function(_fn_click, _record_click)
