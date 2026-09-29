@@ -163,3 +163,16 @@ def test_realistic_intranet_file_upload_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+
+
+def test_realistic_api_page_observation_scanner_scorecard():
+    """realistic_api の jwt（page 観測系＝passive）を実採点する（0081）。
+
+    /api/v1/session/bootstrap（弱秘密鍵 HS256）=TP・/bootstrap-safe（十分長い鍵）=TN。
+    csrf / info_disclosure は DOM 依存で navigation 前に scan_page が走るため gap 維持（manifest 参照）。
+    """
+    _require_chromium()
+    out = _run_manifest("realistic_api_page_observation.yaml", {"jwt"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
