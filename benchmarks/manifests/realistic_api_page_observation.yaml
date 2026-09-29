@@ -1,0 +1,41 @@
+schema_version: 1
+suite_id: realistic_api_page_observation
+fixture_id: realistic_api
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# realistic_api（Acme Cloud Console）の page 観測系 check の vulnerable + safe twin。
+# いずれも注入点を持たずページ/レスポンス自体を観測するため injection を宣言せず、match は
+# canonical page identity（field="(page)"/location="page-level"）で宣言する。scorer は passive case を
+# (check, path) で採点し、exercised は _attack_one_page が刻む page-level 行を要求する。全 vulnerable/
+# safe エンドポイントは _NAV にリンクされておりクロール到達可能。EXPECTED_FINDINGS / SAFE_ENDPOINTS
+# を正本にする。
+# 収録 check:
+#   - jwt: HS256 JWT を弱い秘密鍵 "secret" で署名して body に露出（jwt scanner が httpx で URL を直接取得し
+#          weak secret を確証。finding check_type=jwt_weak_secret は jwt ファミリに属する）。safe twin は十分長い秘密鍵。
+# 除外（gap 維持・Codex #183 P1）: csrf / info_disclosure(_check_error_page) は browser.page の DOM を読むが、
+#   ScanEngine._attack_one_page は scan_page(page.url) を navigation 前に呼び、入力の無いページは navigate せず
+#   return するため、宣言ページの DOM を見ない（csrf は直前ページの form を誤読して FN/FP、debug-error は FN）。
+#   engine の page-level 順序修正（scan_page 前に navigate）が入るまで benchmark_gaps.yaml に残す。
+# 注: 同 fixture の session（脆弱 candidate FN。session scanner が browser context の cookie を name で
+# dedup するため、永続する insecure cookie の finding が /api/v1/session/issue に安定して紐づかない。
+# 加えて safe twin の Secure cookie は HTTP 上で拒否される）は scanner の attribution/recall 課題のため
+# 本ゲートには含めない（別途対応。benchmark_gaps.yaml に残す）。
+cases:
+  # ── jwt（HS256 を弱い秘密鍵で署名して body に露出）─────────────────────────
+  - case_id: realistic_api_page_observation.jwt.bootstrap.vulnerable
+    expected: vulnerable
+    check: jwt
+    request: {method: GET, path: /api/v1/session/bootstrap}
+    match: {path: /api/v1/session/bootstrap, field: "(page)", location: page-level}
+    twin_id: realistic_api_page_observation.jwt.bootstrap_safe.safe
+    taxonomy: [jwt, unauthenticated]
+    gate: observed
+  - case_id: realistic_api_page_observation.jwt.bootstrap_safe.safe
+    expected: safe
+    check: jwt
+    request: {method: GET, path: /api/v1/session/bootstrap-safe}
+    match: {path: /api/v1/session/bootstrap-safe, field: "(page)", location: page-level}
+    twin_id: realistic_api_page_observation.jwt.bootstrap.vulnerable
+    taxonomy: [jwt, unauthenticated]
+    gate: observed
