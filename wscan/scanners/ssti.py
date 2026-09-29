@@ -121,7 +121,9 @@ class SSTIScanner(BaseScanner):
         await self.log_payload_test(
             field_name, "wscan_ssti_baseline", "ssti_baseline", ip.url
         )
-        baseline_source, _ = await self._apply_ip(ip, "wscan_ssti_baseline")
+        # 0035-D1: typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
+        # source が非空のことがある。state で分岐して捨てず判定は従来どおり source/pair のみ）。
+        baseline_source = (await self.dispatch(ip, "wscan_ssti_baseline")).source
 
         async def _test_payload(
             payload: str,
@@ -132,7 +134,8 @@ class SSTIScanner(BaseScanner):
         ) -> bool:
             await self.log_payload_test(field_name, payload, check_label, ip.url)
 
-            source, pair = await self._apply_ip(ip, payload)
+            result = await self.dispatch(ip, payload)
+            source, pair = result.source, result.pair
 
             await asyncio.sleep(0.2 * self.sleep_factor)
 

@@ -185,7 +185,10 @@ class OSInjectionScanner(BaseScanner):
         await self.log_payload_test(
             field_name, "baseline_os_test", "os_baseline", ip.url
         )
-        baseline_source, baseline_pair = await self._apply_ip(ip, "baseline_os_test")
+        # 0035-D1: typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
+        # source が非空のことがある。state で分岐して捨てず判定は従来どおり source/pair のみ）。
+        baseline_result = await self.dispatch(ip, "baseline_os_test")
+        baseline_source, baseline_pair = baseline_result.source, baseline_result.pair
         _b_req = baseline_pair.get("request", {})
         _b_resp = baseline_pair.get("response", {})
         _b_ts_req = _b_req.get("timestamp", 0)
@@ -204,7 +207,8 @@ class OSInjectionScanner(BaseScanner):
             await self.log_payload_test(field_name, payload, check_label, ip.url)
 
             # Apply payload
-            source, pair = await self._apply_ip(ip, payload)
+            result = await self.dispatch(ip, payload)
+            source, pair = result.source, result.pair
 
             # --- Check 1: Command output in response (not pre-existing in baseline) ---
             match = self.check_response_for_patterns(source, OS_OUTPUT_PATTERNS)
@@ -300,7 +304,7 @@ class OSInjectionScanner(BaseScanner):
                 await self.log_payload_test(
                     field_name, "baseline_os_test", "os_baseline", ip.url
                 )
-                echo_baseline, _ = await self._apply_ip(ip, "baseline_os_test")
+                echo_baseline = (await self.dispatch(ip, "baseline_os_test")).source
             for payload in extra_payloads:
                 if await _test_payload(payload, "os_evolved", echo_baseline):
                     break

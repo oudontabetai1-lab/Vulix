@@ -180,7 +180,9 @@ class LDAPScanner(BaseScanner):
             field_name, "normaluser", "ldap_baseline", ip.url
         )
         try:
-            baseline_html, _ = await self._apply_ip(ip, "normaluser")
+            # 0035-D1: typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
+            # source が非空のことがある。state で分岐して捨てず判定は従来どおり source/pair のみ）。
+            baseline_html = (await self.dispatch(ip, "normaluser")).source
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
@@ -191,7 +193,8 @@ class LDAPScanner(BaseScanner):
         async def _test_payload(payload: str, check_label: str = self.CHECK_TYPE) -> bool:
             await self.log_payload_test(field_name, payload, check_label, ip.url)
             try:
-                html, pair = await self._apply_ip(ip, payload)
+                result = await self.dispatch(ip, payload)
+                html, pair = result.source, result.pair
             except Exception as exc:
                 if self.monitor:
                     await self.monitor.emit_status(
