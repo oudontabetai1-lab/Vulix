@@ -437,7 +437,13 @@ class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace
         from wscan.engine import ScanEngine
 
-        br = SimpleNamespace(dialog_total=0, dialog_dismiss_failed=False, recreated=0)
+        br = SimpleNamespace(dialog_total=0, dialog_dismiss_failed=False, recreated=0,
+                             navigated=[])
+
+        async def _nav(url, retries=0):
+            br.navigated.append(url)
+            return True
+        br.navigate = _nav
 
         async def recreate():
             br.recreated += 1
@@ -462,7 +468,8 @@ class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
             browser=br, wave_errors=[], scanners={"a": _S(True), "b": _S(False)},
             navigation_retries=0, concurrency=1, flows=[],
         )
-        for n in ("_recover_if_dialog_flood", "_page_recovery_failed", "_dialog_wedged_since"):
+        for n in ("_recover_if_dialog_flood", "_page_recovery_failed", "_dialog_wedged_since",
+                  "_page_level_page_healthy"):
             setattr(e, n, getattr(ScanEngine, n).__get__(e))
         e._match_pre_attack_flows = lambda page: []
         e._profile = lambda *a, **k: None
@@ -493,6 +500,50 @@ class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(e.scanners["b"].ran, 1)
         self.assertEqual(e._checkpoint_mark_done.call_count, 1)   # b のみ
         self.assertEqual(e.browser.recreated, 1)                  # 区間末で二重再生成しない
+        self.assertEqual(e.browser.navigated, ["http://t/p"])     # P1-1: recreate 後 b の前に target へ復帰
+
+    async def test_sticky_wedge_before_scan_recovers_before_blocked_scanner(self):
+        """P1-2: 既に dismissal 失敗が sticky なら scan_page を呼ぶ前に復旧する。"""
+        e = self._engine(recreate_ok=True)
+        e.scanners["a"].wedge = False
+        e.browser.dialog_dismiss_failed = True
+        order = []
+        orig = e.browser.recreate_page
+
+        async def rec():
+            order.append("recreate")
+            return await orig()
+        e.browser.recreate_page = rec
+        sa = e.scanners["a"]
+        orig_scan = sa.scan_page
+
+        async def scan(url):
+            order.append("scan")
+            return await orig_scan(url)
+        sa.scan_page = scan
+        await self._run(e)
+        self.assertEqual(order[:2], ["recreate", "scan"])
+
+    async def test_sticky_wedge_recovery_failure_never_calls_scanner(self):
+        e = self._engine(recreate_ok=False)
+        e.browser.dialog_dismiss_failed = True
+        await self._run(e)
+        self.assertEqual(e.scanners["a"].ran, 0)
+        self.assertEqual(e.scanners["b"].ran, 0)
+        e._checkpoint_mark_done.assert_not_called()
+
+
+class OpenRedirectBudgetGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_budget_exceeded_ignores_stale_page_url(self):
+        """P2: budget 超過時は前 field の canary が残る browser.page.url を評価せず [] を返す。"""
+        from types import SimpleNamespace
+        from wscan.scanners.open_redirect import OpenRedirectScanner
+        engine = _Engine()
+        engine.browser = SimpleNamespace(page=SimpleNamespace(url="https://evil.example.com/"))
+        sc = OpenRedirectScanner(engine)
+        ip = InjectionPoint.for_url_param("http://h/r?next=1", "next")
+        with _Budget(time.monotonic() - 1.0):
+            self.assertEqual(await sc.scan_injection_point(ip, {"name": "next"}), [])
 
 
 class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):

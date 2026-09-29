@@ -5591,6 +5591,14 @@ class ScanEngine:
             # この scanner 実行中に wedge したか（recover と同じ判定。正常時は False で分岐しない）。
             _dlg_scanner = getattr(self.browser, "dialog_total", 0)
             page_wedged = False
+            # scan_page の前に既存の sticky wedge（前段 navigation/flow の dismissal 失敗）を解消する。
+            # blocked page で無有界 page.content() を掴むと post-scan 復旧に到達できない。sticky でない
+            # 通常時はこの分岐に入らない。
+            if getattr(self.browser, "dialog_dismiss_failed", False):
+                _dlg_pagelevel = await self._recover_if_dialog_flood(_dlg_scanner)
+                if not await self._page_level_page_healthy(page):
+                    self._save_checkpoint()
+                    return
             try:
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
@@ -5645,7 +5653,7 @@ class ScanEngine:
                 # 復旧後は since 基準を進め、区間末の復旧が累積 dialog_total を再カウントして
                 # 健全 page を二重再生成するのを避ける。
                 _dlg_pagelevel = await self._recover_if_dialog_flood(_dlg_scanner)
-                if self._page_recovery_failed(page.url):
+                if not await self._page_level_page_healthy(page):
                     self._save_checkpoint()
                     return  # 残 scanner は未 checkpoint＝resume 回収
         # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
@@ -5923,6 +5931,19 @@ class ScanEngine:
             except Exception:
                 pass
         return getattr(br, "dialog_total", 0)
+
+    async def _page_level_page_healthy(self, page) -> bool:
+        """直前の復旧後、次の browser 依存 page-level scanner を走らせてよいか。
+
+        復旧失敗なら False。recreate した場合は tab が about:blank なので page.url へ戻し、戻れなければ
+        False（blank を検査して空 tested を checkpoint 化する偽陰性を防ぐ）。復旧不要なら True。"""
+        if self._page_recovery_failed(page.url):
+            return False
+        if getattr(self.browser, "_page_recreated", False):
+            if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+                self.wave_errors.append(f"page_recreate_failed:{page.url}:navigate")
+                return False
+        return True
 
     def _dialog_wedged_since(self, since: int) -> bool:
         """``_recover_if_dialog_flood`` と同じ flood/wedge 判定（純粋な観測・副作用なし）。"""

@@ -183,6 +183,11 @@ class OpenRedirectScanner(BaseScanner):
         if field_name.lower() not in REDIRECT_PARAM_NAMES:
             return []
 
+        # 時間ボックス超過なら送信されない（gate は空 transport 結果を返す）。前 field の canary に
+        # 残った browser.page.url を「redirect 成立」と誤判定しないよう、状態評価の前に打ち切る。
+        if self._field_budget_gate():
+            return []
+
         findings = []
 
         if self.monitor:
