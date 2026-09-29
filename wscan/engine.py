@@ -2618,33 +2618,35 @@ class ScanEngine:
             console.print("  [yellow][Auth] 再ログインできませんでした。[/yellow]")
         return bool(success)
 
-    async def _sync_cookies_from_browser(self, browser, for_url: str = "") -> None:
+    async def _sync_cookies_from_browser(self, browser, for_url: str = "") -> bool:
         """ブラウザコンテキストの Cookie を ``self.cookies`` 文字列へ反映する。
 
         ``auth_headers()`` は ``self.cookies`` を Cookie ヘッダに使うため、再ログイン
         後にここを更新しないと httpx ベースの検査が古い Cookie を送ってしまう。
         ``for_url`` のホスト（未指定なら target_url）宛に送られる Cookie のみ採用する。
+        戻り値は同期を完了したか（jar 取得不能＝据え置きは False。空 jar は観測結果なので True）。
         マルチスコープ（www とは別サブドメインの API/ログイン）では、これから叩く
         ホストを渡さないと host-only Cookie が落ちて API 検査が未認証になる。
         """
         try:
             page = getattr(browser, "page", None)
             if page is None:
-                return
+                return False
             cookies = await page.context.cookies()
         except Exception:
-            return
+            return False
         if not cookies:
             # jar が空（ログアウトで消去 / Bearer・localStorage 認証など）。stale な
             # Cookie を送り続けないようクリアする。なお page 取得不能・例外時は判定
             # できないため上の except/None 経路では据え置く（無闇に消さない）。
             _store_synced_cookies(self, "")
-            return
+            return True
         # domain/path スコープした Cookie ヘッダで**常に置換**する（空でも）。per-URL 同期では、
         # 前の URL で別ホスト用に設定した self.cookies が残ると、当該ホストに無関係な Cookie を
         # 送って別セッションで検査してしまう。一致が無ければクリアして未認証で送る。
         # 並列 worker 内では task-local に閉じる（_store_synced_cookies が振り分け）。
         _store_synced_cookies(self, _scoped_cookie_header(cookies, for_url or self.target_url))
+        return True
 
     async def cookie_header_for_url(self, url: str) -> str | None:
         """``url`` のホスト/パスへ送られる Cookie ヘッダをブラウザ jar から作る（path/domain スコープ済み）。
@@ -7106,16 +7108,16 @@ class ScanEngine:
                 f"  verify #{i+1}/{len(to_verify)}: {getattr(finding, 'check_type', '?')} "
                 f"@ {getattr(finding, 'url', '?')}"
             )
-            if getattr(self, "_concurrent_attack_ran", False):
-                # 並列 attack 後は global cookie が baseline のままなので、finding URL 宛の
-                # Cookie を browser jar から都度再スコープする（worker-local 値は捨てられている）。
-                try:
-                    await self._sync_cookies_from_browser(
-                        self._browser, for_url=getattr(finding, "url", "") or ""
-                    )
-                except Exception:
-                    pass
             try:
+                if getattr(self, "_concurrent_attack_ran", False):
+                    # 並列 attack 後は global cookie が baseline のままなので、finding URL 宛の
+                    # Cookie を browser jar から都度再スコープする（worker-local 値は捨てられている）。
+                    # 再同期失敗時（Codex P2）は前 finding の scoped Cookie が残るため、別ホスト/
+                    # path のセッションで検証（漏えい＋偽陰性）せず下の except で skipped へ倒す。
+                    if not await self._sync_cookies_from_browser(
+                        self._browser, for_url=getattr(finding, "url", "") or ""
+                    ):
+                        raise RuntimeError("per-finding cookie 再同期に失敗（誤セッション検証を回避）")
                 # 1 件の finding 検証が wedge しても verify フェーズ全体（＝スキャン）を
                 # 止めないよう有界化する。verify_finding は navigate/baseline/apply/fire を
                 # 重ねるため、特定 finding（例: 反射 XSS の再現）で内部 await が返らないと

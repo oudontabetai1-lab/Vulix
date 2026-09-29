@@ -278,6 +278,52 @@ class WorkerCookieAccessorTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(_verify()), "sid=PUB")  # jar から URL 毎に再スコープ
 
+    def test_sync_returns_completion_bool(self):
+        eng = self._engine("base=1")
+        ok = types.SimpleNamespace(page=types.SimpleNamespace(context=_Ctx([])))
+        self.assertTrue(asyncio.run(eng._sync_cookies_from_browser(ok)))  # 空 jar は観測結果
+        self.assertFalse(asyncio.run(eng._sync_cookies_from_browser(types.SimpleNamespace(page=None))))
+
+        class _Boom:
+            async def cookies(self):
+                raise RuntimeError("transient")
+
+        bad = types.SimpleNamespace(page=types.SimpleNamespace(context=_Boom()))
+        eng.cookies = "keep=1"
+        self.assertFalse(asyncio.run(eng._sync_cookies_from_browser(bad)))
+        self.assertEqual(eng._cookies, "keep=1")  # 失敗は据え置き
+
+    def test_verify_resync_failure_skips_instead_of_stale_cookie(self):
+        # Codex P2: 並列 attack 後の per-finding 再同期が失敗したら、前 finding の scoped Cookie で
+        # 検証せず skipped（未検証・要手動確認）に倒す。finding は保持し CONFIRMED にしない。
+        from wscan.engine import Finding
+        eng = self._engine("base=1")
+        seen = []
+
+        class _Boom:
+            async def cookies(self):
+                raise RuntimeError("transient")
+
+        eng._browser = types.SimpleNamespace(page=types.SimpleNamespace(context=_Boom()))
+        eng._concurrent_attack_ran = True
+        eng.cookies = "sid=PREV_HOST"  # 前 finding の scoped 値が残っている状態
+        eng.monitor = None
+        eng.wave_errors = []
+
+        async def _verify_one(finding):
+            seen.append(eng.auth_headers().get("Cookie"))
+            return "reproduced"
+
+        eng._verify_one = _verify_one
+        f = Finding(check_type="sqli", url="https://other.example.com/x", field_name="q",
+                    payload="'", evidence="e", severity="high")
+        eng.all_findings = [f]
+        asyncio.run(eng._phase_verify())
+        self.assertEqual(seen, [])  # 誤セッションで _verify_one を呼ばない
+        self.assertFalse(f.verified)
+        self.assertEqual(f.verification_state, "skipped")
+        self.assertEqual(len(eng.all_findings), 1)
+
     def test_flow_gate_exclusive_waits_for_shared(self):
         from wscan.engine import _FlowGate
 
