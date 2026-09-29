@@ -357,14 +357,19 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await replay_page.title(), "x=30,y=40")
         await replay_page.close()
 
+    async def _routed_pages(self):
+        """script からの data: トップレベル遷移は Chromium が block するため http を route で偽装する。"""
+        await self._context.route("http://t.test/p1", lambda r: r.fulfill(
+            content_type="text/html",
+            body="<div id='go' role='button' onclick=\"location.href='/p2'\">go</div>"))
+        await self._context.route("http://t.test/p2", lambda r: r.fulfill(
+            content_type="text/html", body="<body>PAGE2</body>"))
+        await self._context.route("http://t.test/p3", lambda r: r.fulfill(
+            content_type="text/html", body="<div id='go' role='button' onclick='void 0'>go</div>"))
+
     async def test_via_click_navigate_is_not_re_executed_on_replay(self):
         """via_click navigate は click が遷移させるため replay で再実行せず二重ロードしない（Codex #179）。"""
-        page1 = (
-            "data:text/html,<!doctype html><html><body>"
-            "<div id='go' role='button' onclick=\"location.href='"
-            "data:text/html,<body>PAGE2</body>'\">go</div></body></html>"
-        )
-        page2 = "data:text/html,<body>PAGE2</body>"
+        await self._routed_pages()
 
         class _CountingBrowser(_PageBrowser):
             def __init__(self, pg):
@@ -378,20 +383,47 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
 
         replay_page = await self._context.new_page()
         browser = _CountingBrowser(replay_page)
-        runner = FlowRunner(browser)
-        # click が page2 へ遷移させ、続く navigate は via_click（照合用に残すが実行 skip）。
         flow = ScanFlow.from_dict({
             "name": "via-click",
             "steps": [
-                {"action": "navigate", "url": page1},
+                {"action": "navigate", "url": "http://t.test/p1"},
                 {"action": "click", "selector": "#go"},
-                {"action": "navigate", "url": page2, "via_click": True},
+                {"action": "navigate", "url": "http://t.test/p2", "via_click": True},
             ],
         })
-        self.assertTrue(await runner.run(flow))
-        # navigate 呼び出しは初期ページのみ（via_click は skip、click が遷移させる）。
-        self.assertEqual(browser.nav_count, 1)
-        self.assertIn("PAGE2", await replay_page.content())
+        self.assertTrue(await FlowRunner(browser).run(flow))
+        self.assertEqual(browser.nav_count, 1)  # 初期ページのみ。p2 は click が遷移させた
+        self.assertEqual(replay_page.url, "http://t.test/p2")
+        await replay_page.close()
+
+    async def test_script_generated_click_is_not_recorded(self):
+        """element.click()/dispatchEvent 由来（isTrusted=false）の click は記録しない（Codex #179 P2）。"""
+        page, steps, _n = await self._recording_page(
+            "data:text/html,<!doctype html><html><body>"
+            "<div id='d' role='button' onclick='void 0'>d</div></body></html>"
+        )
+        await page.evaluate("() => document.getElementById('d').click()")
+        await page.wait_for_timeout(150)
+        self.assertEqual([s for s in steps if s["action"] == "click"], [])
+        await page.click("#d")  # 実操作は記録される
+        await page.wait_for_timeout(150)
+        self.assertEqual([s["selector"] for s in steps if s["action"] == "click"], ["#d"])
+        await page.close()
+
+    async def test_via_click_navigate_falls_back_when_click_did_not_navigate(self):
+        """click が遷移しなかった場合、via_click navigate は skip せず直接 navigate する（Codex #179 P1）。"""
+        await self._routed_pages()
+        replay_page = await self._context.new_page()
+        flow = ScanFlow.from_dict({
+            "name": "no-nav",
+            "steps": [
+                {"action": "navigate", "url": "http://t.test/p3"},
+                {"action": "click", "selector": "#go"},
+                {"action": "navigate", "url": "http://t.test/p2", "via_click": True},
+            ],
+        })
+        self.assertTrue(await FlowRunner(_PageBrowser(replay_page)).run(flow))
+        self.assertEqual(replay_page.url, "http://t.test/p2")
         await replay_page.close()
 
     async def test_replay_rejects_missing_click_target(self):

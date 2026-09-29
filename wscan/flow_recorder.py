@@ -171,6 +171,8 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                     }}
                 }}, true);
                 document.addEventListener('click', function(e) {{
+                    // script 生成の click（element.click()/dispatchEvent）は記録しない（Codex #179 P2）。
+                    if (!e.isTrusted) return;
                     const target = e.target;
                     if (!target || !target.closest) return;
                     const inputType = target.tagName === 'INPUT' ? target.type.toLowerCase() : '';

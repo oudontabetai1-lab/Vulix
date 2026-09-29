@@ -495,6 +495,8 @@ python3 main.py record URL [--output flows/recording.json] [--headless]
 python3 main.py scan URL --flows flows/recording.json [flows/other.json ...]
 ```
 
+**click の記録対象**: ボタン・リンク・`input[type=submit|button|reset]` に加え、`<label>`・`[onclick]`・`[tabindex]`・`role=button|link|menuitem|tab` を持つ独自の操作要素も、**ユーザーの実操作（trusted なクリック）に限り**記録します。スクリプトが発行した `element.click()` / `dispatchEvent` は記録しません。checkbox/radio は状態変更（change）として記録し、file/image input は再生不能のため記録せず警告を出します。canvas や block 要素は相対クリック座標も保存して再生します。再生時、クリックできない（非表示・overlay 等）操作要素は警告して skip し、クリック起因の遷移先へ到達していなければ遷移先を直接開きます（開けなければフロー失敗）。
+
 フローはその最後の `navigate` 先 URL が**クロールで発見したページと一致したとき**、そのページの攻撃直前に再生されます。したがって「ログインして初めて到達できる保護領域」全体を認証させる用途には向きません（未認証クロールが保護ページを発見できないため）。サイト全体の認証には `--cookie` / `--cookie-file` や自動ログインを使ってください。フローで確立した認証をクロール前段に効かせる強化は今後の課題です。
 
 ### `manual-crawl` — 手動巡回シード
