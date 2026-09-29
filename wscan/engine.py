@@ -5345,36 +5345,12 @@ class ScanEngine:
 
     @staticmethod
     def _urls_same_page(current: str, target: str) -> bool:
-        """flow 選択・着地先検証用の URL 同一ページ判定。
+        """flow 選択・着地先検証用の URL 同一ページ判定（``url_scope.same_page`` へ委譲）。
 
-        規則（checkpoint 用 normalize_url_for_key と**あえて別**）:
-        - 通常の同一文書内アンカー（`#settings`）は無視して同一ページ扱い。
-        - route 的 fragment（SPA の `#/admin` / `#!/x`）は保持して区別（#167 P1）。
-        - path 末尾スラッシュは query も route fragment も無いときだけ吸収。query があれば
-          `/app/?x` と `/app?x` を区別（#167 P2）。
-        - **query 値は厳密一致**を要求する。checkpoint 正規化は csrf/nonce 等の揮発クエリを
-          落とすため `/checkout?csrf=A` と `?csrf=B` を同一視し、別 tokenized state 用の flow を
-          誤選択・誤着地承認しうる（#167 P2）。flow マッチはトークンを保持する必要があるため
-          normalize_url_for_key を使わず、path/fragment のみ正規化する専用比較器にする。
+        route fragment 保持・query 厳密一致の規則は url_scope 側の docstring を正典とする。
+        flow 再生（flow_runner・flow_recorder）の via_click fallback 判定と同じ比較器を共有する。
         """
-        from urllib.parse import urlsplit
-
-        def _norm(u: str):
-            u = u or ""
-            p = urlsplit(u)
-            frag = p.fragment
-            keep_frag = frag if url_scope.is_route_fragment(frag) else ""
-            path = p.path if (p.query or keep_frag) else p.path.rstrip("/")
-            # 明示的な空クエリ `?` を保持する（`/confirm?` と `/confirm` を区別）。urlsplit は
-            # 両方 query="" で表すため、サーバが別ルートへ写す2形を同一視しないよう
-            # `?` の有無を key に含める（url_normalize.py:172-177 と整合・#167 P2）。
-            had_query_delim = "?" in u.split("#", 1)[0]
-            return (p.scheme, p.netloc, path, p.query, had_query_delim, keep_frag)
-
-        try:
-            return _norm(current) == _norm(target)
-        except Exception:
-            return False
+        return url_scope.same_page(current, target)
 
     async def _attack_one_page(self, page: CrawledPage, plans: dict, *, run_pre_attack_flows: bool = True):
         """

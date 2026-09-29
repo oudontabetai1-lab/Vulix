@@ -404,10 +404,16 @@ class FlowRecorder:
             action = step.get("action", "")
 
             if action == "navigate":
-                # via_click な navigate は click step が既に遷移させるため再実行しない（Codex #179）。
-                if step.get("via_click"):
-                    continue
                 url = step.get("url", "")
+                # via_click な navigate は click step が既に遷移させるため通常は再実行しない
+                # （Codex #179）。ただし click が skip/timeout/非遷移で記録先へ到達していない場合は
+                # skip すると payload fill が誤ページで走るため、到達を確認できたときだけ skip し、
+                # 未到達なら通常 navigate で fallback する（flow_runner と同じ比較器・Codex #178 P2）。
+                if step.get("via_click"):
+                    from wscan import url_scope
+                    if url and url_scope.same_page(getattr(browser.page, "url", ""), url):
+                        continue
+                    # 未到達: fallback navigate（下へ流す）
                 if url:
                     await browser.navigate(url)
                     await asyncio.sleep(0.3)

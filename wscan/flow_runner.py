@@ -215,9 +215,8 @@ class FlowRunner:
             self._assert_landing_in_scope()
 
         if step.action == "navigate":
-            from urllib.parse import unquote
-            _norm = lambda u: unquote((u or "").split("#")[0]).rstrip("/")  # noqa: E731
-            if step.via_click and _norm(getattr(self.browser.page, "url", "")) == _norm(step.url):
+            from wscan import url_scope
+            if step.via_click and url_scope.same_page(getattr(self.browser.page, "url", ""), step.url):
                 # 直前 click が記録先へ既に遷移済みなので再ロードしない（二重ロード防止・Codex #179）。
                 # 未到達（click が skip/非遷移）なら下で通常 navigate する（fallback・Codex #179 P1）。
                 # 照合には last navigate step の URL を使うので step 自体は残す。

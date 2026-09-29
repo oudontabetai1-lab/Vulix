@@ -170,6 +170,37 @@ def is_route_fragment(fragment: str) -> bool:
     return bool(frag) and (frag[:1] in ("/", "!") or "/" in frag)
 
 
+def same_page(current: str, target: str) -> bool:
+    """flow 選択・着地先検証用の URL 同一ページ判定（純粋関数）。
+
+    規則（checkpoint 用 ``url_normalize.normalize_url_for_key`` と**あえて別**）:
+    - 通常の同一文書内アンカー（``#settings``）は無視して同一ページ扱い。
+    - route 的 fragment（SPA の ``#/admin`` / ``#!/x``）は保持して区別（#167 P1）。
+    - path 末尾スラッシュは query も route fragment も無いときだけ吸収。query があれば
+      ``/app/?x`` と ``/app?x`` を区別（#167 P2）。
+    - **query 値は厳密一致**を要求する（csrf/nonce 等のトークンを保持。checkpoint 正規化と別）。
+
+    engine の flow マッチ／着地検証と flow 再生（flow_runner・flow_recorder）の via_click
+    fallback 判定が共有する単一の正典（#178 P2）。
+    """
+
+    def _norm(u: str):
+        u = u or ""
+        p = urlsplit(u)
+        frag = p.fragment
+        keep_frag = frag if is_route_fragment(frag) else ""
+        path = p.path if (p.query or keep_frag) else p.path.rstrip("/")
+        # 明示的な空クエリ ``?`` を保持する（``/confirm?`` と ``/confirm`` を区別）。urlsplit は
+        # 両方 query="" で表すため、``?`` の有無を key に含める（url_normalize.py と整合・#167 P2）。
+        had_query_delim = "?" in u.split("#", 1)[0]
+        return (p.scheme, p.netloc, path, p.query, had_query_delim, keep_frag)
+
+    try:
+        return _norm(current) == _norm(target)
+    except Exception:
+        return False
+
+
 # --- redaction -------------------------------------------------------------
 
 REDACTED = "<redacted>"

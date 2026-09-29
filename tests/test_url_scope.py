@@ -326,3 +326,35 @@ def test_callers_delegate_to_canonical_helper():
     url = "http://u:p@h/x?access_token=s"
     assert request_logger.redact_url(url) == url_scope.redact_url(url)
     assert http_methods.redact_url(url) == url_scope.redact_url(url, drop_userinfo=True)
+
+
+# --- same_page（flow マッチ／via_click fallback の共有比較器・#178 P2）---------
+
+def test_same_page_route_and_query_semantics():
+    """route fragment 保持・query 厳密一致・末尾スラッシュ規則（engine と flow 再生が共有）。"""
+    sp = url_scope.same_page
+    # 同一文書内アンカーは無視、path 差は別
+    assert sp("http://t/admin", "http://t/admin#settings") is True
+    assert sp("http://t/admin/", "http://t/admin") is True
+    assert sp("http://t/admin", "http://t/login") is False
+    # SPA route fragment は保持して区別（#179 P2: /app#/cart と /app#/checkout を潰さない）
+    assert sp("http://app/#/cart", "http://app/#/checkout") is False
+    assert sp("http://app/#/admin", "http://app/#/admin") is True
+    # query 厳密一致（トークンを落とさない）
+    assert sp("http://t/checkout?csrf=A", "http://t/checkout?csrf=B") is False
+    # クエリ値末尾の `/` を消さない（_norm の rstrip 誤適用回帰・#179 P2）
+    assert sp("http://t/view?next=/", "http://t/view?next=") is False
+    # query 付き末尾スラッシュ差は区別
+    assert sp("http://t/app/?action=save", "http://t/app?action=save") is False
+    assert sp("", "http://t/admin") is False
+
+
+def test_same_page_matches_engine_delegator():
+    """ScanEngine._urls_same_page は url_scope.same_page へ委譲する（重複排除の回帰）。"""
+    from wscan.engine import ScanEngine
+    for a, b in [
+        ("http://app/#/cart", "http://app/#/checkout"),
+        ("http://t/x?csrf=A", "http://t/x?csrf=A"),
+        ("http://t/a", "http://t/a#frag"),
+    ]:
+        assert ScanEngine._urls_same_page(a, b) == url_scope.same_page(a, b)
