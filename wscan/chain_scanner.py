@@ -259,6 +259,20 @@ class ChainScanner:
     # Observation pass
     # ------------------------------------------------------------------
 
+    async def _probe_rendered_as_element(self, uid: str) -> bool:
+        """probe が現ページで実 DOM 要素（``id=wscc_{uid}``）として parse されたか。
+
+        安全に escape された格納はテキストノードになり要素にならないので False。生タグとして
+        描画された HTML injection のときだけ True（部分文字列一致の安全ツイン FP を防ぐ・#184）。
+        uid は ``uuid4().hex`` 断片＝英数字のみで CSS セレクタとして安全。
+        注: DOM 要素照合は iframe / shadow DOM 内を貫通しない（escape 済みテキストの FP 防止を優先した許容トレードオフ）。
+        """
+        try:
+            el = await self.browser.page.query_selector(f"#wscc_{uid}")
+            return el is not None
+        except Exception:
+            return False
+
     async def _observation_pass(self, pages: list) -> list[ChainFinding]:
         """Navigate to each observation page and detect chain executions."""
         chain_findings: list[ChainFinding] = []
@@ -305,15 +319,18 @@ class ChainScanner:
                     continue
 
                 if probe.probe_type == "xss":
-                    # Check for unencoded tag (id attribute survived rendering)
-                    marker = f'id="wscc_{uid}"'
-                    if marker in html:
+                    # 実 DOM 要素（id=wscc_UID）として parse されたときだけ HTML injection とみなす。
+                    # 素朴な部分文字列一致は誤検知する: 安全に escape された格納
+                    # （`&lt;img ... id="..."&gt;` = テキスト表示）でも browser の page.content() は
+                    # escape 済みテキスト内の `"` を戻すため `id="wscc_UID"` が部分文字列として残る
+                    # （安全ツイン FP・Codex #184）。escape 済みテキストは要素にならないので DOM 照合で弾く。
+                    if await self._probe_rendered_as_element(uid):
                         cf = await self._make_html_injection_finding(
                             probe=probe,
                             trigger_url=page.url,
                             evidence=(
-                                f"[ChainDetect] Stored HTML injection: probe marker "
-                                f"'{marker}' found unencoded on {page.url} "
+                                f"[ChainDetect] Stored HTML injection: probe element "
+                                f"'#wscc_{uid}' rendered on {page.url} "
                                 f"(injected via {probe.source_url} "
                                 f"field '{probe.field_name}')"
                             ),
@@ -323,14 +340,16 @@ class ChainScanner:
                             break  # one finding per page is enough
 
                 elif probe.probe_type == "html":
-                    # Simple text marker appeared without encoding
-                    if f"wscanchain_{uid}" in html:
+                    # 同上。text marker（wscanchain_UID）は英数字のみで escape されても残るため
+                    # 部分文字列一致は escape 済みテキストで誤検知する。probe が実要素として
+                    # parse された（id=wscc_UID の span が存在する）ときだけ content injection とみなす。
+                    if await self._probe_rendered_as_element(uid):
                         cf = await self._make_html_injection_finding(
                             probe=probe,
                             trigger_url=page.url,
                             evidence=(
-                                f"[ChainDetect] Content injection: "
-                                f"'wscanchain_{uid}' appeared on {page.url} "
+                                f"[ChainDetect] Content injection: probe element "
+                                f"'#wscc_{uid}' rendered on {page.url} "
                                 f"(injected via {probe.source_url} "
                                 f"field '{probe.field_name}')"
                             ),

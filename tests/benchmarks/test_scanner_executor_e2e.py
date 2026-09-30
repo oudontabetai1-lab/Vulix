@@ -176,3 +176,20 @@ def test_realistic_api_page_observation_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+
+
+def test_realistic_healthcare_stored_xss_scanner_scorecard():
+    """格納型 XSS を脆弱=TP・エスケープ安全ツイン=TN で実採点する。
+
+    xxe は XML carrier が採点不能のため gap（E2E 対象外）。
+
+    脆弱ケースの TP は、単独の格納型 XSS スキャナが、注入フォームのページとは別 URL のクロール済み
+    クエリパラメータ変種（posts ページ）で注入 marker を観測して得る（ページ跨ぎの second-order 要件を
+    満たす）。chain スキャナ由来ではない（stored_xss のみ有効時は同一ページ probe は実行されない）。
+    エスケープ済み安全ツインは実 DOM 要素が生成されず finding にならない。
+    """
+    _require_chromium()
+    out = _run_manifest("realistic_healthcare_stored_xss.yaml", {"stored_xss"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
