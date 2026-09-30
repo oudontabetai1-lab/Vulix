@@ -66,6 +66,76 @@ _FIELD_ATTACK_DEADLINE: ContextVar = ContextVar("wscan_field_deadline", default=
 _FIELD_BUDGET_NOTES: ContextVar = ContextVar("wscan_field_budget_notes", default=None)
 _FIELD_BUDGET_TRUNCATED: ContextVar = ContextVar("wscan_field_budget_truncated", default=None)
 _FIELD_BUDGET_IDENT: ContextVar = ContextVar("wscan_field_budget_ident", default=None)
+# Per-worker Cookie 状態。直列時は _UNSET のままで Cookie は共有 self.cookies に載る。
+# 並列時は worker_loop が各 task の ContextVar を self.cookies のスナップショットで種付けし、
+# pre-attack flow 後や per-page 再スコープで同期した Cookie が worker task 内に閉じる
+# （共有 self.cookies を書き換えて別 worker を汚染しない）。
+_COOKIES_UNSET = object()
+_WORKER_COOKIES: ContextVar = ContextVar("wscan_worker_cookies", default=_COOKIES_UNSET)
+
+
+def _store_synced_cookies(engine, value: str) -> None:
+    """同期した Cookie 文字列を保存する（純粋な振り分け）。
+
+    並列 worker task 内（``_WORKER_COOKIES`` が種付け済み）なら task-local な ContextVar へ、
+    直列時は共有 ``engine.cookies`` へ書く。これにより worker 間の Cookie 汚染を防ぎつつ、
+    直列の挙動を完全に不変に保つ。
+    """
+    if _WORKER_COOKIES.get(_COOKIES_UNSET) is not _COOKIES_UNSET:
+        _WORKER_COOKIES.set(value)
+    else:
+        engine.cookies = value
+
+
+def _effective_cookies_of(engine) -> str:
+    override = _WORKER_COOKIES.get(_COOKIES_UNSET)
+    return engine._cookies if override is _COOKIES_UNSET else override
+
+
+def _effective_cookies(engine) -> str:
+    """auth_headers が使う実効 Cookie 文字列を返す（worker 内なら task-local を優先）。"""
+    override = _WORKER_COOKIES.get(_COOKIES_UNSET)
+    return engine.cookies if override is _COOKIES_UNSET else override
+
+
+class _FlowGate:
+    """pre-attack flow 付きページを排他実行する読み書きゲート（0067 Codex P1）。
+
+    worker は同一 BrowserContext（= cookie jar）を共有するため、flow が jar を書き換える間に
+    他 worker が動くと別 flow の Cookie を拾う。flow を持つページ（exclusive）は他ページが
+    全て退出するのを待って単独で走り、それ以外（shared）は同時実行する。
+    """
+
+    def __init__(self) -> None:
+        self._cond = asyncio.Condition()
+        self._readers = 0
+        self._writer = False
+        self._waiting_writers = 0
+
+    async def acquire(self, exclusive: bool) -> None:
+        async with self._cond:
+            if exclusive:
+                self._waiting_writers += 1
+                try:
+                    await self._cond.wait_for(lambda: not self._writer and self._readers == 0)
+                finally:
+                    self._waiting_writers -= 1
+                    # writer が待機中に cancel されても、_waiting_writers==0 待ちの reader を必ず起こす。
+                    self._cond.notify_all()
+                self._writer = True
+            else:
+                await self._cond.wait_for(
+                    lambda: not self._writer and self._waiting_writers == 0
+                )
+                self._readers += 1
+
+    async def release(self, exclusive: bool) -> None:
+        async with self._cond:
+            if exclusive:
+                self._writer = False
+            else:
+                self._readers -= 1
+            self._cond.notify_all()
 
 
 def _observability_warning_text(summary: dict) -> str:
@@ -840,7 +910,7 @@ class ScanEngine:
         # fast_mode forces 0; ctf_mode halves the delay
         self._effective_delay: float = request_delay * self.sleep_factor
         self.navigation_retries: int = max(0, int(navigation_retries))
-        self.cookies = cookies
+        self._cookies: str = cookies
         self.cookie_list: list = list(cookie_list or [])
         # Normalise low-privilege cookies: prefer list form when both are given
         self.low_priv_cookies: str = low_priv_cookies
@@ -1880,6 +1950,22 @@ class ScanEngine:
             return headers
         return {}
 
+    @property
+    def cookies(self) -> str:
+        """実効 Cookie 文字列。並列 worker task 内なら task-local 値を返す。
+
+        auth_headers だけでなく ``engine.cookies`` を直読みする全 consumer（cms/jwt/graphql/
+        privesc 等）が worker-local 値を見るよう、アクセサ自体を worker-aware にする（0067）。
+        """
+        return _effective_cookies_of(self)
+
+    @cookies.setter
+    def cookies(self, value: str) -> None:
+        if _WORKER_COOKIES.get(_COOKIES_UNSET) is not _COOKIES_UNSET:
+            _WORKER_COOKIES.set(value)
+        else:
+            self._cookies = value
+
     def auth_headers(
         self,
         extra: Optional[dict] = None,
@@ -1905,10 +1991,13 @@ class ScanEngine:
             if url
             else self.header_manager.current()
         )
-        if include_cookie and self.cookies:
+        # 並列 worker 内では task-local な Cookie（pre-attack flow 後に同期したセッション）を
+        # 優先する。直列時は共有 self.cookies をそのまま使う（挙動不変）。
+        cookie = _effective_cookies(self)
+        if include_cookie and cookie:
             # Don't clobber an explicit Cookie header from --header.
             if not any(k.lower() == "cookie" for k in headers):
-                headers["Cookie"] = self.cookies
+                headers["Cookie"] = cookie
         if extra:
             for k, v in extra.items():
                 if v is None:
@@ -2531,32 +2620,35 @@ class ScanEngine:
             console.print("  [yellow][Auth] 再ログインできませんでした。[/yellow]")
         return bool(success)
 
-    async def _sync_cookies_from_browser(self, browser, for_url: str = "") -> None:
+    async def _sync_cookies_from_browser(self, browser, for_url: str = "") -> bool:
         """ブラウザコンテキストの Cookie を ``self.cookies`` 文字列へ反映する。
 
         ``auth_headers()`` は ``self.cookies`` を Cookie ヘッダに使うため、再ログイン
         後にここを更新しないと httpx ベースの検査が古い Cookie を送ってしまう。
         ``for_url`` のホスト（未指定なら target_url）宛に送られる Cookie のみ採用する。
+        戻り値は同期を完了したか（jar 取得不能＝据え置きは False。空 jar は観測結果なので True）。
         マルチスコープ（www とは別サブドメインの API/ログイン）では、これから叩く
         ホストを渡さないと host-only Cookie が落ちて API 検査が未認証になる。
         """
         try:
             page = getattr(browser, "page", None)
             if page is None:
-                return
+                return False
             cookies = await page.context.cookies()
         except Exception:
-            return
+            return False
         if not cookies:
             # jar が空（ログアウトで消去 / Bearer・localStorage 認証など）。stale な
             # Cookie を送り続けないようクリアする。なお page 取得不能・例外時は判定
             # できないため上の except/None 経路では据え置く（無闇に消さない）。
-            self.cookies = ""
-            return
+            _store_synced_cookies(self, "")
+            return True
         # domain/path スコープした Cookie ヘッダで**常に置換**する（空でも）。per-URL 同期では、
         # 前の URL で別ホスト用に設定した self.cookies が残ると、当該ホストに無関係な Cookie を
         # 送って別セッションで検査してしまう。一致が無ければクリアして未認証で送る。
-        self.cookies = _scoped_cookie_header(cookies, for_url or self.target_url)
+        # 並列 worker 内では task-local に閉じる（_store_synced_cookies が振り分け）。
+        _store_synced_cookies(self, _scoped_cookie_header(cookies, for_url or self.target_url))
+        return True
 
     async def cookie_header_for_url(self, url: str) -> str | None:
         """``url`` のホスト/パスへ送られる Cookie ヘッダをブラウザ jar から作る（path/domain スコープ済み）。
@@ -2620,6 +2712,13 @@ class ScanEngine:
             browser, status=status, final_url=final_url, body=body, for_url=url
         )
         if relogged:
+            if self.concurrency > 1:
+                # 並列時は worker が同一 BrowserContext（cookie jar）を共有するため、再ログインによる
+                # jar の書き換えが並行ページへ波及しうる。既知の残余競合を黙殺せず記録する。
+                errors = getattr(self, "wave_errors", None)
+                if errors is None:
+                    self.wave_errors = errors = []
+                errors.append("cookie_jar_shared_relogin:concurrency_gt_1")
             # 認証済みコンテンツを攻撃で見るため、対象ページへ再遷移する。
             try:
                 await browser.navigate(url, retries=self.navigation_retries)
@@ -4542,6 +4641,8 @@ class ScanEngine:
         for w in extra_workers:
             await worker_pool.put(w)
 
+        flow_gate = _FlowGate()
+        self._concurrent_attack_ran = True
         page_queue: asyncio.Queue = asyncio.Queue()
         for p in pages:
             await page_queue.put(p)
@@ -4562,8 +4663,28 @@ class ScanEngine:
 
                 worker_browser = await worker_pool.get()
                 token = _CURRENT_WORKER.set(worker_browser)
+                # この task の Cookie 状態を共有 self.cookies のスナップショットで種付けする。
+                # 以降 _sync_cookies_from_browser はこの ContextVar へ書き（_store_synced_cookies）、
+                # pre-attack flow 後・per-page 再スコープの Cookie が task 内に閉じて別 worker を
+                # 汚染しない。slot 0（メインブラウザ・_CURRENT_WORKER=None）も独立して種付けされる。
+                cookie_seed = None
+                cookie_token = None
+                exclusive = False
+                gate_held = False
                 skip_this_page = False
                 try:
+                    # flow 付きページは共有 cookie jar を書き換えるため他ページと排他実行する。
+                    # 判定が例外を投げても finally（task_done/pool 返却/token reset）を必ず通すため
+                    # try 内で行う（外だと page_queue.join() がハングする）。
+                    exclusive = bool(self._match_pre_attack_flows(page))
+                    await flow_gate.acquire(exclusive)
+                    gate_held = True
+                    # gate 通過後に共有 baseline で種付けする。並列フェーズ中に共有 self._cookies を
+                    # 書く経路は無い（worker-local 値は意図的に昇格しない）ので、これは常に baseline。
+                    # flow が発行した Cookie は _attack_one_page 冒頭の per-page 再同期で jar から
+                    # 取り込まれる。グローバル昇格を足すと URL スコープ違いの Cookie が混線する。
+                    cookie_seed = self._cookies
+                    cookie_token = _WORKER_COOKIES.set(cookie_seed)
                     try:
                         await self.controller.checkpoint()
                     except SkipPage:
@@ -4583,6 +4704,15 @@ class ScanEngine:
                 except Exception as exc:
                     console.print(f"  [yellow][Worker] Error on {page.url}: {exc}[/yellow]")
                 finally:
+                    # task-local Cookie は global self._cookies へ昇格させない（URL スコープ違いの
+                    # Cookie が並行ページ/verification へ混線するため）。verification は URL 毎に
+                    # browser jar から再スコープする（_phase_verify）。
+                    # 既知の残課題(follow-up): 再ログイン/応答 Set-Cookie による共有 jar の競合は
+                    # per-worker BrowserContext が必要。本実装は read 隔離＋flow ページ直列化まで。
+                    if cookie_token is not None:
+                        _WORKER_COOKIES.reset(cookie_token)
+                    if gate_held:
+                        await flow_gate.release(exclusive)
                     _CURRENT_WORKER.reset(token)
                     await worker_pool.put(worker_browser)
                     page_queue.task_done()
@@ -5371,13 +5501,13 @@ class ScanEngine:
         # 同期する。domain/path フィルタにより target_url 同期では Path=/admin の
         # セッション Cookie が落ちるため、graphql/cache/proto の httpx 検査が認証 Cookie
         # 無しで /admin を叩かないよう、ページ毎にそのパス宛 Cookie を採り直す。
-        # ただし self.cookies はエンジン共有なので、並列(--concurrency>1)では別ワーカーの
-        # 検査中に書き換える競合になる。直列時のみ行う（並列は既存の共有 cookie 前提）。
-        if (getattr(self, "concurrency", 1) or 1) <= 1:
-            try:
-                await self._sync_cookies_from_browser(self.browser, for_url=page.url)
-            except Exception:
-                pass
+        # 並列(--concurrency>1)でも安全：worker task 内では _sync_cookies_from_browser が
+        # task-local な ContextVar へ書き（_store_synced_cookies）、共有 self.cookies を
+        # 書き換えず別 worker を汚染しない。直列時は従来どおり self.cookies を更新する。
+        try:
+            await self._sync_cookies_from_browser(self.browser, for_url=page.url)
+        except Exception:
+            pass
 
         # ── Pre-attack flow は page-level 検査より前に実行する（F10・Codex #167 P1）──
         # ログイン/セットアップ flow が失敗したまま page-level（graphql/cache/proto 等）や
@@ -5497,26 +5627,15 @@ class ScanEngine:
             for _ran_flow in matched_flows:
                 self._checkpoint_mark_flow_ran(page.url, _ran_flow)
             # 成功した flow はセッション Cookie を発行/更新し得る。HTTP scanner は browser jar
-            # ではなく engine.cookies から Cookie ヘッダを得るため、flow 後に採り直して乖離を
-            # 防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く・Codex #167 P1）。
-            if (getattr(self, "concurrency", 1) or 1) <= 1:
-                try:
-                    await self._sync_cookies_from_browser(self.browser, for_url=page.url)
-                except Exception:
-                    pass
-            elif not getattr(self, "_warned_flow_concurrency", False):
-                # concurrency>1 では engine.cookies が全 worker 共有のため、worker ごとに flow 発行
-                # Cookie を同期すると別 worker の状態を壊す。同期を見送る結果、HTTP scanner は
-                # pre-flow Cookie で検査し得る。per-worker Cookie スナップショットは follow-up 課題と
-                # し、ここでは制限を1度だけ可視化する（Codex #170 P2）。flow の Cookie 状態を正確に
-                # 検査するには --concurrency 1 を推奨。
-                self._warned_flow_concurrency = True
-                self.wave_errors.append("flow_cookie_sync_skipped:concurrency_gt_1")
-                console.print(
-                    "  [yellow][Flow] --concurrency>1 では flow 発行 Cookie を HTTP scanner の "
-                    "engine.cookies へ同期しません（per-worker 分離は follow-up）。flow の Cookie 状態を"
-                    "正確に検査するには --concurrency 1 を推奨（Codex #170 P2）[/yellow]"
-                )
+            # ではなく engine.cookies（auth_headers）から Cookie ヘッダを得るため、flow 後に
+            # 採り直して乖離を防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く・
+            # Codex #167 P1）。並列(--concurrency>1)でも安全：worker task 内では task-local な
+            # ContextVar に閉じ（_store_synced_cookies）、この worker の HTTP scanner にだけ
+            # flow 発行 Cookie が載る。別 worker は自分の baseline/flow Cookie を保つ（0067）。
+            try:
+                await self._sync_cookies_from_browser(self.browser, for_url=page.url)
+            except Exception:
+                pass
             # 前提 flow が checkout/coupon 等のフォームや URL パラメータを新たに露出し得る。
             # 再生前に採取した CrawledPage のまま攻撃すると新出フォームを検査しないため、
             # 攻撃対象を決める前に現在のページから form/url_param を採り直す（Codex #170 P1）。
@@ -6981,6 +7100,20 @@ class ScanEngine:
                 f"@ {getattr(finding, 'url', '?')}"
             )
             try:
+                if getattr(self, "_concurrent_attack_ran", False):
+                    # 並列 attack 後は global cookie が baseline のままなので、finding URL 宛の
+                    # Cookie を browser jar から都度再スコープする（worker-local 値は捨てられている）。
+                    # 再同期失敗時（Codex P2）は前 finding の scoped Cookie が残るため、別ホスト/
+                    # path のセッションで検証（漏えい＋偽陰性）せず下の except で skipped へ倒す。
+                    # 再同期自体も wedge しうる（page.context.cookies()）ため verify 1 件と同じ上限で有界化し、
+                    # TimeoutError は下の except で skipped へ倒す。
+                    if not await asyncio.wait_for(
+                        self._sync_cookies_from_browser(
+                            self._browser, for_url=getattr(finding, "url", "") or ""
+                        ),
+                        timeout=verify_budget,
+                    ):
+                        raise RuntimeError("per-finding cookie 再同期に失敗（誤セッション検証を回避）")
                 # 1 件の finding 検証が wedge しても verify フェーズ全体（＝スキャン）を
                 # 止めないよう有界化する。verify_finding は navigate/baseline/apply/fire を
                 # 重ねるため、特定 finding（例: 反射 XSS の再現）で内部 await が返らないと
