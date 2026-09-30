@@ -130,7 +130,33 @@ def test_changes_requested_blocks_and_later_approval_clears():
 
 def test_unresolved_thread_blocks():
     assert any("unresolved" in r for r in blocked(reviewThreads=[{"path": "x.py", "isResolved": False}]))
-    assert any("unresolved" in r for r in blocked(reviewThreads=[{"path": "x.py"}])), "解決状態不明は未解決扱い"
+    assert any("boolean" in r for r in blocked(reviewThreads=[{"path": "x.py"}])), "解決状態不明は失格"
+
+
+@pytest.mark.parametrize("value", ["x", True, 0, {"nodes": [{"state": "CHANGES_REQUESTED"}]}, ["x"]])
+def test_malformed_reviews_fail_closed(value):
+    assert any("review:" in r for r in blocked(reviews=value))
+
+
+@pytest.mark.parametrize("value", ["x", 0, {"nodes": []}, ["x"]])
+def test_malformed_threads_fail_closed(value):
+    assert any("threads:" in r for r in blocked(reviewThreads=value))
+
+
+@pytest.mark.parametrize("value", ["", [], "false", 0])
+def test_nonboolean_draft_fails_closed(value):
+    assert any("boolean" in r for r in blocked(isDraft=value))
+
+
+@pytest.mark.parametrize("value", ["false", 0, None])
+def test_nonboolean_resolution_fails_closed(value):
+    assert any("boolean" in r for r in blocked(reviewThreads=[{"isResolved": value}]))
+
+
+def test_undated_change_request_cannot_be_cleared():
+    reviews = [{"author": {"login": "bob"}, "state": "CHANGES_REQUESTED"},
+               {"author": {"login": "bob"}, "state": "APPROVED", "submittedAt": "2026-01-02"}]
+    assert any("submittedAt missing" in r for r in blocked(reviews=reviews))
 
 
 @pytest.mark.parametrize("key", REQUIRED_EVIDENCE)

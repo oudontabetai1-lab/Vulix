@@ -63,7 +63,9 @@ def _check_pr(p: Mapping[str, Any], out: list[str]) -> None:
         out.append(f"pr: state is {state or 'unknown'}, expected OPEN")
     if not _has(p, "isDraft", "is_draft"):
         out.append("pr: isDraft missing (fail closed)")
-    elif bool(_pick(p, "isDraft", "is_draft", default=True)):
+    elif not isinstance(_pick(p, "isDraft", "is_draft"), bool):
+        out.append("pr: isDraft must be a boolean (fail closed)")
+    elif _pick(p, "isDraft", "is_draft"):
         out.append("pr: draft PRs are not mergeable")
     m = _pick(p, "mergeable", default=None)
     if m is None:
@@ -113,13 +115,22 @@ def _check_reviews(p: Mapping[str, Any], out: list[str]) -> None:
     """CHANGES_REQUESTED が残っていないか（reviewer 毎の最新の意思表示で判定）。"""
     if not _has(p, "reviews"):
         return out.append("review: reviews missing (fail closed)")
+    reviews = _pick(p, "reviews")
+    if not isinstance(reviews, list):
+        return out.append("review: reviews must be a list (fail closed)")
     latest: dict[str, tuple[str, int, str]] = {}
-    for i, r in enumerate(_as_list(_pick(p, "reviews", default=[]))):
+    for i, r in enumerate(reviews):
+        if not isinstance(r, Mapping):
+            out.append("review: invalid review entry (fail closed)")
+            continue
         if (state := _upper(r, "state")) not in _DECISIVE:
             continue  # COMMENTED 等は意思表示を上書きしない
         a = _pick(r, "author", default=None)
         who = _text(_pick(a, "login", "name", default="")) if isinstance(a, Mapping) else _text(_pick(r, "user", "login", default=""))
         key, stamp = who or f"(anonymous#{i})", _text(_pick(r, "submittedAt", "submitted_at", "createdAt", "created_at", default=""))
+        if not stamp:
+            out.append("review: submittedAt missing (fail closed)")
+            continue
         if (prev := latest.get(key)) is None or (stamp, i) >= (prev[0], prev[1]):
             latest[key] = (stamp, i, state)
     blocked = [f"review: changes requested by {w}" for w in sorted(latest) if latest[w][2] == "CHANGES_REQUESTED"]
@@ -132,9 +143,19 @@ def _check_threads(p: Mapping[str, Any], out: list[str]) -> None:
     """未解決スレッドが無いか（解決状態が読めないものは未解決扱い）。"""
     if not _has(p, "reviewThreads", "review_threads"):
         return out.append("threads: reviewThreads missing (fail closed)")
-    paths = [_text(_pick(t, "path", default="")) or "(unknown path)"
-             for t in _as_list(_pick(p, "reviewThreads", "review_threads", default=[]))
-             if not bool(_pick(t, "isResolved", "is_resolved", "resolved", default=None))]
+    threads = _pick(p, "reviewThreads", "review_threads")
+    if not isinstance(threads, list):
+        return out.append("threads: reviewThreads must be a list (fail closed)")
+    paths = []
+    for thread in threads:
+        if not isinstance(thread, Mapping):
+            out.append("threads: invalid review thread (fail closed)")
+            continue
+        resolved = _pick(thread, "isResolved", "is_resolved", "resolved")
+        if not isinstance(resolved, bool):
+            out.append("threads: isResolved must be a boolean (fail closed)")
+        elif not resolved:
+            paths.append(_text(_pick(thread, "path", default="")) or "(unknown path)")
     if paths:
         out.append(f"threads: {len(paths)} unresolved review thread(s) [{', '.join(sorted(set(paths))[:5])}]")
 
