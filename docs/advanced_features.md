@@ -258,6 +258,10 @@ python main.py record --output flows/login.json http://example.com/login
 # 操作後 Ctrl+C で JSON 保存
 ```
 
+### click 記録の対象
+
+ボタン・リンク・submit 系 input に加え、`<label>`・`[onclick]`・`[tabindex]`・`role=button|link|menuitem|tab` の独自操作要素を記録する。記録は**ユーザー実操作（`isTrusted`）のみ**で、スクリプト発行の `click()`/`dispatchEvent` は無視する。checkbox/radio は change として、file/image input は記録せず警告。canvas/block 要素は相対座標付き。クリック起因の遷移は `via_click` 付き navigate として残し、再生時は現在 URL が記録先に一致するときだけ skip する（未到達なら直接 navigate）。
+
 ### セキュリティ考慮
 
 記録時の JavaScript フック関数名にランダムトークンを使用 (`__wscan_fill_{token}__`) し、悪意あるページ JS によるステップ改ざんを防止。
