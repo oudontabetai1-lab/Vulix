@@ -385,7 +385,7 @@ python3 main.py scan URL [URL ...] [options]
 | `--community-payloads / --no-community-payloads` | `true` | 生成済み公開ペイロードを使用/不使用 |
 | `--no-adaptive-payloads` | adaptive 有効 | LLM 適応ラウンドを無効化 |
 | `--no-sitemap-crawl` | 有効 | sitemap/robots シードを無効化 |
-| `-j, --concurrency N` | `1` | 攻撃フェーズの並列ブラウザ数。推奨 2〜4 |
+| `-j, --concurrency N` | `1` | 攻撃フェーズの並列ブラウザ数。推奨 2〜4。`>1` では攻撃前フロー（pre-attack flow）を持つページはそのページの攻撃中は単独で実行（直列化）し、Cookie は worker ごとに分離する。並列中の再ログインは共有 Cookie jar に影響しうるため、発生時は観測性サマリに `cookie_jar_shared_relogin` として記録される |
 | `--llm-concurrency N` | `0`（自動） | LLM 呼び出しの並列度上限。0=自動（ollama/none は 1、cloud は 3）。planner のページ単位 LLM call を絞りローカルモデルの timeout 連発を防ぐ。ブラウザ worker 数とは独立 |
 | `-F, --fast` | `false` | 深さ1、上限12、遅延0等の高速プリセット |
 | `--max-payloads N` | `0`（無制限） | フィールド×チェックの標準ペイロード上限 |
