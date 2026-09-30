@@ -1,371 +1,188 @@
-"""PR マージ可否ゲート（read-only・決定論・fail closed）。
+"""PR マージ可否ゲート（read-only・決定論・fail closed・stdlib のみ）。
 
-CLAUDE.md の「通常ツール層＝確実性」と同じ思想で、**判定は決定論的な純粋関数**が握る。
-本モジュールは GitHub を**一切変更しない**（merge もコメントも投稿もしない）。ネットワーク
-アクセスも行わず、入力 JSON だけを見て `ready` を返す read-only な gate である。
+入力 JSON だけを見て ``{"ready", "reasons", "pr", "head_sha"}`` を返す純粋評価器＋CLI。
+GitHub API は叩かず merge もコメントもしない（subprocess/network を import しない）。
 
-入力は ``gh`` の出力をそのまま流し込める形にしてある（実行は呼び出し側＝本モジュールは
-subprocess を起動しない）::
-
-    gh pr view 190 --json number,state,isDraft,mergeable,mergeStateStatus,headRefOid,\\
-        statusCheckRollup,reviews \\
-      | jq '. + {requiredChecks:["test"], evidence:{...}}' \\
-      | python -m orchestration.merge_gate
-
-**fail closed**: 判定に必要な証跡が欠けている場合は「安全側＝not ready」に倒す。
-「情報が無い」を「問題が無い」と読み替えない（0 findings＝安全ではない、と同じ規律）。
-
-``ready: true`` には次の**すべて**が必要:
-
-1. PR が open・非 draft・GitHub 上 mergeable（衝突なし）。
-2. **現在の head** に対して required CI が全て成功している（古い commit の成功は数えない）。
-3. changes-requested なレビューが残っていない（reviewer 毎の最新状態で判定）。
-4. 未解決（unresolved）のレビュースレッドが無い。
-5. ローカルの独立レビュー・セキュリティレビュー・受入確認の証跡が明示的に ``PASS``。
-
-出力は ``{"ready": bool, "reasons": [...]}``（reasons は決定論的な順序・重複排除済み）。
-``ready`` が true のときも「何を根拠に通したか」を ``reasons`` に残す（証跡を空にしない）。
+判定材料が欠けていれば通さない（「情報が無い」を「問題が無い」と読み替えない）:
+``isDraft``/``mergeStateStatus``/``reviews``/``reviewThreads`` はキー欠落・null で失格。CI は現
+head SHA へ厳密 pin された単一エントリの SUCCESS のみ合格（SHA 欠落・stale・同名重複は失格）。
+independent/security/acceptance は ``{"verdict":"PASS","head_sha":<現 head>}`` のみ有効。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from pathlib import Path
+from typing import Any, Mapping, Optional, Sequence
 
-# 必須のローカル証跡キー（この3つが揃って PASS でなければ通さない）
 REQUIRED_EVIDENCE = ("independent_review", "security_review", "acceptance")
-
-# mergeStateStatus のうち「マージして安全」と見なす値。列挙にない値は fail closed。
-# BLOCKED(必須レビュー未達) / DIRTY(衝突) / BEHIND / UNSTABLE(CI 失敗) / UNKNOWN は通さない。
 _SAFE_MERGE_STATE = frozenset({"CLEAN", "HAS_HOOKS"})
-
-# review の state のうち「その reviewer の意思表示」として最新判定に使う値。
-# COMMENTED は APPROVED/CHANGES_REQUESTED を上書きしない（GitHub 準拠）。
-_DECISIVE_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
-
-# CI の合格と見なす結論。fail closed のため SUCCESS のみ（NEUTRAL/SKIPPED は通さない）。
-_PASSING_CONCLUSIONS = frozenset({"SUCCESS"})
+_DECISIVE = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
+_HEAD_KEYS = ("headRefOid", "head_sha", "headSha")
 
 
-def _text(value: Any) -> str:
-    """スカラを比較用の正規化文字列へ（None/非文字列も安全に潰す）。"""
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value).strip()
-
-
-def _upper(value: Any) -> str:
-    return _text(value).upper()
-
-
-def _pick(payload: Mapping[str, Any], *names: str, default: Any = None) -> Any:
-    """camelCase（gh 由来）と snake_case（手書き JSON）の両方を受ける。"""
-    for name in names:
-        if name in payload and payload[name] is not None:
-            return payload[name]
+def _pick(src: Any, *names: str, default: Any = None) -> Any:
+    """camelCase(gh 由来)と snake_case(手書き JSON)の両方を受ける。null は未提供扱い。"""
+    if isinstance(src, Mapping):
+        for n in names:
+            if src.get(n) is not None:
+                return src[n]
     return default
 
 
-def _as_list(value: Any) -> list[Any]:
-    """リスト以外（None・単一オブジェクト）を安全にリスト化する。"""
-    if value is None:
-        return []
-    if isinstance(value, Mapping):
-        return [value]
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return []
+def _has(src: Any, *names: str) -> bool:
+    return isinstance(src, Mapping) and any(src.get(n) is not None for n in names)
 
 
-def _dedupe(reasons: Iterable[str]) -> list[str]:
-    """出現順を保ったまま重複排除（決定論的な出力のため）。"""
-    seen: set[str] = set()
-    out: list[str] = []
-    for reason in reasons:
-        if reason not in seen:
-            seen.add(reason)
-            out.append(reason)
-    return out
+def _text(v: Any) -> str:
+    if v is None or isinstance(v, (list, tuple, dict)):
+        return ""
+    return ("true" if v else "false") if isinstance(v, bool) else str(v).strip()
+
+
+def _upper(src: Any, *names: str) -> str:
+    return (_text(_pick(src, *names, default="")) if names else _text(src)).upper()
+
+
+def _sha(src: Any, *names: str) -> str:
+    return _text(_pick(src, *names, default="")).lower()
+
+
+def _as_list(v: Any) -> list:
+    return [v] if isinstance(v, Mapping) else (list(v) if isinstance(v, (list, tuple)) else [])
 
 
 def _short(sha: str) -> str:
     return sha[:7] if sha else "(unknown)"
 
 
-# --- 個別ゲート（いずれも純粋関数：入力→理由リスト） -----------------------
+def _check_pr(p: Mapping[str, Any], out: list[str]) -> None:
+    """open・非 draft・衝突なし・mergeStateStatus が clean 系か。"""
+    if (state := _upper(p, "state")) != "OPEN":
+        out.append(f"pr: state is {state or 'unknown'}, expected OPEN")
+    if not _has(p, "isDraft", "is_draft"):
+        out.append("pr: isDraft missing (fail closed)")
+    elif bool(_pick(p, "isDraft", "is_draft", default=True)):
+        out.append("pr: draft PRs are not mergeable")
+    m = _pick(p, "mergeable", default=None)
+    if m is None:
+        out.append("pr: mergeable unknown (fail closed)")
+    elif m is not True and _upper(m) != "MERGEABLE":
+        out.append("pr: not mergeable (conflicts)" if m is False
+                   else f"pr: mergeable is {_upper(m) or '(empty)'}, expected MERGEABLE")
+    if not _has(p, "mergeStateStatus", "merge_state_status"):
+        out.append("pr: mergeStateStatus missing (fail closed)")
+    elif (ms := _upper(p, "mergeStateStatus", "merge_state_status")) not in _SAFE_MERGE_STATE:
+        out.append(f"pr: mergeStateStatus is {ms or '(empty)'}, not mergeable-clean")
 
 
-def check_pr_state(payload: Mapping[str, Any]) -> list[str]:
-    """PR 自体がマージ可能な状態か（open・非 draft・衝突なし）。"""
-    reasons: list[str] = []
-
-    state = _upper(_pick(payload, "state", default=""))
-    if not state:
-        reasons.append("pr: state unknown (fail closed)")
-    elif state != "OPEN":
-        reasons.append(f"pr: state is {state}, expected OPEN")
-
-    if bool(_pick(payload, "isDraft", "is_draft", default=False)):
-        reasons.append("pr: draft PRs are not mergeable")
-
-    mergeable = _pick(payload, "mergeable", default=None)
-    if mergeable is None:
-        reasons.append("pr: mergeable unknown (fail closed)")
-    elif isinstance(mergeable, bool):
-        # REST API 形式（true/false/null）。
-        if not mergeable:
-            reasons.append("pr: not mergeable (conflicts)")
-    else:
-        token = _upper(mergeable)
-        if token != "MERGEABLE":
-            reasons.append(f"pr: mergeable is {token or '(empty)'}, expected MERGEABLE")
-
-    # mergeStateStatus は任意。与えられたら安全側の値だけを通す。
-    merge_state = _upper(_pick(payload, "mergeStateStatus", "merge_state_status", default=""))
-    if merge_state and merge_state not in _SAFE_MERGE_STATE:
-        reasons.append(f"pr: mergeStateStatus is {merge_state}, not mergeable-clean")
-
-    return reasons
-
-
-def _rollup_entry(entry: Mapping[str, Any]) -> tuple[str, str, str, str]:
-    """statusCheckRollup の 1 件を (name, conclusion, sha, sort_key) へ正規化。
-
-    CheckRun（name/status/conclusion）と StatusContext（context/state）の両形式を吸収する。
-    CheckRun は ``status`` が COMPLETED でなければ（queued/in_progress）未完了として扱う。
-    """
-    name = _text(_pick(entry, "name", "context", default=""))
-
-    if "conclusion" in entry or "status" in entry:
-        status = _upper(_pick(entry, "status", default=""))
-        conclusion = _upper(_pick(entry, "conclusion", default=""))
-        if status and status != "COMPLETED":
-            conclusion = status or "PENDING"
-        elif not conclusion:
-            conclusion = "PENDING"
-    else:
-        conclusion = _upper(_pick(entry, "state", default="")) or "PENDING"
-
-    commit = _pick(entry, "commit", default=None)
-    sha = ""
-    if isinstance(commit, Mapping):
-        sha = _text(_pick(commit, "oid", "sha", default=""))
-    else:
-        sha = _text(_pick(entry, "headSha", "head_sha", "sha", default=""))
-
-    # 再実行（同名 check の複数エントリ）は「最後に完了したもの」を採用する。
-    sort_key = _text(_pick(entry, "completedAt", "completed_at", "startedAt", "started_at", default=""))
-    return name, conclusion, sha, sort_key
-
-
-def check_ci(payload: Mapping[str, Any]) -> list[str]:
-    """**現在の head** に対して required CI が全て成功しているか。
-
-    - head sha が不明なら fail closed（どの commit の CI か確定できない）。
-    - required_checks が空なら fail closed（CI 証跡なしで通さない）。
-    - エントリが head と違う sha を持つ場合は「古い実行」として無視する
-      （＝required check が欠落扱いになり not ready に倒れる）。
-    - 同名 check が複数あるときは completedAt が最後のもの（再実行の結果）を採用。
-    """
-    reasons: list[str] = []
-    head = _text(_pick(payload, "headRefOid", "head_sha", "headSha", default=""))
+def _check_ci(p: Mapping[str, Any], head: str, out: list[str]) -> None:
+    """必須 CI が「現 head に厳密 pin された単一エントリの SUCCESS」か。"""
     if not head:
-        reasons.append("ci: head sha unknown (fail closed)")
-
-    required = [_text(c) for c in _as_list(_pick(payload, "requiredChecks", "required_checks", default=[]))]
-    required = [c for c in required if c]
+        out.append("ci: head sha unknown (fail closed)")
+    required = sorted({_text(c) for c in _as_list(_pick(p, "requiredChecks", "required_checks", default=[])) if _text(c)})
     if not required:
-        reasons.append("ci: no required checks declared (fail closed)")
-
-    # head 上の最新結果だけを畳み込む。
-    latest: dict[str, tuple[str, str]] = {}  # name -> (sort_key, conclusion)
-    stale: set[str] = set()
-    for entry in _as_list(_pick(payload, "statusCheckRollup", "status_check_rollup", "checks", default=[])):
-        if not isinstance(entry, Mapping):
+        out.append("ci: no required checks declared (fail closed)")
+    pinned: dict[str, str] = {}
+    dupes: set[str] = set()
+    unpinned: set[str] = set()
+    for e in _as_list(_pick(p, "statusCheckRollup", "status_check_rollup", "checks", default=[])):
+        if not (name := _text(_pick(e, "name", "context", default=""))):
             continue
-        name, conclusion, sha, sort_key = _rollup_entry(entry)
-        if not name:
-            continue
-        if sha and head and sha != head:
-            stale.add(name)
-            continue  # 古い commit の実行は現 head の証跡にならない
-        prev = latest.get(name)
-        if prev is None or sort_key >= prev[0]:
-            latest[name] = (sort_key, conclusion)
-
-    for name in sorted(set(required)):
-        found = latest.get(name)
-        if found is None:
-            if name in stale:
-                reasons.append(f"ci: required check '{name}' has no run on head {_short(head)} (stale result only)")
-            else:
-                reasons.append(f"ci: required check '{name}' missing on head {_short(head)}")
-            continue
-        conclusion = found[1]
-        if conclusion not in _PASSING_CONCLUSIONS:
-            reasons.append(f"ci: required check '{name}' is {conclusion or 'PENDING'} on head {_short(head)}")
-
-    return reasons
-
-
-def check_reviews(payload: Mapping[str, Any]) -> list[str]:
-    """changes-requested なレビューが残っていないか（reviewer 毎の最新状態）。"""
-    reasons: list[str] = []
-    latest: dict[str, tuple[str, int, str]] = {}  # login -> (submittedAt, index, state)
-
-    for index, review in enumerate(_as_list(_pick(payload, "reviews", default=[]))):
-        if not isinstance(review, Mapping):
-            continue
-        state = _upper(_pick(review, "state", default=""))
-        if state not in _DECISIVE_REVIEW_STATES:
-            continue  # COMMENTED 等は意思表示を上書きしない
-        author = _pick(review, "author", default=None)
-        if isinstance(author, Mapping):
-            login = _text(_pick(author, "login", "name", default=""))
+        c = _pick(e, "commit", default=None)
+        sha = _sha(c, "oid", "sha") if isinstance(c, Mapping) else _sha(e, "headSha", "head_sha", "sha", "commit")
+        if not head or sha != head:  # SHA 欠落も stale も現 head の証跡にならない
+            unpinned.add(name)
+        elif name in pinned:
+            dupes.add(name)  # 同名重複はどちらが真か決められない＝曖昧
         else:
-            login = _text(_pick(review, "user", "login", default=""))
-        login = login or f"(anonymous#{index})"
-        stamp = _text(_pick(review, "submittedAt", "submitted_at", "createdAt", "created_at", default=""))
-        prev = latest.get(login)
-        if prev is None or (stamp, index) >= (prev[0], prev[1]):
-            latest[login] = (stamp, index, state)
-
-    for login in sorted(latest):
-        if latest[login][2] == "CHANGES_REQUESTED":
-            reasons.append(f"review: changes requested by {login}")
-
-    # reviewDecision が明示的に CHANGES_REQUESTED なら、reviews 配列が無くても拾う。
-    decision = _upper(_pick(payload, "reviewDecision", "review_decision", default=""))
-    if decision == "CHANGES_REQUESTED" and not reasons:
-        reasons.append("review: reviewDecision is CHANGES_REQUESTED")
-
-    return reasons
+            status = _upper(e, "status")
+            pinned[name] = status if status and status != "COMPLETED" else (_upper(e, "conclusion", "state") or "PENDING")
+    for name in required:
+        if name in dupes:
+            out.append(f"ci: required check '{name}' has duplicate entries on head {_short(head)} (ambiguous, fail closed)")
+        elif name not in pinned:
+            out.append(f"ci: required check '{name}' missing on head {_short(head)}"
+                       + (" (only unpinned/stale results)" if name in unpinned else ""))
+        elif pinned[name] != "SUCCESS":
+            out.append(f"ci: required check '{name}' is {pinned[name]} on head {_short(head)}")
 
 
-def check_threads(payload: Mapping[str, Any]) -> list[str]:
-    """未解決のレビュースレッドが無いか（outdated でも未解決なら通さない）。"""
-    unresolved = 0
-    paths: list[str] = []
-    for thread in _as_list(_pick(payload, "reviewThreads", "review_threads", default=[])):
-        if not isinstance(thread, Mapping):
-            continue
-        resolved = _pick(thread, "isResolved", "is_resolved", "resolved", default=None)
-        if resolved is None:
-            # 解決状態が読めないスレッドは未解決とみなす（fail closed）。
-            unresolved += 1
-            paths.append(_text(_pick(thread, "path", default="")) or "(unknown path)")
-            continue
-        if not bool(resolved):
-            unresolved += 1
-            paths.append(_text(_pick(thread, "path", default="")) or "(unknown path)")
-
-    if not unresolved:
-        return []
-    shown = ", ".join(sorted(set(paths))[:5])
-    return [f"threads: {unresolved} unresolved review thread(s) [{shown}]"]
+def _check_reviews(p: Mapping[str, Any], out: list[str]) -> None:
+    """CHANGES_REQUESTED が残っていないか（reviewer 毎の最新の意思表示で判定）。"""
+    if not _has(p, "reviews"):
+        return out.append("review: reviews missing (fail closed)")
+    latest: dict[str, tuple[str, int, str]] = {}
+    for i, r in enumerate(_as_list(_pick(p, "reviews", default=[]))):
+        if (state := _upper(r, "state")) not in _DECISIVE:
+            continue  # COMMENTED 等は意思表示を上書きしない
+        a = _pick(r, "author", default=None)
+        who = _text(_pick(a, "login", "name", default="")) if isinstance(a, Mapping) else _text(_pick(r, "user", "login", default=""))
+        key, stamp = who or f"(anonymous#{i})", _text(_pick(r, "submittedAt", "submitted_at", "createdAt", "created_at", default=""))
+        if (prev := latest.get(key)) is None or (stamp, i) >= (prev[0], prev[1]):
+            latest[key] = (stamp, i, state)
+    blocked = [f"review: changes requested by {w}" for w in sorted(latest) if latest[w][2] == "CHANGES_REQUESTED"]
+    if not blocked and _upper(p, "reviewDecision", "review_decision") == "CHANGES_REQUESTED":
+        blocked.append("review: reviewDecision is CHANGES_REQUESTED")
+    out.extend(blocked)
 
 
-def _evidence_verdict(raw: Any) -> tuple[str, str]:
-    """証跡エントリを (verdict, head_sha) へ正規化。文字列形式とオブジェクト形式を許す。"""
-    if isinstance(raw, Mapping):
-        verdict = _upper(_pick(raw, "verdict", "status", "result", default=""))
-        sha = _text(_pick(raw, "head_sha", "headSha", "commit", default=""))
-        return verdict, sha
-    return _upper(raw), ""
+def _check_threads(p: Mapping[str, Any], out: list[str]) -> None:
+    """未解決スレッドが無いか（解決状態が読めないものは未解決扱い）。"""
+    if not _has(p, "reviewThreads", "review_threads"):
+        return out.append("threads: reviewThreads missing (fail closed)")
+    paths = [_text(_pick(t, "path", default="")) or "(unknown path)"
+             for t in _as_list(_pick(p, "reviewThreads", "review_threads", default=[]))
+             if not bool(_pick(t, "isResolved", "is_resolved", "resolved", default=None))]
+    if paths:
+        out.append(f"threads: {len(paths)} unresolved review thread(s) [{', '.join(sorted(set(paths))[:5])}]")
 
 
-def check_evidence(payload: Mapping[str, Any]) -> list[str]:
-    """ローカルの独立レビュー・セキュリティレビュー・受入確認が明示的に PASS か。
-
-    - 3 種すべてが必要。欠落・空・PASS 以外はすべて not ready（fail closed）。
-    - オブジェクト形式で ``head_sha`` を添えた場合、現 head と一致しなければ「古い証跡」
-      として無効にする（別 commit に対する PASS を流用させない）。
-    """
-    reasons: list[str] = []
-    evidence = _pick(payload, "evidence", default=None)
-    if not isinstance(evidence, Mapping):
-        return [f"evidence: missing '{key}' (fail closed)" for key in REQUIRED_EVIDENCE]
-
-    head = _text(_pick(payload, "headRefOid", "head_sha", "headSha", default=""))
+def _check_evidence(p: Mapping[str, Any], head: str, out: list[str]) -> None:
+    """3 種の証跡が現 head に pin された PASS オブジェクトか（文字列 PASS は不可）。"""
+    ev = _pick(p, "evidence", default=None)
     for key in REQUIRED_EVIDENCE:
-        if key not in evidence or evidence[key] is None:
-            reasons.append(f"evidence: missing '{key}' (fail closed)")
-            continue
-        verdict, sha = _evidence_verdict(evidence[key])
-        if verdict != "PASS":
-            reasons.append(f"evidence: '{key}' is {verdict or '(empty)'}, expected PASS")
-            continue
-        if sha and head and sha != head:
-            reasons.append(
-                f"evidence: '{key}' recorded for {_short(sha)}, not current head {_short(head)}"
-            )
-
-    return reasons
-
-
-# --- 統合判定 -------------------------------------------------------------
+        item = ev.get(key) if isinstance(ev, Mapping) else None
+        if item is None:
+            out.append(f"evidence: missing '{key}' (fail closed)")
+        elif not isinstance(item, Mapping):
+            out.append(f"evidence: '{key}' must be an object with verdict and head_sha (fail closed)")
+        elif (v := _upper(item, "verdict", "status", "result")) != "PASS":
+            out.append(f"evidence: '{key}' is {v or '(empty)'}, expected PASS")
+        elif not (sha := _sha(item, "head_sha", "headSha", "commit", "sha")):
+            out.append(f"evidence: '{key}' has no head_sha (fail closed)")
+        elif not head:
+            out.append(f"evidence: '{key}' cannot be pinned: head sha unknown (fail closed)")
+        elif sha != head:
+            out.append(f"evidence: '{key}' recorded for {_short(sha)}, not current head {_short(head)}")
 
 
 def evaluate(payload: Any) -> dict:
-    """マージ可否を判定する純粋関数（I/O なし・GitHub を変更しない）。
-
-    返り値は JSON 直列化可能な dict::
-
-        {"ready": bool, "reasons": [...], "pr": <number|null>, "head_sha": "<sha>"}
-
-    ``payload`` が dict でない（空・壊れている）場合も例外を投げず not ready に倒す。
-    """
+    """マージ可否を判定する純粋関数（I/O なし・例外を投げず安全側に倒す）。"""
     if not isinstance(payload, Mapping):
-        return {
-            "ready": False,
-            "reasons": ["input: payload is not a JSON object (fail closed)"],
-            "pr": None,
-            "head_sha": "",
-        }
-
-    reasons: list[str] = []
-    for gate in (check_pr_state, check_ci, check_reviews, check_threads, check_evidence):
-        reasons.extend(gate(payload))
-    reasons = _dedupe(reasons)
-
-    number = _pick(payload, "number", "pr", default=None)
-    head = _text(_pick(payload, "headRefOid", "head_sha", "headSha", default=""))
-    ready = not reasons
-    if ready:
-        # 通した根拠も残す（証跡を空にしない）。
-        reasons = [
-            "pr: open, non-draft, mergeable",
-            f"ci: all required checks succeeded on head {_short(head)}",
-            "review: no changes-requested reviews",
-            "threads: no unresolved review threads",
-            "evidence: independent-review, security-review, acceptance all PASS",
-        ]
-
-    return {
-        "ready": ready,
-        "reasons": reasons,
-        "pr": number if isinstance(number, int) else (_text(number) or None),
-        "head_sha": head,
-    }
-
-
-# --- CLI ------------------------------------------------------------------
+        return {"ready": False, "reasons": ["input: payload is not a JSON object (fail closed)"], "pr": None, "head_sha": ""}
+    head, found = _sha(payload, *_HEAD_KEYS), []
+    _check_pr(payload, found)
+    _check_ci(payload, head, found)
+    _check_reviews(payload, found)
+    _check_threads(payload, found)
+    _check_evidence(payload, head, found)
+    reasons = list(dict.fromkeys(found))  # 出現順を保った重複排除（決定論的出力）
+    if not reasons:  # 通した根拠も残す（証跡を空にしない）
+        reasons = ["pr: open, non-draft, mergeable", f"ci: all required checks succeeded on head {_short(head)}",
+                   "review: no changes-requested reviews", "threads: no unresolved review threads",
+                   f"evidence: independent-review, security-review, acceptance all PASS on head {_short(head)}"]
+    n = _pick(payload, "number", "pr", default=None)
+    return {"ready": not found, "reasons": reasons, "pr": n if isinstance(n, int) else (_text(n) or None), "head_sha": head}
 
 
 def _load(source: Optional[str]) -> tuple[Any, Optional[str]]:
-    """入力 JSON を読む。(payload, error) を返し、例外は投げない。"""
+    """入力 JSON を読む。(payload, error) を返し例外は投げない。"""
     try:
-        if source in (None, "-"):
-            raw = sys.stdin.read()
-        else:
-            with open(source, "r", encoding="utf-8") as fh:
-                raw = fh.read()
+        raw = sys.stdin.read() if source in (None, "-") else Path(source).read_text(encoding="utf-8")
     except OSError as exc:
         return None, f"input: cannot read {source!r} ({exc.__class__.__name__})"
-
     if not raw.strip():
         return None, "input: empty input (fail closed)"
     try:
@@ -375,25 +192,14 @@ def _load(source: Optional[str]) -> tuple[Any, Optional[str]]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """read-only な CLI。exit code: 0=ready / 1=not ready / 2=入力エラー。"""
-    parser = argparse.ArgumentParser(
-        prog="merge_gate",
-        description="PR merge readiness gate (read-only, deterministic, fail closed). "
-        "Reads evidence JSON from stdin or --input; never merges or mutates GitHub.",
-    )
-    parser.add_argument("--input", "-i", default="-", help="evidence JSON file ('-' = stdin, default)")
-    args = parser.parse_args(list(argv) if argv is not None else None)
-
-    payload, error = _load(args.input)
-    if error is not None:
-        json.dump({"ready": False, "reasons": [error], "pr": None, "head_sha": ""}, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-        return 2
-
-    result = evaluate(payload)
+    """read-only CLI。exit code: 0=ready / 1=not ready / 2=入力エラー。"""
+    ap = argparse.ArgumentParser(prog="merge_gate", description="PR merge readiness gate (read-only, deterministic, fail closed).")
+    ap.add_argument("--input", "-i", default="-", help="evidence JSON file ('-' = stdin, default)")
+    payload, error = _load(ap.parse_args(list(argv) if argv is not None else None).input)
+    result = {"ready": False, "reasons": [error], "pr": None, "head_sha": ""} if error else evaluate(payload)
     json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
-    return 0 if result["ready"] else 1
+    return 2 if error else (0 if result["ready"] else 1)
 
 
 if __name__ == "__main__":
