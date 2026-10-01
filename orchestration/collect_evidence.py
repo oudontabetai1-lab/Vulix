@@ -23,12 +23,13 @@ def _login(name: Any) -> str:
     return n[: -len("[bot]")] if n.endswith("[bot]") else n
 
 
-def independent_review(head: str, head_date: Optional[str], allowed: Sequence[str], reviews: list,
+def independent_review(head: str, head_time: Optional[str], allowed: Sequence[str], reviews: list,
                        review_comments: list, issue_comments: list) -> dict:
     """現 head 上の許可 reviewer の「指摘なし」シグナルだけを PASS にする純粋関数。
 
     reviews/review_comments/issue_comments は gh api(REST) の素のデータ。issue_comments の各要素には
     ``reactions``（``[{"content","user":{"login"}}]``）を付けて渡す。ISO8601(Z) 同士は文字列比較で足りる。
+    head_time は GitHub が記録した head の時刻（committer date は偽装可能なので単独では使わない）。None なら +1 経路は無効（fail closed）。
     """
     ok = {_login(a) for a in allowed}
     head = head.lower()
@@ -40,10 +41,10 @@ def independent_review(head: str, head_date: Optional[str], allowed: Sequence[st
     changes = bool(latest) and latest.get("state") == "CHANGES_REQUESTED"
     if latest and not changes and latest.get("id") not in commented:
         return {"verdict": "PASS", "head_sha": head, "ref": latest.get("html_url") or str(latest.get("id"))}
-    if head_date and not changes:  # 未解消の CHANGES_REQUESTED は +1 で上書きしない
+    if head_time and not changes:  # 未解消の CHANGES_REQUESTED は +1 で上書きしない
         for c in issue_comments:
             body = (c.get("body") or "").lower()
-            if (any(k in body for k in REVIEW_REQUESTS) and (c.get("created_at") or "") > head_date
+            if (any(k in body for k in REVIEW_REQUESTS) and (c.get("created_at") or "") > head_time
                     and any(r.get("content") == "+1" and _login((r.get("user") or {}).get("login")) in ok
                             for r in c.get("reactions") or [])):
                 return {"verdict": "PASS", "head_sha": head, "ref": c.get("html_url") or str(c.get("id"))}
@@ -52,7 +53,8 @@ def independent_review(head: str, head_date: Optional[str], allowed: Sequence[st
                 "detail": f"latest review by {(latest.get('user') or {}).get('login')} on head is "
                           + ("CHANGES_REQUESTED" if changes else "with inline comments")}
     return {"verdict": "MISSING", "head_sha": head, "ref": "",
-            "detail": "no clean review or +1 reaction by an allowed reviewer on the current head"}
+            "detail": "no clean review or +1 reaction by an allowed reviewer on the current head"
+                      + ("" if head_time else " (head time unavailable: +1 path disabled)")}
 
 
 def gh(args: Sequence[str]) -> str:
@@ -91,25 +93,46 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
     if pages := paged("check-runs", f"repos/{repo}/commits/{head}/check-runs"):
         out["statusCheckRollup"] = [{"name": r.get("name"), "status": r.get("status"), "conclusion": r.get("conclusion"),
                                      "head_sha": r.get("head_sha")} for p in pages for r in p.get("check_runs", [])]
+    st = call("commit status", ["api", f"repos/{repo}/commits/{head}/status"])
+    if isinstance(st, dict) and st.get("sha"):
+        out.setdefault("statusCheckRollup", []).extend(
+            {"name": x.get("context"), "status": "COMPLETED", "conclusion": str(x.get("state", "")).upper(),
+             "head_sha": st["sha"]} for x in st.get("statuses") or [])
     owner, name = repo.split("/", 1)
-    q = ("query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p)"
-         "{reviewThreads(first:100){nodes{isResolved path}}}}}")
-    th = call("reviewThreads", ["api", "graphql", "-f", f"query={q}", "-F", f"p={pr}", "-f", f"o={owner}", "-f", f"n={name}"])
-    try:
-        out["reviewThreads"] = th["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-    except (TypeError, KeyError):
-        pass
+    q = ("query($o:String!,$n:String!,$p:Int!,$c:String){repository(owner:$o,name:$n){pullRequest(number:$p)"
+         "{reviewThreads(first:100,after:$c){pageInfo{hasNextPage endCursor} nodes{isResolved path}}}}}")
+    threads: Optional[list] = []
+    cursor = None
+    while threads is not None:  # 途中で失敗したら省略（gate が fail closed）
+        extra = ["-f", f"c={cursor}"] if cursor else []
+        th = call("reviewThreads", ["api", "graphql", "-f", f"query={q}", "-F", f"p={pr}",
+                                    "-f", f"o={owner}", "-f", f"n={name}", *extra])
+        try:
+            conn = th["data"]["repository"]["pullRequest"]["reviewThreads"]
+            threads += conn["nodes"]
+            if not conn["pageInfo"]["hasNextPage"]:
+                break
+            cursor = conn["pageInfo"]["endCursor"]
+            if not cursor:
+                threads = None
+        except (TypeError, KeyError):
+            threads = None
+    if threads is not None:
+        out["reviewThreads"] = threads
     reviews = paged("pr reviews", f"repos/{repo}/pulls/{pr}/reviews")
     rcomments = paged("pr review comments", f"repos/{repo}/pulls/{pr}/comments")
     icomments = paged("issue comments", f"repos/{repo}/issues/{pr}/comments")
     commit = call("head commit", ["api", f"repos/{repo}/commits/{head}"])
-    head_date = (((commit or {}).get("commit") or {}).get("committer") or {}).get("date")
+    commit_date = (((commit or {}).get("commit") or {}).get("committer") or {}).get("date")
+    starts = [r["started_at"] for p in pages or [] for r in p.get("check_runs", []) if r.get("started_at")]
+    # committer date は偽装可能なので、サーバ記録の check-run 開始時刻が無ければ +1 経路を無効にする
+    head_time = max(filter(None, [commit_date, min(starts)])) if starts else None
     if reviews is not None and rcomments is not None and icomments is not None:
         for c in icomments:  # reaction は review request コメントにだけ取りに行く
             if any(k in (c.get("body") or "").lower() for k in REVIEW_REQUESTS):
                 c["reactions"] = call("reactions", ["api", f"repos/{repo}/issues/comments/{c['id']}/reactions"]) or []
         out.setdefault("evidence", {})["independent_review"] = independent_review(
-            head, head_date, reviewers, reviews, rcomments, icomments)
+            head, head_time, reviewers, reviews, rcomments, icomments)
     if isinstance(evidence, dict):
         for k in ("security_review", "acceptance"):
             if k in evidence:
@@ -117,8 +140,8 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
     if tier:
         out["tier"] = tier
     runs = call("nightly recall", ["run", "list", "--repo", repo, "--workflow", RECALL_WORKFLOW, "--branch", "main",
-                                   "--limit", "5", "--json", "conclusion,headSha,createdAt,status"])
-    if done := next((r for r in runs or [] if r.get("status") == "completed"), None):
+                                   "--status", "completed", "--limit", "1", "--json", "conclusion,headSha,createdAt,status"])
+    if done := next(iter(runs or []), None):
         out["nightlyRecall"] = {"conclusion": done.get("conclusion"), "head_sha": done.get("headSha"),
                                 "created_at": done.get("createdAt")}
     return out, errors
