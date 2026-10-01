@@ -1,7 +1,10 @@
 """merge_gate 用 evidence payload を gh の read-only 呼び出しで機械的に収集する（stdout へ JSON）。
 
 使い方: ``python3 -m orchestration.collect_evidence PR --reviewer LOGIN [--tier A|B|C] | python3 -m orchestration.merge_gate``
-merge もコメント投稿もしない。head SHA は API の値をそのまま使い、こちらで注入しない。
+--reviewer は REST の login をそのまま渡す（例: ``chatgpt-codex-connector[bot]``。``[bot]`` の有無は区別する）。
+merge もコメント投稿もしない。マージは gate 出力の head_sha で固定すること:
+``gh pr merge N --squash --match-head-commit <head_sha>``（収集後に head が動いたら collectionErrors で失格）。
+head SHA は API の値をそのまま使い、こちらで注入しない。
 gh 呼び出しが失敗したフィールドは省略（＝gate が fail closed）し、理由を stderr に出して exit 1。payload は常に出力する。
 security_review / acceptance は ``--evidence-file`` の値を素通しするだけで合成しない。
 """
@@ -18,14 +21,17 @@ from typing import Any, Callable, Optional, Sequence
 
 REVIEW_REQUESTS = ("@codex review", "@claude review")
 _EFFECTIVE = ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")  # DISMISSED/PENDING は意思表示として数えない
-CLEAN_MARKERS = ("codex review: didn't find any major issues",)  # 「指摘なし」コメントの先頭の定型句（途中出現は不可）
-_REVIEWED_COMMIT = re.compile(r"reviewed commit:?\**\s*`([0-9a-f]{10,40})`", re.I)
+# 信頼する「指摘なし」コメントの完全な形: 1行目(+短い一言) → Reviewed commit 行 → 任意で末尾までの <details> 定型フッタ。
+# それ以外（間に指摘、</details> の後の追記など）は clean でない。
+_CLEAN_COMMENT = re.compile(
+    r"Codex Review: Didn't find any major issues\.(?: [^\n]{1,40})?\n(?:[ \t]*\n)*"
+    r"\*\*Reviewed commit:\*\* `([0-9a-f]{10,40})`\s*"
+    r"(?:<details>(?:(?!</details>).)*</details>)?", re.S)
 RECALL_WORKFLOW = "Nightly recall gate"
 
 
 def _login(name: Any) -> str:
-    n = str(name or "").lower()
-    return n[: -len("[bot]")] if n.endswith("[bot]") else n
+    return str(name or "").lower()  # [bot] を剥がさない（人間アカウントの同名なりすましを許可しない）
 
 
 def independent_review(head: str, head_time: Optional[str], allowed: Sequence[str], reviews: list,
@@ -38,7 +44,7 @@ def independent_review(head: str, head_time: Optional[str], allowed: Sequence[st
 
     各 reviewer の指摘 = CHANGES_REQUESTED（最新なら上書き不可）/ COMMENTED / inline 付き APPROVED。
     第3の clean シグナル: 許可 reviewer の未編集 issue コメントで、CLEAN_MARKERS と ``Reviewed commit: `<sha>` ``（10桁以上、
-    head の先頭一致）を持ち、本文が CLEAN_MARKERS で始まるもの（指摘混在の本文を拒否）。prefix 衝突での使い回しを防ぐため
+    head の先頭一致）を持ち、本文全体が _CLEAN_COMMENT の完全な形に一致するもの（指摘混在の本文を拒否）。prefix 衝突での使い回しを防ぐため
     head_time 必須で、コメントは head_time より後に作られていること（head_time が無ければ無効）。
     指摘は「同じ reviewer 自身」の後続の clean（inline なし APPROVED、または指摘より後の依頼への +1）でのみ解消する
     （別 reviewer の APPROVED では消えない）。PASS = 未解消の指摘が無く、かつ clean シグナルが 1 つ以上。
@@ -74,9 +80,8 @@ def independent_review(head: str, head_time: Optional[str], allowed: Sequence[st
                     signals.append((c.get("created_at") or "", who, c["html_url"]))
     for c in issue_comments:
         who, body = _login((c.get("user") or {}).get("login")), c.get("body") or ""
-        m = _REVIEWED_COMMIT.search(body)
-        if (head_time and who in ok and m and head.startswith(m.group(1).lower())
-                and body.lstrip().lower().startswith(CLEAN_MARKERS)
+        m = _CLEAN_COMMENT.fullmatch(body.strip())
+        if (head_time and who in ok and m and head.startswith(m.group(1))
                 and c.get("html_url") and c.get("updated_at") in (None, c.get("created_at"))
                 and (c.get("created_at") or "") > max(head_time, found_at(who))):
             signals.append((c.get("created_at") or "", who, c["html_url"]))
@@ -189,6 +194,10 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
     if done := next(iter(runs or []), None):
         out["nightlyRecall"] = {"conclusion": done.get("conclusion"), "head_sha": done.get("headSha"),
                                 "created_at": done.get("createdAt")}
+    # 収集中に head が動いていないか（動いたら証跡は別 commit のものなので失格）
+    again = call("pr view (recheck)", ["pr", "view", str(pr), "--repo", repo, "--json", "headRefOid"])
+    if isinstance(again, dict) and again.get("headRefOid") != view.get("headRefOid"):
+        errors.append(f"head changed during collection ({head[:7]} -> {str(again.get('headRefOid'))[:7]})")
     # app 固定の必須 context は別 app の同名 check や commit status では満たせない
     if "statusCheckRollup" in out:
         out["statusCheckRollup"] = [e for e in out["statusCheckRollup"]
@@ -199,7 +208,7 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="collect_evidence", description="Collect merge_gate evidence via read-only gh calls.")
     ap.add_argument("pr", type=int)
-    ap.add_argument("--reviewer", action="append", required=True, help="allowed independent reviewer login (repeatable)")
+    ap.add_argument("--reviewer", action="append", required=True, help="allowed reviewer REST login, exact (e.g. chatgpt-codex-connector[bot]; repeatable)")
     ap.add_argument("--tier", choices=["A", "B", "C"], type=str.upper)
     ap.add_argument("--evidence-file", help="JSON object with security_review / acceptance (passed through as-is)")
     ap.add_argument("--repo", help="OWNER/NAME (default: current repo)")

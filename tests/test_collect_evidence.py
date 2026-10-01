@@ -8,10 +8,11 @@ from orchestration.merge_gate import evaluate
 
 HEAD, OLD = "a" * 40, "b" * 40
 HEAD_DATE = "2026-01-02T00:00:00Z"
-BOT = "chatgpt-codex-connector"
+BOT = "chatgpt-codex-connector[bot]"
+REAL_CLEAN_BODY = 'Codex Review: Didn\'t find any major issues. Breezy!\n\n**Reviewed commit:** `def0819f0e`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment "@codex review".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting "@codex address that feedback".\n            \n</details>\n'
 
 
-def review(commit=HEAD, login=f"{BOT}[bot]", rid=1, state="APPROVED", at="2026-01-02T01:00:00Z"):
+def review(commit=HEAD, login=BOT, rid=1, state="APPROVED", at="2026-01-02T01:00:00Z"):
     return {"id": rid, "commit_id": commit, "user": {"login": login}, "state": state, "submitted_at": at,
             "html_url": f"https://github.com/o/r/pull/7#pullrequestreview-{rid}"}
 
@@ -104,7 +105,7 @@ def test_plus_one_on_request_after_head_passes():
     assert judge(issues=[request()])["verdict"] == "PASS"
 
 
-def clean_comment(sha=HEAD[:10], created="2026-01-02T02:00:00Z", login=f"{BOT}[bot]", **kw):
+def clean_comment(sha=HEAD[:10], created="2026-01-02T02:00:00Z", login=BOT, **kw):
     return dict({"id": 11, "user": {"login": login}, "created_at": created,
                  "html_url": "https://github.com/o/r/pull/7#issuecomment-11",
                  "body": f"Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `{sha}`"}, **kw)
@@ -114,8 +115,35 @@ def test_clean_issue_comment_bound_to_head_passes():
     r = judge(issues=[clean_comment()])
     assert r["verdict"] == "PASS" and r["ref"].endswith("#issuecomment-11")
     assert judge(issues=[clean_comment(body="  Codex Review: Didn't find any major issues.\n`Reviewed commit:` `" + HEAD[:10] + "`")])["verdict"] == "MISSING"
-    ok = "  CODEX REVIEW: DIDN'T FIND ANY MAJOR ISSUES.\n**Reviewed commit:** `" + HEAD[:10].upper() + "`"
-    assert judge(issues=[clean_comment(body=ok)])["verdict"] == "PASS"  # 先頭空白・大小は許容
+    ok = "\n  Codex Review: Didn't find any major issues. Breezy!\n\n**Reviewed commit:** `" + HEAD[:10] + "`\n"
+    assert judge(issues=[clean_comment(body=ok)])["verdict"] == "PASS"  # 前後空白・短い一言は許容
+    long_flavor = ok.replace("Breezy!", "x" * 41)
+    assert judge(issues=[clean_comment(body=long_flavor)])["verdict"] == "MISSING"
+
+
+def test_real_codex_clean_comment_shape():
+    real = REAL_CLEAN_BODY.replace("def0819f0e", HEAD[:10])
+    assert judge(issues=[clean_comment(body=real)])["verdict"] == "PASS"
+    finding = real.replace("Breezy!\n", "Breezy!\nBug: x.py:3 crashes.\n", 1)
+    assert judge(issues=[clean_comment(body=finding)])["verdict"] == "MISSING"
+    assert judge(issues=[clean_comment(body=real.rstrip() + "\nAlso a bug in y.py")])["verdict"] == "MISSING"
+    assert judge(issues=[clean_comment(body=real + "x </details>")])["verdict"] == "MISSING"
+
+
+def test_head_change_during_collection_is_a_collection_error():
+    base = make_run()
+    n = []
+
+    def run(args):
+        if args[:2] == ["pr", "view"]:
+            n.append(1)
+            if len(n) == 2:
+                return json.dumps({"headRefOid": "d" * 40})
+        return base(args)
+    payload, errors = build_payload(7, "o/r", [BOT], "B", None, run)
+    assert any("head changed during collection (aaaaaaa -> ddddddd)" in e for e in errors)
+    assert payload["collectionErrors"] == errors
+    assert build_payload(7, "o/r", [BOT], "B", None, make_run())[1] == []
 
 
 def test_clean_issue_comment_must_match_head_and_be_valid():
@@ -150,9 +178,12 @@ def test_non_allowed_reviewer_is_missing():
     assert judge([review(login="coordinator")], issues=[request(login="coordinator")])["verdict"] == "MISSING"
 
 
-def test_bot_suffix_is_normalized_both_ways():
-    assert judge([review(login=BOT)], allowed=[f"{BOT}[bot]"])["verdict"] == "PASS"
-    assert judge([review(login=f"{BOT.upper()}[bot]")])["verdict"] == "PASS"
+def test_reviewer_identity_is_exact_but_case_insensitive():
+    assert judge([review(login="foo[bot]")], allowed=["foo[bot]"])["verdict"] == "PASS"
+    assert judge([review(login="FOO[BOT]")], allowed=["foo[bot]"])["verdict"] == "PASS"
+    assert judge([review(login="foo")], allowed=["foo[bot]"])["verdict"] == "MISSING"
+    assert judge([review(login="foo[bot]")], allowed=["foo"])["verdict"] == "MISSING"
+    assert judge(issues=[request(login="foo")], allowed=["foo[bot]"])["verdict"] == "MISSING"
 
 
 def test_error_comment_without_reaction_is_missing():
@@ -249,7 +280,7 @@ def test_commit_status_pages_are_flattened_and_sha_mismatch_skips():
 def test_gate_reviews_come_from_rest_and_protection_branch_is_quoted():
     calls = []
     payload, _ = build_payload(7, "o/r", [BOT], "B", None, make_run(calls))
-    assert payload["reviews"] == [{"state": "APPROVED", "author": {"login": f"{BOT}[bot]"},
+    assert payload["reviews"] == [{"state": "APPROVED", "author": {"login": BOT},
                                    "submittedAt": "2026-01-02T01:00:00Z"}]
     assert not any(c.startswith("pr view") and "reviews" in c.split("--json")[1] for c in calls)
 
