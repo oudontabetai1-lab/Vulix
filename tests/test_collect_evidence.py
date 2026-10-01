@@ -104,6 +104,32 @@ def test_plus_one_on_request_after_head_passes():
     assert judge(issues=[request()])["verdict"] == "PASS"
 
 
+def clean_comment(sha=HEAD[:10], created="2026-01-02T02:00:00Z", login=f"{BOT}[bot]", **kw):
+    return dict({"id": 11, "user": {"login": login}, "created_at": created,
+                 "html_url": "https://github.com/o/r/pull/7#issuecomment-11",
+                 "body": f"Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** `{sha}`"}, **kw)
+
+
+def test_clean_issue_comment_bound_to_head_passes():
+    r = judge(issues=[clean_comment()], head_time=None)  # SHA 束縛なので head_time 不要
+    assert r["verdict"] == "PASS" and r["ref"].endswith("#issuecomment-11")
+
+
+def test_clean_issue_comment_must_match_head_and_be_valid():
+    assert judge(issues=[clean_comment(sha="def0819f0e")])["verdict"] == "MISSING"
+    assert judge(issues=[clean_comment(sha=HEAD[:6])])["verdict"] == "MISSING"  # 7桁未満
+    assert judge(issues=[clean_comment(body="Codex Review: Something went wrong. `Reviewed commit:` `" + HEAD[:10] + "`")])["verdict"] == "MISSING"
+    assert judge(issues=[clean_comment(updated_at="2026-01-02T05:00:00Z")])["verdict"] == "MISSING"
+    assert judge(issues=[clean_comment(html_url=None)])["verdict"] == "MISSING"
+    assert judge(issues=[clean_comment(login="coordinator")])["verdict"] == "MISSING"
+
+
+def test_clean_issue_comment_before_own_finding_is_findings():
+    c = review(state="COMMENTED", at="2026-01-02T03:00:00Z")
+    assert judge([c], issues=[clean_comment(created="2026-01-02T02:00:00Z")])["verdict"] == "FINDINGS"
+    assert judge([c], issues=[clean_comment(created="2026-01-02T04:00:00Z")])["verdict"] == "PASS"
+
+
 def test_plus_one_disabled_without_head_time():
     r = judge(issues=[request()], head_time=None)
     assert r["verdict"] == "MISSING" and "head time unavailable" in r["detail"]

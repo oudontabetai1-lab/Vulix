@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ from typing import Any, Callable, Optional, Sequence
 
 REVIEW_REQUESTS = ("@codex review", "@claude review")
 _EFFECTIVE = ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")  # DISMISSED/PENDING は意思表示として数えない
+CLEAN_MARKERS = ("didn't find any major issues",)  # reviewer の「指摘なし」コメントの定型句
+_REVIEWED_COMMIT = re.compile(r"reviewed commit:?\**\s*`([0-9a-f]{7,40})`", re.I)
 RECALL_WORKFLOW = "Nightly recall gate"
 
 
@@ -34,6 +37,8 @@ def independent_review(head: str, head_time: Optional[str], allowed: Sequence[st
     head_time は GitHub が記録した head の時刻（committer date は偽装可能）。None なら +1 経路は無効（fail closed）。
 
     各 reviewer の指摘 = CHANGES_REQUESTED（最新なら上書き不可）/ COMMENTED / inline 付き APPROVED。
+    第3の clean シグナル: 許可 reviewer の未編集 issue コメントで、CLEAN_MARKERS と ``Reviewed commit: `<sha>` ``（7桁以上、
+    head の先頭一致）を含むもの。SHA に束縛されるので head_time は不要。
     指摘は「同じ reviewer 自身」の後続の clean（inline なし APPROVED、または指摘より後の依頼への +1）でのみ解消する
     （別 reviewer の APPROVED では消えない）。PASS = 未解消の指摘が無く、かつ clean シグナルが 1 つ以上。
     """
@@ -66,6 +71,13 @@ def independent_review(head: str, head_time: Optional[str], allowed: Sequence[st
             for who in {_login((x.get("user") or {}).get("login")) for x in c.get("reactions") or [] if x.get("content") == "+1"} & ok:
                 if (c.get("created_at") or "") > max(head_time, found_at(who)):
                     signals.append((c.get("created_at") or "", who, c["html_url"]))
+    for c in issue_comments:
+        who, body = _login((c.get("user") or {}).get("login")), c.get("body") or ""
+        m = _REVIEWED_COMMIT.search(body)
+        if (who in ok and m and head.startswith(m.group(1).lower()) and any(k in body.lower() for k in CLEAN_MARKERS)
+                and c.get("html_url") and c.get("updated_at") in (None, c.get("created_at"))
+                and (c.get("created_at") or "") > found_at(who)):
+            signals.append((c.get("created_at") or "", who, c["html_url"]))
     unresolved = [w for w in mine if found_at(w) and not any(who == w for _, who, _ in signals)]
     if signals and not unresolved:
         return {"verdict": "PASS", "head_sha": head, "ref": max(signals)[2]}
