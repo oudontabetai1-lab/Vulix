@@ -6,7 +6,10 @@ GitHub API は叩かず merge もコメントもしない（subprocess/network �
 判定材料が欠けていれば通さない（「情報が無い」を「問題が無い」と読み替えない）:
 ``isDraft``/``mergeStateStatus``/``reviews``/``reviewThreads`` はキー欠落・null で失格。CI は現
 head SHA へ厳密 pin された単一エントリの SUCCESS のみ合格（SHA 欠落・stale・同名重複は失格）。
-independent/security/acceptance は ``{"verdict":"PASS","head_sha":<現 head>}`` のみ有効。
+independent/security/acceptance は ``{"verdict":"PASS","head_sha":<現 head>,"ref":<出典>}`` のみ有効
+（``ref`` は verdict の出所＝レビュー URL/ID 等。無ければ失格＝手書き PASS を通さない）。
+``tier``（A/B/C・欠落/不明は A 扱い）が A のときは ``nightlyRecall.conclusion`` が SUCCESS であることも要求する
+（main の nightly recall が赤のまま検出系 PR を通さない）。B/C は検査しない。
 """
 from __future__ import annotations
 
@@ -171,12 +174,31 @@ def _check_evidence(p: Mapping[str, Any], head: str, out: list[str]) -> None:
             out.append(f"evidence: '{key}' must be an object with verdict and head_sha (fail closed)")
         elif (v := _upper(item, "verdict", "status", "result")) != "PASS":
             out.append(f"evidence: '{key}' is {v or '(empty)'}, expected PASS")
+        elif not _text(item.get("ref")):
+            out.append(f"evidence: '{key}' has no ref (provenance required, fail closed)")
         elif not (sha := _sha(item, "head_sha", "headSha", "commit", "sha")):
             out.append(f"evidence: '{key}' has no head_sha (fail closed)")
         elif not head:
             out.append(f"evidence: '{key}' cannot be pinned: head sha unknown (fail closed)")
         elif sha != head:
             out.append(f"evidence: '{key}' recorded for {_short(sha)}, not current head {_short(head)}")
+
+
+def _tier(p: Mapping[str, Any]) -> str:
+    """tier を A/B/C に正規化。欠落・不明は保守側の A。"""
+    t = _upper(p, "tier")
+    return t if t in ("A", "B", "C") else "A"
+
+
+def _check_recall(p: Mapping[str, Any], tier: str, out: list[str]) -> None:
+    """Tier A は main の nightly recall gate が SUCCESS であること。"""
+    if tier != "A":
+        return
+    nr = _pick(p, "nightlyRecall", "nightly_recall", default=None)
+    if not isinstance(nr, Mapping) or not (c := _upper(nr, "conclusion")):
+        out.append("recall: nightly recall status missing (Tier A blocked, fail closed)")
+    elif c != "SUCCESS":
+        out.append(f"recall: nightly recall gate on main is {c} (Tier A blocked)")
 
 
 def evaluate(payload: Any) -> dict:
@@ -189,11 +211,14 @@ def evaluate(payload: Any) -> dict:
     _check_reviews(payload, found)
     _check_threads(payload, found)
     _check_evidence(payload, head, found)
+    tier = _tier(payload)
+    _check_recall(payload, tier, found)
     reasons = list(dict.fromkeys(found))  # 出現順を保った重複排除（決定論的出力）
     if not reasons:  # 通した根拠も残す（証跡を空にしない）
         reasons = ["pr: open, non-draft, mergeable", f"ci: all required checks succeeded on head {_short(head)}",
                    "review: no changes-requested reviews", "threads: no unresolved review threads",
-                   f"evidence: independent-review, security-review, acceptance all PASS on head {_short(head)}"]
+                   f"evidence: independent-review, security-review, acceptance all PASS on head {_short(head)}",
+                   f"recall: tier {tier}" + (" (nightly recall SUCCESS)" if tier == "A" else " (nightly recall not required)")]
     n = _pick(payload, "number", "pr", default=None)
     return {"ready": not found, "reasons": reasons, "pr": n if isinstance(n, int) else (_text(n) or None), "head_sha": head}
 

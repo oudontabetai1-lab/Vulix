@@ -36,7 +36,9 @@ def payload(**overrides):
         ],
         "reviews": [{"author": {"login": "alice"}, "state": "APPROVED", "submittedAt": "2026-01-02"}],
         "reviewThreads": [{"path": "a.py", "isResolved": True}],
-        "evidence": {k: {"verdict": "PASS", "head_sha": HEAD} for k in REQUIRED_EVIDENCE},
+        "evidence": {k: {"verdict": "PASS", "head_sha": HEAD, "ref": f"https://example.test/{k}"} for k in REQUIRED_EVIDENCE},
+        "tier": "A",
+        "nightlyRecall": {"conclusion": "SUCCESS", "head_sha": "c" * 40},
     }
     base.update(overrides)
     return {k: v for k, v in base.items() if v is not ...}
@@ -165,15 +167,35 @@ def test_evidence_missing_stale_or_unpinned_blocks(key):
     for broken, fragment in [
         (None, "missing"),
         ("PASS", "object"),                                   # 文字列形式は不可
-        ({"verdict": "FAIL", "head_sha": HEAD}, "expected PASS"),
-        ({"verdict": "PASS"}, "no head_sha"),                 # pin なし
-        ({"verdict": "PASS", "head_sha": OLD}, "not current head"),  # 別 commit の流用
+        ({"verdict": "FAIL", "head_sha": HEAD, "ref": "r"}, "expected PASS"),
+        ({"verdict": "PASS", "ref": "r"}, "no head_sha"),     # pin なし
+        ({"verdict": "PASS", "head_sha": OLD, "ref": "r"}, "not current head"),  # 別 commit の流用
+        ({"verdict": "PASS", "head_sha": HEAD}, "no ref"),    # 出典なし（手書き PASS）
+        ({"verdict": "PASS", "head_sha": HEAD, "ref": "  "}, "no ref"),
     ]:
-        evidence = {k: {"verdict": "PASS", "head_sha": HEAD} for k in REQUIRED_EVIDENCE}
+        evidence = {k: {"verdict": "PASS", "head_sha": HEAD, "ref": "r"} for k in REQUIRED_EVIDENCE}
         evidence[key] = broken
         assert any(f"'{key}'" in r and fragment in r for r in blocked(evidence=evidence)), (key, fragment)
 
     assert len(blocked(evidence=None)) >= len(REQUIRED_EVIDENCE)
+
+
+def test_tier_a_requires_nightly_recall_success():
+    assert evaluate(payload(tier="a"))["ready"] is True  # 大文字小文字は問わない
+    assert any("recall" in r and "FAILURE" in r for r in blocked(nightlyRecall={"conclusion": "failure"}))
+    assert any("recall" in r and "missing" in r for r in blocked(nightlyRecall=...))
+    assert any("recall" in r and "missing" in r for r in blocked(nightlyRecall={"head_sha": HEAD}))
+
+
+@pytest.mark.parametrize("tier", [..., None, "", "Z", 1])
+def test_missing_or_unknown_tier_is_treated_as_a(tier):
+    assert any("recall" in r for r in blocked(tier=tier, nightlyRecall={"conclusion": "FAILURE"}))
+
+
+@pytest.mark.parametrize("tier", ["B", "c"])
+def test_tier_b_c_ignore_nightly_recall(tier):
+    assert evaluate(payload(tier=tier, nightlyRecall={"conclusion": "FAILURE"}))["ready"] is True
+    assert evaluate(payload(tier=tier, nightlyRecall=...))["ready"] is True
 
 
 @pytest.mark.parametrize("bad", [None, [], "nope", 42, {}])
