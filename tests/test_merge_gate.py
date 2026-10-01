@@ -16,6 +16,7 @@ import pytest
 from orchestration.merge_gate import REQUIRED_EVIDENCE, evaluate, main
 
 HEAD = "a" * 40
+REF = "https://github.com/o/r/pull/1#issuecomment-2"
 OLD = "b" * 40
 MODULE = Path(__file__).resolve().parents[1] / "orchestration" / "merge_gate.py"
 
@@ -36,7 +37,8 @@ def payload(**overrides):
         ],
         "reviews": [{"author": {"login": "alice"}, "state": "APPROVED", "submittedAt": "2026-01-02"}],
         "reviewThreads": [{"path": "a.py", "isResolved": True}],
-        "evidence": {k: {"verdict": "PASS", "head_sha": HEAD, "ref": f"https://example.test/{k}"} for k in REQUIRED_EVIDENCE},
+        "evidence": {k: {"verdict": "PASS", "head_sha": HEAD, "ref": f"https://github.com/o/r/pull/190#pullrequestreview-{i}"} for i, k in enumerate(REQUIRED_EVIDENCE)},
+        "collectionErrors": [],
         "tier": "A",
         "nightlyRecall": {"conclusion": "SUCCESS", "head_sha": "c" * 40, "created_at": "2026-01-02T00:00:00Z"},
         "collectedAt": "2026-01-02T12:00:00Z",
@@ -168,13 +170,13 @@ def test_evidence_missing_stale_or_unpinned_blocks(key):
     for broken, fragment in [
         (None, "missing"),
         ("PASS", "object"),                                   # 文字列形式は不可
-        ({"verdict": "FAIL", "head_sha": HEAD, "ref": "r"}, "expected PASS"),
-        ({"verdict": "PASS", "ref": "r"}, "no head_sha"),     # pin なし
-        ({"verdict": "PASS", "head_sha": OLD, "ref": "r"}, "not current head"),  # 別 commit の流用
+        ({"verdict": "FAIL", "head_sha": HEAD, "ref": REF}, "expected PASS"),
+        ({"verdict": "PASS", "ref": REF}, "no head_sha"),     # pin なし
+        ({"verdict": "PASS", "head_sha": OLD, "ref": REF}, "not current head"),  # 別 commit の流用
         ({"verdict": "PASS", "head_sha": HEAD}, "no ref"),    # 出典なし（手書き PASS）
         ({"verdict": "PASS", "head_sha": HEAD, "ref": "  "}, "no ref"),
     ]:
-        evidence = {k: {"verdict": "PASS", "head_sha": HEAD, "ref": "r"} for k in REQUIRED_EVIDENCE}
+        evidence = {k: {"verdict": "PASS", "head_sha": HEAD, "ref": REF} for k in REQUIRED_EVIDENCE}
         evidence[key] = broken
         assert any(f"'{key}'" in r and fragment in r for r in blocked(evidence=evidence)), (key, fragment)
 
@@ -199,6 +201,29 @@ def test_tier_a_nightly_freshness():
     assert any("freshness unknown" in r for r in blocked(collectedAt=...))
     assert any("freshness unknown" in r for r in blocked(collectedAt="nope"))
     assert evaluate(payload(tier="B", nightlyRecall=stale, collectedAt=...))["ready"] is True
+
+
+def test_collection_errors_must_be_present_and_empty():
+    assert any("collectionErrors missing" in r for r in blocked(collectionErrors=...))
+    assert any("collectionErrors missing" in r for r in blocked(collectionErrors="none"))
+    assert any(r == "input: evidence collection failed: boom" for r in blocked(collectionErrors=["boom"]))
+    assert any(r.endswith("failed: a (+2 more)") for r in blocked(collectionErrors=["a", "b", "c"]))
+
+
+@pytest.mark.parametrize("ref", [
+    "https://github.com/o/r/pull/1", "https://github.com/o/r/pull/12#pullrequestreview-123",
+    "https://github.com/o/r/pull/1#issuecomment-456", "https://github.com/o/r/pull/1#discussion_r789",
+    "https://github.com/o/r/issues/5", "task_0123abcd", "task_" + "f" * 16])
+def test_valid_ref_formats(ref):
+    ev = {k: {"verdict": "PASS", "head_sha": HEAD, "ref": ref} for k in REQUIRED_EVIDENCE}
+    assert evaluate(payload(evidence=ev))["ready"] is True
+
+
+@pytest.mark.parametrize("ref", ["r", "PASS", True, 1, "http://github.com/o/r/pull/1", "https://evil.test/o/r/pull/1",
+                                 "https://github.com/o/r/commit/abc", "task_xyz", "task_0123", "https://github.com/o/r/pull/x"])
+def test_unverifiable_ref_is_rejected(ref):
+    ev = {k: {"verdict": "PASS", "head_sha": HEAD, "ref": ref} for k in REQUIRED_EVIDENCE}
+    assert any("ref" in r for r in blocked(evidence=ev))
 
 
 @pytest.mark.parametrize("tier", [..., None, "", "Z", 1])
@@ -258,4 +283,4 @@ def test_module_is_read_only_stdlib_only():
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             roots.add(node.module.split(".")[0])
     assert not (roots & banned), roots & banned
-    assert roots <= {"argparse", "json", "sys", "pathlib", "typing", "datetime", "__future__"}, roots
+    assert roots <= {"argparse", "json", "sys", "pathlib", "typing", "datetime", "re", "__future__"}, roots

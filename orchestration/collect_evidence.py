@@ -54,18 +54,18 @@ def independent_review(head: str, head_time: Optional[str], allowed: Sequence[st
 
     signals: list[tuple[str, str, str]] = []  # (時刻, reviewer, ref)
     for who, rs in mine.items():
-        signals += [(r.get("submitted_at") or "", who, r.get("html_url") or str(r.get("id"))) for r in rs
-                    if r["state"] == "APPROVED" and r.get("id") not in commented
+        signals += [(r.get("submitted_at") or "", who, r["html_url"]) for r in rs
+                    if r["state"] == "APPROVED" and r.get("html_url") and r.get("id") not in commented
                     and (r.get("submitted_at") or "") > found_at(who)]
     if head_time:
         for c in issue_comments:
             if not any(k in (c.get("body") or "").lower() for k in REVIEW_REQUESTS):
                 continue
-            if c.get("updated_at") not in (None, c.get("created_at")):
+            if not c.get("html_url") or c.get("updated_at") not in (None, c.get("created_at")):
                 continue  # 編集された依頼コメントは無効（内容/時刻を後から書き換えられる）
             for who in {_login((x.get("user") or {}).get("login")) for x in c.get("reactions") or [] if x.get("content") == "+1"} & ok:
                 if (c.get("created_at") or "") > max(head_time, found_at(who)):
-                    signals.append((c.get("created_at") or "", who, c.get("html_url") or str(c.get("id"))))
+                    signals.append((c.get("created_at") or "", who, c["html_url"]))
     unresolved = [w for w in mine if found_at(w) and not any(who == w for _, who, _ in signals)]
     if signals and not unresolved:
         return {"verdict": "PASS", "head_sha": head, "ref": max(signals)[2]}
@@ -100,7 +100,8 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
         pages = call(label, ["api", "--paginate", "--slurp", path])
         return None if pages is None else [x for p in pages for x in (p if isinstance(p, list) else [p])]
 
-    out: dict = {"collectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    # 収集失敗はパイプ越しに exit code が消えるので payload に載せる（gate が非空なら失格）
+    out: dict = {"collectionErrors": errors, "collectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     view = call("pr view", ["pr", "view", str(pr), "--repo", repo, "--json",
                             "number,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName"])
     if not isinstance(view, dict):

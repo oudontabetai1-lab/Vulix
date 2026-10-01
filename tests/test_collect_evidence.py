@@ -13,11 +13,11 @@ BOT = "chatgpt-codex-connector"
 
 def review(commit=HEAD, login=f"{BOT}[bot]", rid=1, state="APPROVED", at="2026-01-02T01:00:00Z"):
     return {"id": rid, "commit_id": commit, "user": {"login": login}, "state": state, "submitted_at": at,
-            "html_url": f"https://example.test/review/{rid}"}
+            "html_url": f"https://github.com/o/r/pull/7#pullrequestreview-{rid}"}
 
 
 def request(created="2026-01-02T02:00:00Z", plus=True, login=BOT, body="@codex review"):
-    return {"id": 9, "body": body, "created_at": created, "html_url": "https://example.test/c/9",
+    return {"id": 9, "body": body, "created_at": created, "html_url": "https://github.com/o/r/pull/7#issuecomment-9",
             "reactions": [{"content": "+1" if plus else "eyes", "user": {"login": login}}]}
 
 
@@ -27,7 +27,7 @@ def judge(reviews=(), comments=(), issues=(), allowed=(BOT,), head_time=HEAD_DAT
 
 def test_clean_review_on_head_passes():
     r = judge([review()])
-    assert r["verdict"] == "PASS" and r["head_sha"] == HEAD and r["ref"].endswith("/review/1")
+    assert r["verdict"] == "PASS" and r["head_sha"] == HEAD and r["ref"].endswith("#pullrequestreview-1")
 
 
 def test_review_on_older_commit_is_missing():
@@ -268,7 +268,8 @@ def _plus_one_run(commit_date, started_at):
         if a.endswith("/pulls/7/reviews"):
             return "[[]]"
         if a.endswith("/issues/7/comments"):
-            return json.dumps([[{"id": 9, "body": "@codex review", "created_at": "2026-01-02T00:10:00Z"}]])
+            return json.dumps([[{"id": 9, "body": "@codex review", "created_at": "2026-01-02T00:10:00Z",
+                                     "html_url": "https://github.com/o/r/pull/7#issuecomment-9"}]])
         if a.endswith("/reactions"):
             return json.dumps([[{"content": "+1", "user": {"login": BOT}}]])
         return base(args)
@@ -300,6 +301,17 @@ def test_latest_check_run_start_is_the_reference():
     assert payload["evidence"]["independent_review"]["verdict"] == "MISSING"
 
 
+def test_missing_html_url_makes_signal_unusable():
+    r = dict(review(), html_url=None)
+    assert judge([r])["verdict"] == "FINDINGS"  # clean 扱いされない
+    assert judge(issues=[dict(request(), html_url=None)])["verdict"] == "MISSING"
+
+
+def test_collection_errors_are_in_payload_and_empty_on_success():
+    payload, errors = build_payload(7, "o/r", [BOT], "B", None, make_run())
+    assert payload["collectionErrors"] == [] and errors == []
+
+
 def test_collected_at_is_set():
     payload, _ = build_payload(7, "o/r", [BOT], "B", None, make_run())
     assert payload["collectedAt"].endswith("Z")
@@ -311,7 +323,7 @@ def test_plus_one_after_both_times_passes():
 
 
 def test_build_payload_with_fake_runner_feeds_the_gate():
-    sec = {"verdict": "PASS", "head_sha": HEAD, "ref": "s"}
+    sec = {"verdict": "PASS", "head_sha": HEAD, "ref": "task_0123abcd"}
     payload, errors = build_payload(7, "o/r", [BOT], "A", {"security_review": sec}, make_run())
     assert errors == []
     assert payload["evidence"]["independent_review"]["verdict"] == "PASS"
@@ -326,5 +338,5 @@ def test_gh_failure_omits_fields_and_reports():
         raise RuntimeError("boom")
 
     payload, errors = build_payload(7, "o/r", [BOT], None, None, run)
-    assert set(payload) == {"collectedAt"} and errors
+    assert set(payload) == {"collectedAt", "collectionErrors"} and errors and payload["collectionErrors"] == errors
     assert evaluate(payload)["ready"] is False

@@ -6,8 +6,10 @@ GitHub API は叩かず merge もコメントもしない（subprocess/network �
 判定材料が欠けていれば通さない（「情報が無い」を「問題が無い」と読み替えない）:
 ``isDraft``/``mergeStateStatus``/``reviews``/``reviewThreads`` はキー欠落・null で失格。CI は現
 head SHA へ厳密 pin された単一エントリの SUCCESS のみ合格（SHA 欠落・stale・同名重複は失格）。
+payload は collect_evidence 由来必須（``collectionErrors`` が存在し空配列。収集失敗はパイプで exit code が失われるため payload に載せる）。
 independent/security/acceptance は ``{"verdict":"PASS","head_sha":<現 head>,"ref":<出典>}`` のみ有効
-（``ref`` は verdict の出所＝レビュー URL/ID 等。無ければ失格＝手書き PASS を通さない）。
+（``ref`` は GitHub PR/issue URL か Orca task id の形式必須。gate が検証するのは出典の**形式**で真正性ではない：
+真正性は証跡を collector/reviewer の出力経由でしか作らない運用で担保する）。
 ``tier``（A/B/C・欠落/不明は A 扱い）が A のときは ``nightlyRecall.conclusion`` が SUCCESS であることも要求する
 （main の nightly recall が赤のまま検出系 PR を通さない）。B/C は検査しない。SUCCESS でも ``nightlyRecall.created_at`` が ``collectedAt``（収集時刻・決定論のため入力から取る）
 より 36 時間超古い／どちらかが読めないなら失格（古い成功を今の健全性の証拠にしない）。
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +63,9 @@ def _as_list(v: Any) -> list:
 
 def _short(sha: str) -> str:
     return sha[:7] if sha else "(unknown)"
+
+
+_REF_RE = re.compile(r"^(https://github\.com/[\w.-]+/[\w.-]+/(pull|issues)/\d+([/?#]\S*)?|task_[0-9a-f]{8,})$")
 
 
 def _check_pr(p: Mapping[str, Any], out: list[str]) -> None:
@@ -176,8 +182,10 @@ def _check_evidence(p: Mapping[str, Any], head: str, out: list[str]) -> None:
             out.append(f"evidence: '{key}' must be an object with verdict and head_sha (fail closed)")
         elif (v := _upper(item, "verdict", "status", "result")) != "PASS":
             out.append(f"evidence: '{key}' is {v or '(empty)'}, expected PASS")
-        elif not _text(item.get("ref")):
+        elif not isinstance(item.get("ref"), str) or not item["ref"].strip():
             out.append(f"evidence: '{key}' has no ref (provenance required, fail closed)")
+        elif not _REF_RE.match(item["ref"]):
+            out.append(f"evidence: '{key}' ref is not a verifiable reference (GitHub PR/issue URL or Orca task id required)")
         elif not (sha := _sha(item, "head_sha", "headSha", "commit", "sha")):
             out.append(f"evidence: '{key}' has no head_sha (fail closed)")
         elif not head:
@@ -226,6 +234,11 @@ def evaluate(payload: Any) -> dict:
     if not isinstance(payload, Mapping):
         return {"ready": False, "reasons": ["input: payload is not a JSON object (fail closed)"], "pr": None, "head_sha": ""}
     head, found = _sha(payload, *_HEAD_KEYS), []
+    errs = payload.get("collectionErrors")
+    if not isinstance(errs, list):
+        found.append("input: collectionErrors missing (payload must come from collect_evidence, fail closed)")
+    elif errs:
+        found.append(f"input: evidence collection failed: {_text(errs[0])}" + (f" (+{len(errs) - 1} more)" if len(errs) > 1 else ""))
     _check_pr(payload, found)
     _check_ci(payload, head, found)
     _check_reviews(payload, found)
