@@ -1,0 +1,5 @@
+# Laya 決定モデル（OUD-78 / 77a）。非自己回帰の分類/ルーティング/スコアリング用、ローカル推論。
+# 既定 OFF（環境変数 WSCAN_LAYA で有効化）。本体スキャンは Laya 非依存で、未導入時は
+# wscan/laya_client.py が従来経路へ完全フォールバックする。
+# PoC（OUD-79/80/81/82）で実利用する際に必要。PyTorch と HF weights を伴う。
+laya
