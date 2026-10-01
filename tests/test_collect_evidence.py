@@ -111,13 +111,20 @@ def clean_comment(sha=HEAD[:10], created="2026-01-02T02:00:00Z", login=f"{BOT}[b
 
 
 def test_clean_issue_comment_bound_to_head_passes():
-    r = judge(issues=[clean_comment()], head_time=None)  # SHA 束縛なので head_time 不要
+    r = judge(issues=[clean_comment()])
     assert r["verdict"] == "PASS" and r["ref"].endswith("#issuecomment-11")
+    assert judge(issues=[clean_comment(body="  Codex Review: Didn't find any major issues.\n`Reviewed commit:` `" + HEAD[:10] + "`")])["verdict"] == "MISSING"
+    ok = "  CODEX REVIEW: DIDN'T FIND ANY MAJOR ISSUES.\n**Reviewed commit:** `" + HEAD[:10].upper() + "`"
+    assert judge(issues=[clean_comment(body=ok)])["verdict"] == "PASS"  # 先頭空白・大小は許容
 
 
 def test_clean_issue_comment_must_match_head_and_be_valid():
     assert judge(issues=[clean_comment(sha="def0819f0e")])["verdict"] == "MISSING"
-    assert judge(issues=[clean_comment(sha=HEAD[:6])])["verdict"] == "MISSING"  # 7桁未満
+    assert judge(issues=[clean_comment(sha=HEAD[:9])])["verdict"] == "MISSING"  # 10桁未満
+    assert judge(issues=[clean_comment(created="2026-01-01T00:00:00Z")])["verdict"] == "MISSING"  # head_time より前（使い回し）
+    assert judge(issues=[clean_comment()], head_time=None)["verdict"] == "MISSING"  # head_time 無しは無効
+    mixed = "Found a bug in x.py. Codex Review: Didn't find any major issues.\n**Reviewed commit:** `" + HEAD[:10] + "`"
+    assert judge(issues=[clean_comment(body=mixed)])["verdict"] == "MISSING"  # 先頭でない
     assert judge(issues=[clean_comment(body="Codex Review: Something went wrong. `Reviewed commit:` `" + HEAD[:10] + "`")])["verdict"] == "MISSING"
     assert judge(issues=[clean_comment(updated_at="2026-01-02T05:00:00Z")])["verdict"] == "MISSING"
     assert judge(issues=[clean_comment(html_url=None)])["verdict"] == "MISSING"
