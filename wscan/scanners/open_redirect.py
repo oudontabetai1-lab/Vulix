@@ -202,6 +202,10 @@ class OpenRedirectScanner(BaseScanner):
 
             source, pair = await self._apply_ip(ip, payload)
             await asyncio.sleep(0.3 * self.sleep_factor)
+            # transport/待機中に deadline を跨ぐと page.url は前 probe の canary のまま
+            # ありうる。打切り後は stale browser 状態を evidence に使わない。
+            if self._field_budget_gate():
+                return findings
 
             # Check 1: browser actually navigated to the canary host
             try:

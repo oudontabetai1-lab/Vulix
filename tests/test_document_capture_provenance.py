@@ -237,6 +237,7 @@ async def test_unavailable_capture_leaves_engine_page_checkpoint_incomplete(chec
     engine._save_checkpoint = Mock()
     engine._dialog_wedged_since = Mock(return_value=False)
     engine._recover_if_dialog_flood = AsyncMock()
+    engine._recovered_page_healthy = AsyncMock(return_value=True)
     engine._page_recovery_failed = Mock(return_value=False)
     page = SimpleNamespace(url=URL, html=None, forms=[], url_params=[])
     await ScanEngine._attack_one_page(engine, page, {})

@@ -35,6 +35,7 @@ from collections import Counter, deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 from urllib.parse import urlparse, urljoin, parse_qs, urlsplit
 
@@ -751,6 +752,19 @@ def _adaptive_checkpoint_check(check_name: str) -> str:
     return f"(adaptive:{check_name})"
 
 
+def _dialog_flooded(fired: int, dismiss_failed: bool) -> bool:
+    """区間内の dialog 発火数と dismiss 失敗フラグから flood/wedge を判定する（純粋・F06/0059）。"""
+    return fired > 3 or bool(dismiss_failed)
+
+
+def _field_check_checkpointable(errored: bool, truncated: bool, wedged: bool) -> bool:
+    """field×check 単位を完了として checkpoint してよいか（純粋）。
+
+    例外・time-box 打切り・dialog flood/wedge 中の実行は「健全 page で probe が走った」陽性証拠が
+    無いため完了化しない（resume で再試行。finding は dedup 済みなので再実行で重複しない）。"""
+    return not (errored or truncated or wedged)
+
+
 # ---------------------------------------------------------------------------
 # Scan Engine
 # ---------------------------------------------------------------------------
@@ -1430,6 +1444,10 @@ class ScanEngine:
         # nan は `> 0` が偽で保護を黙って無効化、inf は失効しない deadline になる。非有限は既定へ。
         if not math.isfinite(self._field_attack_budget_s):
             self._field_attack_budget_s = 120.0
+        # 同じ deterministic check が field budget を使い切ると、未完のまま resume しても
+        # 常に先頭で deadline に達して後続 check を starve させる。2 回は再試行して一時的な
+        # 劣化を回収し、なお打切りなら「未完だが前進させる」checkpoint 状態へ移す。
+        self._field_budget_retry_limit = 2
         self._finding_dedup: set[tuple] = set()     # (url, field_name, check_type) — prevent duplicates
         self.attack_plans: list = []
         self.visited_urls: set = set()
@@ -2563,6 +2581,18 @@ class ScanEngine:
         if not self.enable_checkpoint or self.checkpoint is None:
             return
         self.checkpoint.mark_done(url, field_name, form_index, check, is_url_param)
+
+    def _checkpoint_truncation_exhausted_ip(self, ip, check: str) -> bool:
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return False
+        return self.checkpoint.is_truncation_exhausted_ip(ip, check)
+
+    def _checkpoint_record_truncation_ip(self, ip, check: str) -> tuple[int, bool]:
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return 0, False
+        return self.checkpoint.record_truncation_ip(
+            ip, check, self._field_budget_retry_limit,
+        )
 
     def _injection_point_for(
         self,
@@ -5584,6 +5614,10 @@ class ScanEngine:
         # 長時間スキャンでセッションが切れると以降が全てログイン画面/401 に化け、
         # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
         # 失効レスポンスに当ててしまわないよう、page-level・field 双方の前に実行する。
+        # F06/0059: 失効チェック/pre-attack flow の準備 navigate が stored-XSS sink を読んで 4+ dialog を
+        # 発火し全 dismiss 成功すると、page-level の baseline は準備後に取るため delta 0＝flood 未検知になる。
+        # 準備区間をここから bracket し、page-level 検査の前に回復する（正常時 fired<=3 で不変）。
+        _dlg_prep = getattr(self.browser, "dialog_total", 0)
         await self._maybe_relogin_for_page(page.url)
         # 再ログインが起きなくても、この page.url 宛に送られる Cookie を self.cookies へ
         # 同期する。domain/path フィルタにより target_url 同期では Path=/admin の
@@ -5729,9 +5763,17 @@ class ScanEngine:
             # 攻撃対象を決める前に現在のページから form/url_param を採り直す（Codex #170 P1）。
             await self._refresh_page_after_flow(page)
 
+        # 準備区間（失効チェック/flow）の flood/wedge を page-level 検査の前に回復する。復旧失敗・
+        # 再生成後に target へ戻れなければ全検査を未 checkpoint のまま止める（resume で回収）。
+        await self._recover_if_dialog_flood(_dlg_prep)
+        if not await self._recovered_page_healthy(page):
+            self._save_checkpoint()
+            return
+
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         # F06/0059: 入力の無い stored-XSS 観測ページは scan_page 中に alert flood/wedge しうる。
         # ここで dialog_total を控え、page-level 区間末で回復して field 攻撃へ劣化を持ち越さない。
+        # 準備回復の復帰 navigate 分を数え直さないよう、回復・復帰の後で取る。
         _dlg_pagelevel = getattr(self.browser, "dialog_total", 0)
         for check_name, scanner in self.scanners.items():
             # API テンプレート専用スキャナ（mass_assignment）はここで動かさない。
@@ -6103,7 +6145,7 @@ class ScanEngine:
             # 直近呼び出しの復旧失敗を browser（worker 毎）に保持する（呼び出し側が _page_recovery_failed で参照）。
             br._recovery_failed = False
             br._page_recreated = False
-            if fired > 3 or wedged:
+            if _dialog_flooded(fired, wedged):
                 if await br.recreate_page():
                     br._page_recreated = True  # 呼び出し側が blank page から target へ復帰する目印
                     self.wave_errors.append(
@@ -6152,8 +6194,9 @@ class ScanEngine:
         """``_recover_if_dialog_flood`` と同じ flood/wedge 判定（純粋な観測・副作用なし）。"""
         br = self.browser
         try:
-            return (getattr(br, "dialog_total", 0) - since > 3) or bool(
-                getattr(br, "dialog_dismiss_failed", False)
+            return _dialog_flooded(
+                getattr(br, "dialog_total", 0) - since,
+                getattr(br, "dialog_dismiss_failed", False),
             )
         except Exception:
             return False
@@ -6432,6 +6475,11 @@ class ScanEngine:
         # 「(adaptive) 完了マーカー」と併せて判定する（abort 中断時の再開網羅性のため）。
         checks_executed = 0
         checks_skipped_done = 0
+        # F06/0059: 早い check（XSS 等）が dialog flood/wedge させた page で後続 check が空振りし
+        # tested/checkpoint 完了化される偽陰性を防ぐため、check 毎に bracket して回復する。
+        # 回復不能なら残 check と adaptive を未 checkpoint のまま打ち切る（resume で回収）。
+        field_unhealthy = False
+        _target_page = SimpleNamespace(url=url)
         for check_name in ordered_checks:
             scanner = self.scanners.get(check_name)
             if scanner is None:
@@ -6469,6 +6517,26 @@ class ScanEngine:
                 )
                 checks_skipped_done += 1
                 continue
+            _is_truncation_exhausted = getattr(
+                self, "_checkpoint_truncation_exhausted_ip", None
+            )
+            if callable(_is_truncation_exhausted) and _is_truncation_exhausted(
+                ip, check_name
+            ):
+                # 完了ではない。繰返し打切りで全 field を永久停止させないため、未到達を
+                # scan matrix/wave_errors に残したままこの run の後続 check へ譲る。
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="error",
+                    location=location,
+                    note="Skipped — field budget retry limit reached; unit remains incomplete.",
+                )
+                self.wave_errors.append(
+                    f"field_budget_retry_exhausted:{check_name}:{url}:{field_name}"
+                )
+                continue
 
             # 中央 budget gate: 予算超過後は scanner を呼ばない（_apply_ip を経由しない legacy 直送
             # scanner も一律保護）。gate が truncated 集合へ入れるため checkpoint は完了化されず
@@ -6503,7 +6571,9 @@ class ScanEngine:
                 _override_token = _FIELD_PAYLOAD_OVERRIDES.set({**current_overrides, check_name: merged})
 
             check_errored = False
+            check_wedged = False
             checks_executed += 1
+            _dlg_check = getattr(self.browser, "dialog_total", 0)
             try:
                 before_count = len(self.all_findings)
                 findings = await scanner.scan_injection_point(ip, field)
@@ -6515,14 +6585,21 @@ class ScanEngine:
                     f for f in self.all_findings[before_count:]
                     if f.url == url and f.field_name == field_name and f.check_type == check_name
                 ]
+                check_wedged = self._dialog_wedged_since(_dlg_check)
                 self._record_scan_matrix(
                     url=url,
                     field_name=field_name,
                     check_name=check_name,
-                    status="finding" if new_findings else "tested",
+                    # wedge 中の空結果は blocked read の可能性があり「tested」にしない
+                    # （finding は陽性証拠なので残す）。
+                    status=(
+                        "finding" if new_findings
+                        else "error" if check_wedged else "tested"
+                    ),
                     location=location,
                     severity=_top_severity(new_findings),
                     finding_count=len(new_findings),
+                    note="field scan ran on a dialog-wedged page" if check_wedged else "",
                 )
             except AbortScan:
                 # payload 単位の即時停止でこの check は途中終了した。「済み」に
@@ -6532,6 +6609,7 @@ class ScanEngine:
                 raise
             except Exception as e:
                 check_errored = True
+                check_wedged = self._dialog_wedged_since(_dlg_check)
                 self._record_scan_matrix(
                     url=url,
                     field_name=field_name,
@@ -6552,11 +6630,38 @@ class ScanEngine:
                 # ('',{}) が返るため放置すると tested 扱い→_checkpoint_mark_done_ip され、resume が
                 # 未送信/一部送信の check を恒久スキップして見逃す）。truncated は resume で再試行する。
                 _truncated = _FIELD_BUDGET_TRUNCATED.get() or set()
-                if not check_errored and check_name not in _truncated:
+                if check_name in _truncated:
+                    _record_truncation = getattr(
+                        self, "_checkpoint_record_truncation_ip", None
+                    )
+                    if callable(_record_truncation):
+                        attempts, exhausted = _record_truncation(ip, check_name)
+                        if exhausted:
+                            self.wave_errors.append(
+                                f"field_budget_retry_exhausted:{check_name}:{url}:{field_name}"
+                            )
+                        else:
+                            self.wave_errors.append(
+                                f"field_budget_retry_deferred:{check_name}:{attempts}:{url}:{field_name}"
+                            )
+                if _field_check_checkpointable(
+                    check_errored, check_name in _truncated, check_wedged
+                ):
                     self._checkpoint_mark_done_ip(ip, check_name)
+                elif check_wedged:
+                    self.wave_errors.append(
+                        f"dialog_wedged_check_deferred:{check_name}:{url}:{field_name}"
+                    )
+            if check_wedged:
+                # 後続 check が blocked page を掴んで空 tested になる前にここで page を作り直し
+                # target へ戻す。戻れなければ残 check は未走査（未 checkpoint）で打ち切る。
+                await self._recover_if_dialog_flood(_dlg_check)
+                if not await self._recovered_page_healthy(_target_page):
+                    field_unhealthy = True
+                    break
 
         # CTF: check page source after all scanners ran on this field
-        if self.flag_finder:
+        if self.flag_finder and not field_unhealthy:
             try:
                 post_html = await self.browser.page.content()
                 self._check_page_for_flags(post_html, url)
@@ -6587,6 +6692,7 @@ class ScanEngine:
         # 拾う。個々の済み判定は _adaptive_attack_field 側でも行い、再攻撃を防ぐ。
         if (
             self.adaptive_enabled
+            and not field_unhealthy
             and not legacy_adaptive_done
             and adaptive_pending
             and (checks_executed > 0 or checks_skipped_done > 0)

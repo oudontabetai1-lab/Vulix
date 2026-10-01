@@ -71,6 +71,18 @@ class UnitKeyTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_truncation_retry_state_persists_without_marking_done(self):
+        state = CheckpointState()
+        ip = InjectionPoint.for_form("http://h/a", "q", 0)
+        self.assertEqual(state.record_truncation_ip(ip, "xss", 2), (1, False))
+        self.assertFalse(state.is_done_ip(ip, "xss"))
+        self.assertFalse(state.is_truncation_exhausted_ip(ip, "xss"))
+        self.assertEqual(state.record_truncation_ip(ip, "xss", 2), (2, True))
+
+        restored = CheckpointState.from_dict(state.to_dict())
+        self.assertFalse(restored.is_done_ip(ip, "xss"))
+        self.assertTrue(restored.is_truncation_exhausted_ip(ip, "xss"))
+
     def test_form_injection_point_matches_legacy_unit(self):
         state = CheckpointState()
         ip = InjectionPoint.for_form("http://h/a/", "id", 2)
