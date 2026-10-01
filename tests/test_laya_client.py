@@ -109,3 +109,8 @@ def test_concurrent_first_load_once(monkeypatch):
     [t.join() for t in ts]
     assert len(calls) == 1
     assert len(out) == 2 and all(r["answers"]["q"]["noul"] == 0.9 for r in out)
+
+
+def test_null_answer_value_is_none(monkeypatch):
+    _fake(monkeypatch, lambda s, q: {"answers": {"q": {"noul": None}}})
+    assert laya_client.decide("s", Q) is None

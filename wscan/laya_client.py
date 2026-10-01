@@ -80,7 +80,7 @@ def _answer_ok(spec: Any, ans: Any) -> bool:
         return False
     t = spec.get("type") if isinstance(spec, dict) else None
     if t in ("choice", "score", "noul"):
-        return t in ans
+        return ans.get(t) is not None  # キー存在＋null 拒否（型/範囲の厳密検証は PoC で実出力を見てから）
     return bool(ans)  # type 不明は保守的に「空でない dict」のみ許容
 
 
