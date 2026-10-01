@@ -134,6 +134,36 @@ def test_real_codex_clean_comment_shape():
     assert judge(issues=[clean_comment(body=real.replace("About Codex", "P0: auth bypass found"))])["verdict"] == "MISSING"
 
 
+def test_clean_codex_footer_allows_formatting_variants_but_not_free_text():
+    header = f"Codex Review: Didn't find any major issues. Nice!\r\n\r\n**Reviewed commit:** `{HEAD[:10]}`"
+    footer = (
+        '<details>\r\n'
+        '<summary>About Codex in GitHub</summary>\r\n'
+        '<br>\r\n'
+        '[Your team has set up Codex to review pull requests in this repo]'
+        '(https://chatgpt.com/codex/cloud/settings/general?source=review). Reviews are triggered when you\r\n'
+        '* Open a pull request for review\r\n'
+        '* Mark a draft as ready\r\n'
+        '* Comment "@codex review".\r\n\r\n'
+        'If Codex has suggestions, it will comment; otherwise it will react with 👍.\r\n'
+        'Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".\r\n'
+        '</details>'
+    )
+    body = f"{header}\r\n\r\n{footer}"
+    assert judge(issues=[clean_comment(body=body)])["verdict"] == "PASS"
+    finding = body.replace(
+        'If Codex has suggestions,', 'P1: auth bypass found.\r\nIf Codex has suggestions,'
+    )
+    assert judge(issues=[clean_comment(body=finding)])["verdict"] == "MISSING"
+    assert judge(issues=[clean_comment(body=body + "\r\n\r\nSummary: looks good")])["verdict"] == "MISSING"
+
+
+def test_all_reviewed_codex_clean_flavors_are_accepted():
+    for flavor in ("Breezy!", "Nice!", "LGTM!"):
+        body = f"Codex Review: Didn't find any major issues. {flavor}\n\n**Reviewed commit:** `{HEAD[:10]}`"
+        assert judge(issues=[clean_comment(body=body)])["verdict"] == "PASS"
+
+
 def test_head_change_during_collection_is_a_collection_error():
     base = make_run()
     n = []
