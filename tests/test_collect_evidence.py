@@ -68,6 +68,31 @@ def test_plus_one_on_request_before_commented_review_is_findings():
     assert judge([c], issues=[request(created="2026-01-02T02:00:00Z")])["verdict"] == "FINDINGS"
 
 
+B = "other-reviewer"
+
+
+def test_other_reviewers_approval_does_not_hide_a_comment():
+    a = review(state="COMMENTED", at="2026-01-02T01:00:00Z")
+    b = review(login=B, rid=2, state="APPROVED", at="2026-01-02T02:00:00Z")
+    assert judge([a, b], allowed=(BOT, B))["verdict"] == "FINDINGS"
+
+
+def test_same_reviewer_supersedes_own_comment_with_later_clean_signal():
+    a = review(state="COMMENTED", at="2026-01-02T01:00:00Z")
+    assert judge([a], issues=[request(created="2026-01-02T02:00:00Z")])["verdict"] == "PASS"
+    a2 = review(rid=3, state="APPROVED", at="2026-01-02T02:00:00Z")
+    assert judge([a, a2])["verdict"] == "PASS"
+    assert judge([a2, a])["verdict"] == "PASS"  # 入力順に依存しない
+    # 別 reviewer の +1 では A の指摘は消えない
+    assert judge([a], issues=[request(created="2026-01-02T02:00:00Z", login=B)], allowed=(BOT, B))["verdict"] == "FINDINGS"
+
+
+def test_changes_requested_by_any_reviewer_blocks_other_approvals():
+    a = review(state="CHANGES_REQUESTED", at="2026-01-02T01:00:00Z")
+    b = review(login=B, rid=2, state="APPROVED", at="2026-01-02T02:00:00Z")
+    assert judge([a, b], allowed=(BOT, B))["verdict"] == "FINDINGS"
+
+
 def test_plus_one_on_request_after_head_passes():
     assert judge(issues=[request()])["verdict"] == "PASS"
 
@@ -113,7 +138,7 @@ def make_run(calls=None, **o):
         if a.startswith("pr view"):
             return json.dumps(pr_view)
         if "branches/main/protection" in a:
-            return json.dumps({"required_status_checks": {"contexts": ["test", "ext/ci"]}})
+            return json.dumps(o.get("protection", {"required_status_checks": {"contexts": ["test", "ext/ci"]}}))
         if "check-runs" in a:
             return json.dumps(o.get("check_runs", cr))
         if a.endswith("/status"):
@@ -199,6 +224,24 @@ def test_gate_reviews_come_from_rest_and_protection_branch_is_quoted():
     payload, errors = build_payload(7, "o/r", [BOT], "B", None, run)
     assert "reviews" not in payload and errors  # 取得失敗は省略（gate が fail closed）
     assert any("branches/feat%2Fx%20y/protection" in c for c in calls)
+
+
+def test_app_pinned_required_check_rejects_other_app_and_statuses():
+    def runs(*apps):
+        return [{"check_runs": [{"name": "test", "status": "completed", "conclusion": "success", "head_sha": HEAD,
+                                 "started_at": "2026-01-02T00:30:00Z", "app": {"id": a}} for a in apps]}]
+    prot = {"required_status_checks": {"checks": [{"context": "test", "app_id": 15368}, {"context": "ext/ci", "app_id": -1}]}}
+    payload, _ = build_payload(7, "o/r", [BOT], "B", None, make_run(protection=prot, check_runs=runs(999)))
+    assert payload["requiredChecks"] == ["test", "ext/ci"]
+    names = [e["name"] for e in payload["statusCheckRollup"]]
+    assert "test" not in names and "ext/ci" in names  # -1 は任意 app（commit status 可）
+    assert any("'test'" in r and "missing" in r for r in evaluate(payload)["reasons"])
+    payload, _ = build_payload(7, "o/r", [BOT], "B", None, make_run(protection=prot, check_runs=runs(15368)))
+    assert any(e["name"] == "test" and e["app_id"] == 15368 for e in payload["statusCheckRollup"])
+    # app 固定の context は commit status では満たせない
+    st = [{"sha": HEAD, "statuses": [{"context": "test", "state": "success"}]}]
+    payload, _ = build_payload(7, "o/r", [BOT], "B", None, make_run(protection=prot, check_runs=runs(), status=st))
+    assert not any(e["name"] == "test" for e in payload.get("statusCheckRollup", []))
 
 
 def test_nightly_asks_for_latest_completed_run():

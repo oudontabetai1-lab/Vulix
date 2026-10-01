@@ -26,37 +26,50 @@ def _login(name: Any) -> str:
 
 def independent_review(head: str, head_time: Optional[str], allowed: Sequence[str], reviews: list,
                        review_comments: list, issue_comments: list) -> dict:
-    """現 head 上の許可 reviewer の「指摘なし」シグナルだけを PASS にする純粋関数。
+    """現 head 上の許可 reviewer の「指摘なし」シグナルだけを PASS にする純粋関数（reviewer 毎に判定）。
 
     reviews/review_comments/issue_comments は gh api(REST) の素のデータ。issue_comments の各要素には
     ``reactions``（``[{"content","user":{"login"}}]``）を付けて渡す。ISO8601(Z) 同士は文字列比較で足りる。
-    head_time は GitHub が記録した head の時刻（committer date は偽装可能なので単独では使わない）。None なら +1 経路は無効（fail closed）。
+    head_time は GitHub が記録した head の時刻（committer date は偽装可能）。None なら +1 経路は無効（fail closed）。
+
+    各 reviewer の指摘 = CHANGES_REQUESTED（最新なら上書き不可）/ COMMENTED / inline 付き APPROVED。
+    指摘は「同じ reviewer 自身」の後続の clean（inline なし APPROVED、または指摘より後の依頼への +1）でのみ解消する
+    （別 reviewer の APPROVED では消えない）。PASS = 未解消の指摘が無く、かつ clean シグナルが 1 つ以上。
     """
     ok = {_login(a) for a in allowed}
     head = head.lower()
     commented = {c.get("pull_request_review_id") for c in review_comments}
-    mine = sorted((r for r in reviews if _login((r.get("user") or {}).get("login")) in ok
-                   and str(r.get("commit_id", "")).lower() == head and r.get("state") in _EFFECTIVE),
-                  key=lambda r: r.get("submitted_at") or "")
-    latest = mine[-1] if mine else None
-    changes = bool(latest) and latest.get("state") == "CHANGES_REQUESTED"
-    # 本文だけに指摘が入った COMMENTED は検出できないので clean 扱いしない（PASS は APPROVED かつ inline なしのみ）
-    if latest and latest.get("state") == "APPROVED" and latest.get("id") not in commented:
-        return {"verdict": "PASS", "head_sha": head, "ref": latest.get("html_url") or str(latest.get("id"))}
-    # +1 は head 後、かつ最新 COMMENTED の後に出した再レビュー依頼のものだけ。CHANGES_REQUESTED は上書きしない
-    since = (max(head_time or "", latest.get("submitted_at") or "")
-             if latest and latest.get("state") == "COMMENTED" else head_time)
-    if head_time and not changes:
+    mine: dict[str, list] = {}
+    for r in sorted(reviews, key=lambda r: r.get("submitted_at") or ""):
+        who = _login((r.get("user") or {}).get("login"))
+        if who in ok and str(r.get("commit_id", "")).lower() == head and r.get("state") in _EFFECTIVE:
+            mine.setdefault(who, []).append(r)
+    if any(rs[-1].get("state") == "CHANGES_REQUESTED" for rs in mine.values()):
+        return {"verdict": "FINDINGS", "head_sha": head, "ref": "", "detail": "an allowed reviewer's latest review on head is CHANGES_REQUESTED"}
+
+    def found_at(who: str) -> str:  # reviewer の最後の指摘時刻（無ければ ""）
+        return max([r.get("submitted_at") or "" for r in mine.get(who, [])
+                    if r["state"] == "COMMENTED" or r.get("id") in commented] or [""])
+
+    signals: list[tuple[str, str, str]] = []  # (時刻, reviewer, ref)
+    for who, rs in mine.items():
+        signals += [(r.get("submitted_at") or "", who, r.get("html_url") or str(r.get("id"))) for r in rs
+                    if r["state"] == "APPROVED" and r.get("id") not in commented
+                    and (r.get("submitted_at") or "") > found_at(who)]
+    if head_time:
         for c in issue_comments:
-            body = (c.get("body") or "").lower()
-            if (any(k in body for k in REVIEW_REQUESTS) and (c.get("created_at") or "") > since
-                    and any(r.get("content") == "+1" and _login((r.get("user") or {}).get("login")) in ok
-                            for r in c.get("reactions") or [])):
-                return {"verdict": "PASS", "head_sha": head, "ref": c.get("html_url") or str(c.get("id"))}
-    if latest:
+            if not any(k in (c.get("body") or "").lower() for k in REVIEW_REQUESTS):
+                continue
+            for who in {_login((x.get("user") or {}).get("login")) for x in c.get("reactions") or [] if x.get("content") == "+1"} & ok:
+                if (c.get("created_at") or "") > max(head_time, found_at(who)):
+                    signals.append((c.get("created_at") or "", who, c.get("html_url") or str(c.get("id"))))
+    unresolved = [w for w in mine if found_at(w) and not any(who == w for _, who, _ in signals)]
+    if signals and not unresolved:
+        return {"verdict": "PASS", "head_sha": head, "ref": max(signals)[2]}
+    if mine:
         return {"verdict": "FINDINGS", "head_sha": head, "ref": "",
-                "detail": f"latest review by {(latest.get('user') or {}).get('login')} on head is "
-                          + (latest.get("state") if latest.get("state") != "APPROVED" else "with inline comments")}
+                "detail": f"unresolved findings on head from {', '.join(sorted(unresolved)) or '(none)'}" if unresolved
+                          else "no clean signal after findings on head"}
     return {"verdict": "MISSING", "head_sha": head, "ref": "",
             "detail": "no clean review or +1 reaction by an allowed reviewer on the current head"
                       + ("" if head_time else " (head time unavailable: +1 path disabled)")}
@@ -93,11 +106,16 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
     out.update(view)
     head = str(view.get("headRefOid") or "")
     prot = call("branch protection", ["api", f"repos/{repo}/branches/{quote(base, safe='')}/protection"])
-    if ctx := ((prot or {}).get("required_status_checks") or {}).get("contexts"):
-        out["requiredChecks"] = ctx
+    rsc = (prot or {}).get("required_status_checks") or {}
+    # checks[]={context,app_id} 優先、無ければ contexts（app 指定なし）。app_id が null/-1 は「任意の app」
+    req = rsc.get("checks") or [{"context": c, "app_id": None} for c in rsc.get("contexts") or []]
+    pins = {x["context"]: x.get("app_id") for x in req if x.get("app_id") not in (None, -1)}
+    if names := [x["context"] for x in req]:
+        out["requiredChecks"] = names
     if pages := paged("check-runs", f"repos/{repo}/commits/{head}/check-runs"):
         out["statusCheckRollup"] = [{"name": r.get("name"), "status": r.get("status"), "conclusion": r.get("conclusion"),
-                                     "head_sha": r.get("head_sha")} for p in pages for r in p.get("check_runs", [])]
+                                     "head_sha": r.get("head_sha"), "app_id": (r.get("app") or {}).get("id")}
+                                    for p in pages for r in p.get("check_runs", [])]
     sp = paged("commit status", f"repos/{repo}/commits/{head}/status")  # 各ページは combined status の dict
     if sp and len({x.get("sha") for x in sp}) == 1 and sp[0].get("sha"):  # sha 不一致なら足さない
         out.setdefault("statusCheckRollup", []).extend(
@@ -152,6 +170,10 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
     if done := next(iter(runs or []), None):
         out["nightlyRecall"] = {"conclusion": done.get("conclusion"), "head_sha": done.get("headSha"),
                                 "created_at": done.get("createdAt")}
+    # app 固定の必須 context は別 app の同名 check や commit status では満たせない
+    if "statusCheckRollup" in out:
+        out["statusCheckRollup"] = [e for e in out["statusCheckRollup"]
+                                    if e["name"] not in pins or e.get("app_id") == pins[e["name"]]]
     return out, errors
 
 
