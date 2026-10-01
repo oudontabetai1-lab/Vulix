@@ -11,6 +11,7 @@ import argparse
 import json
 import subprocess
 import sys
+from urllib.parse import quote
 from typing import Any, Callable, Optional, Sequence
 
 REVIEW_REQUESTS = ("@codex review", "@claude review")
@@ -39,19 +40,23 @@ def independent_review(head: str, head_time: Optional[str], allowed: Sequence[st
                   key=lambda r: r.get("submitted_at") or "")
     latest = mine[-1] if mine else None
     changes = bool(latest) and latest.get("state") == "CHANGES_REQUESTED"
-    if latest and not changes and latest.get("id") not in commented:
+    # 本文だけに指摘が入った COMMENTED は検出できないので clean 扱いしない（PASS は APPROVED かつ inline なしのみ）
+    if latest and latest.get("state") == "APPROVED" and latest.get("id") not in commented:
         return {"verdict": "PASS", "head_sha": head, "ref": latest.get("html_url") or str(latest.get("id"))}
-    if head_time and not changes:  # 未解消の CHANGES_REQUESTED は +1 で上書きしない
+    # +1 は head 後、かつ最新 COMMENTED の後に出した再レビュー依頼のものだけ。CHANGES_REQUESTED は上書きしない
+    since = (max(head_time or "", latest.get("submitted_at") or "")
+             if latest and latest.get("state") == "COMMENTED" else head_time)
+    if head_time and not changes:
         for c in issue_comments:
             body = (c.get("body") or "").lower()
-            if (any(k in body for k in REVIEW_REQUESTS) and (c.get("created_at") or "") > head_time
+            if (any(k in body for k in REVIEW_REQUESTS) and (c.get("created_at") or "") > since
                     and any(r.get("content") == "+1" and _login((r.get("user") or {}).get("login")) in ok
                             for r in c.get("reactions") or [])):
                 return {"verdict": "PASS", "head_sha": head, "ref": c.get("html_url") or str(c.get("id"))}
     if latest:
         return {"verdict": "FINDINGS", "head_sha": head, "ref": "",
                 "detail": f"latest review by {(latest.get('user') or {}).get('login')} on head is "
-                          + ("CHANGES_REQUESTED" if changes else "with inline comments")}
+                          + (latest.get("state") if latest.get("state") != "APPROVED" else "with inline comments")}
     return {"verdict": "MISSING", "head_sha": head, "ref": "",
             "detail": "no clean review or +1 reaction by an allowed reviewer on the current head"
                       + ("" if head_time else " (head time unavailable: +1 path disabled)")}
@@ -81,23 +86,23 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
 
     out: dict = {}
     view = call("pr view", ["pr", "view", str(pr), "--repo", repo, "--json",
-                            "number,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviews"])
+                            "number,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName"])
     if not isinstance(view, dict):
         return out, errors
     base = view.pop("baseRefName", "")
     out.update(view)
     head = str(view.get("headRefOid") or "")
-    prot = call("branch protection", ["api", f"repos/{repo}/branches/{base}/protection"])
+    prot = call("branch protection", ["api", f"repos/{repo}/branches/{quote(base, safe='')}/protection"])
     if ctx := ((prot or {}).get("required_status_checks") or {}).get("contexts"):
         out["requiredChecks"] = ctx
     if pages := paged("check-runs", f"repos/{repo}/commits/{head}/check-runs"):
         out["statusCheckRollup"] = [{"name": r.get("name"), "status": r.get("status"), "conclusion": r.get("conclusion"),
                                      "head_sha": r.get("head_sha")} for p in pages for r in p.get("check_runs", [])]
-    st = call("commit status", ["api", f"repos/{repo}/commits/{head}/status"])
-    if isinstance(st, dict) and st.get("sha"):
+    sp = paged("commit status", f"repos/{repo}/commits/{head}/status")  # 各ページは combined status の dict
+    if sp and len({x.get("sha") for x in sp}) == 1 and sp[0].get("sha"):  # sha 不一致なら足さない
         out.setdefault("statusCheckRollup", []).extend(
             {"name": x.get("context"), "status": "COMPLETED", "conclusion": str(x.get("state", "")).upper(),
-             "head_sha": st["sha"]} for x in st.get("statuses") or [])
+             "head_sha": sp[0]["sha"]} for pg in sp for x in pg.get("statuses") or [])
     owner, name = repo.split("/", 1)
     q = ("query($o:String!,$n:String!,$p:Int!,$c:String){repository(owner:$o,name:$n){pullRequest(number:$p)"
          "{reviewThreads(first:100,after:$c){pageInfo{hasNextPage endCursor} nodes{isResolved path}}}}}")
@@ -127,10 +132,13 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
     starts = [r["started_at"] for p in pages or [] for r in p.get("check_runs", []) if r.get("started_at")]
     # committer date は偽装可能なので、サーバ記録の check-run 開始時刻が無ければ +1 経路を無効にする
     head_time = max(filter(None, [commit_date, min(starts)])) if starts else None
+    if reviews is not None:  # gate の reviews は pr view(先頭100件のみ)でなくページング済み REST から作る
+        out["reviews"] = [{"state": r.get("state"), "author": {"login": (r.get("user") or {}).get("login")},
+                           "submittedAt": r.get("submitted_at")} for r in reviews if r.get("submitted_at")]
     if reviews is not None and rcomments is not None and icomments is not None:
         for c in icomments:  # reaction は review request コメントにだけ取りに行く
             if any(k in (c.get("body") or "").lower() for k in REVIEW_REQUESTS):
-                c["reactions"] = call("reactions", ["api", f"repos/{repo}/issues/comments/{c['id']}/reactions"]) or []
+                c["reactions"] = paged("reactions", f"repos/{repo}/issues/comments/{c['id']}/reactions") or []
         out.setdefault("evidence", {})["independent_review"] = independent_review(
             head, head_time, reviewers, reviews, rcomments, icomments)
     if isinstance(evidence, dict):

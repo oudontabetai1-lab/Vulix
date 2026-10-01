@@ -11,7 +11,7 @@ HEAD_DATE = "2026-01-02T00:00:00Z"
 BOT = "chatgpt-codex-connector"
 
 
-def review(commit=HEAD, login=f"{BOT}[bot]", rid=1, state="COMMENTED", at="2026-01-02T01:00:00Z"):
+def review(commit=HEAD, login=f"{BOT}[bot]", rid=1, state="APPROVED", at="2026-01-02T01:00:00Z"):
     return {"id": rid, "commit_id": commit, "user": {"login": login}, "state": state, "submitted_at": at,
             "html_url": f"https://example.test/review/{rid}"}
 
@@ -51,6 +51,21 @@ def test_dismissed_or_pending_only_is_missing():
 
 def test_approved_on_head_without_comments_passes():
     assert judge([review(state="APPROVED")])["verdict"] == "PASS"
+
+
+def test_commented_review_is_never_clean():
+    r = judge([review(state="COMMENTED")])
+    assert r["verdict"] == "FINDINGS" and r["ref"] == ""
+
+
+def test_commented_then_later_request_with_plus_one_passes():
+    c = review(state="COMMENTED", at="2026-01-02T01:00:00Z")
+    assert judge([c], issues=[request(created="2026-01-02T02:00:00Z")])["verdict"] == "PASS"
+
+
+def test_plus_one_on_request_before_commented_review_is_findings():
+    c = review(state="COMMENTED", at="2026-01-02T03:00:00Z")
+    assert judge([c], issues=[request(created="2026-01-02T02:00:00Z")])["verdict"] == "FINDINGS"
 
 
 def test_plus_one_on_request_after_head_passes():
@@ -102,7 +117,7 @@ def make_run(calls=None, **o):
         if "check-runs" in a:
             return json.dumps(o.get("check_runs", cr))
         if a.endswith("/status"):
-            return json.dumps(o.get("status", {"sha": HEAD, "statuses": [{"context": "ext/ci", "state": "success"}]}))
+            return json.dumps(o.get("status", [{"sha": HEAD, "statuses": [{"context": "ext/ci", "state": "success"}]}]))
         if "graphql" in a:
             r = o["threads"](a) if "threads" in o else page
             if isinstance(r, Exception):
@@ -155,6 +170,37 @@ def test_review_threads_pagination_failure_omits_field():
     assert "reviewThreads" not in payload and errors
 
 
+def test_commit_status_pages_are_flattened_and_sha_mismatch_skips():
+    pages = [{"sha": HEAD, "statuses": [{"context": "ext/ci", "state": "success"}]},
+             {"sha": HEAD, "statuses": [{"context": "ext/two", "state": "pending"}]}]
+    payload, _ = build_payload(7, "o/r", [BOT], "B", None, make_run(status=pages))
+    names = {e["name"]: e["conclusion"] for e in payload["statusCheckRollup"]}
+    assert names["ext/ci"] == "SUCCESS" and names["ext/two"] == "PENDING"
+    pages[1]["sha"] = OLD
+    payload, _ = build_payload(7, "o/r", [BOT], "B", None, make_run(status=pages))
+    assert {e["name"] for e in payload["statusCheckRollup"]} == {"test"}
+
+
+def test_gate_reviews_come_from_rest_and_protection_branch_is_quoted():
+    calls = []
+    payload, _ = build_payload(7, "o/r", [BOT], "B", None, make_run(calls))
+    assert payload["reviews"] == [{"state": "APPROVED", "author": {"login": f"{BOT}[bot]"},
+                                   "submittedAt": "2026-01-02T01:00:00Z"}]
+    assert not any(c.startswith("pr view") and "reviews" in c.split("--json")[1] for c in calls)
+
+    def run(args):
+        calls.append(" ".join(args))
+        if args[:2] == ["pr", "view"]:
+            return json.dumps({"headRefOid": HEAD, "baseRefName": "feat/x y"})
+        if "reviews" in args[-1]:
+            raise RuntimeError("boom")
+        return "null"
+    calls.clear()
+    payload, errors = build_payload(7, "o/r", [BOT], "B", None, run)
+    assert "reviews" not in payload and errors  # 取得失敗は省略（gate が fail closed）
+    assert any("branches/feat%2Fx%20y/protection" in c for c in calls)
+
+
 def test_nightly_asks_for_latest_completed_run():
     calls = []
     build_payload(7, "o/r", [BOT], "B", None, make_run(calls))
@@ -174,7 +220,7 @@ def _plus_one_run(commit_date, started_at):
         if a.endswith("/issues/7/comments"):
             return json.dumps([[{"id": 9, "body": "@codex review", "created_at": "2026-01-02T00:10:00Z"}]])
         if a.endswith("/reactions"):
-            return json.dumps([{"content": "+1", "user": {"login": BOT}}])
+            return json.dumps([[{"content": "+1", "user": {"login": BOT}}]])
         return base(args)
     return run
 
