@@ -10,10 +10,19 @@ Q = {"q": {"type": "noul", "instructions": "?"}}
 
 def _fake(monkeypatch, predict):
     laya_client._agents.clear()
+    laya_client._failed.clear()
     agent = types.SimpleNamespace(predict=predict)
-    mod = types.SimpleNamespace(load=lambda *a, **k: agent)
-    monkeypatch.setitem(sys.modules, "laya", mod)
+    calls = []
+
+    def load(*a, **k):
+        calls.append(1)
+        if isinstance(predict, Exception):
+            raise predict
+        return agent
+
+    monkeypatch.setitem(sys.modules, "laya", types.SimpleNamespace(load=load))
     monkeypatch.setenv("WSCAN_LAYA", "1")
+    return calls
 
 
 def test_default_off(monkeypatch):
@@ -48,3 +57,21 @@ def test_predict_raises_is_none(monkeypatch):
 def test_empty_questions_is_none(monkeypatch):
     _fake(monkeypatch, lambda s, q: {"answers": {"q": {"noul": 0.9}}})
     assert laya_client.decide("s", {}) is None
+
+
+def test_incomplete_answers_is_none(monkeypatch):
+    _fake(monkeypatch, lambda s, q: {"answers": {}})
+    assert laya_client.decide("s", Q) is None
+
+
+def test_unknown_variant_not_loaded(monkeypatch):
+    calls = _fake(monkeypatch, lambda s, q: {"answers": {"q": {"noul": 0.9}}})
+    assert laya_client.decide("s", Q, variant="bogus") is None
+    assert calls == []
+
+
+def test_load_failure_memoized(monkeypatch):
+    calls = _fake(monkeypatch, RuntimeError("dl"))
+    assert laya_client.decide("s", Q) is None
+    assert laya_client.decide("s", Q) is None
+    assert len(calls) == 1

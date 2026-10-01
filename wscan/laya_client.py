@@ -26,6 +26,9 @@ _SUBFOLDERS = {"default": None, "multilingual": "multilingual"}
 
 # variant -> ロード済み agent（プロセス内キャッシュ。重い load を 1 回に）。
 _agents: dict[str, Any] = {}
+# load 失敗済み variant（以降の decide は重い再 load/再 DL を避けて即 None）。
+# ponytail: プロセス内の恒久メモ。復旧を拾うなら一定時間後に再試行するクールダウン化。
+_failed: set[str] = set()
 
 
 def enabled() -> bool:
@@ -50,8 +53,12 @@ def _load(variant: str) -> Any:
         return agent
     import laya
 
-    subfolder = _SUBFOLDERS.get(variant, None)
-    agent = laya.load(_MODEL_ID, subfolder=subfolder) if subfolder else laya.load(_MODEL_ID)
+    subfolder = _SUBFOLDERS[variant]
+    try:
+        agent = laya.load(_MODEL_ID, subfolder=subfolder) if subfolder else laya.load(_MODEL_ID)
+    except Exception:
+        _failed.add(variant)
+        raise
     _agents[variant] = agent
     return agent
 
@@ -62,7 +69,7 @@ def decide(state: Any, questions: dict, *, variant: str = "default") -> Optional
     戻り値は Laya の `result` dict（`result["answers"][q]` に choice/score/noul と probabilities）。
     呼び出し側は `None` を fail-open に扱う（攻撃・候補・探索を黙って減らさない）。
     """
-    if not questions or not available():
+    if not questions or variant not in _SUBFOLDERS or variant in _failed or not available():
         return None
     try:
         agent = _load(variant)
@@ -70,6 +77,8 @@ def decide(state: Any, questions: dict, *, variant: str = "default") -> Optional
     except Exception:
         # Laya の障害は確実性の敵（偽陰性）にしない。例外は握って None（従来経路へ）。
         return None
-    if isinstance(result, dict) and isinstance(result.get("answers"), dict):
+    # 要求した全 question が dict で揃っている完全な応答だけ採る（呼び出し側の KeyError 防止）。
+    answers = result.get("answers") if isinstance(result, dict) else None
+    if isinstance(answers, dict) and all(isinstance(answers.get(q), dict) for q in questions):
         return result
     return None
