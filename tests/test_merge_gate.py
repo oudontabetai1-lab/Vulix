@@ -217,6 +217,31 @@ def test_collection_evidence_expires_after_five_minutes():
     assert any("collection time invalid" in r for r in blocked(collectedAt=future))
 
 
+def test_collection_evidence_at_exact_five_minute_boundary_is_valid():
+    exact = (NOW - timedelta(minutes=5)).isoformat()
+    assert evaluate(payload(collectedAt=exact))["ready"] is True
+    expired = (NOW - timedelta(minutes=5, microseconds=1)).isoformat()
+    assert any("evidence is stale" in r for r in blocked(collectedAt=expired))
+
+
+def test_evaluate_without_now_uses_timezone_aware_utc(monkeypatch):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz is timezone.utc
+            return NOW
+
+    monkeypatch.setattr("orchestration.merge_gate.datetime", FrozenDateTime)
+    assert _evaluate(payload())["ready"] is True
+
+
+@pytest.mark.parametrize("bad_now", ["not-a-timestamp", 0, object()])
+def test_malformed_evaluation_time_fails_closed_without_raising(bad_now):
+    result = _evaluate(payload(), bad_now)
+    assert result["ready"] is False
+    assert "input: evidence collection time invalid (fail closed)" in result["reasons"]
+
+
 def test_collection_errors_must_be_present_and_empty():
     assert any("collectionErrors missing" in r for r in blocked(collectionErrors=...))
     assert any("collectionErrors missing" in r for r in blocked(collectionErrors="none"))
@@ -263,8 +288,15 @@ def test_reasons_are_deduped_and_deterministic():
     assert result["reasons"] == evaluate(payload(state="CLOSED", evidence=None))["reasons"]
 
 
-@pytest.mark.parametrize("data, code", [(payload(), 0), (payload(isDraft=True), 1)])
-def test_cli_exit_codes(tmp_path, capsys, data, code):
+@pytest.mark.parametrize("overrides, code", [({}, 0), ({"isDraft": True}, 1)])
+def test_cli_exit_codes(tmp_path, capsys, overrides, code):
+    live_now = datetime.now(timezone.utc)
+    data = payload(
+        **overrides,
+        collectedAt=live_now.isoformat(),
+        nightlyRecall={"conclusion": "SUCCESS", "head_sha": "c" * 40,
+                       "created_at": (live_now - timedelta(hours=12)).isoformat()},
+    )
     path = tmp_path / "in.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     assert main(["--input", str(path)]) == code
@@ -280,8 +312,14 @@ def test_cli_bad_input_exits_two(tmp_path, capsys, raw):
 
 
 def test_cli_reads_stdin():
+    live_now = datetime.now(timezone.utc)
+    data = payload(
+        collectedAt=live_now.isoformat(),
+        nightlyRecall={"conclusion": "SUCCESS", "head_sha": "c" * 40,
+                       "created_at": (live_now - timedelta(hours=12)).isoformat()},
+    )
     proc = subprocess.run([sys.executable, "-m", "orchestration.merge_gate"],
-                          input=json.dumps(payload()), capture_output=True, text=True,
+                          input=json.dumps(data), capture_output=True, text=True,
                           cwd=str(MODULE.parents[1]))
     assert proc.returncode == 0 and json.loads(proc.stdout)["ready"] is True
 

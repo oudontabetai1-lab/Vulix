@@ -207,6 +207,8 @@ EVIDENCE_MAX_AGE_MINUTES = 5
 
 def _age_hours(then: str, now: str) -> Optional[float]:
     """ISO8601 の差(時間)。どちらかが読めなければ None（fail closed）。未来時刻は 0 扱いせず None。"""
+    if not isinstance(then, str) or not isinstance(now, str):
+        return None
     try:
         t, n = (datetime.fromisoformat(x.replace("Z", "+00:00")) for x in (then, now))
     except ValueError:
@@ -239,8 +241,10 @@ def _check_collection_freshness(p: Mapping[str, Any], now: str, out: list[str]) 
         out.append(f"input: evidence is stale ({age * 60:.0f}m old; recollect before merge)")
 
 
-def evaluate(payload: Any, now: str) -> dict:
-    """評価時刻を明示してマージ可否を判定する純粋関数（I/O なし・例外を投げない）。"""
+def evaluate(payload: Any, now: Optional[str] = None) -> dict:
+    """評価時刻を明示（省略時はUTC現在時刻）してマージ可否を判定する（I/O なし・例外を投げない）。"""
+    if now is None:
+        now = datetime.now(timezone.utc).isoformat()
     if not isinstance(payload, Mapping):
         return {"ready": False, "reasons": ["input: payload is not a JSON object (fail closed)"], "pr": None, "head_sha": ""}
     head, found = _sha(payload, *_HEAD_KEYS), []
