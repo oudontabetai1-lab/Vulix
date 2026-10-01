@@ -4,12 +4,16 @@ from __future__ import annotations
 import json
 
 from orchestration.collect_evidence import build_payload, independent_review
-from orchestration.merge_gate import evaluate
+from orchestration.merge_gate import evaluate as _evaluate
 
 HEAD, OLD = "a" * 40, "b" * 40
 HEAD_DATE = "2026-01-02T00:00:00Z"
 BOT = "chatgpt-codex-connector[bot]"
 REAL_CLEAN_BODY = 'Codex Review: Didn\'t find any major issues. Breezy!\n\n**Reviewed commit:** `def0819f0e`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment "@codex review".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting "@codex address that feedback".\n            \n</details>\n'
+
+
+def evaluate(payload):
+    return _evaluate(payload, payload.get("collectedAt", ""))
 
 
 def review(commit=HEAD, login=BOT, rid=1, state="APPROVED", at="2026-01-02T01:00:00Z"):
@@ -116,9 +120,8 @@ def test_clean_issue_comment_bound_to_head_passes():
     assert r["verdict"] == "PASS" and r["ref"].endswith("#issuecomment-11")
     assert judge(issues=[clean_comment(body="  Codex Review: Didn't find any major issues.\n`Reviewed commit:` `" + HEAD[:10] + "`")])["verdict"] == "MISSING"
     ok = "\n  Codex Review: Didn't find any major issues. Breezy!\n\n**Reviewed commit:** `" + HEAD[:10] + "`\n"
-    assert judge(issues=[clean_comment(body=ok)])["verdict"] == "PASS"  # 前後空白・短い一言は許容
-    long_flavor = ok.replace("Breezy!", "x" * 41)
-    assert judge(issues=[clean_comment(body=long_flavor)])["verdict"] == "MISSING"
+    assert judge(issues=[clean_comment(body=ok)])["verdict"] == "PASS"  # 既知の定型句だけ許容
+    assert judge(issues=[clean_comment(body=ok.replace("Breezy!", "P0: auth bypass found"))])["verdict"] == "MISSING"
 
 
 def test_real_codex_clean_comment_shape():
@@ -128,6 +131,7 @@ def test_real_codex_clean_comment_shape():
     assert judge(issues=[clean_comment(body=finding)])["verdict"] == "MISSING"
     assert judge(issues=[clean_comment(body=real.rstrip() + "\nAlso a bug in y.py")])["verdict"] == "MISSING"
     assert judge(issues=[clean_comment(body=real + "x </details>")])["verdict"] == "MISSING"
+    assert judge(issues=[clean_comment(body=real.replace("About Codex", "P0: auth bypass found"))])["verdict"] == "MISSING"
 
 
 def test_head_change_during_collection_is_a_collection_error():

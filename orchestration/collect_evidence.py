@@ -21,12 +21,27 @@ from typing import Any, Callable, Optional, Sequence
 
 REVIEW_REQUESTS = ("@codex review", "@claude review")
 _EFFECTIVE = ("APPROVED", "COMMENTED", "CHANGES_REQUESTED")  # DISMISSED/PENDING は意思表示として数えない
-# 信頼する「指摘なし」コメントの完全な形: 1行目(+短い一言) → Reviewed commit 行 → 任意で末尾までの <details> 定型フッタ。
-# それ以外（間に指摘、</details> の後の追記など）は clean でない。
+# 信頼する「指摘なし」コメントの完全な形。自由文は一切許可せず、Codex の既知の定型だけを受ける。
+_CLEAN_DETAILS = """<details> <summary>ℹ️ About Codex in GitHub</summary>
+<br/>
+
+[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you
+- Open a pull request for review
+- Mark a draft as ready
+- Comment "@codex review".
+
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+
+
+
+
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+
+</details>"""
 _CLEAN_COMMENT = re.compile(
-    r"Codex Review: Didn't find any major issues\.(?: [^\n]{1,40})?\n(?:[ \t]*\n)*"
+    r"Codex Review: Didn't find any major issues\.(?: Breezy!)?\n(?:[ \t]*\n)*"
     r"\*\*Reviewed commit:\*\* `([0-9a-f]{10,40})`\s*"
-    r"(?:<details>(?:(?!</details>).)*</details>)?", re.S)
+    rf"(?:{re.escape(_CLEAN_DETAILS)})?")
 RECALL_WORKFLOW = "Nightly recall gate"
 
 
@@ -80,7 +95,7 @@ def independent_review(head: str, head_time: Optional[str], allowed: Sequence[st
                     signals.append((c.get("created_at") or "", who, c["html_url"]))
     for c in issue_comments:
         who, body = _login((c.get("user") or {}).get("login")), c.get("body") or ""
-        m = _CLEAN_COMMENT.fullmatch(body.strip())
+        m = _CLEAN_COMMENT.fullmatch(re.sub(r"(?m)^[ \t]+$", "", body.strip()))
         if (head_time and who in ok and m and head.startswith(m.group(1))
                 and c.get("html_url") and c.get("updated_at") in (None, c.get("created_at"))
                 and (c.get("created_at") or "") > max(head_time, found_at(who))):

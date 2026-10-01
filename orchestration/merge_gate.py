@@ -7,6 +7,7 @@ GitHub API は叩かず merge もコメントもしない（subprocess/network �
 ``isDraft``/``mergeStateStatus``/``reviews``/``reviewThreads`` はキー欠落・null で失格。CI は現
 head SHA へ厳密 pin された単一エントリの SUCCESS のみ合格（SHA 欠落・stale・同名重複は失格）。
 payload は collect_evidence 由来必須（``collectionErrors`` が存在し空配列。収集失敗はパイプで exit code が失われるため payload に載せる）。
+``collectedAt`` から5分を超えた payload は、後から変化しうる review/thread 状態の再利用を防ぐため失格。
 independent/security/acceptance は ``{"verdict":"PASS","head_sha":<現 head>,"ref":<出典>}`` のみ有効
 （``ref`` は GitHub PR/issue URL か Orca task id の形式必須。gate が検証するのは出典の**形式**で真正性ではない：
 真正性は証跡を collector/reviewer の出力経由でしか作らない運用で担保する）。
@@ -20,7 +21,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -201,6 +202,7 @@ def _tier(p: Mapping[str, Any]) -> str:
 
 
 RECALL_MAX_AGE_H = 36
+EVIDENCE_MAX_AGE_MINUTES = 5
 
 
 def _age_hours(then: str, now: str) -> Optional[float]:
@@ -229,8 +231,16 @@ def _check_recall(p: Mapping[str, Any], tier: str, out: list[str]) -> None:
         out.append(f"recall: nightly recall result is stale ({age:.0f}h old, Tier A blocked)")
 
 
-def evaluate(payload: Any) -> dict:
-    """マージ可否を判定する純粋関数（I/O なし・例外を投げず安全側に倒す）。"""
+def _check_collection_freshness(p: Mapping[str, Any], now: str, out: list[str]) -> None:
+    """変更可能な GitHub 状態を含む payload は短時間だけ有効。"""
+    if (age := _age_hours(_text(p.get("collectedAt")), now)) is None:
+        out.append("input: evidence collection time invalid (fail closed)")
+    elif age * 60 > EVIDENCE_MAX_AGE_MINUTES:
+        out.append(f"input: evidence is stale ({age * 60:.0f}m old; recollect before merge)")
+
+
+def evaluate(payload: Any, now: str) -> dict:
+    """評価時刻を明示してマージ可否を判定する純粋関数（I/O なし・例外を投げない）。"""
     if not isinstance(payload, Mapping):
         return {"ready": False, "reasons": ["input: payload is not a JSON object (fail closed)"], "pr": None, "head_sha": ""}
     head, found = _sha(payload, *_HEAD_KEYS), []
@@ -239,6 +249,7 @@ def evaluate(payload: Any) -> dict:
         found.append("input: collectionErrors missing (payload must come from collect_evidence, fail closed)")
     elif errs:
         found.append(f"input: evidence collection failed: {_text(errs[0])}" + (f" (+{len(errs) - 1} more)" if len(errs) > 1 else ""))
+    _check_collection_freshness(payload, now, found)
     _check_pr(payload, found)
     _check_ci(payload, head, found)
     _check_reviews(payload, found)
@@ -275,7 +286,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="merge_gate", description="PR merge readiness gate (read-only, deterministic, fail closed).")
     ap.add_argument("--input", "-i", default="-", help="evidence JSON file ('-' = stdin, default)")
     payload, error = _load(ap.parse_args(list(argv) if argv is not None else None).input)
-    result = {"ready": False, "reasons": [error], "pr": None, "head_sha": ""} if error else evaluate(payload)
+    now = datetime.now(timezone.utc).isoformat()
+    result = {"ready": False, "reasons": [error], "pr": None, "head_sha": ""} if error else evaluate(payload, now)
     json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
     return 2 if error else (0 if result["ready"] else 1)

@@ -9,16 +9,22 @@ import ast
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from orchestration.merge_gate import REQUIRED_EVIDENCE, evaluate, main
+from orchestration.merge_gate import REQUIRED_EVIDENCE, evaluate as _evaluate, main
 
 HEAD = "a" * 40
 REF = "https://github.com/o/r/pull/1#issuecomment-2"
 OLD = "b" * 40
 MODULE = Path(__file__).resolve().parents[1] / "orchestration" / "merge_gate.py"
+NOW = datetime.now(timezone.utc)
+
+
+def evaluate(value):
+    return _evaluate(value, NOW.isoformat())
 
 
 def payload(**overrides):
@@ -40,8 +46,9 @@ def payload(**overrides):
         "evidence": {k: {"verdict": "PASS", "head_sha": HEAD, "ref": f"https://github.com/o/r/pull/190#pullrequestreview-{i}"} for i, k in enumerate(REQUIRED_EVIDENCE)},
         "collectionErrors": [],
         "tier": "A",
-        "nightlyRecall": {"conclusion": "SUCCESS", "head_sha": "c" * 40, "created_at": "2026-01-02T00:00:00Z"},
-        "collectedAt": "2026-01-02T12:00:00Z",
+        "nightlyRecall": {"conclusion": "SUCCESS", "head_sha": "c" * 40,
+                          "created_at": (NOW - timedelta(hours=12)).isoformat()},
+        "collectedAt": NOW.isoformat(),
     }
     base.update(overrides)
     return {k: v for k, v in base.items() if v is not ...}
@@ -191,16 +198,23 @@ def test_tier_a_requires_nightly_recall_success():
 
 
 def test_tier_a_nightly_freshness():
-    fresh = {"conclusion": "SUCCESS", "created_at": "2026-01-01T12:00:01Z"}  # 約 36h 弱
+    fresh = {"conclusion": "SUCCESS", "created_at": (NOW - timedelta(hours=35)).isoformat()}
     assert evaluate(payload(nightlyRecall=fresh))["ready"] is True
-    stale = {"conclusion": "SUCCESS", "created_at": "2025-12-31T00:00:00Z"}
+    stale = {"conclusion": "SUCCESS", "created_at": (NOW - timedelta(hours=37)).isoformat()}
     assert any("stale" in r and "Tier A" in r for r in blocked(nightlyRecall=stale))
     for bad in [{"conclusion": "SUCCESS"}, {"conclusion": "SUCCESS", "created_at": "garbage"},
-                {"conclusion": "SUCCESS", "created_at": "2026-01-03T00:00:00Z"}]:  # 未来時刻も不明扱い
+                {"conclusion": "SUCCESS", "created_at": (NOW + timedelta(hours=1)).isoformat()}]:  # 未来時刻も不明扱い
         assert any("freshness unknown" in r for r in blocked(nightlyRecall=bad))
     assert any("freshness unknown" in r for r in blocked(collectedAt=...))
     assert any("freshness unknown" in r for r in blocked(collectedAt="nope"))
-    assert evaluate(payload(tier="B", nightlyRecall=stale, collectedAt=...))["ready"] is True
+    assert any("collection time invalid" in r for r in blocked(tier="B", nightlyRecall=stale, collectedAt=...))
+
+
+def test_collection_evidence_expires_after_five_minutes():
+    old = (NOW - timedelta(minutes=6)).isoformat()
+    assert any("evidence is stale" in r for r in blocked(collectedAt=old))
+    future = (NOW + timedelta(minutes=1)).isoformat()
+    assert any("collection time invalid" in r for r in blocked(collectedAt=future))
 
 
 def test_collection_errors_must_be_present_and_empty():
