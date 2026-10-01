@@ -1,6 +1,8 @@
 """wscan.laya_client の fail-safe（laya 未導入でも通る）。"""
 
 import sys
+import threading
+import time
 import types
 
 from wscan import laya_client
@@ -75,3 +77,35 @@ def test_load_failure_memoized(monkeypatch):
     assert laya_client.decide("s", Q) is None
     assert laya_client.decide("s", Q) is None
     assert len(calls) == 1
+
+
+def test_empty_answer_dict_is_none(monkeypatch):
+    _fake(monkeypatch, lambda s, q: {"answers": {"q": {}}})
+    assert laya_client.decide("s", Q) is None
+
+
+def test_typed_answer_ok(monkeypatch):
+    _fake(monkeypatch, lambda s, q: {"answers": {"q": {"noul": 0.5}}})
+    assert laya_client.decide("s", Q)["answers"]["q"]["noul"] == 0.5
+
+
+def test_choice_missing_key_is_none(monkeypatch):
+    _fake(monkeypatch, lambda s, q: {"answers": {"q": {"noul": 0.5}}})
+    assert laya_client.decide("s", {"q": {"type": "choice"}}) is None
+
+
+def test_concurrent_first_load_once(monkeypatch):
+    calls = _fake(monkeypatch, lambda s, q: {"answers": {"q": {"noul": 0.9}}})
+    inner = sys.modules["laya"].load
+
+    def slow(*a, **k):
+        time.sleep(0.05)
+        return inner(*a, **k)
+
+    sys.modules["laya"].load = slow
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(laya_client.decide("s", Q))) for _ in range(2)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert len(calls) == 1
+    assert len(out) == 2 and all(r["answers"]["q"]["noul"] == 0.9 for r in out)

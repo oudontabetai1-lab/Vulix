@@ -17,6 +17,7 @@ Laya（`convaiinnovations/laya`、Convai Innovations、Apache-2.0）は非自己
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, Optional
 
 # GitHub README（https://github.com/NandhaKishorM/laya）で確認した checkpoint と load API。
@@ -29,6 +30,9 @@ _agents: dict[str, Any] = {}
 # load 失敗済み variant（以降の decide は重い再 load/再 DL を避けて即 None）。
 # ponytail: プロセス内の恒久メモ。復旧を拾うなら一定時間後に再試行するクールダウン化。
 _failed: set[str] = set()
+# 初回 load の直列化（マルチスレッドで重い laya.load を二重実行しない）。
+# ponytail: モジュール単一ロック。load 競合が問題になれば variant 単位のロックへ。
+_load_lock = threading.Lock()
 
 
 def enabled() -> bool:
@@ -51,16 +55,33 @@ def _load(variant: str) -> Any:
     agent = _agents.get(variant)
     if agent is not None:
         return agent
-    import laya
+    with _load_lock:
+        # ロック内で再確認（待っている間に他スレッドが load/失敗記録した可能性）。
+        agent = _agents.get(variant)
+        if agent is not None:
+            return agent
+        if variant in _failed:
+            raise RuntimeError("laya load failed earlier")
+        import laya
 
-    subfolder = _SUBFOLDERS[variant]
-    try:
-        agent = laya.load(_MODEL_ID, subfolder=subfolder) if subfolder else laya.load(_MODEL_ID)
-    except Exception:
-        _failed.add(variant)
-        raise
-    _agents[variant] = agent
-    return agent
+        subfolder = _SUBFOLDERS[variant]
+        try:
+            agent = laya.load(_MODEL_ID, subfolder=subfolder) if subfolder else laya.load(_MODEL_ID)
+        except Exception:
+            _failed.add(variant)
+            raise
+        _agents[variant] = agent
+        return agent
+
+
+def _answer_ok(spec: Any, ans: Any) -> bool:
+    """question の type に対応する回答キー（choice/score/noul）が揃っているか。"""
+    if not isinstance(ans, dict):
+        return False
+    t = spec.get("type") if isinstance(spec, dict) else None
+    if t in ("choice", "score", "noul"):
+        return t in ans
+    return bool(ans)  # type 不明は保守的に「空でない dict」のみ許容
 
 
 def decide(state: Any, questions: dict, *, variant: str = "default") -> Optional[dict]:
@@ -79,6 +100,6 @@ def decide(state: Any, questions: dict, *, variant: str = "default") -> Optional
         return None
     # 要求した全 question が dict で揃っている完全な応答だけ採る（呼び出し側の KeyError 防止）。
     answers = result.get("answers") if isinstance(result, dict) else None
-    if isinstance(answers, dict) and all(isinstance(answers.get(q), dict) for q in questions):
+    if isinstance(answers, dict) and all(_answer_ok(spec, answers.get(q)) for q, spec in questions.items()):
         return result
     return None
