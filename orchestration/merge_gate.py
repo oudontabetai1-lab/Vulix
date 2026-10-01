@@ -9,13 +9,15 @@ head SHA へ厳密 pin された単一エントリの SUCCESS のみ合格（SHA
 independent/security/acceptance は ``{"verdict":"PASS","head_sha":<現 head>,"ref":<出典>}`` のみ有効
 （``ref`` は verdict の出所＝レビュー URL/ID 等。無ければ失格＝手書き PASS を通さない）。
 ``tier``（A/B/C・欠落/不明は A 扱い）が A のときは ``nightlyRecall.conclusion`` が SUCCESS であることも要求する
-（main の nightly recall が赤のまま検出系 PR を通さない）。B/C は検査しない。
+（main の nightly recall が赤のまま検出系 PR を通さない）。B/C は検査しない。SUCCESS でも ``nightlyRecall.created_at`` が ``collectedAt``（収集時刻・決定論のため入力から取る）
+より 36 時間超古い／どちらかが読めないなら失格（古い成功を今の健全性の証拠にしない）。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -190,6 +192,20 @@ def _tier(p: Mapping[str, Any]) -> str:
     return t if t in ("A", "B", "C") else "A"
 
 
+RECALL_MAX_AGE_H = 36
+
+
+def _age_hours(then: str, now: str) -> Optional[float]:
+    """ISO8601 の差(時間)。どちらかが読めなければ None（fail closed）。未来時刻は 0 扱いせず None。"""
+    try:
+        t, n = (datetime.fromisoformat(x.replace("Z", "+00:00")) for x in (then, now))
+    except ValueError:
+        return None
+    if t.tzinfo is None or n.tzinfo is None or t > n:
+        return None
+    return (n - t).total_seconds() / 3600
+
+
 def _check_recall(p: Mapping[str, Any], tier: str, out: list[str]) -> None:
     """Tier A は main の nightly recall gate が SUCCESS であること。"""
     if tier != "A":
@@ -199,6 +215,10 @@ def _check_recall(p: Mapping[str, Any], tier: str, out: list[str]) -> None:
         out.append("recall: nightly recall status missing (Tier A blocked, fail closed)")
     elif c != "SUCCESS":
         out.append(f"recall: nightly recall gate on main is {c} (Tier A blocked)")
+    elif (age := _age_hours(_text(nr.get("created_at")), _text(p.get("collectedAt")))) is None:
+        out.append("recall: nightly recall freshness unknown (Tier A blocked)")
+    elif age > RECALL_MAX_AGE_H:
+        out.append(f"recall: nightly recall result is stale ({age:.0f}h old, Tier A blocked)")
 
 
 def evaluate(payload: Any) -> dict:

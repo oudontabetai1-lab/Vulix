@@ -11,6 +11,7 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from urllib.parse import quote
 from typing import Any, Callable, Optional, Sequence
 
@@ -60,6 +61,8 @@ def independent_review(head: str, head_time: Optional[str], allowed: Sequence[st
         for c in issue_comments:
             if not any(k in (c.get("body") or "").lower() for k in REVIEW_REQUESTS):
                 continue
+            if c.get("updated_at") not in (None, c.get("created_at")):
+                continue  # 編集された依頼コメントは無効（内容/時刻を後から書き換えられる）
             for who in {_login((x.get("user") or {}).get("login")) for x in c.get("reactions") or [] if x.get("content") == "+1"} & ok:
                 if (c.get("created_at") or "") > max(head_time, found_at(who)):
                     signals.append((c.get("created_at") or "", who, c.get("html_url") or str(c.get("id"))))
@@ -97,7 +100,7 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
         pages = call(label, ["api", "--paginate", "--slurp", path])
         return None if pages is None else [x for p in pages for x in (p if isinstance(p, list) else [p])]
 
-    out: dict = {}
+    out: dict = {"collectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     view = call("pr view", ["pr", "view", str(pr), "--repo", repo, "--json",
                             "number,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName"])
     if not isinstance(view, dict):
@@ -148,8 +151,9 @@ def build_payload(pr: int, repo: str, reviewers: Sequence[str], tier: Optional[s
     commit = call("head commit", ["api", f"repos/{repo}/commits/{head}"])
     commit_date = (((commit or {}).get("commit") or {}).get("committer") or {}).get("date")
     starts = [r["started_at"] for p in pages or [] for r in p.get("check_runs", []) if r.get("started_at")]
-    # committer date は偽装可能なので、サーバ記録の check-run 開始時刻が無ければ +1 経路を無効にする
-    head_time = max(filter(None, [commit_date, min(starts)])) if starts else None
+    # committer date は偽装可能。サーバ記録の check-run 開始のうち「最新」を使う（他所で先にチェック済みの commit は
+    # 開始が古いため最早では甘い）。無ければ +1 経路を無効にする（再実行で +1 が無効化されるのは許容＝fail closed）
+    head_time = max(filter(None, [commit_date, max(starts)])) if starts else None
     if reviews is not None:  # gate の reviews は pr view(先頭100件のみ)でなくページング済み REST から作る
         out["reviews"] = [{"state": r.get("state"), "author": {"login": (r.get("user") or {}).get("login")},
                            "submittedAt": r.get("submitted_at")} for r in reviews if r.get("submitted_at")]

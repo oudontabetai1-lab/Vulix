@@ -93,6 +93,13 @@ def test_changes_requested_by_any_reviewer_blocks_other_approvals():
     assert judge([a, b], allowed=(BOT, B))["verdict"] == "FINDINGS"
 
 
+def test_edited_request_comment_does_not_count():
+    edited = dict(request(), updated_at="2026-01-02T05:00:00Z")
+    assert judge(issues=[edited])["verdict"] == "MISSING"
+    same = dict(request(), updated_at="2026-01-02T02:00:00Z")
+    assert judge(issues=[same])["verdict"] == "PASS"
+
+
 def test_plus_one_on_request_after_head_passes():
     assert judge(issues=[request()])["verdict"] == "PASS"
 
@@ -279,6 +286,25 @@ def test_missing_check_run_time_disables_plus_one():
     assert payload["evidence"]["independent_review"]["verdict"] == "MISSING"
 
 
+def test_latest_check_run_start_is_the_reference():
+    # 古い開始(00:05)と新しい開始(00:30)が混在 → 基準は新しい方。請求(00:10)は無効
+    run = _plus_one_run("2026-01-02T00:00:00Z", "2026-01-02T00:05:00Z")
+
+    def wrapped(args):
+        if "check-runs" in " ".join(args):
+            return json.dumps([{"check_runs": [
+                {"name": "test", "status": "completed", "conclusion": "success", "head_sha": HEAD, "started_at": t}
+                for t in ("2026-01-02T00:05:00Z", "2026-01-02T00:30:00Z")]}])
+        return run(args)
+    payload, _ = build_payload(7, "o/r", [BOT], "B", None, wrapped)
+    assert payload["evidence"]["independent_review"]["verdict"] == "MISSING"
+
+
+def test_collected_at_is_set():
+    payload, _ = build_payload(7, "o/r", [BOT], "B", None, make_run())
+    assert payload["collectedAt"].endswith("Z")
+
+
 def test_plus_one_after_both_times_passes():
     payload, _ = build_payload(7, "o/r", [BOT], "B", None, _plus_one_run("2026-01-02T00:00:00Z", "2026-01-02T00:05:00Z"))
     assert payload["evidence"]["independent_review"]["verdict"] == "PASS"
@@ -300,5 +326,5 @@ def test_gh_failure_omits_fields_and_reports():
         raise RuntimeError("boom")
 
     payload, errors = build_payload(7, "o/r", [BOT], None, None, run)
-    assert payload == {} and errors
+    assert set(payload) == {"collectedAt"} and errors
     assert evaluate(payload)["ready"] is False

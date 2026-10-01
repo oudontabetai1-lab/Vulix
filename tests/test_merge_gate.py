@@ -38,7 +38,8 @@ def payload(**overrides):
         "reviewThreads": [{"path": "a.py", "isResolved": True}],
         "evidence": {k: {"verdict": "PASS", "head_sha": HEAD, "ref": f"https://example.test/{k}"} for k in REQUIRED_EVIDENCE},
         "tier": "A",
-        "nightlyRecall": {"conclusion": "SUCCESS", "head_sha": "c" * 40},
+        "nightlyRecall": {"conclusion": "SUCCESS", "head_sha": "c" * 40, "created_at": "2026-01-02T00:00:00Z"},
+        "collectedAt": "2026-01-02T12:00:00Z",
     }
     base.update(overrides)
     return {k: v for k, v in base.items() if v is not ...}
@@ -187,6 +188,19 @@ def test_tier_a_requires_nightly_recall_success():
     assert any("recall" in r and "missing" in r for r in blocked(nightlyRecall={"head_sha": HEAD}))
 
 
+def test_tier_a_nightly_freshness():
+    fresh = {"conclusion": "SUCCESS", "created_at": "2026-01-01T12:00:01Z"}  # 約 36h 弱
+    assert evaluate(payload(nightlyRecall=fresh))["ready"] is True
+    stale = {"conclusion": "SUCCESS", "created_at": "2025-12-31T00:00:00Z"}
+    assert any("stale" in r and "Tier A" in r for r in blocked(nightlyRecall=stale))
+    for bad in [{"conclusion": "SUCCESS"}, {"conclusion": "SUCCESS", "created_at": "garbage"},
+                {"conclusion": "SUCCESS", "created_at": "2026-01-03T00:00:00Z"}]:  # 未来時刻も不明扱い
+        assert any("freshness unknown" in r for r in blocked(nightlyRecall=bad))
+    assert any("freshness unknown" in r for r in blocked(collectedAt=...))
+    assert any("freshness unknown" in r for r in blocked(collectedAt="nope"))
+    assert evaluate(payload(tier="B", nightlyRecall=stale, collectedAt=...))["ready"] is True
+
+
 @pytest.mark.parametrize("tier", [..., None, "", "Z", 1])
 def test_missing_or_unknown_tier_is_treated_as_a(tier):
     assert any("recall" in r for r in blocked(tier=tier, nightlyRecall={"conclusion": "FAILURE"}))
@@ -244,4 +258,4 @@ def test_module_is_read_only_stdlib_only():
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             roots.add(node.module.split(".")[0])
     assert not (roots & banned), roots & banned
-    assert roots <= {"argparse", "json", "sys", "pathlib", "typing", "__future__"}, roots
+    assert roots <= {"argparse", "json", "sys", "pathlib", "typing", "datetime", "__future__"}, roots
