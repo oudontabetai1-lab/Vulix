@@ -210,12 +210,28 @@ class CheckpointState:
             reached_urls=list(data.get("reached_urls", []) or []),
             http_status_counts=data.get("http_status_counts", {}) or {},
             attempt_ledger=data.get("attempt_ledger", {}) or {},
-            truncation_counts=data.get("truncation_counts", {}) or {},
-            exhausted_truncations=set(data.get("exhausted_truncations", []) or []),
+            # 不正な retry metadata で再開を落とさず、未完 unit は再試行可能な既定へ戻す。
+            truncation_counts={
+                key: count for key, count in (
+                    data.get("truncation_counts", {}).items()
+                    if isinstance(data.get("truncation_counts"), dict) else []
+                )
+                if isinstance(key, str) and type(count) is int and count >= 0
+            },
+            exhausted_truncations=set(),
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
             source_version=source_version,
         )
+        # exhausted は record_truncation_ip() が同じ保存単位で記録する派生状態。
+        # 壊れた/手編集された checkpoint の孤立 key を尊重すると、未送信 check を
+        # retry 上限到達として永久 skip してしまうため、正の試行回数があるものだけ戻す。
+        raw_exhausted = data.get("exhausted_truncations", [])
+        if isinstance(raw_exhausted, list):
+            state.exhausted_truncations = {
+                key for key in raw_exhausted
+                if isinstance(key, str) and state.truncation_counts.get(key, 0) > 0
+            }
         if state.source_version < 2:
             state._migrate_v1_adaptive_units()
         if state.source_version < 6:

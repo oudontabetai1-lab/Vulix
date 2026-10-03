@@ -7287,6 +7287,8 @@ class ScanEngine:
         verify_budget = (
             max(_VERIFY_ONE_TIMEOUT_S, 6.0 * _req_to) if _req_to else _VERIFY_ONE_TIMEOUT_S
         )
+        _recover = getattr(self, "_recover_if_dialog_flood", None)
+        _dlg_verify = getattr(_browser, "dialog_total", 0)
         for i, finding in enumerate(to_verify):
             skipped = False
             state = ""
@@ -7295,6 +7297,12 @@ class ScanEngine:
                 f"@ {getattr(finding, 'url', '?')}"
             )
             try:
+                if _browser is not None and callable(_recover):
+                    _dlg_verify = await asyncio.wait_for(
+                        _recover(_dlg_verify), timeout=verify_budget
+                    )
+                    if getattr(_browser, "_recovery_failed", False):
+                        raise RuntimeError("verification page recovery failed")
                 if getattr(self, "_concurrent_attack_ran", False):
                     # 並列 attack 後は global cookie が baseline のままなので、finding URL 宛の
                     # Cookie を browser jar から都度再スコープする（worker-local 値は捨てられている）。
@@ -7334,6 +7342,20 @@ class ScanEngine:
                     f"on [yellow]{finding.field_name}[/yellow]: "
                     f"{type(exc).__name__} — 未検証（要手動確認）"
                 )
+            # 再検証が発火させた flood を次 finding へ持ち越さない。復旧失敗も未検証として
+            # Finding を残し、劣化 page の空応答を正常な非再現へ丸めない。
+            if _browser is not None and callable(_recover):
+                try:
+                    _dlg_verify = await asyncio.wait_for(
+                        _recover(_dlg_verify), timeout=verify_budget
+                    )
+                    if getattr(_browser, "_recovery_failed", False):
+                        raise RuntimeError("verification page recovery failed")
+                except Exception as exc:
+                    skipped = True
+                    self.wave_errors.append(
+                        f"verify_recovery:{finding.check_type}: {type(exc).__name__}: {exc}"
+                    )
             if skipped:
                 # 検証を実行できなかった＝**再現していない**。report/SARIF で可視化するため
                 # verified を倒し（既存の ⚠ 要確認 + note 経路に載せる）、正常な非再現

@@ -83,6 +83,24 @@ class StateTests(unittest.TestCase):
         self.assertFalse(restored.is_done_ip(ip, "xss"))
         self.assertTrue(restored.is_truncation_exhausted_ip(ip, "xss"))
 
+    def test_v7_malformed_truncation_metadata_does_not_skip_unattempted_unit(self):
+        """破損した v7 metadata は resume を壊さず、未試行 unit を exhausted 扱いにしない。"""
+        state = CheckpointState.from_dict({
+            "version": 7,
+            "truncation_counts": {
+                "valid": 2,
+                "negative": -1,
+                "string": "2",
+                "bool": True,
+            },
+            "exhausted_truncations": [
+                "valid", "orphan", "negative", "string", "bool", 42,
+            ],
+        })
+
+        self.assertEqual(state.truncation_counts, {"valid": 2})
+        self.assertEqual(state.exhausted_truncations, {"valid"})
+
     def test_form_injection_point_matches_legacy_unit(self):
         state = CheckpointState()
         ip = InjectionPoint.for_form("http://h/a/", "id", 2)
