@@ -3168,6 +3168,9 @@ class WorkerBrowser(BrowserManager):
 
         # Worker-private state
         self.page = page
+        # sessionStorage is page-local, unlike the shared context's cookies.
+        # Recovery must seed only this worker's own per-origin snapshots.
+        self._last_session_storage: dict[str, str] = {}
         # Inherit the audit logger so concurrent workers also persist traffic.
         self.request_logger = getattr(real_browser, "request_logger", None)
         self.network = NetworkCapture(logger=self.request_logger)
