@@ -7477,6 +7477,10 @@ class ScanEngine:
             # してしまうため、結果値より前に flag を確認する（Codex #99 R7）。
             if self._api_auth_failed or self._json_probe_failed:
                 return "assumed"
+            # SSTI needs a retrieved control. An indeterminate scanner result must
+            # not become confirmed through the generic expected-string fallback.
+            if f.check_type == "ssti" and scanner_result is None:
+                return "assumed"
             if scanner_result is not None:
                 # SSTI has an HTTP-level fallback below for URL parameters. Use
                 # it when browser-based scanner verification could not reproduce
@@ -7594,7 +7598,7 @@ class ScanEngine:
                         if probe == f.payload
                     ] or [expected for _probe, expected, _engine in SSTI_PROBES]
                 except Exception:
-                    expected_values = ["49", "7777777", "7045744422742119121"]
+                    expected_values = ["49", "7777777", "7046029209275649121"]
                 reproduced = any(expected in (source or "") for expected in expected_values)
                 return "reproduced" if reproduced else "unreproduced"
 
