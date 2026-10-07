@@ -1735,14 +1735,10 @@ class DetectionEvidenceTests(unittest.TestCase):
     def test_security_headers_scan_records_structured_missing_header_evidence(self):
         async def run():
             scanner = SecurityHeadersScanner(_DummyEngine())
-            scanner.current_page_pair = lambda url: {
-                "request": {"url": url},
-                "response": {
-                    "status": 200,
-                    "headers": {"server": "fixture"},
-                    "body": "<html>ok</html>",
-                },
-            }
+            scanner._get = AsyncMock(return_value=httpx.Response(
+                200, headers={"server": "fixture"}, html="<html>ok</html>",
+                request=httpx.Request("GET", "http://fixture.test/"),
+            ))
 
             findings = await scanner.scan_page("http://fixture.test/")
             hsts = next(
@@ -1855,6 +1851,7 @@ class DetectionEvidenceTests(unittest.TestCase):
                         "cross-origin-opener-policy": "same-origin",
                     },
                     text="<html>safe</html>",
+                    request=httpx.Request("GET", "http://fixture.test/safe"),
                 )
             )
 
@@ -2116,6 +2113,7 @@ class DetectionEvidenceTests(unittest.TestCase):
 
     def test_page_level_scanner_uses_document_pair_over_later_asset(self):
         async def run():
+            from types import SimpleNamespace
             engine = _DummyEngine()
             engine.browser.network = NetworkCapture()
             engine.browser.network.pairs = [
@@ -2141,6 +2139,15 @@ class DetectionEvidenceTests(unittest.TestCase):
                     },
                 },
             ]
+            # production capture が持つ GET/document・identity・送信順を明示する。
+            pairs = engine.browser.network.pairs[:]
+            engine.browser.network.clear()
+            for pair in pairs:
+                request = SimpleNamespace(url=pair["request"]["url"], method="GET", headers={},
+                    post_data=None, resource_type="script" if "/static/" in pair["request"]["url"] else "document")
+                engine.browser.network.on_request(request)
+                engine.browser.network.on_response(SimpleNamespace(
+                    request=request, url=request.url, status=200, headers=pair["response"]["headers"]))
             scanner = SecurityHeadersScanner(engine)
 
             findings = await scanner.scan_page("http://fixture.test/")

@@ -315,10 +315,16 @@ class NetworkCapture:
         self._pending[key] = {
             "url": request.url,
             "method": request.method,
+            "resource_type": getattr(request, "resource_type", ""),
             "headers": dict(request.headers),
             "post_data": request.post_data,
             "timestamp": time.time(),
             "_req_id": id(request),
+            "_capture_sequence": self._requests_since_clear + 1,
+            "_redirected_from_req_id": (
+                id(request.redirected_from)
+                if getattr(request, "redirected_from", None) is not None else None
+            ),
         }
         self._requests_since_clear += 1
 
@@ -339,6 +345,7 @@ class NetworkCapture:
         pair = {
             "request": req,
             "response": {
+                "_req_id": req_id,
                 "url": response.url,
                 "status": response.status,
                 "headers": dict(response.headers),
@@ -383,7 +390,9 @@ class NetworkCapture:
                 # 展開量を 50KB に抑える（gzip bomb 対策）。
                 body = safe_decode(await response.body(), limit=50000)
             for pair in reversed(self.pairs):
-                if pair["response"]["url"] == response.url:
+                if (response.request is not None
+                        and pair["response"].get("_req_id") == id(response.request)
+                        and pair["response"]["url"] == response.url):
                     pair["response"]["body"] = body[:50000]  # cap at 50KB
                     break
         except Exception:
