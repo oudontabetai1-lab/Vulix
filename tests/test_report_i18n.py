@@ -217,3 +217,32 @@ def test_serve_submission_passes_language(tmp_path, monkeypatch, agent_mode):
     monkeypatch.setattr(sys, "argv", ["main.py", "serve", "--host", "127.0.0.1", "--port", "18765"])
     asyncio.run(asyncio.wait_for(main.run_serve(main.parse_args()), timeout=5))
     assert captured == ["en"]
+
+
+def test_en_remediation_keeps_specific_ja_guidance_over_generic_family():
+    # 個別 ja ガイダンスがあり en 未訳の check は、同系統の一般英訳で具体策を潰さない。
+    from wscan.remediation import _STATIC_FIX
+    assert "remediation.privesc_bypass" not in i18n.available_keys("en")
+    for check in ("privesc_bypass", "privesc_unauth"):
+        assert _get_static(check, lang="en") == _STATIC_FIX[check]
+        assert _get_static(check, lang="en") != translate("remediation.privesc", "en")
+    # 個別 ja が無い派生 check だけ同系統の英訳を使う。
+    assert _get_static("privesc_unknown_variant", lang="en") == translate("remediation.privesc", "en")
+
+
+def test_en_coverage_reasons_translated_or_fall_back_to_japanese(tmp_path, monkeypatch):
+    from wscan.check_coverage import _PREREQUISITE_REASONS, _STATE_PROFILE_REASON
+    coverage = {"prerequisite_coverage": {
+        "prerequisite_missing": [{"check": "mass_assignment", "missing_prerequisites": ["api_spec"],
+                                  "reasons": [_PREREQUISITE_REASONS["api_spec"]]}],
+        "state_profile_skipped": [{"check": "csrf",
+                                   "reason": _STATE_PROFILE_REASON.format(profile="read-only")}],
+    }}
+    en = ReportGenerator(tmp_path, lang="en")._build_coverage_html(coverage)
+    assert "No API spec seed configured" in en and "does not send state-changing checks" in en and "read-only" in en
+    assert "API 仕様シード未設定" not in en and "送信しません" not in en
+    ja = ReportGenerator(tmp_path)._build_coverage_html(coverage)
+    assert _PREREQUISITE_REASONS["api_spec"] in ja
+    monkeypatch.delitem(i18n._MESSAGES["en"], "coverage.reason.prereq.api_spec")
+    en2 = ReportGenerator(tmp_path, lang="en")._build_coverage_html(coverage)
+    assert _PREREQUISITE_REASONS["api_spec"] in en2

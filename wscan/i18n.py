@@ -423,6 +423,17 @@ _MESSAGES["en"].update({
     "remediation.graphql": "Restrict introspection where appropriate, authorize each resolver, use safe query APIs and enforce query complexity limits.",
     "remediation.jwt": "Allowlist secure signing algorithms, verify signatures and claims, use strong keys and reject unsigned tokens.",
     "remediation.cms": "Update the CMS, plugins and themes. Remove unused components, restrict administration and review access controls.",
+    # coverage の理由（ja 原文は check_coverage._PREREQUISITE_REASONS 等。未訳は ja へ）。
+    "coverage.reason.prereq.auth_session": "No authenticated session configured (--login-url / --auth-user / cookie, etc.)",
+    "coverage.reason.prereq.oob_sink": "No OOB email sink configured (WSCAN_OOB_*)",
+    "coverage.reason.prereq.multi_account": "Multiple accounts not configured (two or more in --accounts)",
+    "coverage.reason.prereq.api_spec": "No API spec seed configured (OpenAPI/Postman via --api-spec)",
+    "coverage.reason.prereq.second_request": "Requires multiple requests (satisfied automatically in a normal scan)",
+    "coverage.reason.prereq.browser": "Requires a real browser (always available in a normal scan)",
+    "coverage.reason.state_profile": (
+        "State profile '{profile}' does not send state-changing checks "
+        "(state_change=always), so no probes were sent"
+    ),
 })
 
 

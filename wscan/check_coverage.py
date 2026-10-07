@@ -9,6 +9,7 @@ registry の全 scanner のうちどれが scan 対象（selected）で、どれ
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Mapping
 
 
@@ -83,6 +84,31 @@ _PREREQUISITE_REASONS = {
 }
 
 
+_STATE_PROFILE_REASON = (
+    "state profile '{profile}' は状態変更を伴う検査（state_change=always）を"
+    "送信しません＝probe 未投入"
+)
+
+
+def localize_prerequisite_reasons(entry: Mapping[str, Any], lang: str) -> list[str]:
+    """prerequisite_missing 1件の理由を lang で返す（純粋・表示専用。未訳は ja 原文）。"""
+    from .i18n import translate_or
+    codes = entry.get("missing_prerequisites") or []
+    reasons = list(entry.get("reasons") or [])
+    if len(codes) != len(reasons):
+        return reasons
+    return [translate_or(f"coverage.reason.prereq.{c}", lang, r) for c, r in zip(codes, reasons)]
+
+
+def localize_state_profile_reason(reason: str, lang: str) -> str:
+    """state_profile_skipped の理由を lang で返す（純粋・表示専用。判別不能/未訳は ja 原文）。"""
+    from .i18n import translate_or
+    m = re.match(r"state profile '([^']*)'", reason or "")
+    if not m or reason != _STATE_PROFILE_REASON.format(profile=m.group(1)):
+        return reason
+    return translate_or("coverage.reason.state_profile", lang, reason).replace("{profile}", m.group(1))
+
+
 def compute_prerequisite_coverage(
     selected_checks: Iterable[str],
     contracts: Mapping[str, Any] | None,
@@ -127,10 +153,7 @@ def compute_prerequisite_coverage(
             profile_skipped.append(
                 {
                     "check": check,
-                    "reason": (
-                        f"state profile '{profile}' は状態変更を伴う検査（state_change=always）を"
-                        "送信しません＝probe 未投入"
-                    ),
+                    "reason": _STATE_PROFILE_REASON.format(profile=profile),
                 }
             )
             continue

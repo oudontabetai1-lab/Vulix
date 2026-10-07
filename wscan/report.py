@@ -1700,6 +1700,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         # prerequisite 会計（0016）: 選択されたが実行条件（前提／state profile）を満たさず
         # 実質検査できない check を理由付きで出す。「選択済み＝検査済み」ではない点を明示し、
         # 0 findings=安全 の誤解を防ぐ。前提不足と state profile skip を1表に併記する。
+        from .check_coverage import localize_prerequisite_reasons, localize_state_profile_reason
         prereq_html = ""
         pcov = coverage.get("prerequisite_coverage", {}) or {}
         missing = pcov.get("prerequisite_missing", []) or []
@@ -1708,7 +1709,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             (
                 (m or {}).get("check", ""),
                 t("report.coverage.prereq.kind.missing"),
-                ", ".join((m or {}).get("reasons", []) or []),
+                ", ".join(localize_prerequisite_reasons(m, self.lang)),
             )
             for m in missing
             if isinstance(m, dict)
@@ -1716,7 +1717,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             (
                 (s or {}).get("check", ""),
                 t("report.coverage.prereq.kind.state_profile"),
-                (s or {}).get("reason", ""),
+                localize_state_profile_reason((s or {}).get("reason", ""), self.lang),
             )
             for s in profile_skipped
             if isinstance(s, dict)

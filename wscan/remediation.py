@@ -297,7 +297,11 @@ def _get_static(check_type: str, lang: str = "ja") -> str:
     code = normalize_lang(lang)
     base = check_type.split("_")[0]
     if code != DEFAULT_LANG:
-        for key in (f"remediation.{check_type}", f"remediation.{base}"):
+        # 個別 ja ガイダンスがある check は同系統の一般英訳で上書きしない（具体策を失うため）。
+        keys = [f"remediation.{check_type}"]
+        if check_type not in _STATIC_FIX:
+            keys.append(f"remediation.{base}")
+        for key in keys:
             if key in available_keys(code):
                 return translate(key, code)
         if check_type not in _STATIC_FIX and base not in _STATIC_FIX:
