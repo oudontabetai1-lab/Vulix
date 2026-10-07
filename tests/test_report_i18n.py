@@ -10,9 +10,11 @@ import pytest
 
 import main
 from wscan.engine import ScanEngine
-from wscan.i18n import normalize_lang, translate, untranslated_keys
+from tests.fixtures import report_i18n_inputs
+from wscan import i18n
+from wscan.i18n import normalize_lang, translate, translate_or, untranslated_keys
 from wscan.remediation import _get_static
-from wscan.report import ReportGenerator
+from wscan.report import ReportGenerator, _js_str
 from wscan.sarif import SarifExporter, _RULE_DESCS, write_sarif
 from wscan.scanners.base import Finding
 
@@ -35,9 +37,6 @@ def test_templates_default_and_both_languages(tmp_path, template):
     finding.ai_fix = _get_static("sqli")
     kwargs = dict(target="http://fixture.test/", findings=[finding], visited_urls=[finding.url],
                   checks=["sqli"], template=template, observability={"total": 1})
-    default = ReportGenerator(tmp_path).generate(**kwargs).read_text()
-    japanese = ReportGenerator(tmp_path, lang="ja").generate(**kwargs).read_text()
-    assert default == japanese
     english = ReportGenerator(tmp_path, lang="en").generate(**kwargs).read_text()
     assert '<html lang="en">' in english
     assert "0 findings does not necessarily mean" in english
@@ -46,6 +45,53 @@ def test_templates_default_and_both_languages(tmp_path, template):
         assert "証拠 &lt;script&gt;" in english
         assert "parameterized queries" in english
     assert finding.ai_fix == _get_static("sqli")
+
+
+BASELINE_DIR = Path(__file__).parent / "fixtures" / "report_i18n_baseline"
+
+
+@pytest.mark.parametrize("name", ["audit.html", "executive.html", "developer.html", "report.sarif.json"])
+def test_default_output_is_byte_identical_to_pre_i18n_baseline(tmp_path, name):
+    # 期待値は多言語化前の main に同じ固定入力を与えて生成したバイト列（新実装同士の比較ではない）。
+    rendered = report_i18n_inputs.render_all(tmp_path)
+    assert rendered[name] == (BASELINE_DIR / name).read_bytes()
+
+
+def test_explicit_ja_matches_baseline(tmp_path, monkeypatch):
+    original = ReportGenerator.__init__
+    monkeypatch.setattr(ReportGenerator, "__init__", lambda self, out: original(self, out, lang="ja"))
+    rendered = report_i18n_inputs.render_all(tmp_path)
+    assert rendered["audit.html"] == (BASELINE_DIR / "audit.html").read_bytes()
+
+
+def test_english_audit_script_literals_are_translated(tmp_path):
+    html = ReportGenerator(tmp_path, lang="en").generate(
+        "fixture", [], [], [], attack_plans=report_i18n_inputs._attack_plans(),
+        page_graph=report_i18n_inputs._page_graph()).read_text()
+    assert "'▲ Hide payloads'" in html and "Clicked element: " in html
+    assert "@@" not in html
+
+
+def test_js_str_keeps_non_ascii_and_cannot_break_out():
+    assert _js_str("▲ ペイロードを隠す") == "'▲ ペイロードを隠す'"
+    literal = _js_str("a'b\"c\\</script>&\n")
+    assert "</script>" not in literal and "&" not in literal and "\n" not in literal
+    assert literal == r"""'a\'b\"c\\\u003c/script\u003e\u0026\n'"""
+
+
+def test_untranslated_keys_fall_back_to_japanese(tmp_path, monkeypatch):
+    assert translate_or("sarif.rule.sqli", "fr", "ja原文") == "ja原文"
+    monkeypatch.delitem(i18n._MESSAGES["en"], "sarif.rule.sqli")
+    monkeypatch.delitem(i18n._MESSAGES["en"], "remediation.sqli")
+    finding = dict(check_type="sqli", severity="high", url="http://fixture.test/", field_name="q",
+                   payload="'", evidence="e", verification_state="assumed")
+    rule = SarifExporter("en").export([finding])["runs"][0]["tool"]["driver"]["rules"][0]
+    assert rule["shortDescription"]["text"] == _RULE_DESCS["sqli"]
+    assert "sarif.rule" not in json.dumps(rule)
+    assert rule["help"]["text"] == _get_static("sqli")
+    # 個別訳がある check は英訳、ja にも無い未知 check は英語の汎用文。
+    assert _get_static("xss", lang="en") == translate("remediation.xss", "en")
+    assert "countermeasures" in _get_static("totally_unknown", lang="en")
 
 
 def test_empty_developer_and_language_override(tmp_path):

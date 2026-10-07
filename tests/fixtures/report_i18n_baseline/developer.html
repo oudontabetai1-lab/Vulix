@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8">
+<title>Developer Report — http://fixture.test/</title>
+<!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
+<style>
+body{font-family:"Inter",system-ui,sans-serif;background:#161826;color:#292b31;margin:0;padding:26px 14px;-webkit-font-smoothing:antialiased}
+.hdr{max-width:960px;margin:0 auto;background:#fff;border-radius:10px 10px 0 0;padding:30px 40px 20px;border-bottom:1px solid #e4e7f5;box-shadow:0 24px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:6px} .hdr h1{font-size:1.5rem;font-weight:500;color:#292b31}
+.hdr .sub{order:-1;color:#5d5294;font-size:.7rem;letter-spacing:.16em;text-transform:uppercase}
+.container{max-width:960px;margin:0 auto;background:#fff;border-radius:0 0 10px 10px;padding:24px 40px 34px;box-shadow:0 24px 60px rgba(0,0,0,.35)}
+.finding-item{border:1px solid #e4e7f5;border-radius:8px;margin-bottom:12px;overflow:hidden;background:#fff}
+.finding-item-agent{border-color:#eccfaf}
+.finding-item-agent .fi-header{background:#fdf6ee}
+.fi-header{padding:11px 14px;display:flex;align-items:center;gap:9px;flex-wrap:wrap;background:#f3f5fe;border-bottom:1px solid #e4e7f5}
+.fi-header label{display:flex;align-items:center;gap:8px;cursor:pointer;flex:1}
+.fi-body{padding:12px 14px;display:none}
+.fi-check:checked ~ label + * + .fi-body, input:checked ~ .fi-body { display:block }
+.finding-item:has(.fi-check:checked) .fi-body{display:block}
+.sev-tag{color:#fff;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}
+.conf-tag{font-size:.75rem;color:#595d6c;margin-left:auto;font-family:"JetBrains Mono",monospace}
+.fi-url{font-size:.82rem;color:#3f424d;font-family:"JetBrains Mono",monospace;word-break:break-all;margin-bottom:6px}
+.fi-evidence{background:#f5f4ff;border:1px solid #d2cefd;border-radius:5px;padding:8px 10px;font-size:.85rem;margin-bottom:6px;color:#292b31}
+.fi-payload{display:block;background:#12141f;color:#b5abfc;padding:8px 10px;border-radius:5px;font-size:.8rem;word-break:break-all;margin-bottom:6px;white-space:pre-wrap;font-family:"JetBrains Mono",monospace}
+.fix-box{background:#f5f4ff;border:1px solid #d2cefd;border-radius:5px;padding:10px;font-size:.85rem;margin-top:6px;color:#292b31}
+.refs{font-size:.75rem;color:#595d6c;margin-top:4px}
+.new-badge{background:#e4e7f5;color:#2b6076;padding:2px 6px;border-radius:5px;font-size:.7rem;font-weight:600}
+.fixed-badge{background:#e7e5fe;color:#5d5294;padding:2px 6px;border-radius:5px;font-size:.7rem;font-weight:600}
+.badge-agent{background:#fbeee1;color:#8f4d15;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}
+.badge-agent-verified{background:#e4e7f5;color:#3f424d;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}
+.badge-confirmed{background:#e4e7f5;color:#3f424d;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}
+.badge-unconfirmed{background:#f7f1da;color:#6f5c11;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}
+.badge-assumed{background:#f7f1da;color:#6f5c11;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}
+.diff-bar{background:#f5f4ff;border:1px solid #d2cefd;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:.9rem;color:#292b31}
+.footer{text-align:center;color:#a0aec0;font-size:.75rem;padding:20px}
+</style></head><body>
+<div class="hdr">
+  <h1>Developer Security Checklist</h1>
+  <div class="sub">http://fixture.test/ &nbsp;|&nbsp; 2026-01-02 03:04:05 &nbsp;|&nbsp; 確証 1 件 / 未確証 2 件</div>
+</div>
+<div class="container">
+  
+  
+        <div class="section observability-section">
+            <h2>Observability（観測性メトリクス）</h2>
+            <p>劣化・脱落した probe/wave: <strong>2</strong> 件</p>
+            <p>LLM 呼び出し: <strong>1</strong> 件（詳細は llm_calls.jsonl）</p>
+            <p style="color:#975a16;font-weight:600;margin-top:10px">0 findings は「安全」を意味しない可能性があります。</p>
+            <h3 style="margin-top:14px">by_category</h3>
+            <ul><li><code>transport_error</code>: 2</li></ul>
+            <h3 style="margin-top:14px">代表サンプル</h3>
+            <ul><li><code>transport_error:sqli:TimeoutError</code></li></ul>
+        </div>
+  
+  <p style="font-size:.85rem;color:#4a5568;margin-bottom:12px">各項目をクリックして詳細を展開してください。チェックボックスで修正完了を記録できます。</p>
+  
+            <div class="finding-item" style="border-left:4px solid #e53e3e">
+                <div class="fi-header">
+                    <input type="checkbox" class="fi-check" id="fix-0">
+                    <label for="fix-0">
+                        <span class="sev-tag" style="background:#e53e3e">CRITICAL</span>
+                        <b>PRIVESC_UNAUTH</b>
+                        <span class="badge-assumed">〜 推定（再検証未実行）</span><span class="badge-unconfirmed" title="未確証: ">⚠ 要確認</span>
+                        
+                        — <code>q</code>
+                    </label>
+                    <span class="conf-tag">信頼度: likely</span>
+                </div>
+                <div class="fi-body">
+                    <div class="fi-url">http://fixture.test/p2</div>
+                    <div class="fi-evidence">証拠 &lt;b&gt;&amp;&lt;/b&gt;</div>
+                    <code class="fi-payload">&#39;&quot;&lt;script&gt;</code>
+                    
+                    <div class="fix-box"><b>修正ガイダンス:</b><br>**認可制御対策 (未認証アクセス)**<br>1. すべての保護エンドポイントで認証チェックを行ってください。<br>2. 認可ミドルウェア/デコレータを一元管理してください。<br>3. デフォルトで拒否し、明示的に許可する設計 (Deny-by-Default) を採用してください。</div>
+                </div>
+            </div>
+            <div class="finding-item" style="border-left:4px solid #dd6b20">
+                <div class="fi-header">
+                    <input type="checkbox" class="fi-check" id="fix-1">
+                    <label for="fix-1">
+                        <span class="sev-tag" style="background:#dd6b20">HIGH</span>
+                        <b>SQLI</b>
+                        <span class="badge-confirmed">✅ 確証</span>
+                        
+                        — <code>q</code>
+                    </label>
+                    <span class="conf-tag">信頼度: likely</span>
+                </div>
+                <div class="fi-body">
+                    <div class="fi-url">http://fixture.test/p0</div>
+                    <div class="fi-evidence">証拠 &lt;b&gt;&amp;&lt;/b&gt;</div>
+                    <code class="fi-payload">&#39;&quot;&lt;script&gt;</code>
+                    
+                    <div class="fix-box"><b>修正ガイダンス:</b><br>**SQLインジェクション対策**<br>1. プリペアドステートメント（パラメータ化クエリ）を使用し、動的SQL文字列の連結を排除してください。<br>2. ORM（Hibernate, SQLAlchemy, Django ORM 等）を活用してください。<br>3. 入力値の型チェック・範囲検証を行ってください。<br>4. データベースアカウントに最小権限を付与してください。<br>例 (Python): `cursor.execute(&#39;SELECT * FROM users WHERE id = %s&#39;, (user_id,))`</div>
+                </div>
+            </div>
+            <div class="finding-item" style="border-left:4px solid #d69e2e">
+                <div class="fi-header">
+                    <input type="checkbox" class="fi-check" id="fix-2">
+                    <label for="fix-2">
+                        <span class="sev-tag" style="background:#d69e2e">MEDIUM</span>
+                        <b>XSS</b>
+                        <span class="badge-assumed">〜 推定（再検証未実行）</span><span class="badge-unconfirmed" title="未確証: ">⚠ 要確認</span>
+                        <span class="new-badge">NEW</span>
+                        — <code>q</code>
+                    </label>
+                    <span class="conf-tag">信頼度: likely</span>
+                </div>
+                <div class="fi-body">
+                    <div class="fi-url">http://fixture.test/p1</div>
+                    <div class="fi-evidence">証拠 &lt;b&gt;&amp;&lt;/b&gt;</div>
+                    <code class="fi-payload">&#39;&quot;&lt;script&gt;</code>
+                    
+                    <div class="fix-box"><b>修正ガイダンス:</b><br>**クロスサイト・スクリプティング (XSS) 対策**<br>1. ユーザー入力を HTML に出力する際、必ず HTML エスケープ (`htmlspecialchars`, `escape()` 等) を適用してください。<br>2. `Content-Security-Policy` ヘッダを設定し、スクリプト実行元を制限してください。<br>3. テンプレートエンジンの自動エスケープ機能を有効にしてください。<br>4. `innerHTML` の使用を避け、`textContent` を使用してください。</div>
+                </div>
+            </div>
+</div>
+<div class="footer">WScan Security Report &mdash; Developer Checklist</div>
+<script>
+document.querySelectorAll('.finding-item').forEach(function(item) {
+    item.querySelector('.fi-header').addEventListener('click', function(e) {
+        if (e.target.classList.contains('fi-check')) return;
+        var body = item.querySelector('.fi-body');
+        body.style.display = body.style.display === 'block' ? 'none' : 'block';
+    });
+});
+</script>
+</body></html>

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8">
+<title>Executive Report — http://fixture.test/</title>
+<!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
+<style>
+body{font-family:"Inter",system-ui,sans-serif;background:#161826;color:#292b31;margin:0;padding:26px 14px;-webkit-font-smoothing:antialiased}
+.hdr{max-width:1000px;margin:0 auto;background:#fff;border-radius:10px 10px 0 0;padding:38px 44px 22px;border-bottom:1px solid #e4e7f5;box-shadow:0 24px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:6px}
+.hdr h1{font-size:1.7rem;font-weight:500;color:#292b31;line-height:1.15} .hdr .sub{order:-1;color:#5d5294;font-size:.7rem;letter-spacing:.16em;text-transform:uppercase}
+.container{max-width:1000px;margin:0 auto;background:#fff;border-radius:0 0 10px 10px;padding:28px 44px 38px;box-shadow:0 24px 60px rgba(0,0,0,.35)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
+.exec-card{background:#f3f5fe;border:1px solid #e4e7f5;border-radius:8px;padding:16px}
+.exec-count{font-size:2.1rem;font-weight:500} .exec-label{font-size:.72rem;color:#595d6c;text-transform:uppercase;letter-spacing:.05em}
+.critical{color:#a3234a} .high{color:#8f4d15} .medium{color:#6f5c11} .low{color:#2b6076}
+.section{background:transparent;border-radius:0;padding:0;margin-bottom:26px;box-shadow:none}
+.section h2{font-size:1.1rem;font-weight:500;margin-bottom:14px;border-bottom:1px solid #e4e7f5;padding-bottom:8px;color:#292b31}
+ul li{margin:4px 0;font-size:.9rem} .footer{text-align:center;color:#75798c;font-size:.75rem;padding:22px}
+</style></head><body>
+<div class="hdr">
+  <h1>Executive Security Report</h1>
+  <div class="sub">http://fixture.test/ &nbsp;|&nbsp; 2026-01-02 03:04:05 &nbsp;|&nbsp; 検査項目: 4 種</div>
+</div>
+<div class="container">
+  <div class="grid">
+    <div class="exec-card" style="border-left:4px solid #e53e3e">
+      <div class="exec-count critical">0</div>
+      <div class="exec-label">Critical</div>
+    </div>
+    <div class="exec-card" style="border-left:4px solid #dd6b20">
+      <div class="exec-count high">1</div>
+      <div class="exec-label">High</div>
+    </div>
+    <div class="exec-card" style="border-left:4px solid #d69e2e">
+      <div class="exec-count medium">0</div>
+      <div class="exec-label">Medium</div>
+    </div>
+    <div class="exec-card" style="border-left:4px solid #38a169">
+      <div class="exec-count low">0</div>
+      <div class="exec-label">Low</div>
+    </div>
+    <div class="exec-card">
+      <div class="exec-count" style="color:#4299e1">1</div>
+      <div class="exec-label">確証 (Confirmed)</div>
+    </div>
+    <div class="exec-card">
+      <div class="exec-count" style="color:#d97706">2</div>
+      <div class="exec-label">未確証 (Hypothesis)</div>
+    </div>
+    <div class="exec-card">
+      <div class="exec-count" style="color:#805ad5">10.0</div>
+      <div class="exec-label">Avg CVSS Score</div>
+    </div>
+    
+    
+  </div>
+  <div class="section">
+    <h2>OWASP Top 10 違反 (上位5件)</h2>
+    <ul><li>違反なし</li></ul>
+  </div>
+  <div class="section">
+    <h2>PCI DSS 違反 (上位5件)</h2>
+    <ul><li>違反なし</li></ul>
+  </div>
+  <div class="section">
+    <h2>推奨事項</h2>
+    <ul><li>【高】高リスクの脆弱性が検出されました。速やかな対応を推奨します。</li><li>定期的なペネトレーションテストの実施を推奨します。</li></ul>
+  </div>
+  
+        <div class="section observability-section">
+            <h2>Observability（観測性メトリクス）</h2>
+            <p>劣化・脱落した probe/wave: <strong>2</strong> 件</p>
+            <p>LLM 呼び出し: <strong>1</strong> 件（詳細は llm_calls.jsonl）</p>
+            <p style="color:#975a16;font-weight:600;margin-top:10px">0 findings は「安全」を意味しない可能性があります。</p>
+            <h3 style="margin-top:14px">by_category</h3>
+            <ul><li><code>transport_error</code>: 2</li></ul>
+            <h3 style="margin-top:14px">代表サンプル</h3>
+            <ul><li><code>transport_error:sqli:TimeoutError</code></li></ul>
+        </div>
+  
+  <div class="section">
+    <h2>スキャン範囲</h2>
+    <p style="font-size:.9rem">2 ページを検査 / 検査項目: sqli, xss, privesc_unauth, graphql_introspection</p>
+  </div>
+</div>
+<div class="footer">WScan Security Report &mdash; Executive Summary</div>
+</body></html>

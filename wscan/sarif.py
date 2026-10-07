@@ -76,7 +76,7 @@ _SARIF_SCHEMA = (
 
 
 from wscan.scanners.base import finding_dict_confirmed
-from .i18n import DEFAULT_LANG, normalize_lang, translate
+from .i18n import DEFAULT_LANG, normalize_lang, translate, translate_or
 
 
 class SarifExporter:
@@ -185,8 +185,8 @@ class SarifExporter:
             severity = f.get("severity", "medium")
             level = _SEVERITY_TO_LEVEL.get(severity, "warning")
             desc = _RULE_DESCS.get(ct, ct)
-            if self.lang == "en" and ct in _RULE_DESCS:
-                desc = translate(f"sarif.rule.{ct}", self.lang)
+            if ct in _RULE_DESCS:
+                desc = translate_or(f"sarif.rule.{ct}", self.lang, desc)
 
             # 修正ガイダンス (remediation._STATIC_FIX から流用)
             help_text = self._get_remediation(ct)
@@ -278,7 +278,7 @@ class SarifExporter:
     def _get_remediation(self, check_type: str) -> str:
         """remediation モジュールの静的テンプレートから修正ガイダンスを取得する。"""
         try:
-            if self.lang == "en":
+            if self.lang != DEFAULT_LANG:
                 from wscan.remediation import _get_static
                 return _get_static(check_type, lang=self.lang)
             from wscan.remediation import _STATIC_FIX

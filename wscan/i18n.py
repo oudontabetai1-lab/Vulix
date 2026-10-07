@@ -449,6 +449,16 @@ def translate(key: str, lang: str = DEFAULT_LANG, /, **params) -> str:
         return template
 
 
+def translate_or(key: str, lang: str, default: str) -> str:
+    """訳があれば返し、未訳/未知言語なら呼び出し側の既定（ja 原文）を返す（純粋）。
+
+    ja 原文がカタログ外（``sarif._RULE_DESCS``・``remediation._STATIC_FIX``）にある
+    文言用。キー文字列や英語の汎用文へ化けさせず、必ず ja へフォールバックする。
+    """
+    template = _MESSAGES.get(normalize_lang(lang), {}).get(key)
+    return default if template is None else template
+
+
 def translator(lang: str = DEFAULT_LANG) -> Callable[..., str]:
     """言語を束縛した lookup を返す（レポート生成側は ``t("key", **params)`` で使う）。"""
     code = normalize_lang(lang)

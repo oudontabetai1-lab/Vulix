@@ -5,6 +5,7 @@ Generates a self-contained HTML security assessment report.
 import datetime
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -18,8 +19,8 @@ TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
 # Plain JS for the offline report's screen-transition map (compact / shots / explorer
 # modes). Kept as a normal string (single braces) so it can sit inside an f-string
-# without brace-escaping. Reads the globals `RPT_SM_NODES` and `RPT_SM_I18N`
-# (文言は言語別に JSON で注入する。JS 側はキー参照のみで言語を知らない)。
+# without brace-escaping. Reads the global `RPT_SM_NODES` injected before it.
+# 文言は `@@key@@` を `_render_sitemap_js` が言語別に置換する（ja は旧出力とバイト不変）。
 _RPT_SITEMAP_JS = r"""
 (function() {
   var NS = 'http://www.w3.org/2000/svg';
@@ -31,9 +32,6 @@ _RPT_SITEMAP_JS = r"""
   if (!svg || !wrap) return;
 
   var all = {}, children = {}, desc = {};
-  // 文言は RPT_SM_I18N（言語別に注入）から引く。欠落時は空文字で描画を壊さない。
-  var T = (typeof RPT_SM_I18N !== 'undefined' && RPT_SM_I18N) ? RPT_SM_I18N : {};
-  function L(k) { return T[k] != null ? T[k] : ''; }
   RPT_SM_NODES.forEach(function(n) { all[n.url] = n; });
   Object.keys(all).forEach(function(u) {
     var p = all[u].parent;
@@ -119,7 +117,7 @@ _RPT_SITEMAP_JS = r"""
       g.appendChild(mk('circle', { cx: tx + 4, cy: BH/2, r: 4.5, fill: color(n) }));
       var title = mk('text', { x: tx + 14, y: BH/2 - 2, 'font-size': '10.5px', fill: '#e6edf3' }); title.textContent = short(n.url); g.appendChild(title);
       var sub = mk('text', { x: tx + 14, y: BH/2 + 11, 'font-size': '9px', fill: '#8b949e' });
-      sub.textContent = (st.collapsed[n.url] && desc[n.url]) ? (desc[n.url] + L('pages')) : ((n.forms||0) + 'f / ' + (n.inputs||0) + 'i');
+      sub.textContent = (st.collapsed[n.url] && desc[n.url]) ? (desc[n.url] + '@@pages@@') : ((n.forms||0) + 'f / ' + (n.inputs||0) + 'i');
       g.appendChild(sub);
       g.addEventListener('click', function(ev){ showPop(ev, n); });
       g.addEventListener('mousemove', function(ev){ showTip(ev, n); });
@@ -176,17 +174,17 @@ _RPT_SITEMAP_JS = r"""
 
   function detailHtml(n) {
     var p = n.parent && all[n.parent], nr = norm(n.via), shot = (p && p.shot) || n.shot;
-    var h = '<h4 style="margin:0 0 10px;color:#58a6ff;font-size:.86rem">' + (n.via ? (L('click_path') + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(n.url) + L('origin'))) + '</h4>';
+    var h = '<h4 style="margin:0 0 10px;color:#58a6ff;font-size:.86rem">' + (n.via ? ('@@click_path@@' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(n.url) + '@@origin@@')) + '</h4>';
     if (shot) {
       h += '<div style="position:relative;border:1px solid #30363d;border-radius:8px;overflow:hidden;max-width:560px"><img style="display:block;width:100%" src="data:image/jpeg;base64,' + shot + '">';
-      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? L('click_offscreen') : L('click_spot')) + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
+      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? '@@click_offscreen@@' : '@@click_spot@@') + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
       h += '</div>';
     }
     h += '<div style="margin-top:12px;font-size:.78rem;color:#8b949e;line-height:1.8">';
-    if (n.via) h += L('clicked_element') + '<b style="color:#e6edf3">「' + esc(n.via.text || L('no_text')) + '」</b><br>' + L('selector') + '<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
-    h += L('url') + '<code style="color:#79c0ff">' + esc(n.url) + '</code><br>' + L('status') + '<b style="color:#e6edf3">' + n.status + '</b> ／ ' + (n.forms||0) + ' forms / ' + (n.inputs||0) + ' inputs / ' + (n.params||0) + ' params';
+    if (n.via) h += '@@clicked_element@@<b style="color:#e6edf3">「' + esc(n.via.text || '@@no_text@@') + '」</b><br>@@selector@@<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
+    h += '@@url@@<code style="color:#79c0ff">' + esc(n.url) + '</code><br>@@status@@<b style="color:#e6edf3">' + n.status + '</b> ／ ' + (n.forms||0) + ' forms / ' + (n.inputs||0) + ' inputs / ' + (n.params||0) + ' params';
     if (n.findings > 0) h += '<br><span style="color:#f85149">' + n.findings + ' finding' + (n.findings>1?'s':'') + '</span>';
-    h += '<br><a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">' + L('open_this_page') + '</a></div>';
+    h += '<br><a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">@@open_this_page@@</a></div>';
     return h;
   }
 
@@ -242,16 +240,16 @@ _RPT_SITEMAP_JS = r"""
   function showPop(ev, n) {
     var p = n.parent && all[n.parent], nr = norm(n.via), shot = (p && p.shot) || n.shot;
     // 閉じるボタン（一度開くと閉じられない問題の対策）。背景クリック / Esc でも閉じる。
-    var h = '<span onclick="rptSmClosePop()" title="' + L('close') + '" style="position:absolute;top:6px;right:8px;width:20px;height:20px;line-height:18px;text-align:center;border:1px solid #30363d;border-radius:5px;background:#161b22;color:#8b949e;cursor:pointer">×</span>';
-    h += '<h4 style="margin:0 20px 6px 0;color:#58a6ff;font-size:.78rem">' + (n.via ? (L('click_path') + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(short(n.url)) + L('origin'))) + '</h4>';
+    var h = '<span onclick="rptSmClosePop()" title="@@close@@" style="position:absolute;top:6px;right:8px;width:20px;height:20px;line-height:18px;text-align:center;border:1px solid #30363d;border-radius:5px;background:#161b22;color:#8b949e;cursor:pointer">×</span>';
+    h += '<h4 style="margin:0 20px 6px 0;color:#58a6ff;font-size:.78rem">' + (n.via ? ('@@click_path@@' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(short(n.url)) + '@@origin@@')) + '</h4>';
     if (shot) {
       h += '<div style="position:relative;border:1px solid #30363d;border-radius:8px;overflow:hidden"><img style="display:block;width:100%" src="data:image/jpeg;base64,' + shot + '">';
-      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? L('click_offscreen') : L('click_spot')) + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
+      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? '@@click_offscreen@@' : '@@click_spot@@') + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
       h += '</div>';
     }
     h += '<div style="margin-top:8px;font-size:.74rem;color:#8b949e;line-height:1.7">';
-    if (n.via) h += L('clicked_element') + '<b style="color:#e6edf3">「' + esc(n.via.text || L('no_text')) + '」</b><br>' + L('selector') + '<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
-    h += '<a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">' + L('open_page') + '</a></div>';
+    if (n.via) h += '@@clicked_element@@<b style="color:#e6edf3">「' + esc(n.via.text || '@@no_text@@') + '」</b><br>@@selector@@<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
+    h += '<a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">@@open_page@@</a></div>';
     pop.innerHTML = h; pop.style.display = 'block';
     var rect = wrap.getBoundingClientRect();
     var x = ev.clientX - rect.left + 14, y = ev.clientY - rect.top + 8;
@@ -295,7 +293,37 @@ _RPT_SITEMAP_JS = r"""
 })();
 """
 
-SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+def _js_str_body(s: str) -> str:
+    """<script> 内の JS 文字列リテラル本体へ埋める形にエスケープする（純粋）。
+
+    非 ASCII はそのまま出す（ja 出力を旧来のリテラル日本語とバイト不変に保つ）。
+    引用符・改行・``</script>`` 等は抜けられないようエスケープする。
+    """
+    body = json.dumps(s, ensure_ascii=False)[1:-1]
+    return (
+        body.replace("'", "\\'")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def _js_str(s: str) -> str:
+    """単一引用符の JS 文字列リテラルを返す（旧来の手書きリテラルと同じ形）。"""
+    return "'" + _js_str_body(s) + "'"
+
+
+def _render_sitemap_js(t) -> str:
+    """サイトマップ JS の ``@@key@@`` を言語別文言で置換する。"""
+    return re.sub(
+        r"@@(\w+)@@",
+        lambda m: _js_str_body(t(f"report.sitemap.js.{m.group(1)}")),
+        _RPT_SITEMAP_JS,
+    )
+
+
+SEVERITY_ORDER ={"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 SEVERITY_COLORS = {
     "critical": "#e53e3e",
     "high": "#dd6b20",
@@ -1044,7 +1072,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         e.stopPropagation();
         const list = btn.nextElementSibling;
         list.classList.toggle('open');
-        btn.textContent = list.classList.contains('open') ? {json.dumps(t('report.plan.payloads.hide'))} : {json.dumps(t('report.plan.payloads.show'))};
+        btn.textContent = list.classList.contains('open') ? {_js_str(t('report.plan.payloads.hide'))} : {_js_str(t('report.plan.payloads.show'))};
     }});
 }});
 </script>
@@ -1323,27 +1351,8 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             .rsm-cnt {{ margin-left:auto; color:#8b949e; font-size:.68rem; }}
         </style>
         <script>"""
-        # サイトマップ JS の文言も言語別に注入する。JS 側はキー参照のみ（言語非依存）。
-        # nodes と同じく script タグを抜けられないようエスケープする。
-        sitemap_labels = {
-            key: t(f"report.sitemap.js.{key}")
-            for key in (
-                "pages", "click_path", "origin", "click_spot", "click_offscreen",
-                "clicked_element", "no_text", "selector", "url", "status",
-                "open_this_page", "open_page", "close",
-            )
-        }
-        labels_json = (
-            _json.dumps(sitemap_labels)
-            .replace("<", "\\u003c")
-            .replace(">", "\\u003e")
-            .replace("&", "\\u0026")
-        )
-        data_js = (
-            f"\nvar RPT_SM_NODES = {nodes_json};\n"
-            f"var RPT_SM_I18N = {labels_json};\n"
-        )
-        return header + data_js + _RPT_SITEMAP_JS + "\n        </script>\n    </div>"
+        data_js = f"\nvar RPT_SM_NODES = {nodes_json};\n"
+        return header + data_js + _render_sitemap_js(t) + "\n        </script>\n    </div>"
 
     def _format_request(self, req: dict) -> str:
         if not req:
