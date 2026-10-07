@@ -339,8 +339,9 @@ def test_generate_report_passes_only_display_scope_matrix(monkeypatch, tmp_path)
     generated = []
 
     class _ReportGenerator:
-        def __init__(self, output_dir):
+        def __init__(self, output_dir, lang="ja"):
             self.output_dir = output_dir
+            assert lang == "ja"
 
         def generate(self, **kwargs):
             generated.append(kwargs)
@@ -1135,7 +1136,8 @@ def test_coverage_includes_live_worker_status_before_cleanup():
 def test_coverage_html_omitted_when_no_metrics():
     """coverage 未提供(None/空)なら Coverage セクションを描画しない（Codex #102）。"""
     from wscan.report import ReportGenerator
-    gen = ReportGenerator.__new__(ReportGenerator)
+    from pathlib import Path
+    gen = ReportGenerator(Path("."))
     assert gen._build_coverage_html(None) == ""
     assert gen._build_coverage_html({}) == ""
     # 実データがあれば描画する。
@@ -1150,7 +1152,8 @@ def test_coverage_html_omitted_when_no_metrics():
 def test_coverage_html_renders_client_error_bucket():
     """coverage HTML が client_error(4xx) も表示する（Codex #102）。"""
     from wscan.report import ReportGenerator
-    gen = ReportGenerator.__new__(ReportGenerator)
+    from pathlib import Path
+    gen = ReportGenerator(Path("."))
     html = gen._build_coverage_html({
         "reached_count": 1, "attempts": 1, "findings_total": 0,
         "http_status": {"total": 3, "blocked": 0, "client_error": 2, "server_error": 1},

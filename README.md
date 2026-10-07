@@ -392,6 +392,7 @@ python3 main.py scan URL [URL ...] [options]
 | `--delay SECS` | `0.5` | リクエスト間隔 |
 | `--navigation-retries N` | `2` | ページ遷移の再試行回数 |
 | `--no-sarif` | SARIF 有効 | `report.sarif` を出力しない |
+| `--report-lang ja\|en` | `output.language` (既定 `ja`) | HTML 全テンプレート・SARIF の出力文言の言語 |
 | `--notify-webhook URL` | 空 | Finding 通知の Slack/汎用 Webhook |
 | `--notify-severity LEVEL` | `high` | `critical/high/medium/low` の通知閾値 |
 | `--har FILE` | 空 | HAR の URL/Cookie をシード化 |
@@ -431,6 +432,7 @@ python3 main.py agent URL [options]
 | `--header-file FILE` | 空 | JSON/YAML/1行1ヘッダ形式 |
 | `-o, --output DIR` | `output/agent_<timestamp>/` | 出力先 |
 | `--resume` | 無効 | `--output DIR` の checkpoint から、同一条件・残予算で再開 |
+| `--report-lang ja\|en` | `output.language` (既定 `ja`) | Agent HTML レポートの出力言語 |
 | `--port PORT` | `8765` | モニターポート |
 | `--no-monitor`, `--no-open-report` | 無効 | モニター/自動表示を無効化 |
 
@@ -477,7 +479,7 @@ python3 main.py setup "ECサイト。管理画面とREST APIあり"
 ### `batch` — 複数ターゲット
 
 ```bash
-python3 main.py batch TARGETS_YAML [-o DIR]
+python3 main.py batch TARGETS_YAML [-o DIR] [--report-lang ja|en]
 ```
 
 ターゲット YAML を順番に実行し、統合サマリーを生成します。出力先の既定は `output/batch_<timestamp>/` です。
@@ -660,6 +662,7 @@ python3 main.py capability-matrix -o cap.md  # ファイルへ書き出し
 | `ctf.enabled` | bool | `false` | `--ctf` / 機能フラグ |
 | `ctf.flag_pattern` | str | `""` | `--ctf-flag-format` |
 | `output.dir` | str | `""` | `--output` |
+| `output.language` | str | `ja` | レポート言語 (`ja` / `en`)、CLI は `--report-lang` |
 | `output.payloads_file` | str | `""` | `--payloads` |
 
 ## 8. LLM アーキテクチャ

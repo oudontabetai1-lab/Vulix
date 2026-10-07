@@ -369,6 +369,8 @@ component_intel:
 # 出力
 # ──────────────────────────────────────────────────────────
 output:
+  # HTML/SARIF の出力言語 (ja / en)。証拠・LLM 生成文は原文のまま。
+  language: ja
   # レポート出力先 (空欄=output/<timestamp>/)
   dir: ""
 

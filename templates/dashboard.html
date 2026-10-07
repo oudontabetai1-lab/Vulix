@@ -1075,6 +1075,13 @@ body { padding-left: 212px; }
             <input type="number" id="cfgPortDisp" value="8765" readonly style="opacity:0.5;cursor:not-allowed">
           </div>
           <div class="cfg-field">
+            <label for="cfgReportLang">レポート言語 / Report language</label>
+            <select id="cfgReportLang">
+              <option value="ja">日本語</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+          <div class="cfg-field">
             <label>プロキシ URL</label>
             <input type="text" id="cfgProxy" placeholder="http://127.0.0.1:8080">
           </div>
@@ -3032,6 +3039,7 @@ function submitScanConfig() {
     url,
     depth:       parseInt(document.getElementById('cfgDepth').value) || 2,
     timeout:     parseInt(document.getElementById('cfgTimeoutInput').value) || 30,
+    report_lang: document.getElementById('cfgReportLang')?.value || 'ja',
     llm_timeout_seconds: parseFloat(document.getElementById('cfgLlmTimeoutInput')?.value) || 30,
     llm_stream_timeout_seconds: parseFloat(document.getElementById('cfgLlmStreamTimeoutInput')?.value) || 90,
     max_forms:   parseInt(document.getElementById('cfgMaxForms').value) || 50,
@@ -3140,6 +3148,7 @@ function _collectFullConfigForExport() {
     url: collect('cfgInputUrl').trim(),
     depth: collect('cfgDepth'),
     timeout: collect('cfgTimeoutInput'),
+    report_lang: collect('cfgReportLang'),
     llm_timeout_seconds: collect('cfgLlmTimeoutInput'),
     llm_stream_timeout_seconds: collect('cfgLlmStreamTimeoutInput'),
     max_forms: collect('cfgMaxForms'),
@@ -3247,6 +3256,7 @@ function applyImportedConfig(cfg) {
   setVal('cfgInputUrl', cfg.url);
   setVal('cfgDepth', cfg.depth);
   setVal('cfgTimeoutInput', cfg.timeout);
+  setVal('cfgReportLang', cfg.report_lang);
   setVal('cfgLlmTimeoutInput', cfg.llm_timeout_seconds);
   setVal('cfgLlmStreamTimeoutInput', cfg.llm_stream_timeout_seconds);
   setVal('cfgMaxForms', cfg.max_forms);
@@ -3366,6 +3376,7 @@ function submitAgentScan() {
   const config = {
     url,
     agent_mode: true,
+    report_lang: document.getElementById('cfgReportLang')?.value || 'ja',
     llm: document.getElementById('agentLlm').value,
     agent_model: document.getElementById('agentModel').value.trim(),
     agent_max_steps: parseInt(document.getElementById('agentMaxSteps').value) || 50,
@@ -3402,6 +3413,7 @@ function submitAgentScan() {
 // フィールドは「明示的に列挙しない限り漏れない」。TLS の *_cert/_key/_pfx/_ca は
 // ファイルパスであり秘密そのものではないため保存する（cert_password のみ除外）。
 const CONFIG_SAVE_ALLOWLIST = [
+  'report_lang',
   'url', 'restore_target', 'depth', 'timeout', 'llm_timeout_seconds', 'llm_stream_timeout_seconds',
   'max_forms', 'concurrency', 'max_payloads', 'request_delay', 'navigation_retries', 'proxy',
   'tls_client_cert', 'tls_client_key', 'tls_client_pfx', 'tls_ca_cert',
@@ -3488,6 +3500,7 @@ function saveConfigToStorage() {
         !!document.getElementById(id)?.value?.trim()),
       depth: document.getElementById('cfgDepth').value,
       timeout: document.getElementById('cfgTimeoutInput').value,
+      report_lang: document.getElementById('cfgReportLang')?.value || 'ja',
       llm_timeout_seconds: document.getElementById('cfgLlmTimeoutInput')?.value,
       llm_stream_timeout_seconds: document.getElementById('cfgLlmStreamTimeoutInput')?.value,
       max_forms: document.getElementById('cfgMaxForms').value,
@@ -3546,6 +3559,7 @@ function loadConfigFromStorage() {
     if (restoreTarget && cfg.url && safeUrlForStorage(cfg.url) !== undefined) document.getElementById('cfgInputUrl').value = cfg.url;
     if (cfg.depth) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
+    if (cfg.report_lang) document.getElementById('cfgReportLang').value = cfg.report_lang;
     if (cfg.llm_timeout_seconds != null) document.getElementById('cfgLlmTimeoutInput').value = cfg.llm_timeout_seconds;
     if (cfg.llm_stream_timeout_seconds != null) document.getElementById('cfgLlmStreamTimeoutInput').value = cfg.llm_stream_timeout_seconds;
     if (cfg.max_forms) document.getElementById('cfgMaxForms').value = cfg.max_forms;
@@ -3619,6 +3633,7 @@ async function loadDefaultConfigFromServer() {
     if (!cfg || typeof cfg !== 'object') return;
     if (cfg.depth != null) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout != null) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
+    if (cfg.report_lang) document.getElementById('cfgReportLang').value = cfg.report_lang;
     if (cfg.llm_timeout_seconds != null) document.getElementById('cfgLlmTimeoutInput').value = cfg.llm_timeout_seconds;
     if (cfg.llm_stream_timeout_seconds != null) document.getElementById('cfgLlmStreamTimeoutInput').value = cfg.llm_stream_timeout_seconds;
     if (cfg.max_forms != null) document.getElementById('cfgMaxForms').value = cfg.max_forms;
@@ -5291,6 +5306,7 @@ function submitHybridScan() {
     headless:     cfgToggles.headless,
     depth:        parseInt(document.getElementById('cfgDepth').value) || 2,
     timeout:      parseInt(document.getElementById('cfgTimeoutInput').value) || 30,
+    report_lang: document.getElementById('cfgReportLang')?.value || 'ja',
     llm_timeout_seconds: parseFloat(document.getElementById('cfgLlmTimeoutInput')?.value) || 30,
     llm_stream_timeout_seconds: parseFloat(document.getElementById('cfgLlmStreamTimeoutInput')?.value) || 90,
     concurrency:  parseInt(document.getElementById('cfgConcurrency').value) || 1,

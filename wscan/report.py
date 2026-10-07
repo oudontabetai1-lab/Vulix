@@ -5,9 +5,11 @@ Generates a self-contained HTML security assessment report.
 import datetime
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
+from .i18n import DEFAULT_LANG, normalize_lang, translator
 from .scanners.base import Finding
 
 if TYPE_CHECKING:
@@ -18,6 +20,7 @@ TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 # Plain JS for the offline report's screen-transition map (compact / shots / explorer
 # modes). Kept as a normal string (single braces) so it can sit inside an f-string
 # without brace-escaping. Reads the global `RPT_SM_NODES` injected before it.
+# 文言は `@@key@@` を `_render_sitemap_js` が言語別に置換する（ja は旧出力とバイト不変）。
 _RPT_SITEMAP_JS = r"""
 (function() {
   var NS = 'http://www.w3.org/2000/svg';
@@ -114,7 +117,7 @@ _RPT_SITEMAP_JS = r"""
       g.appendChild(mk('circle', { cx: tx + 4, cy: BH/2, r: 4.5, fill: color(n) }));
       var title = mk('text', { x: tx + 14, y: BH/2 - 2, 'font-size': '10.5px', fill: '#e6edf3' }); title.textContent = short(n.url); g.appendChild(title);
       var sub = mk('text', { x: tx + 14, y: BH/2 + 11, 'font-size': '9px', fill: '#8b949e' });
-      sub.textContent = (st.collapsed[n.url] && desc[n.url]) ? (desc[n.url] + ' ページ') : ((n.forms||0) + 'f / ' + (n.inputs||0) + 'i');
+      sub.textContent = (st.collapsed[n.url] && desc[n.url]) ? (desc[n.url] + '@@pages@@') : ((n.forms||0) + 'f / ' + (n.inputs||0) + 'i');
       g.appendChild(sub);
       g.addEventListener('click', function(ev){ showPop(ev, n); });
       g.addEventListener('mousemove', function(ev){ showTip(ev, n); });
@@ -171,17 +174,17 @@ _RPT_SITEMAP_JS = r"""
 
   function detailHtml(n) {
     var p = n.parent && all[n.parent], nr = norm(n.via), shot = (p && p.shot) || n.shot;
-    var h = '<h4 style="margin:0 0 10px;color:#58a6ff;font-size:.86rem">' + (n.via ? ('クリック箇所： ' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(n.url) + '（起点）')) + '</h4>';
+    var h = '<h4 style="margin:0 0 10px;color:#58a6ff;font-size:.86rem">' + (n.via ? ('@@click_path@@' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(n.url) + '@@origin@@')) + '</h4>';
     if (shot) {
       h += '<div style="position:relative;border:1px solid #30363d;border-radius:8px;overflow:hidden;max-width:560px"><img style="display:block;width:100%" src="data:image/jpeg;base64,' + shot + '">';
-      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? 'クリック箇所はスクショ範囲外（端に表示）' : 'クリック箇所') + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
+      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? '@@click_offscreen@@' : '@@click_spot@@') + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
       h += '</div>';
     }
     h += '<div style="margin-top:12px;font-size:.78rem;color:#8b949e;line-height:1.8">';
-    if (n.via) h += '押した要素：<b style="color:#e6edf3">「' + esc(n.via.text || '(テキスト無し)') + '」</b><br>セレクタ：<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
-    h += 'URL：<code style="color:#79c0ff">' + esc(n.url) + '</code><br>状態：<b style="color:#e6edf3">' + n.status + '</b> ／ ' + (n.forms||0) + ' forms / ' + (n.inputs||0) + ' inputs / ' + (n.params||0) + ' params';
+    if (n.via) h += '@@clicked_element@@<b style="color:#e6edf3">「' + esc(n.via.text || '@@no_text@@') + '」</b><br>@@selector@@<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
+    h += '@@url@@<code style="color:#79c0ff">' + esc(n.url) + '</code><br>@@status@@<b style="color:#e6edf3">' + n.status + '</b> ／ ' + (n.forms||0) + ' forms / ' + (n.inputs||0) + ' inputs / ' + (n.params||0) + ' params';
     if (n.findings > 0) h += '<br><span style="color:#f85149">' + n.findings + ' finding' + (n.findings>1?'s':'') + '</span>';
-    h += '<br><a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">このページを開く ↗</a></div>';
+    h += '<br><a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">@@open_this_page@@</a></div>';
     return h;
   }
 
@@ -237,16 +240,16 @@ _RPT_SITEMAP_JS = r"""
   function showPop(ev, n) {
     var p = n.parent && all[n.parent], nr = norm(n.via), shot = (p && p.shot) || n.shot;
     // 閉じるボタン（一度開くと閉じられない問題の対策）。背景クリック / Esc でも閉じる。
-    var h = '<span onclick="rptSmClosePop()" title="閉じる" style="position:absolute;top:6px;right:8px;width:20px;height:20px;line-height:18px;text-align:center;border:1px solid #30363d;border-radius:5px;background:#161b22;color:#8b949e;cursor:pointer">×</span>';
-    h += '<h4 style="margin:0 20px 6px 0;color:#58a6ff;font-size:.78rem">' + (n.via ? ('クリック箇所： ' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(short(n.url)) + '（起点）')) + '</h4>';
+    var h = '<span onclick="rptSmClosePop()" title="@@close@@" style="position:absolute;top:6px;right:8px;width:20px;height:20px;line-height:18px;text-align:center;border:1px solid #30363d;border-radius:5px;background:#161b22;color:#8b949e;cursor:pointer">×</span>';
+    h += '<h4 style="margin:0 20px 6px 0;color:#58a6ff;font-size:.78rem">' + (n.via ? ('@@click_path@@' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(short(n.url)) + '@@origin@@')) + '</h4>';
     if (shot) {
       h += '<div style="position:relative;border:1px solid #30363d;border-radius:8px;overflow:hidden"><img style="display:block;width:100%" src="data:image/jpeg;base64,' + shot + '">';
-      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? 'クリック箇所はスクショ範囲外（端に表示）' : 'クリック箇所') + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
+      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? '@@click_offscreen@@' : '@@click_spot@@') + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
       h += '</div>';
     }
     h += '<div style="margin-top:8px;font-size:.74rem;color:#8b949e;line-height:1.7">';
-    if (n.via) h += '押した要素：<b style="color:#e6edf3">「' + esc(n.via.text || '(テキスト無し)') + '」</b><br>セレクタ：<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
-    h += '<a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">ページを開く ↗</a></div>';
+    if (n.via) h += '@@clicked_element@@<b style="color:#e6edf3">「' + esc(n.via.text || '@@no_text@@') + '」</b><br>@@selector@@<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
+    h += '<a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">@@open_page@@</a></div>';
     pop.innerHTML = h; pop.style.display = 'block';
     var rect = wrap.getBoundingClientRect();
     var x = ev.clientX - rect.left + 14, y = ev.clientY - rect.top + 8;
@@ -290,7 +293,37 @@ _RPT_SITEMAP_JS = r"""
 })();
 """
 
-SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+def _js_str_body(s: str) -> str:
+    """<script> 内の JS 文字列リテラル本体へ埋める形にエスケープする（純粋）。
+
+    非 ASCII はそのまま出す（ja 出力を旧来のリテラル日本語とバイト不変に保つ）。
+    引用符・改行・``</script>`` 等は抜けられないようエスケープする。
+    """
+    body = json.dumps(s, ensure_ascii=False)[1:-1]
+    return (
+        body.replace("'", "\\'")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def _js_str(s: str) -> str:
+    """単一引用符の JS 文字列リテラルを返す（旧来の手書きリテラルと同じ形）。"""
+    return "'" + _js_str_body(s) + "'"
+
+
+def _render_sitemap_js(t) -> str:
+    """サイトマップ JS の ``@@key@@`` を言語別文言で置換する。"""
+    return re.sub(
+        r"@@(\w+)@@",
+        lambda m: _js_str_body(t(f"report.sitemap.js.{m.group(1)}")),
+        _RPT_SITEMAP_JS,
+    )
+
+
+SEVERITY_ORDER ={"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 SEVERITY_COLORS = {
     "critical": "#e53e3e",
     "high": "#dd6b20",
@@ -311,8 +344,11 @@ def _risk_color(score: int) -> str:
 
 
 class ReportGenerator:
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, lang: str = DEFAULT_LANG):
         self.output_dir = output_dir
+        # 出力言語（既定 ja＝現行挙動）。未知コードは ja へ正規化する。
+        self.lang = normalize_lang(lang)
+        self._t = translator(self.lang)
 
     def generate(
         self,
@@ -329,6 +365,7 @@ class ReportGenerator:
         diff_result=None,
         observability: "Optional[dict]" = None,
         coverage: "Optional[dict]" = None,
+        lang: "Optional[str]" = None,
     ):
         """
         Generate HTML report and save to output directory.
@@ -337,7 +374,11 @@ class ReportGenerator:
         ----------
         template  : "audit" (default/full detail) | "executive" | "developer"
         diff_result : DiffResult or None
+        lang      : 出力言語の都度上書き（省略時はインスタンスの言語＝既定 ja）
         """
+        if lang is not None:
+            self.lang = normalize_lang(lang)
+            self._t = translator(self.lang)
         sorted_findings = sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 99))
 
         if template == "executive":
@@ -388,6 +429,7 @@ class ReportGenerator:
         llm_summary = llm_summary or {}
         observability = observability or {}
         coverage = coverage or {}
+        t = self._t
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         confirmed_findings = [f for f in findings if f.verified]
         hypothesis_findings = [f for f in findings if not f.verified]
@@ -426,15 +468,17 @@ class ReportGenerator:
             extra_badges += self._verification_badges_html(f)
             # E: 信頼度バッジ
             conf = getattr(f, "confidence", "tentative")
-            conf_labels = {"confirmed": ("✔ 確認済", "#276749"), "likely": ("〜 可能性高", "#744210"), "tentative": ("? 暫定", "#4a5568")}
-            conf_label, conf_color = conf_labels.get(conf, conf_labels["tentative"])
+            conf_colors = {"confirmed": "#276749", "likely": "#744210", "tentative": "#4a5568"}
+            conf_key = conf if conf in conf_colors else "tentative"
+            conf_label = t(f"report.badge.confidence.{conf_key}")
+            conf_color = conf_colors[conf_key]
             extra_badges += f'<span class="badge-confidence" style="background:{conf_color}">{conf_label}</span>'
             # I: 差分バッジ
             diff_status = getattr(f, "_diff_status", "") or f.__dict__.get("_diff_status", "")
             if diff_status == "new":
-                extra_badges += '<span class="badge-diff-new">🆕 新規</span>'
+                extra_badges += f'<span class="badge-diff-new">{t("report.badge.diff.new")}</span>'
             elif diff_status == "persistent":
-                extra_badges += '<span class="badge-diff-persist">🔄 継続</span>'
+                extra_badges += f'<span class="badge-diff-persist">{t("report.badge.diff.persistent")}</span>'
 
             cvss_score = getattr(f, "cvss_score", 0.0)
             cvss_vector = getattr(f, "cvss_vector", "")
@@ -452,13 +496,16 @@ class ReportGenerator:
             # のときは "AI" と偽らず「推奨修正（静的ガイダンス）」として出す。
             ai_fix_text = f.__dict__.get("ai_fix", "")
             ai_fix_is_ai = bool(f.__dict__.get("ai_fix_is_ai", False))
+            if ai_fix_text and not ai_fix_is_ai and self.lang == "en":
+                from .remediation import _get_static
+                ai_fix_text = _get_static(f.check_type, lang=self.lang)
             ai_fix_html = ""
             if ai_fix_text:
                 ai_fix_safe = self._escape(ai_fix_text).replace("\n", "<br>")
                 if ai_fix_is_ai:
-                    fix_heading = "🤖 AI 推奨修正 (AI Fix Suggestion)"
+                    fix_heading = t("report.fix.heading.ai")
                 else:
-                    fix_heading = "🛠️ 推奨修正 (静的ガイダンス)"
+                    fix_heading = t("report.fix.heading.static")
                 ai_fix_html = f"""
                     <div class="finding-detail ai-fix-section">
                         <h4>{fix_heading}</h4>
@@ -508,8 +555,8 @@ class ReportGenerator:
             url_finding_counts[f.url] = url_finding_counts.get(f.url, 0) + 1
 
         url_status_labels = {
-            "vuln": "発見あり",
-            "done": "完了",
+            "vuln": t("report.url.status.vuln"),
+            "done": t("report.url.status.done"),
         }
         url_items_parts = []
         for u in visited_urls:
@@ -557,7 +604,7 @@ class ReportGenerator:
         coverage_html = self._build_coverage_html(coverage)
 
         return f"""<!DOCTYPE html>
-<html lang="ja">
+<html lang="{t('report.lang.html')}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -818,11 +865,11 @@ a {{ color:var(--accent); }}
     <div class="summary-grid">
         <div class="summary-card">
             <div class="count total-count">{total}</div>
-            <div class="label">確証 (Confirmed)</div>
+            <div class="label">{t('report.summary.confirmed')}</div>
         </div>
         <div class="summary-card">
             <div class="count" style="color:#d97706">{hypothesis_total}</div>
-            <div class="label">未確証 (Hypothesis)</div>
+            <div class="label">{t('report.summary.hypothesis')}</div>
         </div>
         <div class="summary-card">
             <div class="count critical-count">{counts.get('critical', 0)}</div>
@@ -934,16 +981,16 @@ a {{ color:var(--accent); }}
         <div class="url-panel-header">
             <h2>Scanned URLs ({url_total})</h2>
             <div class="url-panel-summary">
-                <span class="url-badge url-badge-done">完了 {url_done_total}</span>
-                <span class="url-badge url-badge-vuln">発見あり {url_vuln_total}</span>
+                <span class="url-badge url-badge-done">{t('report.url.status.done')} {url_done_total}</span>
+                <span class="url-badge url-badge-vuln">{t('report.url.status.vuln')} {url_vuln_total}</span>
             </div>
         </div>
         <div class="url-panel-toolbar">
-            <input type="text" id="url-filter" class="url-filter-input" placeholder="URL でフィルタ…">
+            <input type="text" id="url-filter" class="url-filter-input" placeholder="{t('report.url.filter.placeholder')}">
             <div class="url-filter-tabs">
-                <button class="url-filter-tab active" data-filter="all">すべて</button>
-                <button class="url-filter-tab" data-filter="vuln">発見あり</button>
-                <button class="url-filter-tab" data-filter="done">完了</button>
+                <button class="url-filter-tab active" data-filter="all">{t('report.url.tab.all')}</button>
+                <button class="url-filter-tab" data-filter="vuln">{t('report.url.tab.vuln')}</button>
+                <button class="url-filter-tab" data-filter="done">{t('report.url.tab.done')}</button>
             </div>
         </div>
         <div class="url-list" id="url-list">
@@ -1025,7 +1072,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         e.stopPropagation();
         const list = btn.nextElementSibling;
         list.classList.toggle('open');
-        btn.textContent = list.classList.contains('open') ? '▲ ペイロードを隠す' : '▼ LLMペイロードを表示';
+        btn.textContent = list.classList.contains('open') ? {_js_str(t('report.plan.payloads.hide'))} : {_js_str(t('report.plan.payloads.show'))};
     }});
 }});
 </script>
@@ -1151,7 +1198,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                         payload_items += f'<div class="plan-payload-type">{self._escape(check_type)}</div>{codes}'
                     if payload_items:
                         payload_html = f"""
-                        <span class="plan-payloads-toggle">▼ LLMペイロードを表示 ({sum(len(v) for v in fp.custom_payloads.values())}件)</span>
+                        <span class="plan-payloads-toggle">{self._t("report.plan.payloads.show_count", count=sum(len(v) for v in fp.custom_payloads.values()))}</span>
                         <div class="plan-payload-list">{payload_items}</div>"""
 
                 fields_rows += f"""
@@ -1190,9 +1237,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
     <div class="section">
         <h2>🗺 Attack Plan — Phase 2 ({len(attack_plans)} page{'s' if len(attack_plans) != 1 else ''})</h2>
         <p style="color:#718096;font-size:.9rem;margin-bottom:16px;">
-            巡回完了後に LLM / ヒューリスティックが生成した攻撃プランです。
-            リスクスコアが高いフィールドを優先的に攻撃しました。
-            <strong style="color:#553c9a">⚠ Cross-page</strong> は格納型 XSS や別ページへの影響が疑われるフィールドを示します。
+            {self._t("report.plan.note")}
         </p>
         {stat_html}
         {cards_html}
@@ -1212,6 +1257,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             return ""
 
         import json as _json
+        t = self._t
         url_finding_counts = url_finding_counts or {}
 
         nodes = []
@@ -1257,21 +1303,21 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
     <div class="section" id="site-map-section">
         <h2>🗺 Visual Site Map ({len(page_graph)} pages)</h2>
         <div class="sm-toolbar">
-            <span class="sm-pill">画面遷移図 <strong>{len(page_graph)}</strong></span>
-            <input id="rpt-sm-search" class="sm-search" placeholder="検索…" oninput="rptSmSearch(this.value)">
+            <span class="sm-pill">{t('report.sitemap.pill')} <strong>{len(page_graph)}</strong></span>
+            <input id="rpt-sm-search" class="sm-search" placeholder="{t('report.sitemap.search')}" oninput="rptSmSearch(this.value)">
             <span class="sm-modes">
-                <button class="sm-mode-btn active" id="rpt-sm-m-compact" type="button" onclick="rptSmMode('compact')">コンパクト</button>
-                <button class="sm-mode-btn" id="rpt-sm-m-shots" type="button" onclick="rptSmMode('shots')">スクショ</button>
-                <button class="sm-mode-btn" id="rpt-sm-m-explorer" type="button" onclick="rptSmMode('explorer')">一覧</button>
+                <button class="sm-mode-btn active" id="rpt-sm-m-compact" type="button" onclick="rptSmMode('compact')">{t('report.sitemap.mode.compact')}</button>
+                <button class="sm-mode-btn" id="rpt-sm-m-shots" type="button" onclick="rptSmMode('shots')">{t('report.sitemap.mode.shots')}</button>
+                <button class="sm-mode-btn" id="rpt-sm-m-explorer" type="button" onclick="rptSmMode('explorer')">{t('report.sitemap.mode.explorer')}</button>
             </span>
-            <button class="sm-pill sm-btn" type="button" onclick="rptSmExpand(true)">全展開</button>
-            <button class="sm-pill sm-btn" type="button" onclick="rptSmExpand(false)">全折りたたみ</button>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSmExpand(true)">{t('report.sitemap.expand_all')}</button>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSmExpand(false)">{t('report.sitemap.collapse_all')}</button>
             <button class="sm-pill sm-btn" type="button" onclick="rptSmZoom(0.8)">－</button>
             <button class="sm-pill sm-btn" type="button" onclick="rptSmZoom(1.25)">＋</button>
             <button class="sm-pill sm-btn" type="button" onclick="rptSmReset()">⟲</button>
             <span class="sm-pill sm-spacer"></span>
-            <span class="sm-pill"><span class="sm-dot" style="background:#388bfd"></span>完了 {done_count}</span>
-            <span class="sm-pill"><span class="sm-dot" style="background:#f85149"></span>検出 {vuln_count}</span>
+            <span class="sm-pill"><span class="sm-dot" style="background:#388bfd"></span>{t('report.sitemap.legend.done')} {done_count}</span>
+            <span class="sm-pill"><span class="sm-dot" style="background:#f85149"></span>{t('report.sitemap.legend.vuln')} {vuln_count}</span>
         </div>
         <div id="rpt-sm-wrap" style="position:relative;height:560px;background:#0a0c0f;border:1px solid #21262d;border-radius:8px;overflow:hidden">
             <svg id="rpt-sm-svg" style="width:100%;height:100%;display:block"></svg>
@@ -1283,8 +1329,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             </div>
         </div>
         <p style="font-size:.75rem;color:#718096;margin-top:6px">
-            コンパクト=ツリー / スクショ=画面サムネにクリック箇所を表示 / 一覧=ツリー+詳細
-            · 矢印のラベル=クリックした要素 · ホイールでズーム / ドラッグでパン
+            {t('report.sitemap.hint')}
         </p>
         <style>
             .sm-toolbar {{ display:flex; gap:6px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }}
@@ -1307,7 +1352,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         </style>
         <script>"""
         data_js = f"\nvar RPT_SM_NODES = {nodes_json};\n"
-        return header + data_js + _RPT_SITEMAP_JS + "\n        </script>\n    </div>"
+        return header + data_js + _render_sitemap_js(t) + "\n        </script>\n    </div>"
 
     def _format_request(self, req: dict) -> str:
         if not req:
@@ -1424,8 +1469,8 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                 )
             v_state = task.get("verification_state", "") or "reproduced/assumed"
             confirm_html = (
-                '<span class="badge-unconfirmed" title="group 内に未再検証(assumed)の経路あり。'
-                '修正前に再現を確認">⚠ 要手動確認</span>'
+                f'<span class="badge-unconfirmed" title="{self._t("report.badge.needs_manual.title")}">'
+                f'{self._t("report.badge.needs_manual")}</span>'
                 if task.get("needs_confirmation")
                 else ""
             )
@@ -1536,33 +1581,35 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
 
     def _build_observability_html(self, observability: dict) -> str:
         """劣化・脱落した probe/wave を Finding と分離して明示する。"""
+        t = self._t
         total = int(observability.get("total", 0) or 0)
         categories = observability.get("by_category", {}) or {}
         samples = observability.get("samples", []) or []
         llm_calls = int(observability.get("llm_calls", 0) or 0)
+        none_label = t("report.common.none")
         category_html = "".join(
             f"<li><code>{self._escape(category)}</code>: {count}</li>"
             for category, count in sorted(categories.items())
-        ) or "<li>なし</li>"
+        ) or f"<li>{none_label}</li>"
         sample_html = "".join(
             f"<li><code>{self._escape(str(sample))}</code></li>"
             for sample in samples
-        ) or "<li>なし</li>"
+        ) or f"<li>{none_label}</li>"
         warning = ""
         if total:
             warning = (
                 '<p style="color:#975a16;font-weight:600;margin-top:10px">'
-                '0 findings は「安全」を意味しない可能性があります。</p>'
+                f'{t("report.observability.warning")}</p>'
             )
         return f"""
         <div class="section observability-section">
-            <h2>Observability（観測性メトリクス）</h2>
-            <p>劣化・脱落した probe/wave: <strong>{total}</strong> 件</p>
-            <p>LLM 呼び出し: <strong>{llm_calls}</strong> 件（詳細は llm_calls.jsonl）</p>
+            <h2>{t('report.observability.heading')}</h2>
+            <p>{t('report.observability.dropped', total=total)}</p>
+            <p>{t('report.observability.llm_calls', count=llm_calls)}</p>
             {warning}
             <h3 style="margin-top:14px">by_category</h3>
             <ul>{category_html}</ul>
-            <h3 style="margin-top:14px">代表サンプル</h3>
+            <h3 style="margin-top:14px">{t('report.observability.samples')}</h3>
             <ul>{sample_html}</ul>
         </div>"""
 
@@ -1574,6 +1621,8 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         """
         if not coverage:
             return ""
+        t = self._t
+        none_label = t("report.common.none")
         http_status = coverage.get("http_status", {}) or {}
         reached_count = self._escape(coverage.get("reached_count", 0))
         attempts = self._escape(coverage.get("attempts", 0))
@@ -1588,11 +1637,11 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         by_status_html = "".join(
             f"<li><code>{self._escape(status)}</code>: {self._escape(count)}</li>"
             for status, count in sorted(by_status.items(), key=lambda item: str(item[0]))
-        ) or "<li>なし</li>"
+        ) or f"<li>{none_label}</li>"
         reached_rows = "".join(
             "<tr>" f"<td>{self._escape(url)}</td>" "</tr>"
             for url in (coverage.get("reached_urls", []) or [])
-        ) or '<tr><td colspan="1">なし</td></tr>'
+        ) or f'<tr><td colspan="1">{none_label}</td></tr>'
         unreached_rows = "".join(
             "<tr>"
             f"<td>{self._escape((row or {}).get('url', ''))}</td>"
@@ -1600,7 +1649,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             "</tr>"
             for row in (coverage.get("unreached", []) or [])
             if isinstance(row, dict)
-        ) or '<tr><td colspan="2">なし</td></tr>'
+        ) or f'<tr><td colspan="2">{none_label}</td></tr>'
         blocked_warning = ""
         try:
             has_blocked = int(blocked_raw) > 0
@@ -1609,8 +1658,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         if has_blocked:
             blocked_warning = (
                 '<p style="color:#975a16;font-weight:600;margin-top:10px">'
-                f"{blocked} 件が 403/429 でブロック＝WAF/レート制限により攻撃面を"
-                "十分に検査できていない可能性があります</p>"
+                f'{t("report.coverage.blocked_warning", blocked=blocked)}</p>'
             )
 
         # check レベル coverage（0016）: in-scope の scanner 数と未実行（未選択）の検査を出す。
@@ -1624,13 +1672,12 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             not_selected = cc.get("not_selected", []) or []
             not_selected_html = ", ".join(
                 f"<code>{self._escape(c)}</code>" for c in not_selected
-            ) or "なし"
+            ) or none_label
             cc_warning = ""
             if cc.get("coverage_status") in ("PARTIAL", "INCOMPLETE"):
                 cc_warning = (
                     '<p style="color:#b45309">'
-                    "登録 scanner の一部のみが検査対象です。未実行の検査があるため、"
-                    "Findings が 0 でも「安全」とは限りません。</p>"
+                    f'{t("report.coverage.check.warning")}</p>'
                 )
             # 設定に未知の検査名（誤記等）があれば、全 check 選択でも COMPLETE 表示に紛れて
             # 無視されるため、設定警告として明示する（config は argparse choices 未検証）。
@@ -1639,21 +1686,21 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             if unknown_selected:
                 names = ", ".join(f"<code>{self._escape(c)}</code>" for c in unknown_selected)
                 unknown_html = (
-                    '<p style="color:#b00">設定に未知の検査名（誤記の可能性）があり無視されました: '
-                    f"{names}</p>"
+                    '<p style="color:#b00">'
+                    f'{t("report.coverage.check.unknown", names=names)}</p>'
                 )
             check_coverage_html = (
-                '<h3 style="margin-top:14px">検査カバレッジ（in-scope の scanner）</h3>'
-                f"<p>検査対象: <strong>{cc_sel}</strong> / <strong>{cc_total}</strong> 種類 "
-                f"(<strong>{cc_status}</strong>)</p>"
+                f'<h3 style="margin-top:14px">{t("report.coverage.check.heading")}</h3>'
+                f'<p>{t("report.coverage.check.summary", selected=cc_sel, total=cc_total, status=cc_status)}</p>'
                 f"{cc_warning}"
                 f"{unknown_html}"
-                f"<p>未実行（未選択）の検査: {not_selected_html}</p>"
+                f'<p>{t("report.coverage.check.not_selected", names=not_selected_html)}</p>'
             )
 
         # prerequisite 会計（0016）: 選択されたが実行条件（前提／state profile）を満たさず
         # 実質検査できない check を理由付きで出す。「選択済み＝検査済み」ではない点を明示し、
         # 0 findings=安全 の誤解を防ぐ。前提不足と state profile skip を1表に併記する。
+        from .check_coverage import localize_prerequisite_reasons, localize_state_profile_reason
         prereq_html = ""
         pcov = coverage.get("prerequisite_coverage", {}) or {}
         missing = pcov.get("prerequisite_missing", []) or []
@@ -1661,16 +1708,16 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         unmet_rows = [
             (
                 (m or {}).get("check", ""),
-                "前提不足",
-                ", ".join((m or {}).get("reasons", []) or []),
+                t("report.coverage.prereq.kind.missing"),
+                ", ".join(localize_prerequisite_reasons(m, self.lang)),
             )
             for m in missing
             if isinstance(m, dict)
         ] + [
             (
                 (s or {}).get("check", ""),
-                "state profile",
-                (s or {}).get("reason", ""),
+                t("report.coverage.prereq.kind.state_profile"),
+                localize_state_profile_reason((s or {}).get("reason", ""), self.lang),
             )
             for s in profile_skipped
             if isinstance(s, dict)
@@ -1685,11 +1732,12 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                 for check, kind, reason in unmet_rows
             )
             prereq_html = (
-                '<h3 style="margin-top:14px">実行条件が満たされない検査</h3>'
-                '<p style="color:#b45309">以下の検査は選択されていますが、前提（認証・OOB・API 仕様・'
-                "複数アカウント等）の未設定、または state profile による状態変更検査の skip のため、"
-                "実質的に検査できていない可能性があります。Findings が 0 でも「安全」とは限りません。</p>"
-                '<div class="table-wrap"><table><thead><tr><th>検査</th><th>種別</th><th>理由</th>'
+                f'<h3 style="margin-top:14px">{t("report.coverage.prereq.heading")}</h3>'
+                f'<p style="color:#b45309">{t("report.coverage.prereq.note")}</p>'
+                '<div class="table-wrap"><table><thead><tr>'
+                f'<th>{t("report.coverage.table.check")}</th>'
+                f'<th>{t("report.coverage.table.kind")}</th>'
+                f'<th>{t("report.coverage.table.reason")}</th>'
                 f"</tr></thead><tbody>{rows}</tbody></table></div>"
             )
 
@@ -1700,29 +1748,28 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         if cap_matrix:
             try:
                 from .scanner_contract import render_capability_matrix_html
-                capability_matrix_html = render_capability_matrix_html(cap_matrix)
+                capability_matrix_html = render_capability_matrix_html(cap_matrix, lang=self.lang)
             except Exception:
                 capability_matrix_html = ""
 
         return f"""
         <div class="section coverage-section">
-            <h2>Coverage（到達性カバレッジ）</h2>
-            <p>到達 URL: <strong>{reached_count}</strong> 件 / 試行: <strong>{attempts}</strong> 件 /
-            Findings: <strong>{findings_total}</strong> 件</p>
+            <h2>{t('report.coverage.heading')}</h2>
+            <p>{t('report.coverage.summary', reached=reached_count, attempts=attempts, findings=findings_total)}</p>
             {check_coverage_html}
             {prereq_html}
             {capability_matrix_html}
-            <h3 style="margin-top:14px">試行結果（by_status）</h3>
+            <h3 style="margin-top:14px">{t('report.coverage.by_status')}</h3>
             <ul>{by_status_html}</ul>
             <h3 style="margin-top:14px">HTTP status</h3>
             <p>total: <strong>{http_total}</strong> / blocked (403/429): <strong>{blocked}</strong> /
             client_error (4xx): <strong>{client_error}</strong> /
             server_error: <strong>{server_error}</strong></p>
             {blocked_warning}
-            <h3 style="margin-top:14px">到達済み URL</h3>
+            <h3 style="margin-top:14px">{t('report.coverage.reached')}</h3>
             <div class="table-wrap"><table><thead><tr><th>URL</th></tr></thead>
             <tbody>{reached_rows}</tbody></table></div>
-            <h3 style="margin-top:14px">未到達 URL</h3>
+            <h3 style="margin-top:14px">{t('report.coverage.unreached')}</h3>
             <div class="table-wrap"><table><thead><tr><th>URL</th><th>Reason</th></tr></thead>
             <tbody>{unreached_rows}</tbody></table></div>
         </div>"""
@@ -1781,29 +1828,32 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             .replace("'", "&#39;")
         )
 
-    @staticmethod
-    def _agent_badges_html(finding: Finding) -> str:
+    def _agent_badges_html(self, finding: Finding) -> str:
         """Agent由来の解釈と、任意の決定論再現結果を明示する。"""
         if getattr(finding, "source", "scanner") != "agent":
             return ""
         if getattr(finding, "agent_verified", False):
             return (
-                '<span class="badge-agent">🤖 Agent発見（LLM独自解釈）</span>'
-                '<span class="badge-agent-verified">✅ 決定論的にも再現確認済み</span>'
+                f'<span class="badge-agent">{self._t("report.badge.agent")}</span>'
+                f'<span class="badge-agent-verified">{self._t("report.badge.agent.verified")}</span>'
             )
-        return '<span class="badge-agent">🤖 Agent発見（LLM独自解釈・未確証）</span>'
+        return f'<span class="badge-agent">{self._t("report.badge.agent.unconfirmed")}</span>'
 
     def _verification_badges_html(self, finding: Finding) -> str:
         """確証と未確証を verified の派生値で明示する。"""
         if finding.verified:
-            return '<span class="badge-confirmed">✅ 確証</span>'
+            return f'<span class="badge-confirmed">{self._t("report.badge.confirmed")}</span>'
         state = finding.verification_state
         assumed = (
-            '<span class="badge-assumed">〜 推定（再検証未実行）</span>'
+            f'<span class="badge-assumed">{self._t("report.badge.assumed")}</span>'
             if state == "assumed" else ""
         )
         note = self._escape(finding.verification_note)
-        return assumed + f'<span class="badge-unconfirmed" title="未確証: {note}">⚠ 要確認</span>'
+        return assumed + (
+            f'<span class="badge-unconfirmed" '
+            f'title="{self._t("report.badge.unconfirmed.title", note=note)}">'
+            f'{self._t("report.badge.unconfirmed")}</span>'
+        )
 
     # =========================================================================
     # F: Executive Report
@@ -1815,6 +1865,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         observability=None, coverage=None,
     ) -> str:
         """経営層向け: サマリーカード・リスク分布・コンプライアンス適合率・推奨事項。"""
+        t = self._t
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         confirmed_findings = [f for f in findings if f.verified]
         hypothesis_findings = [f for f in findings if not f.verified]
@@ -1835,9 +1886,9 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             agent_summary_html = f"""
             <div class="exec-card" style="border-left:4px solid #6b46c1">
               <div class="exec-count" style="color:#6b46c1">{agent_total}</div>
-              <div class="exec-label">🤖 Agent発見（LLM独自解釈）</div>
+              <div class="exec-label">{t('report.exec.agent_label')}</div>
               <div style="font-size:.75rem;color:#718096;margin-top:6px">
-                確証: {agent_confirmed_total} / 未確証: {agent_total - agent_confirmed_total}
+                {t('report.exec.agent_breakdown', confirmed=agent_confirmed_total, unconfirmed=agent_total - agent_confirmed_total)}
               </div>
             </div>"""
 
@@ -1857,43 +1908,41 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                     pci_violations[ref] = pci_violations.get(ref, 0) + 1
 
         top10_html = "".join(
-            f'<li>{self._escape(k)}: <b>{v}件</b></li>'
+            f'<li>{self._escape(k)}: <b>{t("report.exec.count_suffix", count=v)}</b></li>'
             for k, v in sorted(top10_violations.items(), key=lambda x: -x[1])[:5]
-        ) or "<li>違反なし</li>"
+        ) or f"<li>{t('report.exec.no_violation')}</li>"
 
         pci_html = "".join(
-            f'<li>{self._escape(k)}: <b>{v}件</b></li>'
+            f'<li>{self._escape(k)}: <b>{t("report.exec.count_suffix", count=v)}</b></li>'
             for k, v in sorted(pci_violations.items(), key=lambda x: -x[1])[:5]
-        ) or "<li>違反なし</li>"
+        ) or f"<li>{t('report.exec.no_violation')}</li>"
 
         # 差分サマリー
         diff_html = ""
         if diff_result:
             diff_html = f"""
             <div class="exec-card" style="border-left:4px solid #4299e1">
-                <div class="exec-label">差分スキャン結果</div>
+                <div class="exec-label">{t('report.exec.diff_heading')}</div>
                 <div style="font-size:0.9rem;margin-top:8px">
-                    🆕 新規: <b>{len(diff_result.new_findings)}</b> 件 /
-                    ✅ 修正済: <b>{len(diff_result.fixed_findings)}</b> 件 /
-                    🔄 継続: <b>{len(diff_result.persistent_findings)}</b> 件
+                    {t('report.exec.diff_body', new=len(diff_result.new_findings), fixed=len(diff_result.fixed_findings), persistent=len(diff_result.persistent_findings))}
                 </div>
             </div>"""
 
         # 推奨事項 (重要度別)
         recs = []
         if counts.get("critical", 0) > 0:
-            recs.append("【緊急】クリティカルな脆弱性が検出されました。即時修正が必要です。")
+            recs.append(t("report.exec.rec.critical"))
         if counts.get("high", 0) > 0:
-            recs.append("【高】高リスクの脆弱性が検出されました。速やかな対応を推奨します。")
+            recs.append(t("report.exec.rec.high"))
         if "security_headers" in checks:
-            recs.append("セキュリティヘッダ (CSP, HSTS, X-Frame-Options) の設定を確認してください。")
-        recs.append("定期的なペネトレーションテストの実施を推奨します。")
+            recs.append(t("report.exec.rec.headers"))
+        recs.append(t("report.exec.rec.pentest"))
         rec_html = "".join(f"<li>{self._escape(r)}</li>" for r in recs)
         observability_html = self._build_observability_html(observability or {})
         coverage_html = self._build_coverage_html(coverage or {})
 
         return f"""<!DOCTYPE html>
-<html lang="ja"><head><meta charset="UTF-8">
+<html lang="{self.lang}"><head><meta charset="UTF-8">
 <title>Executive Report — {self._escape(target)}</title>
 <!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
 <style>
@@ -1911,7 +1960,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
 </style></head><body>
 <div class="hdr">
   <h1>Executive Security Report</h1>
-  <div class="sub">{self._escape(target)} &nbsp;|&nbsp; {scan_date} &nbsp;|&nbsp; 検査項目: {len(checks)} 種</div>
+  <div class="sub">{self._escape(target)} &nbsp;|&nbsp; {scan_date} &nbsp;|&nbsp; {self._t('report.exec.checks_count', count=len(checks))}</div>
 </div>
 <div class="container">
   <div class="grid">
@@ -1933,11 +1982,11 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
     </div>
     <div class="exec-card">
       <div class="exec-count" style="color:#4299e1">{total}</div>
-      <div class="exec-label">確証 (Confirmed)</div>
+      <div class="exec-label">{self._t('report.summary.confirmed')}</div>
     </div>
     <div class="exec-card">
       <div class="exec-count" style="color:#d97706">{hypothesis_total}</div>
-      <div class="exec-label">未確証 (Hypothesis)</div>
+      <div class="exec-label">{self._t('report.summary.hypothesis')}</div>
     </div>
     <div class="exec-card">
       <div class="exec-count" style="color:#805ad5">{avg_cvss:.1f}</div>
@@ -1947,22 +1996,22 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
     {diff_html}
   </div>
   <div class="section">
-    <h2>OWASP Top 10 違反 (上位5件)</h2>
+    <h2>{self._t('report.exec.owasp_heading')}</h2>
     <ul>{top10_html}</ul>
   </div>
   <div class="section">
-    <h2>PCI DSS 違反 (上位5件)</h2>
+    <h2>{self._t('report.exec.pci_heading')}</h2>
     <ul>{pci_html}</ul>
   </div>
   <div class="section">
-    <h2>推奨事項</h2>
+    <h2>{self._t('report.exec.recommendations')}</h2>
     <ul>{rec_html}</ul>
   </div>
   {observability_html}
   {coverage_html}
   <div class="section">
-    <h2>スキャン範囲</h2>
-    <p style="font-size:.9rem">{len(visited_urls)} ページを検査 / 検査項目: {", ".join(checks)}</p>
+    <h2>{self._t('report.exec.scope_heading')}</h2>
+    <p style="font-size:.9rem">{self._t('report.exec.scope_body', pages=len(visited_urls), checks=', '.join(checks))}</p>
   </div>
 </div>
 <div class="footer">WScan Security Report &mdash; Executive Summary</div>
@@ -1989,10 +2038,13 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
             source_class = " finding-item-agent" if is_agent else ""
             source_badges = self._agent_badges_html(f) + self._verification_badges_html(f)
             ai_fix = getattr(f, "ai_fix", "") or ""
+            if ai_fix and not getattr(f, "ai_fix_is_ai", False) and self.lang == "en":
+                from .remediation import _get_static
+                ai_fix = _get_static(f.check_type, lang=self.lang)
             ai_fix_html = ""
             if ai_fix:
                 safe_fix = self._escape(ai_fix).replace("\n", "<br>")
-                ai_fix_html = f'<div class="fix-box"><b>修正ガイダンス:</b><br>{safe_fix}</div>'
+                ai_fix_html = f'<div class="fix-box"><b>{self._t("report.dev.fix_label")}</b><br>{safe_fix}</div>'
 
             compliance_refs = getattr(f, "compliance_refs", None) or {}
             refs_parts = []
@@ -2021,7 +2073,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
                         {status_badge}
                         — <code>{self._escape(f.field_name)}</code>
                     </label>
-                    <span class="conf-tag">信頼度: {conf}</span>
+                    <span class="conf-tag">{self._t('report.dev.confidence', confidence=self._escape(conf))}</span>
                 </div>
                 <div class="fi-body">
                     <div class="fi-url">{self._escape(f.url)}</div>
@@ -2036,13 +2088,13 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
         if diff_result:
             diff_summary = f"""
             <div class="diff-bar">
-                🆕 新規 {len(diff_result.new_findings)} / ✅ 修正済 {len(diff_result.fixed_findings)} / 🔄 継続 {len(diff_result.persistent_findings)}
+                {self._t('report.dev.diff_bar', new=len(diff_result.new_findings), fixed=len(diff_result.fixed_findings), persistent=len(diff_result.persistent_findings))}
             </div>"""
         observability_html = self._build_observability_html(observability or {})
         coverage_html = self._build_coverage_html(coverage or {})
 
         return f"""<!DOCTYPE html>
-<html lang="ja"><head><meta charset="UTF-8">
+<html lang="{self.lang}"><head><meta charset="UTF-8">
 <title>Developer Report — {self._escape(target)}</title>
 <!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
 <style>
@@ -2077,14 +2129,14 @@ body{{font-family:"Inter",system-ui,sans-serif;background:#161826;color:#292b31;
 </style></head><body>
 <div class="hdr">
   <h1>Developer Security Checklist</h1>
-  <div class="sub">{self._escape(target)} &nbsp;|&nbsp; {scan_date} &nbsp;|&nbsp; 確証 {confirmed_total} 件 / 未確証 {hypothesis_total} 件</div>
+  <div class="sub">{self._escape(target)} &nbsp;|&nbsp; {scan_date} &nbsp;|&nbsp; {self._t('report.dev.subtitle', confirmed=confirmed_total, hypothesis=hypothesis_total)}</div>
 </div>
 <div class="container">
   {diff_summary}
   {observability_html}
   {coverage_html}
-  <p style="font-size:.85rem;color:#4a5568;margin-bottom:12px">各項目をクリックして詳細を展開してください。チェックボックスで修正完了を記録できます。</p>
-  {items_html if items_html else '<p style="color:#38a169;font-weight:600">✓ 検出された脆弱性はありません。</p>'}
+  <p style="font-size:.85rem;color:#4a5568;margin-bottom:12px">{self._t('report.dev.intro')}</p>
+  {items_html or ('<p style="color:#38a169;font-weight:600">' + self._t('report.dev.no_findings') + '</p>')}
 </div>
 <div class="footer">WScan Security Report &mdash; Developer Checklist</div>
 <script>
