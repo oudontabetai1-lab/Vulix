@@ -1996,10 +1996,66 @@ class BaseScanner(ABC):
                 "body_unavailable": bool(getattr(response, "body_unavailable", False)),
             }
         except Exception:
-            pair = self.current_page_pair(url)
-            resp = (pair or {}).get("response") or {}
-            if not resp:
+            # latest/current_page_pair は query・method・document を保証しない。
+            # native request identity の一致した exact GET document だけを採用する。
+            from urllib.parse import urljoin
+            browser = getattr(self.engine, "browser", None) or getattr(self, "browser", None)
+            network = getattr(browser, "network", None)
+            target = url.split("#", 1)[0]
+            pairs = list(getattr(network, "pairs", None) or [])
+            pairs.extend({"request": req} for req in (getattr(network, "_pending", None) or {}).values())
+            candidates = []
+            for pair in pairs:
+                req = pair.get("request") or {}
+                candidate = pair.get("response") or {}
+                if req.get("resource_type") not in (None, "", "document"):
+                    continue  # known XHR/assets do not replace the document
+                if target not in ((req.get("url") or "").split("#", 1)[0],
+                                  (candidate.get("url") or "").split("#", 1)[0]):
+                    continue
+                if not isinstance(req.get("_capture_sequence"), int):
+                    return None  # unmatched/old capture cannot prove freshness
+                candidates.append(pair)
+            if not candidates:
                 return None
+
+            def _proven_status(pair: dict, expected: str) -> Optional[int]:
+                # GET document・request/response の native identity・exact URL(query 含む)を全て要求する。
+                req, resp = pair.get("request") or {}, pair.get("response") or {}
+                if (req.get("method") != "GET" or req.get("resource_type") != "document"
+                        or req.get("_req_id") is None or req["_req_id"] != resp.get("_req_id")
+                        or (req.get("url") or "").split("#", 1)[0] != expected
+                        or (resp.get("url") or "").split("#", 1)[0] != expected):
+                    return None
+                try:
+                    return int(resp["status"])
+                except (KeyError, TypeError, ValueError):
+                    return None
+
+            pair = max(candidates, key=lambda p: p["request"]["_capture_sequence"])
+            current = target
+            status = _proven_status(pair, current)
+            hops = 0
+            # redirect は browser の native redirected_from 連鎖で証明でき、かつ _get と同じ
+            # 追従規則（same-host/承認 upgrade/明示 scope）を満たす hop だけ辿る。証明できない
+            # redirect 本文を最終 document と推定しない（→ None＝unavailable）。
+            while status is not None and 300 <= status < 400:
+                loc = ((pair["response"].get("headers") or {}).get("location") or "")
+                nxt = next((p for p in pairs if p.get("response")
+                            and p["request"].get("_redirected_from_req_id") == pair["request"]["_req_id"]
+                            and isinstance(p["request"].get("_capture_sequence"), int)
+                            and p["request"]["_capture_sequence"] > pair["request"]["_capture_sequence"]),
+                           None)
+                if hops >= 5 or not loc or nxt is None:
+                    return None
+                dst = urljoin(current, loc).split("#", 1)[0]
+                if not (self._followable_redirect(current, dst) or self._redirect_target_in_scope(dst)):
+                    return None
+                pair, current, hops = nxt, dst, hops + 1
+                status = _proven_status(pair, current)
+            if status is None:
+                return None
+            resp = pair["response"]
             # capture 側（NetworkCapture.enrich_response）は本文を読めなかったとき body キー自体を
             # 欠落させる。これを空本文と取り違えず body_unavailable として伝播し、content 観測系に
             # PageDocumentUnavailable を投げさせる（direct GET 失敗と同じ扱い・Codex #147）。

@@ -876,12 +876,18 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
                     raise RuntimeError("direct GET failed")
                 # capture fallback: status/headers はあるが body キーが無い（読めなかった）。
                 scanner._get = _boom_get
-                scanner.current_page_pair = lambda u: {
-                    "request": {"url": u},
-                    "response": {"status": 200, "headers": {"content-type": "text/html"}, "url": u},
-                }
+                from types import SimpleNamespace
+                from wscan.browser import NetworkCapture
+                network = NetworkCapture()
+                request = SimpleNamespace(url="http://app.test/x", method="GET", resource_type="document",
+                                          headers={}, post_data=None)
+                network.on_request(request)
+                network.on_response(SimpleNamespace(request=request, url=request.url, status=200,
+                                                    headers={"content-type": "text/html"}))
+                engine.browser.network = network
                 with self.assertRaises(PageDocumentUnavailable):
                     await scanner.scan_page("http://app.test/x")
+                self.assertTrue(any("body_unavailable" in note for note in engine.wave_errors))
 
     async def test_header_only_scanner_not_degraded_by_body_failure(self):
         # 本文読取失敗(body_unavailable)でも、header 監査(clickjacking)はヘッダで完了できる。
