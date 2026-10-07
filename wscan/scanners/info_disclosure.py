@@ -16,7 +16,7 @@ from wscan.scanner_contract import (
     ValueKind,
 )
 
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, PageDocumentUnavailable
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -362,7 +362,11 @@ class InfoDisclosureScanner(BaseScanner):
         findings += await self._check_sensitive_files(origin)
         findings += await self._check_directory_listing(origin)
         findings += await self._check_tech_headers(url)
-        findings += await self._check_error_page(url)
+        try:
+            findings += await self._check_error_page(url)
+        except PageDocumentUnavailable as exc:
+            exc.findings.extend(findings)
+            raise
         return findings
 
     async def _check_directory_listing(self, origin: str) -> list[Finding]:
@@ -595,29 +599,33 @@ class InfoDisclosureScanner(BaseScanner):
         return [finding]
 
     async def _check_error_page(self, url: str) -> list[Finding]:
-        """Check current page HTML for verbose error / stack trace patterns."""
-        try:
-            source = await self.browser.page.content()
-        except Exception:
+        """対象 URL の本文を監査する（別ページの残存 DOM を読まない）。"""
+        source = await self._document_body(url)
+        label = self._classify_error_body(source)
+        if label is None:
             return []
-
-        for pattern, label in _CONTENT_PATTERNS.items():
-            if re.search(pattern, source, re.IGNORECASE | re.DOTALL):
-                pair = self.current_page_pair(url)
-                finding = await self.record_finding(
-                    url=url,
-                    field_name="(page HTML)",
-                    payload="(no payload — page content analysis)",
-                    evidence=f"Sensitive information in page: {label}",
-                    pair=pair,
-                    severity="medium",
-                    confidence="likely",
-                    evidence_type="info_error_pattern",
-                    evidence_details={"matched_label": label, "pattern": pattern},
-                )
-                return [finding]
-
-        return []
+        # 本文と同じ URL 別キャッシュから証拠を作る。非 2xx のエラー本文も保持する。
+        raw = await self._raw_document_cached(url)
+        pair = {
+            "request": {"url": url, "method": "GET"},
+            "response": {
+                "url": raw.get("url", url), "status": raw.get("status"),
+                "headers": raw.get("headers", {}), "body": source[:2000],
+            },
+        }
+        pattern = next(p for p, name in _CONTENT_PATTERNS.items() if name == label)
+        finding = await self.record_finding(
+            url=url,
+            field_name="(page HTML)",
+            payload="(no payload — page content analysis)",
+            evidence=f"Sensitive information in page: {label}",
+            pair=pair,
+            severity="medium",
+            confidence="likely",
+            evidence_type="info_error_pattern",
+            evidence_details={"matched_label": label, "pattern": pattern},
+        )
+        return [finding]
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         if finding.evidence_type == "info_sensitive_resource":
@@ -702,7 +710,10 @@ class InfoDisclosureScanner(BaseScanner):
 
         return None
 
-    async def _get(self, url: str, follow_redirects: bool):
+    async def _get(self, url: str, follow_redirects: bool | None = None):
+        if follow_redirects is None:
+            # document 観測は共有 transport の scope/redirect/cookie 保護を使う。
+            return await super()._get(url)
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
         kwargs: dict = {"timeout": timeout, "follow_redirects": follow_redirects}
