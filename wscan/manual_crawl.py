@@ -561,6 +561,8 @@ class ManualCrawlSession:
         self._settle_finishing = False
         self._loader_id: str | None = None
         self._paint_event: asyncio.Event | None = None
+        # 保留中に受けた直近フレーム（撮り直し失敗時のフォールバック）。
+        self._held_frame: str = ""
 
     async def start(self, *args, **kwargs) -> dict:
         """記録セッションを開始する。起動途中のどの例外でも資格情報とブラウザを解放する。
@@ -934,6 +936,10 @@ class ManualCrawlSession:
             "Page.lifecycleEvent",
             lambda params: self._on_lifecycle_event(params, cdp),
         )
+        cdp.on(
+            "Page.frameNavigated",
+            lambda params: self._on_frame_navigated(params, cdp),
+        )
         main_frame_id = await self._enable_lifecycle_events(cdp)
         try:
             await cdp.send(
@@ -983,9 +989,29 @@ class ManualCrawlSession:
         kind = classify_lifecycle_event(params, self._main_frame_id, self._loader_id)
         if kind == "navigation":
             self._loader_id = params.get("loaderId") or None
+            self._held_frame = ""  # 遷移前 document のフレームは持ち越さない。
             self._begin_settle(cdp)
         elif kind == "paint" and self._settling and self._paint_event is not None:
             self._paint_event.set()
+
+    def _on_frame_navigated(self, params: dict, cdp) -> None:
+        """プロセス切替でメインフレーム ID が変わったら取り直し、保留を始める。
+
+        renderer の process swap では置換後のメインフレームに新しい ID が付き、
+        その ``init`` は旧 ID と一致せず取りこぼす。``frameNavigated`` で補う。
+        """
+        if cdp is not self._cdp:
+            return
+        frame = params.get("frame") if isinstance(params, dict) else None
+        if not isinstance(frame, dict) or frame.get("parentId"):
+            return
+        frame_id = frame.get("id")
+        if not frame_id or str(frame_id) == self._main_frame_id:
+            return
+        self._main_frame_id = str(frame_id)
+        self._loader_id = frame.get("loaderId") or None
+        self._held_frame = ""
+        self._begin_settle(cdp)
 
     def _begin_settle(self, cdp) -> None:
         """描画確定待ちを開始する。待機中の連続遷移では試行予算を延長しない。"""
@@ -1012,6 +1038,7 @@ class ManualCrawlSession:
         self._settle_finishing = False
         self._settle_cdp = cdp
         self._paint_event = asyncio.Event()
+        self._held_frame = ""
         self._settle_task = loop.create_task(self._settle_loop(cdp, self._settle_gen))
 
     def _settle_stale(self, cdp, gen: int) -> bool:
@@ -1091,11 +1118,17 @@ class ManualCrawlSession:
             return ""
 
     async def _finish_settle(self, cdp, gen: int) -> None:
-        """保留を解除し、撮り直した画面だけを送る。失敗時は次の配信を待つ。"""
+        """保留を解除し、撮り直した画面を送る。撮り直し失敗時は保留中の直近フレームを送る。
+
+        保留中のフレームは ACK 済みで次は届かないことがある（静止ページ）。
+        何も送らないと空/古い画面が残るため、直近の保持フレームで補う。
+        """
         self._settle_finishing = True
         data = await self._capture_viewport(cdp)
         if self._settle_stale(cdp, gen):
             return
+        data = data or self._held_frame
+        self._held_frame = ""
         self._settling = False
         self._settle_finishing = False
         self._settle_cdp = None
@@ -1127,6 +1160,7 @@ class ManualCrawlSession:
         self._settle_finishing = False
         self._settle_cdp = None
         self._paint_event = None
+        self._held_frame = ""
         self._main_frame_id = None
         self._loader_id = None
 
@@ -1157,7 +1191,10 @@ class ManualCrawlSession:
         if cdp is not self._cdp or epoch != (self._settle_gen, self._loader_id, self._settling):
             return
         if self._settling:
-            # 保留中のフレームは ACK のみ。撮り直し後に古い白フレームを再送しない。
+            # 保留中のフレームは送らず、撮り直し失敗時のフォールバックとして保持だけする。
+            data = params.get("data", "")
+            if isinstance(data, str) and data:
+                self._held_frame = data
             return
         await self._emit_frame(params.get("data", ""))
 

@@ -343,15 +343,69 @@ class PaintSettleSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, ["RECAPTURED"])
         self.assertFalse(session._settling)
 
-    async def test_failed_recapture_drops_held_frame_and_resumes_stream(self):
+    async def test_failed_recapture_emits_held_frame_and_resumes_stream(self):
+        # 撮り直し失敗時は ACK 済みの直近保持フレームを送る（静止ページで空画面を残さない）。
         cdp = _SettleCdp([CHROMIUM_BLANK_WHITE_PNG], viewport_jpeg="")
         session, sent = await self._session(cdp)
-        await session._handle_frame({"data": "HELD", "sessionId": 4}, cdp)
+        await session._handle_frame({"data": "OLDER", "sessionId": 4}, cdp)
+        await session._handle_frame({"data": "HELD", "sessionId": 5}, cdp)
+        self.assertEqual(sent, [])
+        await self._settle(session)
+        self.assertEqual(sent, ["HELD"])
+        self.assertFalse(session._settling)
+        self.assertEqual(session._held_frame, "")
+        await session._handle_frame({"data": "NEXT_REAL", "sessionId": 7}, cdp)
+        self.assertEqual(sent, ["HELD", "NEXT_REAL"])
+
+    async def test_failed_recapture_does_not_emit_previous_document_frame(self):
+        # 遷移前 document の保持フレームは、遷移後の撮り直し失敗時に送らない。
+        cdp = _SettleCdp([CHROMIUM_TEXT_PNG])
+        session, sent = await self._session(cdp)
+        await self._settle(session)
+        sent.clear()
+        manual_crawl._PAINT_SETTLE_DELAYS = (0.05,)
+        cdp.thumbs = [CHROMIUM_BLANK_WHITE_PNG]
+        cdp.viewport_jpeg = ""
+        session._on_lifecycle_event({"frameId": "MAIN", "name": "init", "loaderId": "A"}, cdp)
+        await session._handle_frame({"data": "DOC_A", "sessionId": 8}, cdp)
+        session._on_lifecycle_event({"frameId": "MAIN", "name": "init", "loaderId": "B"}, cdp)
         await self._settle(session)
         self.assertEqual(sent, [])
         self.assertFalse(session._settling)
-        await session._handle_frame({"data": "NEXT_REAL", "sessionId": 7}, cdp)
-        self.assertEqual(sent, ["NEXT_REAL"])
+
+    async def test_process_swap_refreshes_main_frame_id(self):
+        # process swap で置換後のメインフレームに新 ID が付いても保留が効く。
+        cdp = _SettleCdp([CHROMIUM_TEXT_PNG])
+        session, sent = await self._session(cdp)
+        await self._settle(session)
+        sent.clear()
+        cdp.thumbs = [CHROMIUM_BLANK_WHITE_PNG, CHROMIUM_TEXT_PNG]
+        cdp.viewport_jpeg = "SWAPPED_PAINTED"
+        # 新 ID の init は旧 ID と一致せず取りこぼされる。
+        session._on_lifecycle_event({"frameId": "MAIN2", "name": "init", "loaderId": "S1"}, cdp)
+        self.assertFalse(session._settling)
+        cdp.handlers["Page.frameNavigated"]({"frame": {"id": "MAIN2", "loaderId": "S1"}})
+        self.assertEqual(session._main_frame_id, "MAIN2")
+        self.assertEqual(session._loader_id, "S1")
+        self.assertTrue(session._settling)
+        await session._handle_frame({"data": "WHITE_AFTER_SWAP", "sessionId": 9}, cdp)
+        self.assertEqual(sent, [])
+        await self._settle(session)
+        self.assertEqual(sent, ["SWAPPED_PAINTED"])
+        # 以降の同 ID の遷移は lifecycle init で検知される。
+        session._on_lifecycle_event({"frameId": "MAIN2", "name": "init", "loaderId": "S2"}, cdp)
+        self.assertTrue(session._settling)
+        await self._settle(session)
+
+    async def test_iframe_or_same_main_frame_navigated_does_not_resettle(self):
+        cdp = _SettleCdp([CHROMIUM_TEXT_PNG])
+        session, sent = await self._session(cdp)
+        await self._settle(session)
+        handler = cdp.handlers["Page.frameNavigated"]
+        handler({"frame": {"id": "CHILD", "parentId": "MAIN", "loaderId": "C1"}})
+        handler({"frame": {"id": "MAIN", "loaderId": "L1"}})
+        self.assertEqual(session._main_frame_id, "MAIN")
+        self.assertFalse(session._settling)
 
     async def test_undecidable_probe_forwards_immediately(self):
         cdp = _SettleCdp([b"garbage"])
