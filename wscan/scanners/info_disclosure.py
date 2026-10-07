@@ -665,9 +665,11 @@ class InfoDisclosureScanner(BaseScanner):
 
         if finding.evidence_type == "info_tech_headers":
             try:
-                r = await self._get(finding.url, follow_redirects=True)
+                r = await self._get(finding.url)
             except Exception:
                 return None
+            if 300 <= r.status_code < 400:
+                return None  # protected redirect was not followed; no target document
             headers = {k.lower(): v for k, v in r.headers.items()}
             expected = (getattr(finding, "evidence_details", {}) or {}).get("headers", [])
             if expected:
@@ -679,8 +681,10 @@ class InfoDisclosureScanner(BaseScanner):
 
         if finding.evidence_type == "info_error_pattern":
             try:
-                r = await self._get(finding.url, follow_redirects=True)
+                r = await self._get(finding.url)
             except Exception:
+                return None
+            if getattr(r, "body_unavailable", False) or 300 <= r.status_code < 400:
                 return None
             return self._classify_error_body(r.text[:8000]) is not None
 

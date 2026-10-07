@@ -57,6 +57,7 @@
 - `WSCAN_E2E=1 python -m pytest tests/test_end_to_end_scan_extra.py -q`
 - `WSCAN_E2E=1 python -m pytest tests/benchmarks/test_scanner_executor_e2e.py -q -k "not sqli and not intranet_injection and not stored_xss"`
 - `WSCAN_E2E=1 python -m pytest tests/test_info_disclosure_page_context.py -q`
+- `python -m pytest tests/test_document_capture_provenance.py tests/test_transport_error_observable.py -q`
 - `python -m pytest -q --ignore=tests/test_end_to_end_scan.py`
 
 ## 再現条件と原因
@@ -66,28 +67,32 @@
 |CSRF|realistic_api /console/billing/payment-method、無token POSTフォーム、匿名実エンジン|既知Positive欠落、page-level tested、wave_errors空|対象navigate前の別ページDOMをevaluate。入力到達後の観測準備問題|
 |詳細エラー|realistic_api /console/debug-error、Python Traceback、現在DOMは別ページ|既知Positive欠落、page-level tested、wave_errors空|_check_error_pageが対象URLを使わずpage.contentを読む。安全ページも古いエラーDOMで誤検知可能|
 
-最小回帰は同じ realistic_api の詳細エラー/安全ツインを使い、現在DOMと対象応答を逆にした2ケース、およびtransport失敗を含む。共有 `_document_body(url)` はURL別取得、非2xx本文保持、取得不能時の未完了伝播を既に提供する。既存の純粋 `_classify_error_body` は署名の意味を変えず利用できる。
+最小回帰は同じ realistic_api の詳細エラー/安全ツインを使い、現在DOMと対象応答を逆にした2ケース、およびtransport失敗を含む。詳細エラーの観測を共有 `_document_body(url)` へ変更し、非2xx本文を保持する。直接GETが失敗した際のcapture fallbackも、fragmentのみ除外したURL/query、GET、document種別、request/response identityを要求する。最新document要求がpending/POST/証拠不明なら古いGETへ戻らず、取得不能として未完了checkpointに残す。XHRや他queryは対象documentの証拠にしない。redirectはブラウザnativeのredirect元request identityで連鎖を証明でき、各hopが直接GETと同じ追従規則（same-host、承認済みupgrade、明示scope）を満たし、最終hopもGET documentの場合だけ辿る。連鎖を証明できないredirect、別ホストhop、POST hop、URL不一致の応答は取得不能とする。通常の直接GETの保護付きredirect処理は維持する。
+
+共有raw取得は info_disclosure、SRI、secret_leak、clickjacking、security_headers、outdated_components が利用する。詳細エラーと技術ヘッダの再検証はキャッシュを使わず、BaseScannerのGETでブラウザnative Cookie jarとSet-Cookie同期、redirect保護を使う。機密資源/ディレクトリ検証のno-followは維持する。実ChromiumでHttpOnly Cookieをscan→詳細エラーverify→技術ヘッダverifyと更新し、後続の保護ページnavigationが認証済みで成功する回帰を含む。
+
+純粋 `_classify_error_body` の署名、severity、重複排除ロジックは変更しない。一方、詳細エラーFindingのrequest/response証拠は対象GETのURL、status、headers、本文先頭2KBへ変わるため、「検出データ非改変」とは扱わない。document観測と再検証はGETを送信する。GETにも状態変更やone-time token消費はあり得るため、read-only検査という分類だけで副作用なしとは保証しない。
 
 ## 残存確認項目
 
-- CSRFの対象DOM準備と動的フォーム、SessionのCookie観測時点/URL帰属は独立した共通ページ文脈の課題。単に全page scannerの前へnavigateを追加すると状態変更GET/flow状態を変えるため個別設計と回帰が必要。
+- CSRFの対象DOM準備と動的フォームは確認済みFN・未修正であり、個別follow-upの起票/紐付けもpending。SessionのCookie観測時点/URL帰属は別の検証候補。単に全page scannerの前へnavigateを追加すると状態変更GET/flow状態を変えるため個別設計と回帰が必要。
 - JSONのXSS/DOM-XSS/redirect/stored-XSS/mail-header、および汎用Header/Cookie/Path注入はcontract上の未接続領域。対応済みPositiveのFNと混同しない。
 - healthcareの既知高難度gap（boolean SQLi、二重decode traversal、backslash redirect）と長時間full scan、large_vuln_appの全経路は第一パスで完了したと扱わない。
 - passive scannerのtested/no-op行やfield互換no-opは実probeの証拠にならない。到達台帳・requestログ・ground truthを併せて確認する。
 
-## 第一パスの実行結果
+## 第一パスの実行結果（詳細エラー観測の変更時点）
 
 - intranet 実エンジン: 3 tests / 9 subtests 成功。OS・SSRF・NoSQL・DOM-XSS の既知 Positive と安全ツインを確認。
 - 既存 benchmark 実 E2E: SQLi・intranet injection・stored-XSS を除く9 tests成功。XSS、SSTI、traversal、redirect、header injection、LDAP、security headers、SRI、secret leak、clickjacking、JS static、CORS、host header、upload、JWT の manifest 採点を確認。
 - API の既知 Positive: 修正前 7/9 → 修正後 8/9。詳細エラーを回復し、安全エラーツインには finding 無し。残る CSRF は未修正。
-- API の到達キー (check,path,field,location): 161 → 161、捕捉要求 39 → 39。large fixture（page_count=4、全検査ルート保持）の到達キー 58 → 58、捕捉要求 202 → 202、.env Positive を維持。選択scannerはpage-onlyでpayloads.jsonlは両runとも無いが、largeにはengineのchain marker POSTが各1件ある。nonce値だけが変わり、同じsupport入力へ送達している。捕捉要求はブラウザ由来であり、直接HTTP検査の全probe台帳ではない。任意入力面の注入非回帰を意味しない。
+- API の到達キー (check,path,field,location): 161 → 161、捕捉要求 39 → 39。large fixture（page_count=4、全検査ルート保持）の到達キー 58 → 58、捕捉要求 202 → 202、.env Positive を維持。選択scannerはpage-onlyでpayloads.jsonlは両runとも無いが、largeにはengineのchain marker POSTが各1件ある。nonce値だけが変わり、同じsupport入力へ送達している。捕捉要求はブラウザ由来であり、追加のdocument GETと再検証を含む直接HTTP検査の全probe台帳ではない。これは指定fixtureの到達キー/ブラウザ捕捉件数の比較であり、実行probe総数や任意入力面の注入非回帰を保証しない。
 - 最小回帰: 修正前は別DOMのPositive/安全ツイン/取得不能の3ケース失敗、追加の実エンジン回帰も失敗。修正後は対象URL本文を判定し、既存 artifact 回帰と実E2Eを含め45 tests / 2 subtests成功。取得不能前に得た資源findingも保持する回帰を追加。
 
 ## 共通ページ文脈の追加切り分け
 
 |経路|状態|理由・次の確認|
 |---|---|---|
-|info_disclosure 詳細エラー|修正・実再現済み|URL別 document 取得と純粋判定へ統一|
+|info_disclosure 詳細エラー|対象URL観測を修正・実再現済み|URL別document取得と純粋判定。fallback証拠の同一性とverify Cookie同期も回帰対象|
 |csrf scan_page|FN実再現済み・未修正|現在DOMのform列挙。動的フォームを保持する対象ページ準備が必要|
 |session scan_page|観測時点/帰属の候補|全context cookieをURLfilter無しで取得し、cookie名で一度だけ報告。今回API Positiveは検出済みでありFN確定とはしない|
 |js_static scan_page|API template fallback候補|通常attackはscan_page_contextでcrawl HTMLを使い保護済み。API passはscan_page直呼びで現在DOM fallbackが残る|
@@ -98,6 +103,6 @@
 |file_upload / mail_header / DOM-XSS|field経路|form/probeのnavigation後にDOMを読むため、page-levelの順序だけで同型バグと断定しない|
 |WebSocket|専用message経路|evaluateはsocketを開くためのブラウザtransport。HTML判定ではない|
 
-追跡した候補をすべて修正済みとは扱わない。共有原因は「渡されたURLと実際の観測元が同一である保証の欠落」であり、実証済みFNと静的候補を分けて後続検証する。
+追跡した候補をすべて修正済みとは扱わない。「渡されたURLと実際の観測元が同一である保証の欠落」を詳細エラーと共有raw fallbackで修正したが、全page scannerの文脈保証を解決したものではない。実証済みFNと静的候補を分けて後続検証する。39カテゴリの宣言表は各カテゴリ/全carrierの実到達証明ではなく、全体の検知率受入やnightly成功もこの選択実行結果からは保証しない。
 
-最終非E2E: 3322 passed、34 skipped、455 subtests passed。基準は3319 passed、33 skipped、453 subtests passedで、回帰は加算的。E2E環境の実起動も確認済み。
+第一パス時点の非E2E: 3322 passed、34 skipped、455 subtests passed。比較基準は3319 passed、33 skipped、453 subtests passed。これは当時の実行結果であり、変更後の全suiteは上記コマンドで再検証する。
