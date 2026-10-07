@@ -291,8 +291,16 @@ async def _call_llm_raw(payload_gen: "PayloadGenerator", prompt: str) -> str | N
         return await llm_client.complete_text(payload_gen, prompt, max_tokens=400)
 
 
-def _get_static(check_type: str) -> str:
+def _get_static(check_type: str, lang: str = "ja") -> str:
     """静的修正ガイダンスを返す。完全一致なければ prefix フォールバック。"""
+    from .i18n import normalize_lang, translate, available_keys
+    if normalize_lang(lang) == "en":
+        key = f"remediation.{check_type}"
+        if key not in available_keys("en"):
+            key = f"remediation.{check_type.split('_')[0]}"
+        if key in available_keys("en"):
+            return translate(key, "en")
+        return translate("remediation.generic", "en", check=check_type)
     if check_type in _STATIC_FIX:
         return _STATIC_FIX[check_type]
     base = check_type.split("_")[0]

@@ -76,10 +76,14 @@ _SARIF_SCHEMA = (
 
 
 from wscan.scanners.base import finding_dict_confirmed
+from .i18n import DEFAULT_LANG, normalize_lang, translate
 
 
 class SarifExporter:
     """SARIF 2.1.0 ドキュメントを生成するエクスポーター。"""
+
+    def __init__(self, lang: str = DEFAULT_LANG):
+        self.lang = normalize_lang(lang)
 
     def export(
         self,
@@ -181,6 +185,8 @@ class SarifExporter:
             severity = f.get("severity", "medium")
             level = _SEVERITY_TO_LEVEL.get(severity, "warning")
             desc = _RULE_DESCS.get(ct, ct)
+            if self.lang == "en" and ct in _RULE_DESCS:
+                desc = translate(f"sarif.rule.{ct}", self.lang)
 
             # 修正ガイダンス (remediation._STATIC_FIX から流用)
             help_text = self._get_remediation(ct)
@@ -269,14 +275,16 @@ class SarifExporter:
 
         return result
 
-    @staticmethod
-    def _get_remediation(check_type: str) -> str:
+    def _get_remediation(self, check_type: str) -> str:
         """remediation モジュールの静的テンプレートから修正ガイダンスを取得する。"""
         try:
+            if self.lang == "en":
+                from wscan.remediation import _get_static
+                return _get_static(check_type, lang=self.lang)
             from wscan.remediation import _STATIC_FIX
             return _STATIC_FIX.get(check_type, f"{check_type} の適切な入力検証と出力エスケープを実施してください。")
         except Exception:
-            return f"{check_type} の適切な入力検証と出力エスケープを実施してください。"
+            return translate("sarif.fallback.remediation", self.lang, check=check_type)
 
 
 def write_sarif(
@@ -285,6 +293,7 @@ def write_sarif(
     output_path: "Path | str",
     tool_version: str = "1.0.0",
     coverage: dict | None = None,
+    lang: str = DEFAULT_LANG,
 ) -> Path:
     """
     Finding オブジェクトのリスト (または to_dict() 済み dict のリスト) を
@@ -299,7 +308,7 @@ def write_sarif(
         elif isinstance(f, dict):
             findings_dicts.append(f)
 
-    exporter = SarifExporter()
+    exporter = SarifExporter(lang=lang)
     sarif_doc = exporter.export(
         findings_dicts, target_url=target_url, tool_version=tool_version, coverage=coverage
     )

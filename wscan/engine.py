@@ -883,6 +883,7 @@ class ScanEngine:
         logged_in_marker: str = "",
         # Hybrid の Agent Finding。決定論検証の完了後、レポート直前に併記する
         additional_report_findings: Optional[list[Finding]] = None,
+        report_lang: str = "ja",
     ):
         # ユーザーが指定した URL は末尾スラッシュも含めてそのまま保持する。
         # 以前は url.rstrip("/") で末尾の "/" を一律に除去していたが、
@@ -977,6 +978,8 @@ class ScanEngine:
         self.previous_scan_dir: Optional[str] = previous_scan_dir
         # K: SARIF 出力フラグ
         self.sarif: bool = sarif
+        from .i18n import normalize_lang
+        self.report_lang = normalize_lang(report_lang)
         # O: HAR インポートパス
         self.har_path: str = har_path
         # 手動巡回インポートパス
@@ -7577,6 +7580,7 @@ class ScanEngine:
                     self.all_findings,
                     target_url=self.target_url,
                     output_path=self.output_dir / "report.sarif",
+                    lang=getattr(self, "report_lang", "ja"),
                     coverage=self.coverage_summary(),  # 検査カバレッジを SARIF へ（0016）
                 )
                 sarif_out = str(sarif_path)
@@ -7621,7 +7625,7 @@ class ScanEngine:
         （初回描画・分析後 refresh の双方から呼ぶ・Codex #172 P2）。
         """
         from .report import ReportGenerator
-        gen = ReportGenerator(self.output_dir)
+        gen = ReportGenerator(self.output_dir, lang=getattr(self, "report_lang", "ja"))
         display_scan_matrix = self._scan_matrix_for_display()
 
         # 差分スキャン結果を読み込む (evidence.json に書き込み済み)
