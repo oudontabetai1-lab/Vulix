@@ -1,6 +1,7 @@
 """wscan.laya_calibration（純粋関数・Laya/ブラウザ非依存）。"""
 
 import hashlib
+import pytest
 
 from tests.fixtures import realistic_api, realistic_healthcare, realistic_intranet, realistic_site
 from wscan import laya_calibration as lc
@@ -29,7 +30,7 @@ def test_dataset_has_safe_twins_and_unique_ids():
     neg = [s for s in ds if s["label"] == 0]
     assert len(pos) >= 40 and len(neg) >= 40  # 安全ツインが誤検知ガードとして揃う
     assert len({s["id"] for s in ds}) == len(ds)
-    assert "note" not in lc.default_state(ds[0])  # 正解説明を state に漏らさない
+    assert all(lc.default_state(s) is None for s in ds)  # 正解表は実観測ではない
 
 
 def test_split_is_deterministic_stratified_and_disjoint():
@@ -47,7 +48,7 @@ def test_ece_and_bins():
     assert abs(lc.ece([0.9] * 10, [1] * 5 + [0] * 5) - 0.4) < 1e-9
     bins = lc.reliability_bins([0.05, 0.95, 1.0], [0, 1, 1], 10)
     assert [b["count"] for b in bins] == [1, 2]
-    assert lc.ece([], []) == 0.0 and lc.brier([], []) == 0.0
+    assert lc.ece([], []) is None and lc.brier([], []) is None
 
 
 def test_platt_reduces_ece_on_overconfident_scores():
@@ -74,6 +75,7 @@ def test_threshold_cost_tradeoff_and_confusion():
 def test_evaluate_measures_fp_fn_before_after_on_holdout():
     ds = lc.build_dataset(FIXTURES)
     r = lc.evaluate(ds, _overconfident(ds))
+    assert r["status"] == "ok"
     for side in ("raw", "calibrated"):
         h = r[side]["holdout"]
         assert {"fp", "fn", "fpr", "fnr"} <= h.keys()
@@ -100,13 +102,70 @@ def test_abstain_counted_not_dropped():
     assert lc.evaluate(ds, scores)["abstained"] == 1
 
 
+@pytest.mark.parametrize("labels,holdout_frac", [([], 0.3), ([0, 0, 0], 0.3), ([1, 1, 1], 0.3),
+                                               ([0, 1], 0.3), ([0, 0, 1], 0.3), ([0, 0, 1], 0.9)])
+def test_evaluate_requires_both_classes_in_both_splits(labels, holdout_frac):
+    ds = [{"id": str(i), "label": label} for i, label in enumerate(labels)]
+    r = lc.evaluate(ds, {s["id"]: 0.7 for s in ds}, holdout_frac=holdout_frac)
+    assert r["status"] == "insufficient-data" and r["reason"]
+    assert all(r[k] is None for k in ("raw", "calibrated", "platt", "overfit"))
+    assert r["n_calib"] + r["n_holdout"] == len(ds)
+
+
+def test_evaluate_abstentions_can_remove_a_class():
+    ds = lc.build_dataset(FIXTURES)
+    for scores in ({}, dict.fromkeys(s["id"] for s in ds),
+                   {s["id"]: 0.7 if s["label"] else None for s in ds}):
+        r = lc.evaluate(ds, scores)
+        assert r["status"] == "insufficient-data" and r["overfit"] is None
+        assert r["abstained"] == sum(scores.get(s["id"]) is None for s in ds)
+
+
 def test_laya_scores_fail_open_and_reads_noul():
     ds = lc.build_dataset({"intranet": realistic_intranet})
+    for s in ds:
+        s["observations"] = {"check": "xss", "probe": {"reflected": True}}
     assert set(lc.laya_scores(ds, decide=lambda s, q: None).values()) == {None}
     got = lc.laya_scores(ds, decide=lambda s, q: {"answers": {"vulnerable": {"noul": 0.7}}})
     assert set(got.values()) == {0.7}
     bad = lc.laya_scores(ds, decide=lambda s, q: {"answers": {"vulnerable": {"noul": 3}}})
     assert set(bad.values()) == {None}
+
+
+def test_default_state_is_independent_of_fixture_ground_truth():
+    observed = {"check": "xss", "probe": {"reflected": True}}
+    samples = [{"id": "positive", "fixture": "vulnerable", "path": "/unsafe", "check": "xss",
+                "label": 1, "note": "exploitable", "observations": observed},
+               {"id": "negative", "fixture": "safe", "path": "/secure", "check": None,
+                "label": 0, "note": "safe twin", "observations": observed}]
+    states = []
+    def decide(state, questions):
+        states.append(state)
+        return {"answers": {"vulnerable": {"noul": 0.7}}}
+    assert lc.laya_scores(samples, decide=decide) == {"positive": 0.7, "negative": 0.7}
+    assert states == [observed, observed]
+
+
+@pytest.mark.parametrize("observations", [None, {}, {"probe": "response"}, {"check": None, "probe": "response"}, {"check": "xss"}])
+def test_missing_observations_abstain_without_decide(observations):
+    sample = {"id": "safe", "path": "/secure", "check": None, "observations": observations}
+    def unexpected(*args):
+        raise AssertionError("Insufficient observations must not reach Laya")
+    assert lc.laya_scores([sample], decide=unexpected) == {"safe": None}
+
+
+def test_empty_questions_abstain_for_every_sample_without_callbacks():
+    ds = lc.build_dataset(FIXTURES)
+    def unexpected(*args):
+        raise AssertionError("Empty questions must not invoke callbacks")
+    assert lc.laya_scores(iter(ds), questions={}, state_fn=unexpected, decide=unexpected) == {
+        s["id"]: None for s in ds}
+
+
+def test_custom_state_fn_remains_supported():
+    ds = [{"id": "input"}]
+    assert lc.laya_scores(ds, state_fn=lambda s: "Observed probe response",
+                          decide=lambda s, q: {"answers": {"vulnerable": {"noul": 0.4}}}) == {"input": 0.4}
 
 
 def test_laya_scores_default_off_without_env(monkeypatch):

@@ -83,16 +83,16 @@ def reliability_bins(probs: list[float], labels: list[int], n_bins: int = 10) ->
     return out
 
 
-def ece(probs: list[float], labels: list[int], n_bins: int = 10) -> float:
+def ece(probs: list[float], labels: list[int], n_bins: int = 10) -> Optional[float]:
     """Expected Calibration Error（件数重み付きの |平均確率 − 陽性率|）。"""
     if not probs:
-        return 0.0
+        return None
     return sum(b["count"] * abs(b["confidence"] - b["accuracy"])
                for b in reliability_bins(probs, labels, n_bins)) / len(probs)
 
 
-def brier(probs: list[float], labels: list[int]) -> float:
-    return sum((p - y) ** 2 for p, y in zip(probs, labels)) / len(probs) if probs else 0.0
+def brier(probs: list[float], labels: list[int]) -> Optional[float]:
+    return sum((p - y) ** 2 for p, y in zip(probs, labels)) / len(probs) if probs else None
 
 
 # ---------------------------------------------------------------------------
@@ -201,11 +201,17 @@ def evaluate(samples: list[dict], scores: dict[str, Optional[float]], *, holdout
     """校正 split で Platt と閾値を決め、held-out で校正前/後の ECE・Brier・FP/FN を比較する。
 
     `scores[id]` が None（Laya 判断なし）のサンプルは黙って捨てず `abstained` に数える。
+    両 split にスコア付きの両クラスが無ければ status=insufficient-data とし、評価値は None。
     `overfit` は校正 split と held-out のコスト率差が `max_gap` 超（reward hacking/過適合の疑い）。
     """
     scored = [s for s in samples if scores.get(s["id"]) is not None]
     abstained = len(samples) - len(scored)
     calib, hold = split_holdout(scored, holdout_frac)
+    counts = {"n_calib": len(calib), "n_holdout": len(hold), "abstained": abstained}
+    if any({s["label"] for s in rows} != {0, 1} for rows in (calib, hold)):
+        return {**counts, "status": "insufficient-data",
+                "reason": "Both calibration and holdout require scored samples of both classes.",
+                "platt": None, "raw": None, "calibrated": None, "overfit": None}
 
     def _xy(rows):
         return [min(max(float(scores[s["id"]]), 0.0), 1.0) for s in rows], [s["label"] for s in rows]
@@ -224,7 +230,7 @@ def evaluate(samples: list[dict], scores: dict[str, Optional[float]], *, holdout
 
     raw = _side(pc, ph)
     cal = _side(apply_platt(pc, params), apply_platt(ph, params))
-    return {"n_calib": len(calib), "n_holdout": len(hold), "abstained": abstained,
+    return {**counts, "status": "ok",
             "platt": params, "raw": raw, "calibrated": cal, "overfit": cal["gap"] > max_gap}
 
 
@@ -235,23 +241,39 @@ _QUESTION = {"vulnerable": {"type": "noul", "instructions":
                             "Probability that this input point is exploitable for the given check."}}
 
 
-def default_state(sample: dict) -> dict:
-    """正解ラベル/`note` を含めない観測可能な情報だけの state。"""
-    return {"check": sample["check"], "path": sample["path"], "field": sample["field"]}
+def default_state(sample: dict) -> Optional[dict]:
+    """caller が収集・匿名化した実観測 `observations` のみを返す。無ければ abstain。
+
+    observations は check とその実 HTTP/probe 観測を含む dict とする。
+    fixture 名、安全/脆弱を暗示する path/field、label/note を混ぜない責任は caller にある。
+    build_dataset は正解表であり実観測ではないため、既定でスコア取得できない。
+    """
+    observations = sample.get("observations")
+    if not isinstance(observations, dict) or not observations.get("check") or len(observations) < 2:
+        return None
+    return observations
 
 
 def laya_scores(samples: Iterable[dict], state_fn: Callable[[dict], Any] = default_state,
                 questions: dict = _QUESTION, decide: Optional[Callable] = None) -> dict[str, Optional[float]]:
     """各サンプルの Laya 確率（`answers[q]["noul"]`）。未導入/障害/範囲外は None（＝abstain）。
 
+    独自 state_fn も実観測からラベル中立な state を作ること。None は観測不足として扱う。
+    fixture の ground truth から state やスコアを作った評価は実モデルの校正証拠にならない。
     ponytail: noul の値を確率とみなす。実出力の形（probabilities 等）を PoC で確認したら読み替える。
     """
     if decide is None:
         from wscan.laya_client import decide
-    q = next(iter(questions))
+    q = next(iter(questions), None)
     out: dict[str, Optional[float]] = {}
     for s in samples:
-        res = decide(state_fn(s), questions)
+        out[s["id"]] = None
+        if q is None:
+            continue
+        state = state_fn(s)
+        if state is None:
+            continue
+        res = decide(state, questions)
         v = res["answers"][q].get("noul") if res else None
         out[s["id"]] = float(v) if isinstance(v, (int, float)) and 0.0 <= v <= 1.0 else None
     return out
