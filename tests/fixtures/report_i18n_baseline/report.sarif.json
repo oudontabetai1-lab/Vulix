@@ -1,0 +1,277 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "originalUriBaseIds": {
+        "WEBROOT": {
+          "uri": "http://fixture.test/"
+        }
+      },
+      "properties": {
+        "hypothesis_findings": 2,
+        "target": "http://fixture.test/",
+        "total_findings": 1,
+        "total_results": 3
+      },
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "logicalLocations": [
+                {
+                  "kind": "parameter",
+                  "name": "q"
+                }
+              ],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "http://fixture.test/p0",
+                  "uriBaseId": "WEBROOT"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "[q] 証拠 <b>&</b> (payload: '\"<script>)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "sqli:http://fixture.test/p0:q"
+          },
+          "properties": {
+            "agent_verified": false,
+            "compliance_refs": {
+              "ipa": [
+                "IPA 1.1 SQLインジェクション"
+              ],
+              "owasp_asvs": [
+                "ASVS V5.3.4",
+                "ASVS V5.3.5"
+              ],
+              "owasp_top10": [
+                "A03:2021 Injection"
+              ],
+              "pci_dss": [
+                "PCI DSS v4.0 §6.2.4",
+                "PCI DSS v4.0 §6.3.2"
+              ]
+            },
+            "confidence": "likely",
+            "cvss_score": 10.0,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+            "field_name": "q",
+            "payload": "'\"<script>",
+            "source": "scanner",
+            "verification_note": "",
+            "verification_state": "reproduced",
+            "verified": true
+          },
+          "ruleId": "sqli"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "logicalLocations": [
+                {
+                  "kind": "parameter",
+                  "name": "q"
+                }
+              ],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "http://fixture.test/p1",
+                  "uriBaseId": "WEBROOT"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "[q] 証拠 <b>&</b> (payload: '\"<script>)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "xss:http://fixture.test/p1:q"
+          },
+          "properties": {
+            "agent_verified": false,
+            "compliance_refs": {
+              "ipa": [
+                "IPA 1.5 クロスサイト・スクリプティング"
+              ],
+              "owasp_asvs": [
+                "ASVS V5.3.3"
+              ],
+              "owasp_top10": [
+                "A03:2021 Injection"
+              ],
+              "pci_dss": [
+                "PCI DSS v4.0 §6.2.4"
+              ]
+            },
+            "confidence": "likely",
+            "cvss_score": 8.8,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",
+            "field_name": "q",
+            "payload": "'\"<script>",
+            "source": "scanner",
+            "verification_note": "",
+            "verification_state": "assumed",
+            "verified": false
+          },
+          "ruleId": "xss"
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "logicalLocations": [
+                {
+                  "kind": "parameter",
+                  "name": "q"
+                }
+              ],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "http://fixture.test/p2",
+                  "uriBaseId": "WEBROOT"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "[q] 証拠 <b>&</b> (payload: '\"<script>)"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "privesc_unauth:http://fixture.test/p2:q"
+          },
+          "properties": {
+            "agent_verified": false,
+            "compliance_refs": {
+              "ipa": [
+                "IPA 2.1 認可・アクセス制御"
+              ],
+              "owasp_asvs": [
+                "ASVS V4.1.1",
+                "ASVS V4.1.2"
+              ],
+              "owasp_top10": [
+                "A01:2021 Broken Access Control"
+              ],
+              "pci_dss": [
+                "PCI DSS v4.0 §7.2.1",
+                "PCI DSS v4.0 §7.3.1"
+              ]
+            },
+            "confidence": "likely",
+            "cvss_score": 9.1,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+            "field_name": "q",
+            "payload": "'\"<script>",
+            "source": "scanner",
+            "verification_note": "",
+            "verification_state": "assumed",
+            "verified": false
+          },
+          "ruleId": "privesc_unauth"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/oudontabetai1-lab/AutoXSScheckTool",
+          "name": "AutoXSScheckTool",
+          "rules": [
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "SQLインジェクション — ユーザー入力がSQLクエリに注入される"
+              },
+              "help": {
+                "markdown": "**SQLインジェクション対策**\n1. プリペアドステートメント（パラメータ化クエリ）を使用し、動的SQL文字列の連結を排除してください。\n2. ORM（Hibernate, SQLAlchemy, Django ORM 等）を活用してください。\n3. 入力値の型チェック・範囲検証を行ってください。\n4. データベースアカウントに最小権限を付与してください。\n例 (Python): `cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))`",
+                "text": "**SQLインジェクション対策**\n1. プリペアドステートメント（パラメータ化クエリ）を使用し、動的SQL文字列の連結を排除してください。\n2. ORM（Hibernate, SQLAlchemy, Django ORM 等）を活用してください。\n3. 入力値の型チェック・範囲検証を行ってください。\n4. データベースアカウントに最小権限を付与してください。\n例 (Python): `cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))`"
+              },
+              "id": "sqli",
+              "name": "Sqli",
+              "properties": {
+                "precision": "medium",
+                "problem.severity": "high",
+                "tags": [
+                  "security",
+                  "web",
+                  "sqli"
+                ]
+              },
+              "shortDescription": {
+                "text": "SQLインジェクション — ユーザー入力がSQLクエリに注入される"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "fullDescription": {
+                "text": "クロスサイト・スクリプティング (反射型) — スクリプトが反射実行される"
+              },
+              "help": {
+                "markdown": "**クロスサイト・スクリプティング (XSS) 対策**\n1. ユーザー入力を HTML に出力する際、必ず HTML エスケープ (`htmlspecialchars`, `escape()` 等) を適用してください。\n2. `Content-Security-Policy` ヘッダを設定し、スクリプト実行元を制限してください。\n3. テンプレートエンジンの自動エスケープ機能を有効にしてください。\n4. `innerHTML` の使用を避け、`textContent` を使用してください。",
+                "text": "**クロスサイト・スクリプティング (XSS) 対策**\n1. ユーザー入力を HTML に出力する際、必ず HTML エスケープ (`htmlspecialchars`, `escape()` 等) を適用してください。\n2. `Content-Security-Policy` ヘッダを設定し、スクリプト実行元を制限してください。\n3. テンプレートエンジンの自動エスケープ機能を有効にしてください。\n4. `innerHTML` の使用を避け、`textContent` を使用してください。"
+              },
+              "id": "xss",
+              "name": "Xss",
+              "properties": {
+                "precision": "medium",
+                "problem.severity": "medium",
+                "tags": [
+                  "security",
+                  "web",
+                  "xss"
+                ]
+              },
+              "shortDescription": {
+                "text": "クロスサイト・スクリプティング (反射型) — スクリプトが反射実行される"
+              }
+            },
+            {
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "fullDescription": {
+                "text": "privesc_unauth"
+              },
+              "help": {
+                "markdown": "**認可制御対策 (未認証アクセス)**\n1. すべての保護エンドポイントで認証チェックを行ってください。\n2. 認可ミドルウェア/デコレータを一元管理してください。\n3. デフォルトで拒否し、明示的に許可する設計 (Deny-by-Default) を採用してください。",
+                "text": "**認可制御対策 (未認証アクセス)**\n1. すべての保護エンドポイントで認証チェックを行ってください。\n2. 認可ミドルウェア/デコレータを一元管理してください。\n3. デフォルトで拒否し、明示的に許可する設計 (Deny-by-Default) を採用してください。"
+              },
+              "id": "privesc_unauth",
+              "name": "Privesc Unauth",
+              "properties": {
+                "precision": "medium",
+                "problem.severity": "critical",
+                "tags": [
+                  "security",
+                  "web",
+                  "privesc_unauth"
+                ]
+              },
+              "shortDescription": {
+                "text": "privesc_unauth"
+              }
+            }
+          ],
+          "version": "1.0.0"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

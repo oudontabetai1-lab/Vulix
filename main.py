@@ -87,6 +87,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     ct  = raw.get("ctf",      {})
     o   = raw.get("output",   {})
 
+    from wscan.i18n import normalize_lang
+    cfg["report_lang"] = normalize_lang(o.get("language", "ja"))
     cfg["checks"]                  = s.get("checks",    ["sqli", "xss", "os"])
     cfg["depth"]                   = int(s.get("depth",     2))
     cfg["max_forms"]               = int(s.get("max_forms", 50))
@@ -781,6 +783,10 @@ Examples:
 
     # ── scan subcommand ────────────────────────────────────────────
     scan = sub.add_parser("scan", help="Run a security scan")
+    scan.add_argument(
+        "--report-lang", choices=("ja", "en"), default=_CFG.get("report_lang", "ja"),
+        help="HTML/SARIF レポートの言語 (既定: ja)",
+    )
     scan.add_argument(
         "url", nargs="+",
         help="対象 URL。複数指定すると 1 回のスキャン（＝同一ログインセッション）で "
@@ -1506,6 +1512,10 @@ Examples:
         ),
     )
     agent.add_argument("url", help="Target URL (e.g. https://example.com)")
+    agent.add_argument(
+        "--report-lang", choices=("ja", "en"), default=_CFG.get("report_lang", "ja"),
+        help="HTML レポートの言語 (既定: ja)",
+    )
     # 注: --llm-timeout / --llm-stream-timeout は agent サブコマンドには **敢えて足さない**。
     # agent モードの LLM は browser-use の Chat クライアント（ChatAnthropic/ChatOpenAI/ChatOllama）が
     # 駆動し、これらへの timeout 配線は browser-use のバージョン依存で本リポジトリからは確実に
@@ -1747,6 +1757,10 @@ Examples:
         "batch",
         help="複数ターゲットを YAML ファイルで一括スキャンする",
         description="YAML ファイルに定義された複数 URL を順次スキャンし、統合サマリーを生成します。",
+    )
+    batch_cmd.add_argument(
+        "--report-lang", choices=("ja", "en"), default=_CFG.get("report_lang", "ja"),
+        help="HTML/SARIF レポートの言語 (既定: ja)",
     )
     batch_cmd.add_argument(
         "targets_file", metavar="TARGETS_YAML",
@@ -2087,6 +2101,7 @@ async def run_agent(args):
         engine = AgentEngine(
             url=args.url,
             llm_provider=args.llm,
+            report_lang=getattr(args, "report_lang", _CFG.get("report_lang", "ja")),
             llm_model=args.model or "",
             ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
             llm_base_url=_agent_base,
@@ -2129,6 +2144,7 @@ async def run_agent(args):
             engine = AgentEngine(
                 url=args.url,
                 llm_provider=args.llm,
+                report_lang=getattr(args, "report_lang", _CFG.get("report_lang", "ja")),
                 llm_model=args.model or "",
                 ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
                 llm_base_url=_agent_base,
@@ -2603,6 +2619,7 @@ async def run_scan(args):
         return dict(
             url=args.url,
             monitor=monitor_obj,
+            report_lang=getattr(args, "report_lang", _CFG.get("report_lang", "ja")),
             payloads_file=args.payloads,
             depth=args.depth,
             headless=args.headless,
@@ -2941,6 +2958,7 @@ async def run_serve(args):
         console.print(f"[dim]対象スコープ(拒否): {', '.join(monitor.denied_target_hosts)}[/dim]")
 
     monitor.default_scan_cfg = {
+        "report_lang": _CFG.get("report_lang", "ja"),
         "checks": _CFG.get("checks", ["sqli", "xss", "os"]),
         "depth": _CFG.get("depth", 2),
         "timeout": _CFG.get("timeout", 30),
@@ -3110,6 +3128,7 @@ async def run_serve(args):
             try:
                 agent_engine = AgentEngine(
                     url=url,
+                    report_lang=cfg.get("report_lang", _CFG.get("report_lang", "ja")),
                     llm_provider=cfg.get("llm", "claude") or "claude",
                     llm_model=cfg.get("agent_model", "") or "",
                     ollama_url=cfg.get("agent_ollama_url", "http://localhost:11434") or "http://localhost:11434",
@@ -3230,6 +3249,7 @@ async def run_serve(args):
             )
             engine = ScanEngine(
                 url=url,
+                report_lang=cfg.get("report_lang", _CFG.get("report_lang", "ja")),
                 monitor=monitor,
                 depth=_serve_ints["depth"],
                 timeout=_serve_ints["timeout"],
@@ -3721,6 +3741,7 @@ async def run_batch(args):
     console.print(f"  定義ファイル: [cyan]{args.targets_file}[/cyan]")
 
     runner = BatchRunner.load_from_yaml(args.targets_file)
+    runner.global_kwargs["report_lang"] = getattr(args, "report_lang", _CFG.get("report_lang", "ja"))
     if getattr(args, "output", ""):
         runner.output_base = Path(args.output)
 

@@ -291,9 +291,22 @@ async def _call_llm_raw(payload_gen: "PayloadGenerator", prompt: str) -> str | N
         return await llm_client.complete_text(payload_gen, prompt, max_tokens=400)
 
 
-def _get_static(check_type: str) -> str:
+def _get_static(check_type: str, lang: str = "ja") -> str:
     """静的修正ガイダンスを返す。完全一致なければ prefix フォールバック。"""
+    from .i18n import DEFAULT_LANG, available_keys, normalize_lang, translate
+    code = normalize_lang(lang)
+    base = check_type.split("_")[0]
+    if code != DEFAULT_LANG:
+        # 個別 ja ガイダンスがある check は同系統の一般英訳で上書きしない（具体策を失うため）。
+        keys = [f"remediation.{check_type}"]
+        if check_type not in _STATIC_FIX:
+            keys.append(f"remediation.{base}")
+        for key in keys:
+            if key in available_keys(code):
+                return translate(key, code)
+        if check_type not in _STATIC_FIX and base not in _STATIC_FIX:
+            return translate("remediation.generic", code, check=check_type)
+        # 個別ガイダンスが未訳なら ja 原文へフォールバック（汎用文に薄めない）。
     if check_type in _STATIC_FIX:
         return _STATIC_FIX[check_type]
-    base = check_type.split("_")[0]
     return _STATIC_FIX.get(base, f"**{check_type} 対策**\n脆弱性の詳細を確認し、入力値の検証・出力のエスケープ・最小権限原則を適用してください。")

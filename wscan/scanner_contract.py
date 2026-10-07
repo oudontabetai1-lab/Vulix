@@ -324,7 +324,7 @@ _CELL_STYLE = {
 }
 
 
-def render_capability_matrix_html(matrix: dict) -> str:
+def render_capability_matrix_html(matrix: dict, lang: str = "ja") -> str:
     """capability matrix（build_capability_matrix の出力）を HTML 断片へ整形（純粋）。
 
     行=scanner・列=carrier の記号グリッド。未実装セル（U/P/?）を色分けし、各セルの
@@ -333,6 +333,8 @@ def render_capability_matrix_html(matrix: dict) -> str:
     JSON dict だけから生成し再計算しない。scanner_contract 内で self.escape に依存しないよう
     stdlib html.escape を使う（純粋・テスト容易）。
     """
+    from .i18n import translator
+    t = translator(lang)
     scanners = matrix.get("scanners", {}) or {}
     carriers = list(matrix.get("carriers", []) or [])
     if not scanners or not carriers:
@@ -376,25 +378,24 @@ def render_capability_matrix_html(matrix: dict) -> str:
 
     legend = " ".join(
         f'<span style="background:{bg};color:{fg};padding:1px 6px;border-radius:3px">'
-        f"{esc(sym)}={esc(label)}</span>"
+        f"{esc(sym)}={esc(t('report.matrix.supported') if sym == 's' else label)}</span>"
         for sym, (label, bg, fg) in _CELL_STYLE.items()
     )
     # `s` は「宣言のみ・E2E 未接続」なので「実際に検査した」と誤読されないよう明記する。
     summary = (
-        f"supported（宣言のみ・E2E 未接続） {counts.get('s', 0)} / "
+        f"{t('report.matrix.supported')} {counts.get('s', 0)} / "
         f"planned {counts.get('P', 0)} / unsupported {counts.get('U', 0)}"
         + (f" / unclassified {counts['?']}" if counts.get("?") else "")
     )
     return (
         '<details style="margin-top:14px"><summary style="cursor:pointer;font-weight:600">'
-        "Scanner capability matrix（in-scope の scanner × carrier）</summary>"
-        f'<p style="margin:6px 0">凡例: {legend}</p>'
+        f"{t('report.matrix.heading')}</summary>"
+        f'<p style="margin:6px 0">{t("report.matrix.legend")}{legend}</p>'
         f"<p>{esc(summary)}</p>"
         '<div class="table-wrap"><table><thead><tr><th>scanner</th><th>state_change</th>'
         f"{header}</tr></thead><tbody>"
         + "".join(body_rows)
         + "</tbody></table></div>"
-        '<p style="color:#666;font-size:0.9em">セル記号の詳細（value_kinds/transports/理由）は'
-        "各セルにマウスを重ねると表示されます。</p>"
+        f'<p style="color:#666;font-size:0.9em">{t("report.matrix.hint")}</p>'
         "</details>"
     )

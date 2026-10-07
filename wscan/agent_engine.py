@@ -156,8 +156,11 @@ class AgentEngine:
         totp_secret: str = "",
         storage_state: str = "",
         resume: bool = False,
+        report_lang: str = "ja",
     ):
         self.url = url.rstrip("/")
+        from .i18n import normalize_lang
+        self.report_lang = normalize_lang(report_lang)
         self.llm_provider = llm_provider
         self.llm_model = llm_model
         self.ollama_url = ollama_url
@@ -326,7 +329,7 @@ class AgentEngine:
             return result
 
         # Generate HTML report
-        gen = ReportGenerator(self.output_dir)
+        gen = ReportGenerator(self.output_dir, lang=self.report_lang)
         report_path = gen.generate(
             target=self.url,
             findings=findings,
