@@ -1334,6 +1334,10 @@ class BaseScanner(ABC):
                     "timestamp": response_timestamp,
                 },
             }
+            # follow_redirects=True の最終 status は redirect 先のもの。boolean-blind 判定が
+            # 「redirect 経由の応答」を 2xx と誤認しないよう、最初の hop の status を残す。
+            if response.history:
+                pair["response"]["redirect_status"] = response.history[0].status_code
             # 実 POST の応答で認証失効を検知したらエンジンへ通知する。GET プレフライト
             # (_api_session_looks_expired) では検知できない「メソッド限定保護」エンドポイント
             # (GET=404/405, POST=401) の失効で、空 Finding を「済み」記録するのを防ぐ
