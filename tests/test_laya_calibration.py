@@ -267,8 +267,35 @@ def test_default_noul_question_has_true_false_criteria():
     lambda p, y: lc.brier(p, y),
     lambda p, y: lc.confusion(p, y, 0.5),
     lambda p, y: lc.fit_platt(p, y),
+    lambda p, y: lc.choose_threshold(p, y),
 ])
 @pytest.mark.parametrize("probs,labels", [([0.9, 0.1, 0.8], [1, 0]), ([0.9], [1, 0]), ([], [1])])
 def test_metrics_reject_mismatched_lengths(fn, probs, labels):
     with pytest.raises(ValueError, match="length mismatch"):
         fn(probs, labels)
+
+
+@pytest.mark.parametrize("fn", [lc.reliability_bins, lc.ece, lc.brier, lc.fit_platt,
+                                 lc.choose_threshold, lambda p, y: lc.confusion(p, y, 0.5),
+                                 lambda p, y: lc.apply_platt(p, (1.0, 0.0))])
+@pytest.mark.parametrize("bad", [-0.1, 1.0001, float("nan"), float("inf"), float("-inf"),
+                                 True, "0.5", None])
+def test_exported_metrics_reject_invalid_probabilities(fn, bad):
+    with pytest.raises(ValueError, match="finite probabilities"):
+        fn([0.5, bad], [0, 1])
+    # fit_platt の片クラス早期 return も検証を迂回しない。
+    with pytest.raises(ValueError, match="finite probabilities"):
+        fn([bad], [0])
+
+
+def test_exported_metrics_preserve_endpoints_and_empty_inputs():
+    p, y = [0, 1], [0, 1]
+    assert [b["confidence"] for b in lc.reliability_bins(p, y)] == p
+    assert lc.ece(p, y) == lc.brier(p, y) == 0
+    assert lc.confusion(p, y, lc.choose_threshold(p, y))["tp"] == 1
+    assert all(math.isfinite(v) for v in lc.fit_platt(p, y))
+    assert lc.apply_platt(p, (1, 0)) == pytest.approx([1e-6, 1 - 1e-6])
+    assert lc.reliability_bins([], []) == lc.apply_platt([], (1, 0)) == []
+    assert lc.fit_platt([], []) == (1, 0)
+    assert lc.choose_threshold([], []) > 1
+    assert lc.confusion([], [], 0.5) == dict(tp=0, fp=0, fn=0, tn=0, fpr=0, fnr=0)

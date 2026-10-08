@@ -68,9 +68,11 @@ def split_holdout(samples: list[dict], holdout_frac: float = 0.3, salt: str = "l
 # 校正指標
 # ---------------------------------------------------------------------------
 def _check_aligned(probs: list[float], labels: list[int]) -> None:
-    """probs と labels の長さ不一致は ValueError（zip の黙った切り捨てで不正な指標を作らない）。"""
+    """長さ不一致・不正確率は ValueError（切り捨てや clamp で不正な指標を作らない）。"""
     if len(probs) != len(labels):
         raise ValueError(f"probs and labels length mismatch: {len(probs)} != {len(labels)}")
+    if any(_valid_prob(p) is None for p in probs):
+        raise ValueError("probs must contain finite probabilities in [0, 1]")
 
 
 def reliability_bins(probs: list[float], labels: list[int], n_bins: int = 10) -> list[dict]:
@@ -108,6 +110,8 @@ def brier(probs: list[float], labels: list[int]) -> Optional[float]:
 # Platt scaling（logit(p) への 1 次元ロジスティック回帰）
 # ---------------------------------------------------------------------------
 def _logit(p: float) -> float:
+    if _valid_prob(p) is None:
+        raise ValueError("probs must contain finite probabilities in [0, 1]")
     p = min(max(p, _EPS), 1 - _EPS)
     return math.log(p / (1 - p))
 
@@ -200,6 +204,7 @@ def choose_threshold(probs: list[float], labels: list[int], fp_cost: float = 1.0
 
     PoC ごとの運用コスト（例: 攻撃入力の優先順位付けなら FN を重く）を引数で渡す。
     """
+    _check_aligned(probs, labels)
     cands = sorted(set(probs)) + [1.0 + _EPS]
     return min(cands, key=lambda t: (_cost_rate(confusion(probs, labels, t), fp_cost, fn_cost), t))
 
