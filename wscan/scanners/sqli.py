@@ -98,6 +98,9 @@ def _boolean_blind_divergence(
     false_len: int,
     sim_true_base: float,
     sim_false_base: float,
+    baseline_status: int | None = None,
+    true_status: int | None = None,
+    false_status: int | None = None,
 ) -> bool:
     """長さ・自然変動の既存ガードを保ち、真偽の類似度差も許容する純粋判定。"""
     diff_true = abs(true_len - baseline_len)
@@ -107,7 +110,16 @@ def _boolean_blind_divergence(
         and diff_false > max(200, baseline_variance * 4)
         and diff_true < diff_false * 0.5
         and sim_true_base >= 0.85
-        and (sim_false_base <= 0.80 or sim_true_base - sim_false_base >= _BOOLEAN_SIM_GAP)
+        and (
+            sim_false_base <= 0.80
+            or (
+                sim_true_base - sim_false_base >= _BOOLEAN_SIM_GAP
+                # Missing metadata cannot establish that this is the same page type.
+                and all(isinstance(status, int) and 200 <= status < 400
+                        for status in (baseline_status, true_status, false_status))
+                and baseline_status // 100 == true_status // 100 == false_status // 100
+            )
+        )
     )
 
 
@@ -385,9 +397,11 @@ class SQLiScanner(BaseScanner):
                 await self.log_payload_test(
                     field_name, partner, "sqli_boolean_partner", ip.url
                 )
-                partner_source, _ = await self._apply_ip(ip, partner)
+                partner_source, partner_pair = await self._apply_ip(ip, partner)
                 true_src = source if payload == true_payload else partner_source
                 false_src = partner_source if payload == true_payload else source
+                true_pair = pair if payload == true_payload else partner_pair
+                false_pair = partner_pair if payload == true_payload else pair
                 # transport 失敗（json_body の timeout/TLS/DNS/proxy 等）は空応答("")を返す。
                 # 空を「false 条件の相違」と誤認して高 severity の偽陽性を出さないよう、
                 # どちらかが空なら比較不能としてこの pair をスキップする（Codex #99 R5）。
@@ -409,6 +423,9 @@ class SQLiScanner(BaseScanner):
                     len(false_src),
                     sim_true_base,
                     sim_false_base,
+                    baseline_pair.get("response", {}).get("status"),
+                    true_pair.get("response", {}).get("status"),
+                    false_pair.get("response", {}).get("status"),
                 ):
                     finding = await self.record_finding(
                         url=ip.url,
@@ -758,11 +775,11 @@ class SQLiScanner(BaseScanner):
                     self.engine._api_auth_failed = False
                 except Exception:
                     pass
-            baseline_source, _ = await self._get_baseline(ip)
+            baseline_source, baseline_pair = await self._get_baseline(ip)
             await self.log_payload_test(finding.field_name, true_payload, "sqli_verify_boolean", finding.url)
-            true_src, _ = await self._apply_ip(ip, true_payload)
+            true_src, true_pair = await self._apply_ip(ip, true_payload)
             await self.log_payload_test(finding.field_name, false_payload, "sqli_verify_boolean", finding.url)
-            false_src, _ = await self._apply_ip(ip, false_payload)
+            false_src, false_pair = await self._apply_ip(ip, false_payload)
             # boolean verify は初回 replay 後に baseline/true/false と複数回 replay する。
             # その途中で session 失効(401)しても _api_auth_failed が立つので、いずれかで
             # 失効したら login/401 本文を SQL 応答と比較せず indeterminate(None)を返す
@@ -780,6 +797,9 @@ class SQLiScanner(BaseScanner):
                 len(false_src),
                 self._body_similarity(true_src, baseline_source),
                 self._body_similarity(false_src, baseline_source),
+                baseline_pair.get("response", {}).get("status"),
+                true_pair.get("response", {}).get("status"),
+                false_pair.get("response", {}).get("status"),
             )
         if etype == "sqli_concat_equivalence":
             # Re-run the concatenation-equivalence probe; injectable again ⇒ verified.

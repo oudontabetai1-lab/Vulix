@@ -39,11 +39,31 @@ class BooleanBlindDivergenceUnitTests(unittest.TestCase):
         baseline_len=2105, baseline_variance=0,
         true_len=2105, false_len=1745,
         sim_true_base=1.0, sim_false_base=0.8973,
+        baseline_status=200, true_status=200, false_status=200,
     )
 
     def test_shared_chrome_case_is_detected(self):
         # 本修正の主眼: 共有レイアウトで sim_false が天井(0.80)超でも検知する。
         self.assertTrue(_boolean_blind_divergence(**self.SHARED_CHROME))
+
+    def test_middleware_status_rejects_relative_gap(self):
+        for status in (302, 403, 429, 500, 503, None):
+            with self.subTest(false_status=status):
+                values = {**self.SHARED_CHROME, "false_status": status,
+                          "sim_false_base": 0.94}
+                self.assertFalse(_boolean_blind_divergence(**values))
+
+    def test_relative_gap_requires_baseline_and_true_status(self):
+        for field in ("baseline_status", "true_status"):
+            for status in (None, 302, 403, 500):
+                with self.subTest(field=field, status=status):
+                    self.assertFalse(_boolean_blind_divergence(
+                        **{**self.SHARED_CHROME, field: status}))
+
+    def test_legacy_ceiling_accepts_error_status(self):
+        self.assertTrue(_boolean_blind_divergence(
+            **{**self.SHARED_CHROME, "sim_false_base": 0.75,
+               "false_status": 429}))
 
     def test_old_ceiling_alone_would_have_missed_it(self):
         # 旧ロジック（<=0.80 の天井のみ）はこのケースを veto していた＝見逃しの再現。
@@ -107,10 +127,12 @@ class BooleanBlindFixtureIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose()
 
     async def _divergence(self, path: str, field: str, true_p: str, false_p: str) -> bool:
-        base = (await self.client.get(path, params={field: "baseline_test"})).text
+        base_response = await self.client.get(path, params={field: "baseline_test"})
+        base = base_response.text
         base2 = (await self.client.get(path, params={field: "baseline_test"})).text
-        true_src = (await self.client.get(path, params={field: true_p})).text
-        false_src = (await self.client.get(path, params={field: false_p})).text
+        true_response = await self.client.get(path, params={field: true_p})
+        false_response = await self.client.get(path, params={field: false_p})
+        true_src, false_src = true_response.text, false_response.text
         return _boolean_blind_divergence(
             len(base),
             abs(len(base) - len(base2)),
@@ -118,6 +140,7 @@ class BooleanBlindFixtureIntegrationTests(unittest.IsolatedAsyncioTestCase):
             len(false_src),
             _SIM._body_similarity(true_src, base),
             _SIM._body_similarity(false_src, base),
+            base_response.status_code, true_response.status_code, false_response.status_code,
         )
 
     async def test_vulnerable_refill_is_detected(self):
@@ -165,9 +188,9 @@ class SQLiDetectionMatrixTests(unittest.IsolatedAsyncioTestCase):
         )
         for ip in points:
             for kind, payload in (
-                ("boolean", "1 AND 1=1"), ("error", "'"), ("time", "1' AND SLEEP(3)--"),
+                ("boolean", "1 AND 1=1"), ("boolean", "1 AND 1=2"), ("error", "'"), ("time", "1' AND SLEEP(3)--"),
             ):
-                for vulnerable in (True, False):
+                for vulnerable in (True, False, "middleware"):
                     with self.subTest(location=ip.location, kind=kind, vulnerable=vulnerable):
                         engine = SimpleNamespace(
                             browser=SimpleNamespace(screenshot_b64=AsyncMock(return_value="")),
@@ -182,6 +205,8 @@ class SQLiDetectionMatrixTests(unittest.IsolatedAsyncioTestCase):
                         scanner.mutated_payloads = AsyncMock(return_value=[])
                         scanner.run_equivalence_probe = AsyncMock(return_value=None)
 
+                        false_status = 429 if vulnerable == "middleware" else 200
+
                         async def respond(point, value, **kwargs):
                             self.assertEqual(point.location, ip.location)
                             body = bodies["baseline_test"]
@@ -195,18 +220,23 @@ class SQLiDetectionMatrixTests(unittest.IsolatedAsyncioTestCase):
                                     elapsed = 3.2
                             return body, {
                                 "request": {"timestamp": 1},
-                                "response": {"timestamp": 1 + elapsed, "body": body},
+                                "response": {"timestamp": 1 + elapsed, "body": body,
+                                             "status": false_status if kind == "boolean" and value == "1 AND 1=2" else 200},
                             }
 
                         scanner._apply_ip = AsyncMock(side_effect=respond)
                         findings = await scanner.scan_injection_point(ip, {"name": "rx"})
-                        self.assertEqual(len(findings), int(vulnerable))
-                        if vulnerable:
+                        expected = bool(vulnerable) and not (kind == "boolean" and vulnerable == "middleware")
+                        self.assertEqual(len(findings), int(expected))
+                        if expected:
                             finding = findings[0]
                             self.assertEqual(finding.evidence_type, "sqli_" + kind)
                             self.assertEqual(finding.injection_location, ip.location)
                             self.assertTrue(await scanner.verify_finding(finding))
                             self.assertIn(finding, engine.all_findings)
+                            if kind == "boolean":
+                                false_status = 429
+                                self.assertFalse(await scanner.verify_finding(finding))
                         self.assertTrue(scanner.log_payload_test.await_count)
 
 
