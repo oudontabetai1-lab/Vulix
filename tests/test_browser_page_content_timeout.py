@@ -244,3 +244,32 @@ def test_reset_discards_inflight_dialog_screenshot():
         assert not bm._dialog_screenshot_attempted
 
     asyncio.run(run())
+
+
+def test_on_dialog_dismisses_before_screenshot():
+    # OUD-87: 開いた dialog 上の page.screenshot は dismiss まで返らない（実 Chromium 実測で 1 件 3.0s の
+    # native timeout を毎回浪費→alert 多発の realistic_site 通し E2E が 900s を超過）。dismiss を先に行い、
+    # 撮影は閉じた後に成功することを固定する（実ブラウザ不要の決定論テスト）。
+    dismissed = asyncio.Event()
+
+    class _BlockedWhileOpenDialog:
+        message = "xss"
+
+        async def dismiss(self):
+            dismissed.set()
+
+    class _Page:
+        async def screenshot(self, **kw):
+            if not dismissed.is_set():
+                await asyncio.sleep(kw.get("timeout", 3000) / 1000)  # 実機: dialog 未解消だと timeout まで待つ
+                raise TimeoutError("screenshot blocked by open dialog")
+            return b"\xff\xd8\xff"
+
+    bm = _make_dialog_bm()
+    bm.page = _Page()
+    dialog = _BlockedWhileOpenDialog()
+    dialog.page = bm.page
+    start = time.monotonic()
+    asyncio.run(bm._on_dialog(dialog))
+    assert time.monotonic() - start < 1.0      # native timeout(3s) を待たない
+    assert bm.dialog_screenshot_b64            # 閉じた後に証跡撮影できている
