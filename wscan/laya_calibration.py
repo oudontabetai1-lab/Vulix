@@ -205,14 +205,19 @@ def _valid_prob(v: Any) -> Optional[float]:
 
 
 def evaluate(samples: list[dict], scores: dict[str, Optional[float]], *, holdout_frac: float = 0.3,
-             fp_cost: float = 1.0, fn_cost: float = 1.0, max_gap: float = 0.15, n_bins: int = 10) -> dict:
+             fp_cost: float = 1.0, fn_cost: float = 1.0, max_gap: float = 0.15, n_bins: int = 10,
+             min_per_class: int = 5, min_coverage: float = 0.5) -> dict:
     """校正 split で Platt と閾値を決め、held-out で校正前/後の ECE・Brier・FP/FN を比較する。
 
     `scores[id]` が None（Laya 判断なし）のサンプルは黙って捨てず `abstained` に数える。
     有限な [0,1] の実数でない score（範囲外/NaN/inf/bool/非数値）は clamp せず abstain 扱いにし、
     `invalid` にも数える（不正 scorer に偽の有効値・完璧な ECE を与えない）。
     held-out は scorer に依らないよう**全サンプルを先に固定分割**し、各 split 内で abstain を除く。
-    両 split にスコア付きの両クラスが無ければ status=insufficient-data とし、評価値は None。
+    各 split・各クラスで scored 件数が `min_per_class` 以上かつ split 内同クラスの `min_coverage` 以上で
+    なければ status=insufficient-data とし、評価値は None（`coverage` に split×クラスの scored/total）。
+    既定の根拠: 5 件未満では held-out の FPR/FNR が 20% 刻みで閾値・ECE が意味を持たない。カバレッジ
+    過半を要求するのは、scorer が自信のある少数だけ答えて残りを abstain する選別で完璧な指標を作り
+    「成功した校正」に見せる抜け道を塞ぐため（abstain の方が多い評価は scorer の評価として代表性が無い）。
     `overfit` は校正 split と held-out のコスト率差が `max_gap` 超（reward hacking/過適合の疑い）。
     """
     probs = {s["id"]: _valid_prob(scores.get(s["id"])) for s in samples}
@@ -222,9 +227,14 @@ def evaluate(samples: list[dict], scores: dict[str, Optional[float]], *, holdout
     counts = {"n_calib": len(calib), "n_holdout": len(hold),
               "abstained": len(samples) - len(calib) - len(hold),
               "invalid": sum(scores.get(s["id"]) is not None and probs[s["id"]] is None for s in samples)}
-    if any({s["label"] for s in rows} != {0, 1} for rows in (calib, hold)):
+    counts["coverage"] = {
+        name: {y: (sum(s["label"] == y for s in rows), sum(s["label"] == y for s in rows_all)) for y in (0, 1)}
+        for name, rows, rows_all in (("calib", calib, calib_all), ("holdout", hold, hold_all))}
+    if any(scored < max(min_per_class, math.ceil(min_coverage * total))
+           for split in counts["coverage"].values() for scored, total in split.values()):
         return {**counts, "status": "insufficient-data",
-                "reason": "Both calibration and holdout require scored samples of both classes.",
+                "reason": (f"Each class in calibration and holdout requires >= {min_per_class} scored samples "
+                           f"and >= {min_coverage:.0%} scored coverage."),
                 "platt": None, "raw": None, "calibrated": None, "overfit": None}
 
     def _xy(rows):

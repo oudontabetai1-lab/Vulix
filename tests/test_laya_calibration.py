@@ -1,6 +1,8 @@
 """wscan.laya_calibration（純粋関数・Laya/ブラウザ非依存）。"""
 
 import hashlib
+import math
+
 import pytest
 
 from tests.fixtures import realistic_api, realistic_healthcare, realistic_intranet, realistic_site
@@ -210,3 +212,37 @@ def test_laya_scores_default_off_without_env(monkeypatch):
     monkeypatch.delenv("WSCAN_LAYA", raising=False)
     ds = lc.build_dataset({"intranet": realistic_intranet})
     assert set(lc.laya_scores(ds).values()) == {None}
+
+
+def _answer_only(ds, per_split_class):
+    """各 split・各クラスの先頭 n 件だけ正解スコアで答え、残りは abstain する選別 scorer。"""
+    calib, hold = lc.split_holdout(ds)
+    keep = set()
+    for rows in (calib, hold):
+        for y in (0, 1):
+            keep |= {s["id"] for s in [s for s in rows if s["label"] == y][:per_split_class(rows, y)]}
+    return {s["id"]: (float(s["label"]) if s["id"] in keep else None) for s in ds}
+
+
+def test_evaluate_rejects_cherry_picked_scoring_with_mass_abstention():
+    """各 split に陽性1・陰性1だけ完璧に答え残りを abstain → 完璧な指標でも ok にしない。"""
+    ds = lc.build_dataset(FIXTURES)
+    r = lc.evaluate(ds, _answer_only(ds, lambda rows, y: 1))
+    assert r["status"] == "insufficient-data" and r["reason"]
+    assert all(r[k] is None for k in ("raw", "calibrated", "platt", "overfit"))
+    assert r["abstained"] == len(ds) - 4 and r["n_calib"] == r["n_holdout"] == 2
+
+
+def test_evaluate_coverage_gate_boundary():
+    """各 split・各クラスがちょうど下限（max(5, ceil(50%))）なら ok、held-out 陽性が 1 件欠けると insufficient-data。"""
+    ds = lc.build_dataset(FIXTURES)
+    _, hold = lc.split_holdout(ds)
+    def need(rows, y):
+        return max(5, math.ceil(0.5 * sum(s["label"] == y for s in rows)))
+    r = lc.evaluate(ds, _answer_only(ds, need))
+    assert r["status"] == "ok" and r["raw"] is not None and r["overfit"] is not None
+    for split in r["coverage"].values():
+        assert all(scored == max(5, math.ceil(0.5 * total)) for scored, total in split.values())
+    short = _answer_only(ds, lambda rows, y: need(rows, y) - (rows == hold and y == 1))
+    r = lc.evaluate(ds, short)
+    assert r["status"] == "insufficient-data" and r["coverage"]["holdout"][1][0] == need(hold, 1) - 1
