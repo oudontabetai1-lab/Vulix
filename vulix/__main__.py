@@ -5,10 +5,11 @@
 
 サブコマンド別名（Vulix ブランド語彙）:
 - ``explore`` → ``scan`` の別名（``python -m vulix explore <url>`` が ``scan`` として動く）。
+  先頭サブコマンド語のみ argv 上で置換する。
+- ``replay`` → ``main.py`` 側で ``scan`` の argparse 別名として登録済み（flow/HAR 再生は
+  ``--flows`` / ``--har`` で行う）。ここでは置換せずそのまま委譲する。
 
-``agent`` / ``triage`` / ``serve`` 等はそのまま委譲する。``replay`` は現行 CLI に対応する
-独立サブコマンドが無い（flow/HAR 再生は ``scan --flows`` / ``--har`` のフラグ）ため、
-別名は追加しない（Phase 2 で扱う）。
+``agent`` / ``triage`` / ``serve`` 等もそのまま委譲する。
 """
 import sys
 
@@ -21,7 +22,10 @@ _ALIASES = {"explore": "scan"}
 def _show_alias_hint(argv: list[str]) -> None:
     """Vulix の top-level help に wrapper 固有の別名を表示する。"""
     if len(argv) >= 2 and argv[1] in {"-h", "--help"}:
-        print("Vulix command alias: explore (alias for scan)\n")
+        print(
+            "Vulix command aliases: explore (alias for scan), "
+            "replay (alias for scan; flow/HAR 再生)\n"
+        )
 
 
 def _rewrite_argv(argv: list[str]) -> list[str]:

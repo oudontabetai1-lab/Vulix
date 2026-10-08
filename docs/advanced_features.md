@@ -256,6 +256,7 @@ Playwright を使って手動操作（ナビゲーション・フォーム入力
 ```bash
 python main.py record --output flows/login.json http://example.com/login
 # 操作後 Ctrl+C で JSON 保存
+# 再生は scan（または別名 replay）: python main.py replay URL --flows flows/login.json
 ```
 
 ### click 記録の対象

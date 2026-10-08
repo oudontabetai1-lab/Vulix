@@ -782,7 +782,13 @@ Examples:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ── scan subcommand ────────────────────────────────────────────
-    scan = sub.add_parser("scan", help="Run a security scan")
+    # `replay` は scan の別名（0069 Phase1・Vulix 語彙）。flow/HAR 再生は
+    # scan と同じ --flows/--har 経路で行うため、独立実装せず alias で委譲する
+    # （args.command は "replay" になるが dispatch の catch-all で run_scan に入る）。
+    scan = sub.add_parser(
+        "scan", aliases=["replay"],
+        help="Run a security scan（別名 replay: 記録した flow/HAR を --flows/--har で再生）",
+    )
     scan.add_argument(
         "--report-lang", choices=("ja", "en"), default=_CFG.get("report_lang", "ja"),
         help="HTML/SARIF レポートの言語 (既定: ja)",
