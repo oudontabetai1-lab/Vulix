@@ -114,10 +114,9 @@ def _boolean_blind_divergence(
             sim_false_base <= 0.80
             or (
                 sim_true_base - sim_false_base >= _BOOLEAN_SIM_GAP
-                # Missing metadata cannot establish that this is the same page type.
-                and all(isinstance(status, int) and 200 <= status < 400
+                # Redirect/challenge bodies cannot establish SQL-driven divergence.
+                and all(isinstance(status, int) and 200 <= status < 300
                         for status in (baseline_status, true_status, false_status))
-                and baseline_status // 100 == true_status // 100 == false_status // 100
             )
         )
     )

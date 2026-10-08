@@ -46,6 +46,17 @@ class BooleanBlindDivergenceUnitTests(unittest.TestCase):
         # 本修正の主眼: 共有レイアウトで sim_false が天井(0.80)超でも検知する。
         self.assertTrue(_boolean_blind_divergence(**self.SHARED_CHROME))
 
+    def test_relative_gap_rejects_matching_redirect_statuses(self):
+        for status in (300, 301, 302, 303, 307, 308, 399):
+            with self.subTest(status=status):
+                self.assertFalse(_boolean_blind_divergence(
+                    **{**self.SHARED_CHROME, "baseline_status": status,
+                       "true_status": status, "false_status": status}))
+
+    def test_relative_gap_accepts_success_status_boundaries(self):
+        self.assertTrue(_boolean_blind_divergence(
+            **{**self.SHARED_CHROME, "true_status": 201, "false_status": 299}))
+
     def test_middleware_status_rejects_relative_gap(self):
         for status in (302, 403, 429, 500, 503, None):
             with self.subTest(false_status=status):
@@ -159,6 +170,21 @@ class BooleanBlindFixtureIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     await self._divergence("/pharmacy/catalog", "drug", true_p, false_p),
                     "安全ツイン /pharmacy/catalog を誤検知した（false positive）",
                 )
+
+    async def test_redirect_safe_twin_is_not_detected(self):
+        path = "/pharmacy/refill-redirect-safe"
+        responses = [await self.client.get(path, params={"rx": payload})
+                     for payload in ("baseline_test", "1 AND 1=1", "1 AND 1=2")]
+        base, true, false = responses
+        self.assertEqual([r.status_code for r in responses], [302, 302, 302])
+        self.assertNotEqual(true.headers["location"], false.headers["location"])
+        # The bodies satisfy the relaxed branch; only redirect metadata rejects them.
+        self.assertTrue(_boolean_blind_divergence(
+            len(base.text), 0, len(true.text), len(false.text),
+            _SIM._body_similarity(true.text, base.text),
+            _SIM._body_similarity(false.text, base.text), 200, 200, 200,
+        ))
+        self.assertFalse(await self._divergence(path, "rx", "1 AND 1=1", "1 AND 1=2"))
 
     async def test_safe_billing_history_twin_is_not_detected(self):
         for true_p, false_p in (("1 AND 1=1", "1 AND 1=2"), ("1) AND (1=1", "1) AND (1=2")):

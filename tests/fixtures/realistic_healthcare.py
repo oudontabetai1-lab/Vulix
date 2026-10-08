@@ -122,6 +122,8 @@ EXPECTED_FINDINGS = [
 
 # 検出されてはいけない入力/ページ。ここでの finding は誤検知（false positive）。
 SAFE_ENDPOINTS = [
+    {"check": "sqli", "path": "/pharmacy/refill-redirect-safe", "field": "rx",
+     "note": "SQL を実行せず login/challenge へ固定リダイレクト"},
     {"check": "xss", "path": "/portal/help", "field": "q",
      "note": "検索語を HTML エスケープして表示"},
     {"check": "sqli", "path": "/billing/history", "field": "sort",
@@ -1052,6 +1054,16 @@ def create_app() -> FastAPI:
             )
             return _layout("Pharmacy", detail)
         return _layout("Pharmacy", "<p>該当する処方箋はありません。</p>")
+
+    @app.get("/pharmacy/refill-redirect-safe", response_class=HTMLResponse)
+    async def pharmacy_refill_redirect_safe(rx: str = Query("RX-77")):
+        # SAFE: 入力署名による challenge 切替だけで、DB には触れない。
+        challenge = "1=2" in rx
+        detail = "<p>Authentication required.</p>" + ("" if challenge else "Session notice. " * 22)
+        return HTMLResponse(
+            _layout("Pharmacy", detail), status_code=302,
+            headers={"Location": "/auth/challenge" if challenge else "/portal/signin"},
+        )
 
     @app.get("/pharmacy/catalog", response_class=HTMLResponse)
     async def pharmacy_catalog(drug: str = Query("apixaban")):
