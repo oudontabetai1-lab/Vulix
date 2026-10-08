@@ -13,7 +13,9 @@ import zlib
 from wscan import manual_crawl
 from wscan.manual_crawl import (
     ManualCrawlSession,
+    classify_frame_navigated,
     classify_lifecycle_event,
+    classify_screencast_frame,
     decide_settle_action,
     png_is_blank,
     thumbnail_clip,
@@ -190,6 +192,33 @@ class ClassifyLifecycleTests(unittest.TestCase):
         self.assertIsNone(classify_lifecycle_event(params, "M", "NEW"))
         self.assertEqual(classify_lifecycle_event(params, "M", "OLD"), "paint")
         self.assertEqual(classify_lifecycle_event(params, "M", None), "paint")
+
+
+class ClassifyFrameNavigatedTests(unittest.TestCase):
+    def test_new_parentless_id_is_swap(self):
+        self.assertEqual(classify_frame_navigated({"frame": {"id": "M2", "loaderId": "L"}}, "M", "L"), "swap")
+        self.assertEqual(classify_frame_navigated({"frame": {"id": "M"}}, None, None), "swap")
+
+    def test_same_id_new_loader_is_navigation(self):
+        self.assertEqual(classify_frame_navigated({"frame": {"id": "M", "loaderId": "L2"}}, "M", "L1"), "navigation")
+        self.assertEqual(classify_frame_navigated({"frame": {"id": "M", "loaderId": "L2"}}, "M", None), "navigation")
+
+    def test_ignored(self):
+        self.assertIsNone(classify_frame_navigated({"frame": {"id": "M", "loaderId": "L1"}}, "M", "L1"))
+        self.assertIsNone(classify_frame_navigated({"frame": {"id": "M"}}, "M", "L1"))
+        self.assertIsNone(classify_frame_navigated({"frame": {"id": "C", "parentId": "M", "loaderId": "X"}}, "M", "L"))
+        self.assertIsNone(classify_frame_navigated({"frame": {"loaderId": "X"}}, "M", "L"))
+        self.assertIsNone(classify_frame_navigated(None, "M", "L"))
+        self.assertIsNone(classify_frame_navigated({"frame": "bad"}, "M", "L"))
+
+
+class ClassifyScreencastFrameTests(unittest.TestCase):
+    def test_dispositions(self):
+        self.assertEqual(classify_screencast_frame(True, (1, "L", True), (1, "L", True)), "hold")
+        self.assertEqual(classify_screencast_frame(True, (1, "L", False), (1, "L", False)), "emit")
+        self.assertEqual(classify_screencast_frame(False, (1, "L", False), (1, "L", False)), "drop")
+        self.assertEqual(classify_screencast_frame(True, (1, "L", True), (2, "L", True)), "drop")
+        self.assertEqual(classify_screencast_frame(True, (1, "L", True), (1, "L", False)), "drop")
 
 
 class ThumbnailClipTests(unittest.TestCase):
@@ -403,9 +432,62 @@ class PaintSettleSessionTests(unittest.IsolatedAsyncioTestCase):
         await self._settle(session)
         handler = cdp.handlers["Page.frameNavigated"]
         handler({"frame": {"id": "CHILD", "parentId": "MAIN", "loaderId": "C1"}})
-        handler({"frame": {"id": "MAIN", "loaderId": "L1"}})
+        handler({"frame": {"id": "MAIN"}})  # loader 不明＝新 document の証拠なし
         self.assertEqual(session._main_frame_id, "MAIN")
         self.assertFalse(session._settling)
+        # lifecycle init で既に把握した document の frameNavigated は保留をやり直さない。
+        session._on_lifecycle_event({"frameId": "MAIN", "name": "init", "loaderId": "L1"}, cdp)
+        await self._settle(session)
+        handler({"frame": {"id": "MAIN", "loaderId": "L1"}})
+        self.assertFalse(session._settling)
+
+    async def test_lifecycle_failure_same_frame_navigation_still_settles(self):
+        # lifecycle 有効化失敗時も、同 ID・新 loader の遷移で保留して白フレームを送らない。
+        class _NoLifecycle(_SettleCdp):
+            async def send(self, method, params=None):
+                if method in ("Page.enable", "Page.setLifecycleEventsEnabled", "Page.getFrameTree"):
+                    raise RuntimeError("unsupported")
+                return await super().send(method, params)
+
+        cdp = _NoLifecycle([CHROMIUM_TEXT_PNG])
+        session, sent = await self._session(cdp)
+        await self._settle(session)
+        handler = cdp.handlers["Page.frameNavigated"]
+        handler({"frame": {"id": "MAIN", "loaderId": "N1"}})
+        self.assertEqual(session._main_frame_id, "MAIN")
+        await self._settle(session)
+        sent.clear()
+        cdp.thumbs = [CHROMIUM_BLANK_WHITE_PNG, CHROMIUM_TEXT_PNG]
+        cdp.viewport_jpeg = "N2_PAINTED"
+        handler({"frame": {"id": "MAIN", "loaderId": "N2"}})
+        self.assertTrue(session._settling)
+        self.assertEqual(session._loader_id, "N2")
+        await session._handle_frame({"data": "WHITE_N2", "sessionId": 12}, cdp)
+        await self._settle(session)
+        self.assertEqual(sent, ["N2_PAINTED"])
+
+    async def test_held_frame_is_kept_while_ack_is_pending_and_recapture_fails(self):
+        # ACK が撮り直し失敗後まで返らなくても、保留中フレームを代替として送る。
+        manual_crawl._PAINT_SETTLE_DELAYS = (0.01,)
+        cdp = _SettleCdp([CHROMIUM_TEXT_PNG], viewport_jpeg="")
+        ack_started, ack_release = asyncio.Event(), asyncio.Event()
+        original = cdp.send
+
+        async def send(method, params=None):
+            if method == "Page.screencastFrameAck":
+                ack_started.set()
+                await ack_release.wait()
+            return await original(method, params)
+
+        cdp.send = send
+        session, sent = await self._session(cdp)
+        frame = asyncio.create_task(session._handle_frame({"data": "PENDING", "sessionId": 13}, cdp))
+        await ack_started.wait()
+        await self._settle(session)
+        self.assertEqual(sent, ["PENDING"])
+        ack_release.set()
+        await frame
+        self.assertEqual(sent, ["PENDING"])  # ACK 後に二重送信しない
 
     async def test_undecidable_probe_forwards_immediately(self):
         cdp = _SettleCdp([b"garbage"])

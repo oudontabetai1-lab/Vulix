@@ -476,6 +476,42 @@ def classify_lifecycle_event(
     return None
 
 
+def classify_frame_navigated(
+    params: Any, main_frame_id: str | None, loader_id: str | None
+) -> str | None:
+    """CDP ``Page.frameNavigated`` を保留開始の要否に分類する（純粋関数）。
+
+    - ``"swap"``       … 親無しフレームの ID が変わった（process swap / 初回確定）。ID を取り直す。
+    - ``"navigation"`` … 同じメインフレームの新しい document（loader が変わった）。
+      lifecycle 通知が使えないときの遷移検知の代替。
+    - ``None``         … iframe・同一 document の重複通知など。保留しない。
+    """
+    frame = params.get("frame") if isinstance(params, dict) else None
+    if not isinstance(frame, dict) or frame.get("parentId"):
+        return None
+    frame_id = frame.get("id")
+    if not frame_id:
+        return None
+    if str(frame_id) != main_frame_id:
+        return "swap"
+    new_loader = frame.get("loaderId")
+    if new_loader and new_loader != loader_id:
+        return "navigation"
+    return None
+
+
+def classify_screencast_frame(same_cdp: bool, epoch: Any, current_epoch: Any) -> str:
+    """受信フレームの扱いを決める（純粋関数）。``epoch`` は (gen, loader, settling)。
+
+    - ``"drop"`` … 別 CDP・受信後に document/保留状態が変わった古いフレーム。
+    - ``"hold"`` … 保留中の現 document のフレーム。送らず撮り直し失敗時の代替として保持。
+    - ``"emit"`` … 通常配信。
+    """
+    if not same_cdp or epoch != current_epoch:
+        return "drop"
+    return "hold" if epoch[2] else "emit"
+
+
 def thumbnail_clip(metrics: Any, default_width: int, default_height: int,
                    scale: float = _BLANK_THUMB_SCALE) -> dict:
     """空白判定用サムネイルの clip を、現在の表示領域から作る（純粋関数）。
@@ -995,20 +1031,20 @@ class ManualCrawlSession:
             self._paint_event.set()
 
     def _on_frame_navigated(self, params: dict, cdp) -> None:
-        """プロセス切替でメインフレーム ID が変わったら取り直し、保留を始める。
+        """メインフレームの新しい document で保留を始める（lifecycle 通知の取りこぼし補完）。
 
         renderer の process swap では置換後のメインフレームに新しい ID が付き、
-        その ``init`` は旧 ID と一致せず取りこぼす。``frameNavigated`` で補う。
+        その ``init`` は旧 ID と一致せず取りこぼす。lifecycle 有効化に失敗した場合は
+        同じ ID の遷移も ``init`` が来ないため、loader の変化で検知する。
         """
         if cdp is not self._cdp:
             return
-        frame = params.get("frame") if isinstance(params, dict) else None
-        if not isinstance(frame, dict) or frame.get("parentId"):
+        kind = classify_frame_navigated(params, self._main_frame_id, self._loader_id)
+        if kind is None:
             return
-        frame_id = frame.get("id")
-        if not frame_id or str(frame_id) == self._main_frame_id:
-            return
-        self._main_frame_id = str(frame_id)
+        frame = params["frame"]
+        if kind == "swap":
+            self._main_frame_id = str(frame["id"])
         self._loader_id = frame.get("loaderId") or None
         self._held_frame = ""
         self._begin_settle(cdp)
@@ -1179,6 +1215,10 @@ class ManualCrawlSession:
         # ACK の完了より前に受信時の document/保留状態を固定する。
         if epoch is None:
             epoch = (self._settle_gen, self._loader_id, self._settling)
+        data = params.get("data", "")
+        # ACK 待ちの間に撮り直しが失敗して保留が終わっても代替に使えるよう、先に保持する。
+        if self._frame_disposition(cdp, epoch) == "hold" and isinstance(data, str) and data:
+            self._held_frame = data
         # フレームを ack しないと次が届かない。ack 後にコールバックへ渡す。
         session_id = params.get("sessionId")
         if cdp is not None and session_id is not None:
@@ -1188,15 +1228,14 @@ class ManualCrawlSession:
                 )
             except Exception:
                 pass
-        if cdp is not self._cdp or epoch != (self._settle_gen, self._loader_id, self._settling):
-            return
-        if self._settling:
-            # 保留中のフレームは送らず、撮り直し失敗時のフォールバックとして保持だけする。
-            data = params.get("data", "")
-            if isinstance(data, str) and data:
-                self._held_frame = data
-            return
-        await self._emit_frame(params.get("data", ""))
+        # 保留中のフレームは送らない（ACK 前に保持済み）。
+        if self._frame_disposition(cdp, epoch) == "emit":
+            await self._emit_frame(data)
+
+    def _frame_disposition(self, cdp, epoch) -> str:
+        return classify_screencast_frame(
+            cdp is self._cdp, epoch, (self._settle_gen, self._loader_id, self._settling)
+        )
 
     async def select_mfa_field(self, nx: float, ny: float) -> dict:
         """遠隔画面で OTP 欄を特定し、TOTP 設定済みなら現在コードを入力する。"""
