@@ -49,12 +49,13 @@ CHECKS = [
 # 現状エンジンが確実には取れない高難度（素朴な防御をバイパスして初めて成立）。
 # ここに挙げたものは検出されなくてもテストを失敗させない（CLAUDE.md: ultra 方針）。
 # NOTE: blind OS (/tools/nslookup) は payload mutation wave（; sleep 3 等を確実に投入）で
-#       検出可能になったためギャップから外した。残りはブラウザ駆動スキャン固有の壁:
-#       - boolean-blind は応答類似度しきい値、
+#       検出可能になったためギャップから外した。
+# NOTE: boolean-blind (/pharmacy/refill) も `_boolean_blind_divergence` の相対類似度
+#       ギャップ対応で検出可能になったためギャップから外した（共有レイアウトで全体類似度が
+#       高止まりしても真偽差を捉える）。残るのはブラウザ駆動スキャン固有の壁:
 #       - ultra の 2 件は test_url_param のエンコードで NULL/バックスラッシュが
 #         エンコードされ素のままブラウザへ届かない（生バイト依存のバイパス）。
 KNOWN_DETECTION_GAPS = {
-    ("sqli", "/pharmacy/refill"),       # high: boolean-based blind（類似度しきい値）
     ("path_traversal", "/vault/file"),  # ultra: 二重エンコード + NULL バイト（生バイト依存）
     ("open_redirect", "/sso/return"),   # ultra: '/\\' のブラウザ正規化（生バックスラッシュ依存）
 }
