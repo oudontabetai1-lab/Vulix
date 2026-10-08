@@ -246,3 +246,29 @@ def test_evaluate_coverage_gate_boundary():
     short = _answer_only(ds, lambda rows, y: need(rows, y) - (rows == hold and y == 1))
     r = lc.evaluate(ds, short)
     assert r["status"] == "insufficient-data" and r["coverage"]["holdout"][1][0] == need(hold, 1) - 1
+
+
+def test_default_noul_question_has_true_false_criteria():
+    # criteria 無しの noul は英語 checkpoint で state に関係なく "no" を返しうる（Laya README）。
+    q = lc._QUESTION["vulnerable"]
+    assert q["type"] == "noul"
+    crit = q["criteria"]
+    assert set(crit) == {"false", "true"}
+    assert all(isinstance(v, str) and v.strip() for v in crit.values()) and crit["false"] != crit["true"]
+    seen = {}
+    lc.laya_scores([{"id": "a", "observations": {"check": "xss", "reflected": True}}],
+                   decide=lambda st, qs: seen.update(qs) or {"answers": {"vulnerable": {"noul": 0.5}}})
+    assert seen["vulnerable"]["criteria"] == crit
+
+
+@pytest.mark.parametrize("fn", [
+    lambda p, y: lc.reliability_bins(p, y),
+    lambda p, y: lc.ece(p, y),
+    lambda p, y: lc.brier(p, y),
+    lambda p, y: lc.confusion(p, y, 0.5),
+    lambda p, y: lc.fit_platt(p, y),
+])
+@pytest.mark.parametrize("probs,labels", [([0.9, 0.1, 0.8], [1, 0]), ([0.9], [1, 0]), ([], [1])])
+def test_metrics_reject_mismatched_lengths(fn, probs, labels):
+    with pytest.raises(ValueError, match="length mismatch"):
+        fn(probs, labels)

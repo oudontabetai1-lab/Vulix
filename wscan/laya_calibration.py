@@ -67,8 +67,15 @@ def split_holdout(samples: list[dict], holdout_frac: float = 0.3, salt: str = "l
 # ---------------------------------------------------------------------------
 # 校正指標
 # ---------------------------------------------------------------------------
+def _check_aligned(probs: list[float], labels: list[int]) -> None:
+    """probs と labels の長さ不一致は ValueError（zip の黙った切り捨てで不正な指標を作らない）。"""
+    if len(probs) != len(labels):
+        raise ValueError(f"probs and labels length mismatch: {len(probs)} != {len(labels)}")
+
+
 def reliability_bins(probs: list[float], labels: list[int], n_bins: int = 10) -> list[dict]:
     """信頼性図の等幅ビン（空ビンは省く）。各ビン: 範囲・件数・平均確率・実際の陽性率。"""
+    _check_aligned(probs, labels)
     bins: list[list[int]] = [[] for _ in range(n_bins)]
     for i, p in enumerate(probs):
         bins[min(int(p * n_bins), n_bins - 1)].append(i)
@@ -85,6 +92,7 @@ def reliability_bins(probs: list[float], labels: list[int], n_bins: int = 10) ->
 
 def ece(probs: list[float], labels: list[int], n_bins: int = 10) -> Optional[float]:
     """Expected Calibration Error（件数重み付きの |平均確率 − 陽性率|）。"""
+    _check_aligned(probs, labels)
     if not probs:
         return None
     return sum(b["count"] * abs(b["confidence"] - b["accuracy"])
@@ -92,6 +100,7 @@ def ece(probs: list[float], labels: list[int], n_bins: int = 10) -> Optional[flo
 
 
 def brier(probs: list[float], labels: list[int]) -> Optional[float]:
+    _check_aligned(probs, labels)
     return sum((p - y) ** 2 for p, y in zip(probs, labels)) / len(probs) if probs else None
 
 
@@ -113,6 +122,7 @@ def fit_platt(probs: list[float], labels: list[int], iters: int = 100) -> tuple[
     Platt のターゲット平滑化（t+=(N+ +1)/(N+ +2), t-=1/(N- +2)）で完全分離でも発散しない。
     ponytail: 2 パラメータのみ。fixture 規模（数十件）では isotonic より過適合しにくい。
     """
+    _check_aligned(probs, labels)
     n_pos = sum(labels)
     n_neg = len(labels) - n_pos
     if not n_pos or not n_neg:
@@ -170,6 +180,7 @@ def apply_platt(probs: list[float], params: tuple[float, float]) -> list[float]:
 # ---------------------------------------------------------------------------
 def confusion(probs: list[float], labels: list[int], threshold: float) -> dict:
     """`p >= threshold` を陽性とした混同行列と FP/FN 率。"""
+    _check_aligned(probs, labels)
     tp = sum(1 for p, y in zip(probs, labels) if p >= threshold and y)
     fp = sum(1 for p, y in zip(probs, labels) if p >= threshold and not y)
     fn = sum(1 for p, y in zip(probs, labels) if p < threshold and y)
@@ -261,8 +272,16 @@ def evaluate(samples: list[dict], scores: dict[str, Optional[float]], *, holdout
 # ---------------------------------------------------------------------------
 # Laya スコア取得（境界は laya_client のみ）
 # ---------------------------------------------------------------------------
-_QUESTION = {"vulnerable": {"type": "noul", "instructions":
-                            "Probability that this input point is exploitable for the given check."}}
+# criteria 必須: Laya README は criteria 無しの noul が英語 checkpoint（既定 variant）で既定の選択肢対に
+# 引きずられ state に関係なく "no" を返しうると警告する（脆弱/安全が同じ値＝prompt artifact を測る）。
+# criteria は `false`/`true` キーのみ許容（README）。noul は [false, true] 順に採点し P(true) を返す。
+_QUESTION = {"vulnerable": {
+    "type": "noul",
+    "instructions": "Is this input point exploitable for the given check, based on the observations?",
+    "criteria": {
+        "false": "the observations show the input is not exploitable for the check",
+        "true": "the observations show the input is exploitable for the check",
+    }}}
 
 
 def default_state(sample: dict) -> Optional[dict]:
