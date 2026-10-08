@@ -124,6 +124,8 @@ EXPECTED_FINDINGS = [
 SAFE_ENDPOINTS = [
     {"check": "sqli", "path": "/pharmacy/refill-redirect-safe", "field": "rx",
      "note": "SQL を実行せず login/challenge へ固定リダイレクト"},
+    {"check": "sqli", "path": "/pharmacy/refill-redirect-json-safe", "field": "/rx",
+     "note": "JSON body の入力署名で login/challenge へ 302（追従すると両方 200）。DB 非接触"},
     {"check": "xss", "path": "/portal/help", "field": "q",
      "note": "検索語を HTML エスケープして表示"},
     {"check": "sqli", "path": "/billing/history", "field": "sort",
@@ -1064,6 +1066,17 @@ def create_app() -> FastAPI:
             _layout("Pharmacy", detail), status_code=302,
             headers={"Location": "/auth/challenge" if challenge else "/portal/signin"},
         )
+
+    @app.get("/auth/challenge", response_class=HTMLResponse)
+    async def auth_challenge():
+        return _layout("Pharmacy", "<p>Authentication required.</p>")
+
+    @app.post("/pharmacy/refill-redirect-json-safe")
+    async def pharmacy_refill_redirect_json_safe(request: Request):
+        # SAFE: JSON の入力署名だけで login/challenge へ 302。DB には触れない。
+        rx = str((await request.json()).get("rx", ""))
+        return RedirectResponse(
+            "/auth/challenge" if "1=2" in rx else "/portal/signin", status_code=302)
 
     @app.get("/pharmacy/catalog", response_class=HTMLResponse)
     async def pharmacy_catalog(drug: str = Query("apixaban")):

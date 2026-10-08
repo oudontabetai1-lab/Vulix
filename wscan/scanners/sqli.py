@@ -122,6 +122,12 @@ def _boolean_blind_divergence(
     )
 
 
+def _pair_status(pair: dict) -> int | None:
+    """通信記録の判定用 status。redirect を追従した応答は最初の hop の status を返す。"""
+    response = (pair or {}).get("response", {})
+    return response.get("redirect_status", response.get("status"))
+
+
 # ── Auth bypass detection ──────────────────────────────────────────────────
 
 # Payloads that are specifically useful for SQL injection authentication bypass.
@@ -422,9 +428,9 @@ class SQLiScanner(BaseScanner):
                     len(false_src),
                     sim_true_base,
                     sim_false_base,
-                    baseline_pair.get("response", {}).get("status"),
-                    true_pair.get("response", {}).get("status"),
-                    false_pair.get("response", {}).get("status"),
+                    _pair_status(baseline_pair),
+                    _pair_status(true_pair),
+                    _pair_status(false_pair),
                 ):
                     finding = await self.record_finding(
                         url=ip.url,
@@ -796,9 +802,9 @@ class SQLiScanner(BaseScanner):
                 len(false_src),
                 self._body_similarity(true_src, baseline_source),
                 self._body_similarity(false_src, baseline_source),
-                baseline_pair.get("response", {}).get("status"),
-                true_pair.get("response", {}).get("status"),
-                false_pair.get("response", {}).get("status"),
+                _pair_status(baseline_pair),
+                _pair_status(true_pair),
+                _pair_status(false_pair),
             )
         if etype == "sqli_concat_equivalence":
             # Re-run the concatenation-equivalence probe; injectable again ⇒ verified.

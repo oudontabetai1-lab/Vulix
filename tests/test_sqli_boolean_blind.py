@@ -24,6 +24,7 @@ from wscan.scanners.sqli import (
     SQLiScanner,
     _BOOLEAN_SIM_GAP,
     _boolean_blind_divergence,
+    _pair_status,
 )
 
 # ブラウザ/engine 非依存でスキャナの純粋メソッド（_body_similarity/_normalise_body）を使う。
@@ -268,3 +269,34 @@ class SQLiDetectionMatrixTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JsonRedirectFollowTests(unittest.IsolatedAsyncioTestCase):
+    """JSON 経路は redirect を追従する。追従後の最終 200 で緩和 2xx 分岐を満たさないこと。"""
+
+    async def _pairs(self, path: str):
+        app = create_app()
+        engine = SimpleNamespace(
+            browser=None, payload_gen=None, timeout=5, monitor=None, _finding_dedup=set(),
+            injection_templates={"t": {"json_body": {"rx": "1"}}},
+            httpx_client_kwargs=lambda **kw: {
+                **kw, "transport": httpx.ASGITransport(app=app)},
+        )
+        scanner = SQLiScanner(engine)
+        ip = InjectionPoint.for_json_body(
+            "POST", f"http://test{path}", "/rx", template_id="t")
+        return [await scanner._apply_json_payload(ip, p)
+                for p in ("baseline_test", "1 AND 1=1", "1 AND 1=2")]
+
+    async def test_redirect_safe_twin_not_detected(self):
+        (bs, bp), (ts, tp), (fs, fp) = await self._pairs("/pharmacy/refill-redirect-json-safe")
+        # 追従後は三者とも 200 で、本文差だけなら緩和分岐を満たしてしまう（FP の前提）。
+        self.assertEqual([p["response"]["status"] for p in (bp, tp, fp)], [200] * 3)
+        args = (len(bs), 0, len(ts), len(fs),
+                _SIM._body_similarity(ts, bs), _SIM._body_similarity(fs, bs))
+        self.assertTrue(_boolean_blind_divergence(*args, 200, 200, 200))
+        self.assertFalse(_boolean_blind_divergence(*args, *map(_pair_status, (bp, tp, fp))))
+
+    def test_pair_status_without_redirect_is_final_status(self):
+        self.assertEqual(_pair_status({"response": {"status": 200}}), 200)
+        self.assertEqual(_pair_status({"response": {"status": 200, "redirect_status": 302}}), 302)
