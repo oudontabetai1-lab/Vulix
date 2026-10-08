@@ -112,6 +112,8 @@ class BenchmarkCase:
     gate: GateKind = GateKind.OBSERVED
     match: MatchSpec | None = None
     gap: GapInfo | None = None
+    capability: str = ""
+    baseline_expected: ExpectedOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -350,6 +352,8 @@ def build_scorecard(
                 "value_kind": case.injection.value_kind.value if case.injection else None,
                 "taxonomy": list(case.taxonomy),
                 "gate": case.gate.value,
+                "capability": case.capability,
+                "baseline_expected": (case.baseline_expected or case.expected).value,
                 "state": result.state.value if result else None,
                 "candidate_match": result.candidate_match if result else None,
                 "confirmed_match": result.confirmed_match if result else None,
@@ -447,6 +451,177 @@ def compute_baseline_diff(
         elif base_q == "bad" and cur_q == "good":
             improved.append(case_id)
     return {"new": new, "removed": removed, "regressed": regressed, "improved": improved}
+
+
+# 同じ ground truth の2経路を比較する。capability の実配線は runner の責務。
+_DETECTED = frozenset({Classification.TP.value})      # vulnerable を検出できた
+_MISSED = frozenset({Classification.FN.value})        # vulnerable を取りこぼした
+_CLEAN = frozenset({Classification.TN.value})         # safe を正しく素通り
+_FALSE_ALARM = frozenset({Classification.FP.value})   # safe を誤検知
+
+
+def compute_differentiation(
+    conventional: Mapping[str, Any],
+    vulix: Mapping[str, Any],
+    *,
+    tier: str = "candidate",
+) -> dict[str, Any]:
+    """従来経路 vs Vulix 経路の scorecard を case 単位で比較する（純粋・differentiation）。
+
+    - ``differentiated``: vulnerable で 従来=取りこぼし(FN) → Vulix=検出(TP)。**差別化の本体**。
+    - ``parity_detected`` / ``both_missed``: 両経路とも検出 / 両経路とも取りこぼし。
+    - ``vulix_regression``: vulnerable で 従来=TP → Vulix=FN（本来起きてはならない回帰。空であるべき）。
+    - ``new_false_positive``: safe で 従来=TN → Vulix=FP（Vulix 波が持ち込んだ過検知。**0 であるべき**）。
+    - ``shared_false_positive`` / ``cleared_false_positive``: 両経路 FP / 従来 FP→Vulix TN。
+    - ``unmeasured``: いずれかの経路で分類 None（未計測）の case（差別化判定に使わない）。
+
+    片方でも分類 None（未計測＝NOT_REACHED/UNSUPPORTED 等）の case は差別化に数えない
+    （measurement の欠落を「検出できた/できない」と混同しない。completeness は別軸）。
+    ``differentiation_count`` と ``differentiation_rate``（= differentiated / 両経路で計測できた
+    vulnerable case 数）を要約として返す。
+    """
+    if tier not in {"candidate", "confirmed"}:
+        raise ValueError("tier must be 'candidate' or 'confirmed'")
+    for key in ("suite", "suite_id", "source_sha", "manifest_digest", "registry_digest"):
+        if conventional.get(key) != vulix.get(key):
+            raise ValueError(f"incompatible {key}")
+
+    def _index(scorecard: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+        cases = scorecard.get("cases", []) or []
+        index = {}
+        for row in cases:
+            if not isinstance(row, Mapping) or not row.get("case_id"):
+                raise ValueError("each case must have a case_id")
+            case_id = row["case_id"]
+            if case_id in index:
+                raise ValueError(f"duplicate case_id: {case_id}")
+            index[case_id] = row
+        return index
+
+    conv = _index(conventional)
+    vlx = _index(vulix)
+
+    buckets: dict[str, list[str]] = {
+        key: []
+        for key in (
+            "differentiated", "parity_detected", "both_missed", "vulix_regression",
+            "new_false_positive", "shared_false_positive", "cleared_false_positive",
+            "parity_clean", "unmeasured", "baseline_mismatch",
+        )
+    }
+    measured_vulnerable = 0
+    for case_id in sorted(set(conv) | set(vlx)):
+        if case_id not in conv or case_id not in vlx:
+            buckets["unmeasured"].append(case_id)
+            continue
+        c_row, v_row = conv[case_id], vlx[case_id]
+        if c_row.get("capability", "") != v_row.get("capability", ""):
+            raise ValueError(f"incompatible capability: {case_id}")
+        expected = c_row.get("expected")
+        if expected != v_row.get("expected") or expected not in {"vulnerable", "safe"}:
+            raise ValueError(f"incompatible expected outcome: {case_id}")
+        c = (c_row.get("classification") or {}).get(tier)
+        v = (v_row.get("classification") or {}).get(tier)
+        if (c is None or v is None or c_row.get("gate") == "gap" or v_row.get("gate") == "gap"
+                or conventional.get("run_error") or vulix.get("run_error")):
+            buckets["unmeasured"].append(case_id)
+            continue
+        allowed = {"tp", "fn"} if expected == "vulnerable" else {"tn", "fp"}
+        if c not in allowed or v not in allowed:
+            raise ValueError(f"incompatible classification: {case_id}")
+        baseline_expected = c_row.get("baseline_expected", expected)
+        if baseline_expected != v_row.get("baseline_expected", expected) or baseline_expected not in {"vulnerable", "safe"}:
+            raise ValueError(f"incompatible baseline expectation: {case_id}")
+        if (c in {"tp", "fp"}) != (baseline_expected == "vulnerable"):
+            buckets["baseline_mismatch"].append(case_id)
+        if expected == ExpectedOutcome.VULNERABLE.value:
+            measured_vulnerable += 1
+            if c in _MISSED and v in _DETECTED:
+                buckets["differentiated"].append(case_id)
+            elif c in _DETECTED and v in _DETECTED:
+                buckets["parity_detected"].append(case_id)
+            elif c in _MISSED and v in _MISSED:
+                buckets["both_missed"].append(case_id)
+            elif c in _DETECTED and v in _MISSED:
+                buckets["vulix_regression"].append(case_id)
+        else:  # safe twin
+            if c in _CLEAN and v in _FALSE_ALARM:
+                buckets["new_false_positive"].append(case_id)
+            elif c in _FALSE_ALARM and v in _FALSE_ALARM:
+                buckets["shared_false_positive"].append(case_id)
+            elif c in _FALSE_ALARM and v in _CLEAN:
+                buckets["cleared_false_positive"].append(case_id)
+            elif c in _CLEAN and v in _CLEAN:
+                buckets["parity_clean"].append(case_id)
+
+    count = len(buckets["differentiated"])
+    rate = (count / measured_vulnerable) if measured_vulnerable else None
+    capabilities = {}
+    all_rows = {**conv, **vlx}
+    for capability in sorted({row.get("capability", "") for row in all_rows.values()} - {""}):
+        ids = {cid for cid, row in all_rows.items() if row.get("capability") == capability}
+        rows = {
+            key: [cid for cid in values if cid in ids]
+            for key, values in buckets.items()
+        }
+        measured = sum(len(rows[key]) for key in (
+            "differentiated", "parity_detected", "both_missed", "vulix_regression"
+        ))
+        safe_measured = sum(len(rows[key]) for key in (
+            "new_false_positive", "shared_false_positive", "cleared_false_positive", "parity_clean"
+        ))
+        capabilities[capability] = {
+            **rows,
+            "measured_vulnerable": measured,
+            "baseline_recall": (len(rows["parity_detected"]) + len(rows["vulix_regression"])) / measured if measured else None,
+            "vulix_recall": (len(rows["parity_detected"]) + len(rows["differentiated"])) / measured if measured else None,
+            "lift": len(rows["differentiated"]) if measured else None,
+            "safe_measured": safe_measured,
+            "safe_false_positive": sum(len(rows[key]) for key in (
+                "new_false_positive", "shared_false_positive", "cleared_false_positive"
+            )) if safe_measured else None,
+        }
+    return {
+        "tier": tier,
+        **buckets,
+        "differentiation_count": count,
+        "measured_vulnerable": measured_vulnerable,
+        "differentiation_rate": rate,
+        "capabilities": capabilities,
+    }
+
+
+def differentiation_to_markdown(diff: Mapping[str, Any]) -> str:
+    """compute_differentiation の結果を人間向け Markdown にする（純粋）。"""
+    rate = diff.get("differentiation_rate")
+    lines = [
+        "# 差別化 A/B スコアカード（従来経路 vs Vulix 経路）",
+        "",
+        f"- Tier: **{_md_cell(diff.get('tier'))}**",
+        f"- 差別化検出（従来 FN → Vulix TP）: **{diff.get('differentiation_count', 0)}** "
+        f"/ 計測できた vulnerable {diff.get('measured_vulnerable', 0)} "
+        f"（率 {_display(rate)}）",
+        f"- Vulix が持ち込んだ過検知（従来 TN → Vulix FP）: "
+        f"**{len(diff.get('new_false_positive', []))}**（0 であるべき）",
+        f"- Vulix 回帰（従来 TP → Vulix FN）: "
+        f"**{len(diff.get('vulix_regression', []))}**（0 であるべき）",
+        "",
+        "## カテゴリ別 case",
+        "",
+        "| カテゴリ | case 数 | case_id |",
+        "|---|---:|---|",
+    ]
+    for key in (
+        "differentiated", "parity_detected", "both_missed", "vulix_regression",
+        "new_false_positive", "shared_false_positive", "cleared_false_positive",
+        "parity_clean", "unmeasured", "baseline_mismatch",
+    ):
+        ids = diff.get(key, []) or []
+        lines.append(f"| {key} | {len(ids)} | {_md_cell(', '.join(ids))} |")
+    lines += ["", "| capability | baseline recall | Vulix recall | lift | safe FP (either route) | unmeasured |", "|---|---:|---:|---:|---:|---:|"]
+    for capability, rows in diff.get("capabilities", {}).items():
+        lines.append(f"| {_md_cell(capability)} | {_display(rows['baseline_recall'])} | {_display(rows['vulix_recall'])} | {_display(rows['lift'])} | {_display(rows['safe_false_positive'])} | {len(rows['unmeasured'])} |")
+    return "\n".join(lines) + "\n"
 
 
 def _display(value: Any) -> str:
@@ -635,6 +810,8 @@ def _load_case(value: Any, index: int, registry_keys: frozenset[str]) -> Benchma
                 "gate",
                 "match",
                 "gap",
+                "capability",
+                "baseline_expected",
             }
         ),
         label,
@@ -650,6 +827,9 @@ def _load_case(value: Any, index: int, registry_keys: frozenset[str]) -> Benchma
     # 完了 suite を誤って COMPLETE と報告するため、不整合な manifest を拒否する。
     if gap is not None and gate != GateKind.GAP:
         raise ManifestError(f"{label}.gap requires gate=gap")
+    capability = _optional_string(data, "capability", label)
+    if capability not in {"", "transformation_graph", "reward_search", "state_graph", "dom_taint"}:
+        raise ManifestError(f"{label}.capability is unknown: {capability}")
     return BenchmarkCase(
         case_id=_required_string(data, "case_id", label),
         expected=_enum_value(ExpectedOutcome, data.get("expected"), f"{label}.expected"),
@@ -663,6 +843,11 @@ def _load_case(value: Any, index: int, registry_keys: frozenset[str]) -> Benchma
         gate=gate,
         match=_load_match(data.get("match"), f"{label}.match"),
         gap=gap,
+        capability=capability,
+        baseline_expected=_enum_value(
+            ExpectedOutcome, data.get("baseline_expected", data.get("expected")),
+            f"{label}.baseline_expected",
+        ),
     )
 
 
@@ -695,6 +880,8 @@ def _validate_twins(cases: Sequence[BenchmarkCase]) -> None:
                     f"safe case {case.case_id} twin must target the same check: "
                     f"{case.check} vs {twin.check}"
                 )
+        if case.twin_id and by_id[case.twin_id].capability != case.capability:
+            raise ManifestError(f"case {case.case_id} twin must target the same capability")
 
 
 def load_manifest(data: dict[str, Any], *, registry_keys: frozenset[str]) -> BenchmarkSuite:

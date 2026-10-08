@@ -18,6 +18,7 @@ FIXTURE_APPS: dict[str, str] = {
     "realistic_intranet": "tests.fixtures.realistic_intranet:create_app",
     "realistic_healthcare": "tests.fixtures.realistic_healthcare:create_app",
     "realistic_api": "tests.fixtures.realistic_api:create_app",
+    "differentiation_lab": "tests.fixtures.differentiation_lab:create_app",
 }
 
 

@@ -1,0 +1,140 @@
+schema_version: 1
+suite_id: differentiation_frontier
+fixture_id: differentiation_lab
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# Vulix 差別化のフロンティア（differentiation・ground-truth だが anonymous 決定論 runner では未採点）。
+# これらは vulnerable/safe twin を fixture に持つが、現状の匿名 query/form スキャンでは A/B 自動
+# 採点できない理由があるため gate=gap（理由・owner_task・deadline 付き）で明示する。gate=gap の
+# case は checks_covered_by_suites が covered に数えないので registry 完全性を COMPLETE に丸めない
+# （follow-up で scoreable runner を用意したら observed へ昇格する）。
+cases:
+  # transformation_graph の実配線と対応 runner が揃うまでは未計測。
+  - case_id: differentiation_frontier.sqli.ref.vulnerable
+    capability: transformation_graph
+    baseline_expected: safe
+    expected: vulnerable
+    check: sqli
+    request: {method: GET, path: /orders/lookup}
+    injection: {carrier: query, parameter_id: ref, value_kind: string}
+    match: {path: /orders/lookup, field: ref, location: url_param}
+    twin_id: differentiation_frontier.sqli.ref.safe
+    taxonomy: [differentiation, transformation_bypass, double_encoding]
+    difficulty: ultra
+    gate: gap
+    gap:
+      reason: "検証後のdecodeで成立するSQLi。transformation_graph の ON/OFF と対応 runner が未実装"
+      owner_task: "exploration-benchmark"
+      deadline: "2026-12-31"
+  - case_id: differentiation_frontier.sqli.ref.safe
+    capability: transformation_graph
+    baseline_expected: safe
+    expected: safe
+    check: sqli
+    request: {method: GET, path: /orders/status}
+    injection: {carrier: query, parameter_id: ref, value_kind: string}
+    match: {path: /orders/status, field: ref, location: url_param}
+    twin_id: differentiation_frontier.sqli.ref.vulnerable
+    taxonomy: [differentiation, transformation_bypass]
+    gate: gap
+    gap:
+      reason: "safe twin（パラメータ化）。vulnerable 側が gap のため同 gate に揃える"
+      owner_task: "exploration-benchmark"
+      deadline: "2026-12-31"
+  # 多段 chain(stored XSS): chain スキャンに on/off トグルが無く A/B 不能。
+  - case_id: differentiation_frontier.chain.body.vulnerable
+    baseline_expected: safe
+    expected: vulnerable
+    check: stored_xss
+    request: {method: POST, path: /notes/save}
+    injection: {carrier: form, parameter_id: body, value_kind: string}
+    match: {path: /notes/view, field: body, location: form}
+    twin_id: differentiation_frontier.chain.body.safe
+    taxonomy: [differentiation, multistage_chain, stored]
+    difficulty: high
+    gate: gap
+    gap:
+      reason: "格納型は保存(POST)→閲覧(GET)の多段。chain スキャンに on/off トグルが無く従来 vs Vulix の A/B 比較ができない"
+      owner_task: "exploration-benchmark"
+      deadline: "2026-12-31"
+  - case_id: differentiation_frontier.chain.body.safe
+    baseline_expected: safe
+    expected: safe
+    check: stored_xss
+    request: {method: POST, path: /notes/save}
+    injection: {carrier: form, parameter_id: body, value_kind: string}
+    match: {path: /notes/view-safe, field: body, location: form}
+    twin_id: differentiation_frontier.chain.body.vulnerable
+    taxonomy: [differentiation, multistage_chain, stored]
+    gate: gap
+    gap:
+      reason: "safe twin（html.escape 描画）。vulnerable 側が gap のため同 gate に揃える"
+      owner_task: "exploration-benchmark"
+      deadline: "2026-12-31"
+  # state 依存 BOLA/IDOR(privesc): 認証・複数アカウント前提で anonymous runner は UNSUPPORTED。
+  - case_id: differentiation_frontier.bola.id.vulnerable
+    capability: state_graph
+    baseline_expected: safe
+    expected: vulnerable
+    check: privesc
+    request: {method: GET, path: /api/invoice}
+    injection: {carrier: query, parameter_id: id, value_kind: string}
+    match: {path: /api/invoice, field: id, location: url_param}
+    twin_id: differentiation_frontier.bola.id.safe
+    taxonomy: [differentiation, state_bola, idor]
+    difficulty: high
+    prerequisites: [auth_session, multi_account]
+    gate: gap
+    gap:
+      reason: "他人の object id 参照(BOLA)。認証済み複数アカウント状態が前提で anonymous runner では UNSUPPORTED"
+      owner_task: "exploration-benchmark"
+      deadline: "2026-12-31"
+  - case_id: differentiation_frontier.bola.id.safe
+    capability: state_graph
+    baseline_expected: safe
+    expected: safe
+    check: privesc
+    request: {method: GET, path: /api/invoice-safe}
+    injection: {carrier: query, parameter_id: id, value_kind: string}
+    match: {path: /api/invoice-safe, field: id, location: url_param}
+    twin_id: differentiation_frontier.bola.id.vulnerable
+    taxonomy: [differentiation, state_bola, idor]
+    prerequisites: [auth_session, multi_account]
+    gate: gap
+    gap:
+      reason: "safe twin（所有者チェック）。vulnerable 側が gap のため同 gate に揃える"
+      owner_task: "exploration-benchmark"
+      deadline: "2026-12-31"
+  # 部分報酬探索(sqli): 結果件数を部分観測する。reward_search と対応する A/B runner が未実装。
+  - case_id: differentiation_frontier.partial.q.vulnerable
+    capability: reward_search
+    baseline_expected: safe
+    expected: vulnerable
+    check: sqli
+    request: {method: GET, path: /search/fuzzy}
+    injection: {carrier: query, parameter_id: q, value_kind: string}
+    match: {path: /search/fuzzy, field: q, location: url_param}
+    twin_id: differentiation_frontier.partial.q.safe
+    taxonomy: [differentiation, partial_reward, exploration]
+    difficulty: ultra
+    gate: gap
+    gap:
+      reason: "結果件数を部分観測するSQLi。reward_search の ON/OFF と対応 runner が未実装"
+      owner_task: "exploration-benchmark"
+      deadline: "2026-12-31"
+  - case_id: differentiation_frontier.partial.q.safe
+    capability: reward_search
+    baseline_expected: safe
+    expected: safe
+    check: sqli
+    request: {method: GET, path: /search/strict}
+    injection: {carrier: query, parameter_id: q, value_kind: string}
+    match: {path: /search/strict, field: q, location: url_param}
+    twin_id: differentiation_frontier.partial.q.vulnerable
+    taxonomy: [differentiation, partial_reward, exploration]
+    gate: gap
+    gap:
+      reason: "safe twin（パラメータ化）。vulnerable 側が gap のため同 gate に揃える"
+      owner_task: "exploration-benchmark"
+      deadline: "2026-12-31"
