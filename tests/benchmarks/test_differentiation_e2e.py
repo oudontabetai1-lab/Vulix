@@ -33,7 +33,7 @@ def test_bypass_ab_records_measurement_and_guards_safe_twins(tmp_path):
             suite, launcher=UvicornFixtureLauncher(),
             scan_runner=ScanEngineScanRunner(variant=variant), run_id=variant,
             source_sha=sha, manifest_digest=hashlib.sha256(path.read_bytes()).hexdigest(),
-            registry_digest=hashlib.sha256((root / "config/benchmark_gaps.yaml").read_bytes()).hexdigest(),
+            registry_digest=hashlib.sha256("\n".join(sorted(SCANNERS)).encode()).hexdigest(),
             environment={"variant": variant, "source_dirty": dirty},
         )
         write_scorecard(cards[variant], tmp_path / variant)
