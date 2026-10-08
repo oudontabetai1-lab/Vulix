@@ -40,14 +40,6 @@ EXPECTED_FINDINGS = [
      "note": "クエリ tab がクライアント側で innerHTML に書き込まれる"},
     {"check": "file_upload", "path": "/documents/upload", "field": "attachment",
      "note": "拡張子/MIMEを検証せず危険なスクリプトファイルを受理する"},
-]
-
-# 実装 FN として既知（EXPECTED_FINDINGS には載せない＝E2E recall を落とさない）。
-# JSON body {host} の OS 注入。SPA harvest は両 API を拾う（spa_crawl=True）が、
-# engine._JSON_INJECTION_CHECKS が ("sqli",) 限定のため os は JSON 経路で未実行。
-# 同定数に "os" を足せば脆弱=検知・ツイン=非検知になることを実測済み（修正は別 Issue）。
-# 修正後は EXPECTED_FINDINGS へ移すこと。
-KNOWN_GAP_FINDINGS = [
     {"check": "os", "path": "/api/tools/ping", "field": "host",
      "note": "SPA が JSON body {host} で POST。host をシェルへ連結（JSON body 経由の OS 注入）"},
 ]
