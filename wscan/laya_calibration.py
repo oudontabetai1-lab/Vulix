@@ -196,25 +196,39 @@ def choose_threshold(probs: list[float], labels: list[int], fp_cost: float = 1.0
 # ---------------------------------------------------------------------------
 # 校正 → held-out 検証
 # ---------------------------------------------------------------------------
+def _valid_prob(v: Any) -> Optional[float]:
+    """有限な [0,1] の実数ならその値、それ以外（None/bool/非数値/範囲外/NaN/inf）は None。"""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    v = float(v)
+    return v if 0.0 <= v <= 1.0 else None  # NaN は比較が偽、inf は範囲外で弾かれる
+
+
 def evaluate(samples: list[dict], scores: dict[str, Optional[float]], *, holdout_frac: float = 0.3,
              fp_cost: float = 1.0, fn_cost: float = 1.0, max_gap: float = 0.15, n_bins: int = 10) -> dict:
     """校正 split で Platt と閾値を決め、held-out で校正前/後の ECE・Brier・FP/FN を比較する。
 
     `scores[id]` が None（Laya 判断なし）のサンプルは黙って捨てず `abstained` に数える。
+    有限な [0,1] の実数でない score（範囲外/NaN/inf/bool/非数値）は clamp せず abstain 扱いにし、
+    `invalid` にも数える（不正 scorer に偽の有効値・完璧な ECE を与えない）。
+    held-out は scorer に依らないよう**全サンプルを先に固定分割**し、各 split 内で abstain を除く。
     両 split にスコア付きの両クラスが無ければ status=insufficient-data とし、評価値は None。
     `overfit` は校正 split と held-out のコスト率差が `max_gap` 超（reward hacking/過適合の疑い）。
     """
-    scored = [s for s in samples if scores.get(s["id"]) is not None]
-    abstained = len(samples) - len(scored)
-    calib, hold = split_holdout(scored, holdout_frac)
-    counts = {"n_calib": len(calib), "n_holdout": len(hold), "abstained": abstained}
+    probs = {s["id"]: _valid_prob(scores.get(s["id"])) for s in samples}
+    calib_all, hold_all = split_holdout(samples, holdout_frac)
+    calib = [s for s in calib_all if probs[s["id"]] is not None]
+    hold = [s for s in hold_all if probs[s["id"]] is not None]
+    counts = {"n_calib": len(calib), "n_holdout": len(hold),
+              "abstained": len(samples) - len(calib) - len(hold),
+              "invalid": sum(scores.get(s["id"]) is not None and probs[s["id"]] is None for s in samples)}
     if any({s["label"] for s in rows} != {0, 1} for rows in (calib, hold)):
         return {**counts, "status": "insufficient-data",
                 "reason": "Both calibration and holdout require scored samples of both classes.",
                 "platt": None, "raw": None, "calibrated": None, "overfit": None}
 
     def _xy(rows):
-        return [min(max(float(scores[s["id"]]), 0.0), 1.0) for s in rows], [s["label"] for s in rows]
+        return [probs[s["id"]] for s in rows], [s["label"] for s in rows]
 
     pc, yc = _xy(calib)
     ph, yh = _xy(hold)
@@ -275,5 +289,5 @@ def laya_scores(samples: Iterable[dict], state_fn: Callable[[dict], Any] = defau
             continue
         res = decide(state, questions)
         v = res["answers"][q].get("noul") if res else None
-        out[s["id"]] = float(v) if isinstance(v, (int, float)) and 0.0 <= v <= 1.0 else None
+        out[s["id"]] = _valid_prob(v)
     return out

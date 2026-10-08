@@ -121,6 +121,44 @@ def test_evaluate_abstentions_can_remove_a_class():
         assert r["abstained"] == sum(scores.get(s["id"]) is None for s in ds)
 
 
+def test_evaluate_class_selective_abstention_within_one_split():
+    """片 split の片クラスだけ abstain しても（他 split は両クラス）insufficient-data。"""
+    ds = lc.build_dataset(FIXTURES)
+    _, hold = lc.split_holdout(ds)
+    gone = {s["id"] for s in hold if s["label"] == 1}
+    scores = {s["id"]: (None if s["id"] in gone else v) for s, v in zip(ds, _overconfident(ds).values())}
+    r = lc.evaluate(ds, scores)
+    assert r["status"] == "insufficient-data" and r["overfit"] is None
+    assert r["abstained"] == len(gone)
+
+
+def test_evaluate_holdout_is_fixed_regardless_of_abstentions():
+    """abstain で held-out の所属が入れ替わらない（全サンプルを先に固定分割）。"""
+    ds = lc.build_dataset(FIXTURES)
+    base = _overconfident(ds)
+    calib, hold = lc.split_holdout(ds)
+    drop = {s["id"] for s in calib[::3]}
+    r0 = lc.evaluate(ds, base)
+    r1 = lc.evaluate(ds, {k: (None if k in drop else v) for k, v in base.items()})
+    assert r1["status"] == "ok" and r1["abstained"] == len(drop)
+    assert r0["n_holdout"] == r1["n_holdout"] == len(hold)
+    # raw の held-out Brier は校正 split に依存しない → 同じ held-out サンプルなら一致
+    assert r0["raw"]["holdout_brier"] == r1["raw"]["holdout_brier"]
+
+
+@pytest.mark.parametrize("bad", [-100, 100, 1.0001, float("nan"), float("inf"), float("-inf"), True, "0.5"])
+def test_evaluate_rejects_invalid_probabilities_instead_of_clamping(bad):
+    """範囲外/NaN/inf/非数値は clamp で偽の有効値にせず abstain（invalid）に数える。"""
+    ds = lc.build_dataset(FIXTURES)
+    r = lc.evaluate(ds, {s["id"]: bad for s in ds})
+    assert r["status"] == "insufficient-data"
+    assert r["invalid"] == r["abstained"] == len(ds)
+    scores = _overconfident(ds)
+    scores[ds[0]["id"]] = bad
+    r = lc.evaluate(ds, scores)
+    assert r["status"] == "ok" and r["invalid"] == r["abstained"] == 1
+
+
 def test_laya_scores_fail_open_and_reads_noul():
     ds = lc.build_dataset({"intranet": realistic_intranet})
     for s in ds:
