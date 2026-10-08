@@ -1,0 +1,53 @@
+schema_version: 1
+suite_id: differentiation_bypass
+fixture_id: differentiation_lab
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# 既存 evolution/mutation ON/OFF のアブレーション。未実装 transformation_graph の効果とは別。
+# FN→TP は実測結果でのみ数え、fixture が脆弱でも未検出なら FN を維持する。
+cases:
+  - case_id: differentiation_bypass.vault.file.vulnerable
+    baseline_expected: safe
+    expected: vulnerable
+    check: path_traversal
+    request: {method: GET, path: /vault/download}
+    injection: {carrier: query, parameter_id: file, value_kind: string}
+    match: {path: /vault/download, field: file, location: url_param}
+    twin_id: differentiation_bypass.vault.file.safe
+    taxonomy: [differentiation, transformation_bypass, double_encoding, unauthenticated]
+    difficulty: high
+    gate: observed
+  - case_id: differentiation_bypass.vault.file.safe
+    baseline_expected: safe
+    expected: safe
+    check: path_traversal
+    request: {method: GET, path: /vault/fetch}
+    injection: {carrier: query, parameter_id: file, value_kind: string}
+    match: {path: /vault/fetch, field: file, location: url_param}
+    twin_id: differentiation_bypass.vault.file.vulnerable
+    taxonomy: [differentiation, transformation_bypass, double_encoding, unauthenticated]
+    difficulty: high
+    gate: observed
+  - case_id: differentiation_bypass.ping.target.vulnerable
+    baseline_expected: safe
+    expected: vulnerable
+    check: os
+    request: {method: GET, path: /net/ping}
+    injection: {carrier: query, parameter_id: target, value_kind: string}
+    match: {path: /net/ping, field: target, location: url_param}
+    twin_id: differentiation_bypass.ping.target.safe
+    taxonomy: [differentiation, transformation_bypass, ifs_bypass, time_based, unauthenticated]
+    difficulty: high
+    gate: observed
+  - case_id: differentiation_bypass.ping.target.safe
+    baseline_expected: safe
+    expected: safe
+    check: os
+    request: {method: GET, path: /net/resolve}
+    injection: {carrier: query, parameter_id: target, value_kind: string}
+    match: {path: /net/resolve, field: target, location: url_param}
+    twin_id: differentiation_bypass.ping.target.vulnerable
+    taxonomy: [differentiation, transformation_bypass, ifs_bypass, unauthenticated]
+    difficulty: high
+    gate: observed

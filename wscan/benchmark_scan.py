@@ -141,14 +141,29 @@ def _exercised_from_scan_matrix(
 
 
 class ScanEngineScanRunner(ScanRunner):
-    def __init__(self, timeout: float = 840.0) -> None:
+    # 既存 evolution/mutation だけの ON/OFF 比較。探索 graph 等の新 capability は含まない。
+    # 両経路とも LLM / learning / adaptive は無効で、max_payloads など他条件は同じ。
+    _VARIANTS = frozenset({"default", "conventional", "vulix"})
+
+    def __init__(self, timeout: float = 840.0, *, variant: str = "default") -> None:
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be finite and positive")
+        if variant not in self._VARIANTS:
+            raise ValueError(f"variant must be one of {sorted(self._VARIANTS)}: {variant}")
         self.timeout = timeout
+        self.variant = variant
 
     def __call__(self, base_url: str, checks: list[str]) -> ScanOutcome:
         # 単体テスト/manifest 読み込み時には engine/browser を引き込まない。
         from wscan.engine import ScanEngine
+
+        # variant=default は従来挙動（evolution/mutation は config 既定）を維持。A/B では明示する。
+        if self.variant == "conventional":
+            evolution, mutation = False, False
+        elif self.variant == "vulix":
+            evolution, mutation = True, True
+        else:
+            evolution, mutation = None, None
 
         async def scan(output_dir: str) -> ScanOutcome:
             engine = ScanEngine(
@@ -156,6 +171,7 @@ class ScanEngineScanRunner(ScanRunner):
                 headless=True, output_dir=output_dir, open_report=False,
                 enable_waf_detection=False, enable_ai_analysis=False,
                 enable_payload_learning=False, enable_adaptive_payloads=False,
+                enable_payload_evolution=evolution, enable_payload_mutation=mutation,
                 enable_sitemap_crawl=False, depth=2, fast_mode=True, max_payloads=8,
                 request_delay=0, use_planner=False, sarif=False, timeout=8,
                 navigation_retries=0,

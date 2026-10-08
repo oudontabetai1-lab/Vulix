@@ -50,8 +50,8 @@ gaps:
     owner_task: "0018"
     deadline: "2026-12-31"
   privesc:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
+    reason: differentiation_frontier に認証セッション付き BOLA twin があるが、state_graph の ON/OFF と複数アカウント runner が未実装（gate=gap、未計測）
+    owner_task: "state-graph-benchmark"
     deadline: "2026-12-31"
   prototype_pollution:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
