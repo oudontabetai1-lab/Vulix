@@ -1,0 +1,31 @@
+# 0069 Phase1（加算的リブランド）: `vulix` 実行エントリの最小パッケージ定義。
+# 中核（vulix/ re-export・docs 改称）は #174/#180 で導入済み。本ファイルは
+# console_scripts に `vulix` を足し、`python -m vulix` と同等に現行 CLI（main.py）へ
+# 委譲する入口を提供するだけ。出力/設定パス（config/wscan.yaml 等）は後方互換維持。
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vulix"
+description = "Vulix — self-learning browser security exploration engine（旧称 WScan）"
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version", "dependencies"]
+
+# `vulix <subcommand> ...` = `python -m vulix <subcommand> ...`。
+# 中身は vulix/__main__.py:main（explore→scan の別名変換後に main.py へ委譲）。
+[project.scripts]
+vulix = "vulix.__main__:main"
+
+[tool.setuptools]
+# main.py はパッケージ外のトップレベルモジュール。vulix/__main__ が `import main`
+# するため、インストール時も解決できるよう module として同梱する。
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["vulix*", "wscan*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "wscan.__version__" }
+dependencies = { file = ["requirements.txt"] }
