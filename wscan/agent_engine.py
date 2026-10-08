@@ -71,7 +71,7 @@ class AgentHandoffData:
     findings: list = field(default_factory=list)
 
 # Base output directory (same convention as ScanEngine)
-OUTPUT_BASE = Path(__file__).parent.parent / "output"
+OUTPUT_BASE = Path.cwd() / "output"
 
 
 def _convert_agent_findings(agent_findings: list) -> list:

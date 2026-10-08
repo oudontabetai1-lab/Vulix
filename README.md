@@ -189,11 +189,14 @@ python3 -m pip install -r requirements.txt
 playwright install chromium
 ```
 
-`vulix` コマンドとして使いたい場合は、依存導入後にパッケージをインストールします（`python -m vulix` と同等の入口を提供するだけで、出力・設定パスは従来どおり `config/wscan.yaml` 等を使います）。
+`vulix` コマンドとして使いたい場合は、依存導入後にパッケージをインストールします（`python -m vulix` と同等の入口です）。
 
 ```bash
-python3 -m pip install -e .   # `vulix <subcommand> ...` が使えるようになる
+python3 -m pip install .     # `vulix <subcommand> ...` が使えるようになる
+# ソースを編集しながら使う場合は python3 -m pip install -e .
 ```
+
+通常インストールにも既定設定・ペイロード・ダッシュボード/レポート HTML を同梱します。設定はインストール先の `config/wscan.yaml`（editable インストールではソース側）を読みます。通常・Agent スキャンとポータルの既定保存先は、起動時の作業ディレクトリ配下 `output/` です。書込み可能なディレクトリで起動してください。CLI の `--output DIR` はスキャン出力先を明示指定できます。
 
 ### Agent / Hybrid の追加依存
 
