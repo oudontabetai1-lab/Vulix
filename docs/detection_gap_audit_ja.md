@@ -93,7 +93,7 @@
 |経路|状態|理由・次の確認|
 |---|---|---|
 |info_disclosure 詳細エラー|対象URL観測を修正・実再現済み|URL別document取得と純粋判定。fallback証拠の同一性とverify Cookie同期も回帰対象|
-|csrf scan_page|FN実再現済み・未修正|現在DOMのform列挙。動的フォームを保持する対象ページ準備が必要|
+|csrf scan_page|修正済み（scan_page_context 化し crawl 済み page.html を解析。E2E 未確認）|動的フォームは crawl 時 DOM スナップショットに依存|
 |session scan_page|観測時点/帰属の候補|全context cookieをURLfilter無しで取得し、cookie名で一度だけ報告。今回API Positiveは検出済みでありFN確定とはしない|
 |js_static scan_page|API template fallback候補|通常attackはscan_page_contextでcrawl HTMLを使い保護済み。API passはscan_page直呼びで現在DOM fallbackが残る|
 |info_disclosure 技術ヘッダ / CORS wildcard|capture依存の候補|current_page_pairが対象のcapture無しで空。CORS任意Origin反射は直接HTTPで検出済み。wildcard固有経路は別検証が必要|

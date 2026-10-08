@@ -2,7 +2,9 @@
 CSRF (Cross-Site Request Forgery) Scanner
 Detects missing CSRF token protection in POST forms (IPA: 1.6 CSRF).
 """
+from html.parser import HTMLParser
 from typing import TYPE_CHECKING
+from urllib.parse import urljoin
 
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
@@ -24,6 +26,49 @@ CSRF_TOKEN_NAMES = {
     "form_token", "formtoken", "nonce", "security_token", "sec_token",
     "requesttoken", "request_token",
 }
+
+
+class _FormCollector(HTMLParser):
+    """HTML から <form> と name 付き入力を集める（form の入れ子は想定しない）。"""
+
+    def __init__(self):
+        super().__init__()
+        self.forms: list[dict] = []
+        self._cur: dict | None = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "form":
+            self._cur = {
+                "index": len(self.forms),
+                "method": (a.get("method") or "GET").upper(),
+                "action": a.get("action") or "",
+                "inputs": [],
+            }
+            self.forms.append(self._cur)
+        elif tag in ("input", "textarea", "select") and self._cur and a.get("name"):
+            self._cur["inputs"].append(a["name"].lower())
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self._cur = None
+
+
+def unprotected_post_forms(html: str) -> list[dict]:
+    """CSRF token 入力を持たない POST フォームを返す（純粋関数）。"""
+    collector = _FormCollector()
+    try:
+        collector.feed(html or "")
+    except Exception:
+        pass
+    return [
+        f for f in collector.forms
+        if f["method"] == "POST"
+        and not any(
+            n.replace("-", "_").replace(" ", "_") in CSRF_TOKEN_NAMES
+            for n in f["inputs"]
+        )
+    ]
 
 
 class CSRFScanner(BaseScanner):
@@ -76,8 +121,8 @@ class CSRFScanner(BaseScanner):
             ),
         ),
         state_change=StateChangeClass.READ_ONLY,
-        # scan_page の form 列挙が browser.page.evaluate のみ（capture fallback 無し）で
-        # browser 無しでは全 CSRF 検査が黙って空になるため browser 必須。
+        # 既定は crawl 済み page.html（scan_page_context）。フォールバックの scan_page は
+        # browser.page.content のみで browser 無しでは空になるため browser 必須のまま。
         prerequisites=frozenset({Prerequisite.BROWSER}),
         cost=CostClass.LOW,
     )
@@ -94,61 +139,45 @@ class CSRFScanner(BaseScanner):
         # CSRF is a page-level check; no per-field scan needed.
         return []
 
+    async def scan_page_context(self, page) -> list[Finding]:
+        """クロール時に保持した ``page.html`` を解析する（推奨経路）。
+
+        scan_page_context 非採用だと現在タブの DOM を読むため、engine が攻撃前に
+        navigate しない通常ページでは別ページを解析し、対象ページの token 無し
+        POST フォームを見逃す（FN）。js_static/sri と同じくクロール確定 HTML を使う。
+        """
+        return await self._scan(
+            getattr(page, "url", "") or "", getattr(page, "html", "") or ""
+        )
+
     async def scan_page(self, url: str) -> list[Finding]:
-        """Check all POST forms on the page for absent CSRF token fields."""
+        # scan_page_context が使えない経路向けのフォールバック（現在タブの DOM）。
+        try:
+            html = await self.browser.page.content()
+        except Exception:
+            return []
+        return await self._scan(url, html)
+
+    async def _scan(self, url: str, html: str) -> list[Finding]:
+        """token 無しの POST フォームごとに finding を記録する。"""
         findings = []
 
         if self.monitor:
             await self.monitor.emit_status(f"CSRF check on {url}")
 
-        try:
-            forms = await self.browser.page.evaluate("""
-                () => {
-                    const results = [];
-                    document.querySelectorAll('form').forEach((form, fi) => {
-                        const method = (form.method || 'GET').toUpperCase();
-                        const inputs = Array.from(
-                            form.querySelectorAll('input[name], textarea[name], select[name]')
-                        ).map(el => ({
-                            name: (el.name || '').toLowerCase(),
-                            type: (el.type || 'text').toLowerCase(),
-                        }));
-                        results.push({
-                            index: fi,
-                            method: method,
-                            action: form.action || '',
-                            inputs: inputs,
-                        });
-                    });
-                    return results;
-                }
-            """)
-        except Exception:
-            return []
-
-        for form in forms:
-            if form.get("method") != "POST":
-                continue  # CSRF risk is primarily on state-changing POST requests
-
-            inputs = form.get("inputs", [])
-            has_csrf_token = any(
-                inp.get("name", "").replace("-", "_").replace(" ", "_") in CSRF_TOKEN_NAMES
-                for inp in inputs
-            )
-
-            if not has_csrf_token:
-                pair = self.current_page_pair(url)
-                finding = await self.record_finding(
-                    url=url,
-                    field_name=f"form[{form['index']}]",
-                    payload="(no payload — structural analysis)",
-                    evidence=(
-                        f"POST form (action: {form.get('action', url)}) has no CSRF token field. "
-                        "State-changing requests may be forgeable from attacker-controlled pages."
-                    ),
-                    pair=pair,
-                    severity="medium",
-                )
-                findings.append(finding)
+        for form in unprotected_post_forms(html):
+            pair = self.current_page_pair(url)
+            action = urljoin(url, form["action"]) if form["action"] else url
+            findings.append(await self.record_finding(
+                url=url,
+                field_name=f"form[{form['index']}]",
+                payload="(no payload — structural analysis)",
+                evidence=(
+                    f"POST form (action: {action}) has no CSRF token field. "
+                    "State-changing requests may be forgeable from attacker-controlled pages."
+                ),
+                pair=pair,
+                severity="medium",
+            ))
 
         return findings
