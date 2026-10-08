@@ -8,10 +8,13 @@ The saved JSON can be fed back into the normal scanner as seed URLs.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import secrets
+import struct
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -324,6 +327,219 @@ def pick_active_page(pages: list[Any], closed_page: Any) -> Any | None:
     return remaining[-1] if remaining else None
 
 
+# ── 遠隔画面の描画確定待ち（空フレーム抑止・純粋関数） ─────────────────────
+# 遷移直後の Chromium は描画前の真っ白なフレームを screencast で送る。screencast は
+# 画面変化時にしかフレームを送らないため、そのフレームが次の描画まで（描画が止まれば
+# 無期限に）ダッシュボードに残る。新しい document の開始から描画確定までのフレームは
+# 保留し、縮小サムネイル（PNG）で空白か判定して、描画を確認したら新しい画面を送る。
+# 判定は有界回数で打ち切り、本当に空白のページも最後は表示する（凍結させない）。
+_PAINT_SETTLE_DELAYS = (0.1, 0.2, 0.4, 0.8, 1.5)
+_BLANK_THUMB_SCALE = 0.1
+_BLANK_TOLERANCE = 2
+_BLANK_MAX_PIXELS = 1_000_000
+_CAPTURE_TIMEOUT = 2.0
+_PAINT_LIFECYCLE_EVENTS = frozenset(
+    {
+        "firstPaint",
+        "firstContentfulPaint",
+        "firstImagePaint",
+        "firstMeaningfulPaintCandidate",
+        "firstMeaningfulPaint",
+    }
+)
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_PNG_CHANNELS = {0: 1, 2: 3, 4: 2, 6: 4}
+
+
+def _paeth(a: int, b: int, c: int) -> int:
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    return b if pb <= pc else c
+
+
+def png_is_blank(png: bytes, tolerance: int = _BLANK_TOLERANCE) -> bool | None:
+    """PNG 画像が単色（＝描画前の空フレーム）かを判定する（純粋関数・標準ライブラリのみ）。
+
+    各色チャネルの最大値と最小値の差がすべて ``tolerance`` 以下なら ``True``。
+    1 画素でも差があれば ``False``。PNG として解釈できない・未対応形式（8bit 以外、
+    パレット、インターレース）・過大サイズは判定不能として ``None`` を返す
+    （呼び出し側は判定不能を「空白ではない」として扱い、画面を止めない）。
+    alpha チャネルは無視する（スクリーンショットは不透明）。
+    """
+    try:
+        if (not isinstance(png, (bytes, bytearray)) or not png.startswith(_PNG_SIGNATURE)
+                or len(png) > _BLANK_MAX_PIXELS * 5):
+            return None
+        pos = len(_PNG_SIGNATURE)
+        header = None
+        idat = bytearray()
+        while pos + 8 <= len(png):
+            length, ctype = struct.unpack(">I4s", png[pos:pos + 8])
+            chunk = png[pos + 8:pos + 8 + length]
+            if len(chunk) != length:
+                return None
+            pos += 12 + length
+            if ctype == b"IHDR":
+                header = struct.unpack(">IIBBBBB", chunk[:13])
+            elif ctype == b"IDAT":
+                idat.extend(chunk)
+            elif ctype == b"IEND":
+                break
+        if header is None or not idat:
+            return None
+        width, height, depth, color_type, compression, filtering, interlace = header
+        channels = _PNG_CHANNELS.get(color_type)
+        if depth != 8 or channels is None or (compression, filtering, interlace) != (0, 0, 0):
+            return None
+        if width <= 0 or height <= 0 or width * height > _BLANK_MAX_PIXELS:
+            return None
+        color_channels = channels - 1 if color_type in (4, 6) else channels
+        stride = width * channels
+        expected = (stride + 1) * height
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(bytes(idat), expected + 1)
+        if len(raw) != expected or not decoder.eof:
+            return None
+        lo = [255] * color_channels
+        hi = [0] * color_channels
+        prev = bytearray(stride)
+        for y in range(height):
+            base = y * (stride + 1)
+            ftype = raw[base]
+            line = bytearray(raw[base + 1:base + 1 + stride])
+            if ftype == 1:
+                for i in range(channels, stride):
+                    line[i] = (line[i] + line[i - channels]) & 0xFF
+            elif ftype == 2:
+                for i in range(stride):
+                    line[i] = (line[i] + prev[i]) & 0xFF
+            elif ftype == 3:
+                for i in range(stride):
+                    left = line[i - channels] if i >= channels else 0
+                    line[i] = (line[i] + ((left + prev[i]) >> 1)) & 0xFF
+            elif ftype == 4:
+                for i in range(stride):
+                    left = line[i - channels] if i >= channels else 0
+                    upleft = prev[i - channels] if i >= channels else 0
+                    line[i] = (line[i] + _paeth(left, prev[i], upleft)) & 0xFF
+            elif ftype != 0:
+                return None
+            for c in range(color_channels):
+                values = line[c::channels]
+                lo[c] = min(lo[c], min(values))
+                hi[c] = max(hi[c], max(values))
+                if hi[c] - lo[c] > tolerance:
+                    return False
+            prev = line
+        return True
+    except Exception:
+        return None
+
+
+def decide_settle_action(blank: bool | None, attempt: int, max_attempts: int) -> str:
+    """保留中フレームの扱いを決める（純粋関数）。
+
+    - ``"forward"``  … 描画を確認（空白でない）または判定不能。最新画面を送る。
+    - ``"retry"``    … まだ空白。残り試行があるので待って再判定する。
+    - ``"fallback"`` … 空白のまま試行上限。保留を解いて最新フレームを送る（凍結防止）。
+    """
+    if blank is not True:
+        return "forward"
+    if attempt + 1 < max_attempts:
+        return "retry"
+    return "fallback"
+
+
+def classify_lifecycle_event(
+    params: dict, main_frame_id: str | None, loader_id: str | None = None
+) -> str | None:
+    """CDP ``Page.lifecycleEvent`` をメインフレームの遷移開始/描画に分類する（純粋関数）。
+
+    メインフレームの ``init``（新しい document の開始）は ``"navigation"``、
+    描画系イベント（firstPaint 等）は ``"paint"``。iframe・未知のメインフレーム・
+    その他のイベントは ``None``（保留判定に使わない）。``loader_id`` を渡すと、
+    別 document（遷移前のページ）の遅れて届いた描画通知も ``None`` にする。
+    """
+    if not main_frame_id or not isinstance(params, dict):
+        return None
+    if params.get("frameId") != main_frame_id:
+        return None
+    name = params.get("name")
+    if name == "init":
+        return "navigation"
+    if name in _PAINT_LIFECYCLE_EVENTS:
+        if loader_id and params.get("loaderId") and params.get("loaderId") != loader_id:
+            return None
+        return "paint"
+    return None
+
+
+def classify_frame_navigated(
+    params: Any, main_frame_id: str | None, loader_id: str | None
+) -> str | None:
+    """CDP ``Page.frameNavigated`` を保留開始の要否に分類する（純粋関数）。
+
+    - ``"swap"``       … 親無しフレームの ID が変わった（process swap / 初回確定）。ID を取り直す。
+    - ``"navigation"`` … 同じメインフレームの新しい document（loader が変わった）。
+      lifecycle 通知が使えないときの遷移検知の代替。
+    - ``None``         … iframe・同一 document の重複通知など。保留しない。
+    """
+    frame = params.get("frame") if isinstance(params, dict) else None
+    if not isinstance(frame, dict) or frame.get("parentId"):
+        return None
+    frame_id = frame.get("id")
+    if not frame_id:
+        return None
+    if str(frame_id) != main_frame_id:
+        return "swap"
+    new_loader = frame.get("loaderId")
+    if new_loader and new_loader != loader_id:
+        return "navigation"
+    return None
+
+
+def classify_screencast_frame(same_cdp: bool, epoch: Any, current_epoch: Any) -> str:
+    """受信フレームの扱いを決める（純粋関数）。``epoch`` は (gen, loader, settling)。
+
+    - ``"drop"`` … 別 CDP・受信後に document/保留状態が変わった古いフレーム。
+    - ``"hold"`` … 保留中の現 document のフレーム。送らず撮り直し失敗時の代替として保持。
+    - ``"emit"`` … 通常配信。
+    """
+    if not same_cdp or epoch != current_epoch:
+        return "drop"
+    return "hold" if epoch[2] else "emit"
+
+
+def thumbnail_clip(metrics: Any, default_width: int, default_height: int,
+                   scale: float = _BLANK_THUMB_SCALE) -> dict:
+    """空白判定用サムネイルの clip を、現在の表示領域から作る（純粋関数）。
+
+    clip はページ座標なので、スクロール中は ``cssVisualViewport`` の pageX/pageY を
+    使わないと先頭（未表示部分）を撮って誤判定する。値が無い/不正なら既定ビューポート。
+    """
+    vv = metrics.get("cssVisualViewport") if isinstance(metrics, dict) else None
+    vv = vv if isinstance(vv, dict) else {}
+
+    def _num(value, default, positive=False):
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if f != f or f in (float("inf"), float("-inf")) or f < 0 or (positive and f <= 0):
+            return float(default)
+        return f
+
+    return {
+        "x": _num(vv.get("pageX"), 0),
+        "y": _num(vv.get("pageY"), 0),
+        "width": _num(vv.get("clientWidth"), default_width, positive=True),
+        "height": _num(vv.get("clientHeight"), default_height, positive=True),
+        "scale": scale,
+    }
+
+
 class ManualCrawlSession:
     """Stateful visible-browser recorder used by CLI and dashboard APIs."""
 
@@ -372,6 +588,17 @@ class ManualCrawlSession:
         self._cdp = None
         self._frame_callback = None
         self._frame_tasks: set[asyncio.Task] = set()
+        # 描画確定待ち（空フレーム抑止）用。
+        self._main_frame_id: str | None = None
+        self._settling = False
+        self._settle_cdp = None
+        self._settle_task: asyncio.Task | None = None
+        self._settle_gen = 0
+        self._settle_finishing = False
+        self._loader_id: str | None = None
+        self._paint_event: asyncio.Event | None = None
+        # 保留中に受けた直近フレーム（撮り直し失敗時のフォールバック）。
+        self._held_frame: str = ""
 
     async def start(self, *args, **kwargs) -> dict:
         """記録セッションを開始する。起動途中のどの例外でも資格情報とブラウザを解放する。
@@ -741,6 +968,15 @@ class ManualCrawlSession:
             "Page.screencastFrame",
             lambda params: self._on_screencast_frame(params, cdp),
         )
+        cdp.on(
+            "Page.lifecycleEvent",
+            lambda params: self._on_lifecycle_event(params, cdp),
+        )
+        cdp.on(
+            "Page.frameNavigated",
+            lambda params: self._on_frame_navigated(params, cdp),
+        )
+        main_frame_id = await self._enable_lifecycle_events(cdp)
         try:
             await cdp.send(
                 "Page.startScreencast",
@@ -761,6 +997,208 @@ class ManualCrawlSession:
                 pass
             raise
         self._cdp = cdp  # 開始成功後にだけ確定する
+        self._main_frame_id = main_frame_id
+        self._loader_id = None
+        # 切替直後のページは描画済みとは限らない（popup の about:blank→遷移等）。
+        # 最初のフレームも描画確定まで保留する（描画済みなら最初の判定ですぐ送る）。
+        self._begin_settle(cdp)
+
+    async def _enable_lifecycle_events(self, cdp) -> str | None:
+        """遷移開始/描画の lifecycle 通知を有効化し、メインフレーム ID を返す。
+
+        失敗しても配信は止めない（描画の早期検知が効かなくなるだけで、保留は
+        サムネイル判定と有界リトライで解除される）。
+        """
+        try:
+            await cdp.send("Page.enable")
+            await cdp.send("Page.setLifecycleEventsEnabled", {"enabled": True})
+            tree = await cdp.send("Page.getFrameTree")
+            frame_id = tree["frameTree"]["frame"]["id"]
+            return str(frame_id) if frame_id else None
+        except Exception:
+            return None
+
+    def _on_lifecycle_event(self, params: dict, cdp) -> None:
+        """メインフレームの遷移開始で保留を始め、描画通知で保留解除を早める。"""
+        if cdp is not self._cdp:
+            return
+        kind = classify_lifecycle_event(params, self._main_frame_id, self._loader_id)
+        if kind == "navigation":
+            self._loader_id = params.get("loaderId") or None
+            self._held_frame = ""  # 遷移前 document のフレームは持ち越さない。
+            self._begin_settle(cdp)
+        elif kind == "paint" and self._settling and self._paint_event is not None:
+            self._paint_event.set()
+
+    def _on_frame_navigated(self, params: dict, cdp) -> None:
+        """メインフレームの新しい document で保留を始める（lifecycle 通知の取りこぼし補完）。
+
+        renderer の process swap では置換後のメインフレームに新しい ID が付き、
+        その ``init`` は旧 ID と一致せず取りこぼす。lifecycle 有効化に失敗した場合は
+        同じ ID の遷移も ``init`` が来ないため、loader の変化で検知する。
+        """
+        if cdp is not self._cdp:
+            return
+        kind = classify_frame_navigated(params, self._main_frame_id, self._loader_id)
+        if kind is None:
+            return
+        frame = params["frame"]
+        if kind == "swap":
+            self._main_frame_id = str(frame["id"])
+        self._loader_id = frame.get("loaderId") or None
+        self._held_frame = ""
+        self._begin_settle(cdp)
+
+    def _begin_settle(self, cdp) -> None:
+        """描画確定待ちを開始する。待機中の連続遷移では試行予算を延長しない。"""
+        if (
+            self._settling
+            and self._settle_cdp is cdp
+            and not self._settle_finishing
+            and self._settle_task is not None
+            and not self._settle_task.done()
+        ):
+            # 高速な連続遷移（リダイレクト連鎖等）。前 document の描画通知は捨てるが、
+            # 待機の上限は最初の遷移から数える（遷移し続けるページでも画面を凍結させない）。
+            if self._paint_event is not None:
+                self._paint_event.clear()
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._settle_task is not None and not self._settle_task.done():
+            self._settle_task.cancel()
+        self._settle_gen += 1
+        self._settling = True
+        self._settle_finishing = False
+        self._settle_cdp = cdp
+        self._paint_event = asyncio.Event()
+        self._held_frame = ""
+        self._settle_task = loop.create_task(self._settle_loop(cdp, self._settle_gen))
+
+    def _settle_stale(self, cdp, gen: int) -> bool:
+        return gen != self._settle_gen or cdp is not self._cdp
+
+    async def _settle_loop(self, cdp, gen: int) -> None:
+        """描画を確認するまでフレームを保留し、有界回数で判定をリトライする。"""
+        try:
+            max_attempts = len(_PAINT_SETTLE_DELAYS)
+            attempt = 0
+            while True:
+                event = self._paint_event
+                loader_id = self._loader_id
+                if attempt == 0 and event is not None:
+                    try:
+                        await asyncio.wait_for(
+                            event.wait(), _PAINT_SETTLE_DELAYS[min(attempt, max_attempts - 1)]
+                        )
+                        event.clear()
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    # 複数の描画通知で試行予算を早く使い切らない。
+                    await asyncio.sleep(_PAINT_SETTLE_DELAYS[attempt])
+                if self._settle_stale(cdp, gen):
+                    return
+                # firstPaint でも白一色になり得る。通知は判定を早めるだけに使う。
+                blank = await self._probe_blank(cdp)
+                if loader_id != self._loader_id:
+                    blank = True  # 遷移前の描画確認は現 document の証拠にならない。
+                if self._settle_stale(cdp, gen):
+                    return
+                if decide_settle_action(blank, attempt, max_attempts) == "retry":
+                    attempt += 1
+                    continue
+                await self._finish_settle(cdp, gen)
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if not self._settle_stale(cdp, gen):
+                await self._finish_settle(cdp, gen)
+
+    async def _probe_blank(self, cdp) -> bool | None:
+        """表示領域の縮小 PNG を撮って空白か判定する。失敗は ``None``（判定不能）。"""
+        try:
+            metrics = await asyncio.wait_for(
+                cdp.send("Page.getLayoutMetrics"), _CAPTURE_TIMEOUT
+            )
+        except Exception:
+            metrics = None
+        try:
+            shot = await asyncio.wait_for(
+                cdp.send(
+                    "Page.captureScreenshot",
+                    {
+                        "format": "png",
+                        "clip": thumbnail_clip(metrics, self.view_width, self.view_height),
+                    },
+                ),
+                _CAPTURE_TIMEOUT,
+            )
+            return png_is_blank(base64.b64decode(shot["data"]))
+        except Exception:
+            return None
+
+    async def _capture_viewport(self, cdp) -> str:
+        """描画確定後の画面を撮り直す（保留中の古い空フレームを送らないため）。"""
+        try:
+            shot = await asyncio.wait_for(
+                cdp.send("Page.captureScreenshot", {"format": "jpeg", "quality": 55}),
+                _CAPTURE_TIMEOUT,
+            )
+            data = shot.get("data") if isinstance(shot, dict) else None
+            return data if isinstance(data, str) and data else ""
+        except Exception:
+            return ""
+
+    async def _finish_settle(self, cdp, gen: int) -> None:
+        """保留を解除し、撮り直した画面を送る。撮り直し失敗時は保留中の直近フレームを送る。
+
+        保留中のフレームは ACK 済みで次は届かないことがある（静止ページ）。
+        何も送らないと空/古い画面が残るため、直近の保持フレームで補う。
+        """
+        self._settle_finishing = True
+        data = await self._capture_viewport(cdp)
+        if self._settle_stale(cdp, gen):
+            return
+        data = data or self._held_frame
+        self._held_frame = ""
+        self._settling = False
+        self._settle_finishing = False
+        self._settle_cdp = None
+        self._paint_event = None
+        if data:
+            await self._emit_frame(data)
+
+    async def _emit_frame(self, data: str) -> None:
+        cb = self._frame_callback
+        if cb is None:
+            return
+        try:
+            await cb(
+                {
+                    "data": data,
+                    "width": self.view_width,
+                    "height": self.view_height,
+                }
+            )
+        except Exception:
+            pass
+
+    def _reset_settle(self) -> None:
+        if self._settle_task is not None and not self._settle_task.done():
+            self._settle_task.cancel()
+        self._settle_task = None
+        self._settle_gen += 1
+        self._settling = False
+        self._settle_finishing = False
+        self._settle_cdp = None
+        self._paint_event = None
+        self._held_frame = ""
+        self._main_frame_id = None
+        self._loader_id = None
 
     def _on_screencast_frame(self, params: dict, cdp=None) -> None:
         """CDP のフレームイベント（同期コールバック）→ 配信タスクを起こす。"""
@@ -768,11 +1206,19 @@ class ManualCrawlSession:
             loop = asyncio.get_event_loop()
         except RuntimeError:
             return
-        t = loop.create_task(self._handle_frame(params, cdp or self._cdp))
+        epoch = (self._settle_gen, self._loader_id, self._settling)
+        t = loop.create_task(self._handle_frame(params, cdp or self._cdp, epoch))
         self._frame_tasks.add(t)
         t.add_done_callback(lambda x: self._frame_tasks.discard(x))
 
-    async def _handle_frame(self, params: dict, cdp) -> None:
+    async def _handle_frame(self, params: dict, cdp, epoch=None) -> None:
+        # ACK の完了より前に受信時の document/保留状態を固定する。
+        if epoch is None:
+            epoch = (self._settle_gen, self._loader_id, self._settling)
+        data = params.get("data", "")
+        # ACK 待ちの間に撮り直しが失敗して保留が終わっても代替に使えるよう、先に保持する。
+        if self._frame_disposition(cdp, epoch) == "hold" and isinstance(data, str) and data:
+            self._held_frame = data
         # フレームを ack しないと次が届かない。ack 後にコールバックへ渡す。
         session_id = params.get("sessionId")
         if cdp is not None and session_id is not None:
@@ -782,21 +1228,14 @@ class ManualCrawlSession:
                 )
             except Exception:
                 pass
-        if cdp is not self._cdp:
-            return
-        cb = self._frame_callback
-        if cb is None:
-            return
-        try:
-            await cb(
-                {
-                    "data": params.get("data", ""),
-                    "width": self.view_width,
-                    "height": self.view_height,
-                }
-            )
-        except Exception:
-            pass
+        # 保留中のフレームは送らない（ACK 前に保持済み）。
+        if self._frame_disposition(cdp, epoch) == "emit":
+            await self._emit_frame(data)
+
+    def _frame_disposition(self, cdp, epoch) -> str:
+        return classify_screencast_frame(
+            cdp is self._cdp, epoch, (self._settle_gen, self._loader_id, self._settling)
+        )
 
     async def select_mfa_field(self, nx: float, ny: float) -> dict:
         """遠隔画面で OTP 欄を特定し、TOTP 設定済みなら現在コードを入力する。"""
@@ -963,6 +1402,7 @@ class ManualCrawlSession:
         return {"ok": True, "type": norm["type"]}
 
     async def _stop_screencast(self, *, clear_callback: bool = True) -> None:
+        self._reset_settle()
         for t in list(self._frame_tasks):
             t.cancel()
         self._frame_tasks.clear()

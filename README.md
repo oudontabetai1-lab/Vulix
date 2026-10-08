@@ -6,7 +6,7 @@
 
 > **基本の操作面はブラウザで開くダッシュボードです**（`python3 main.py serve`）。通常・Agent・Hybrid の起動、機能フラグの切り替え、進捗確認、結果閲覧までダッシュボードで完結します。`scan`・`agent` などの CLI サブコマンドは自動化・CI・スクリプト用の補助入口です。
 
-Vulix のモジュール入口では `python -m vulix explore URL` を `scan` の別名として利用できます。利用可能な別名は `python -m vulix --help` にも表示されます。
+Vulix のモジュール入口では `python -m vulix explore URL` を `scan` の別名として、`python -m vulix replay URL --flows FILE`（または `--har FILE`）を記録フロー/HAR 再生として利用できます（`replay` は `scan` の別名で、内部は同じ `--flows`/`--har` 経路）。利用可能な別名は `python -m vulix --help` にも表示されます。パッケージとして `pip install .` すると、同じ入口が `vulix <subcommand> ...` コマンドとしても使えます（`python -m vulix` と同等の委譲）。
 
 > Vulix は、自分が管理している環境、または明示的な検査許可を得た環境だけに使用してください。
 
@@ -189,6 +189,15 @@ python3 -m pip install -r requirements.txt
 playwright install chromium
 ```
 
+`vulix` コマンドとして使いたい場合は、依存導入後にパッケージをインストールします（`python -m vulix` と同等の入口です）。
+
+```bash
+python3 -m pip install .     # `vulix <subcommand> ...` が使えるようになる
+# ソースを編集しながら使う場合は python3 -m pip install -e .
+```
+
+通常インストールにも既定設定・ペイロード・ダッシュボード/レポート HTML を同梱します。設定はインストール先の `config/wscan.yaml`（editable インストールではソース側）を読みます。通常・Agent スキャンとポータルの既定保存先は、起動時の作業ディレクトリ配下 `output/` です。書込み可能なディレクトリで起動してください。CLI の `--output DIR` はスキャン出力先を明示指定できます。
+
 ### Agent / Hybrid の追加依存
 
 ```bash
@@ -262,6 +271,8 @@ Agent は LLM がページを観察し、操作、ペイロード選択、結果
 ```text
 scan agent triage serve setup batch record manual-crawl import-payloads capability-matrix
 ```
+
+Vulix ブランドの別名として `explore`（=`scan`）と `replay`（=`scan`、記録フロー/HAR 再生向け）も使えます。`explore` は `python -m vulix` / `vulix` 入口で、`replay` は `main.py` / `python -m vulix` / `vulix` のいずれでも利用できます。
 
 正確なローカル既定値は `config/wscan.yaml` の影響を受けます。実行環境では次も確認してください。
 
@@ -495,6 +506,7 @@ python3 main.py record URL [--output flows/recording.json] [--headless]
 
 ```bash
 python3 main.py scan URL --flows flows/recording.json [flows/other.json ...]
+# 別名: python3 main.py replay URL --flows ...（HAR 再生は --har FILE）
 ```
 
 **click の記録対象**: ボタン・リンク・`input[type=submit|button|reset]` に加え、`<label>`・`[onclick]`・`[tabindex]`・`role=button|link|menuitem|tab` を持つ独自の操作要素も、**ユーザーの実操作（trusted なクリック）に限り**記録します。スクリプトが発行した `element.click()` / `dispatchEvent` は記録しません。checkbox/radio は状態変更（change）として記録し、file/image input は再生不能のため記録せず警告を出します。canvas や block 要素は相対クリック座標も保存して再生します。再生時、クリックできない（非表示・overlay 等）操作要素は警告して skip し、クリック起因の遷移先へ到達していなければ遷移先を直接開きます（開けなければフロー失敗）。
