@@ -34,7 +34,7 @@ from starlette.background import BackgroundTask
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 # Where ScanEngine writes each scan's artifacts (output/<timestamp>/...).
 # Defined here to avoid importing the heavy engine module (pulls in Playwright).
-OUTPUT_BASE = Path(__file__).parent.parent / "output"
+OUTPUT_BASE = Path.cwd() / "output"
 
 _UPLOAD_MAX_BYTES = 8 * 1024 * 1024
 _UPLOAD_DIR_MAX_BYTES = 200 * 1024 * 1024

@@ -14,6 +14,8 @@ class PublicBrandingTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("explore (alias for scan)", proc.stdout)
+        # 0069 残差分: replay 別名も help に露出する。
+        self.assertIn("replay (alias for scan", proc.stdout)
 
     def test_public_ui_and_docs_do_not_name_reference_products(self):
         public_files = [
