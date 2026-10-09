@@ -18,8 +18,9 @@ def _proxy_sdk_modules():
     profile = types.ModuleType("browser_use.browser.profile")
 
     class ProxySettings:
-        def __init__(self, *, server):
+        def __init__(self, *, server, bypass=None):
             self.server = server
+            self.bypass = bypass
 
     profile.ProxySettings = ProxySettings
     return {
@@ -41,6 +42,7 @@ def test_agent_browser_profile_receives_normalized_proxy_without_sdk_global_conf
         scanner._build_browser_profile(Profile)
 
     assert captured["proxy"].server == "http://127.0.0.1:8080"
+    assert captured["proxy"].bypass == "<-loopback>"
 
 
 def test_proxy_profile_rejects_sdk_without_proxy_support():

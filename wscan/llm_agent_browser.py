@@ -1120,7 +1120,7 @@ class AgentBrowserScanner:
             try:
                 from browser_use.browser.profile import ProxySettings
 
-                options["proxy"] = ProxySettings(server=self.proxy)
+                options["proxy"] = ProxySettings(server=self.proxy, bypass="<-loopback>")
                 return profile_type(**options)
             except Exception as exc:
                 raise RuntimeError(
