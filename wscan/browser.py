@@ -1214,28 +1214,19 @@ class BrowserManager:
 
     async def _on_dialog(self, dialog):
         """Capture alert dialogs (XSS indicator)."""
-        self.dialog_fired = True
-        # 累積（flood 検知用・F06/0059）。__init__ を経ないテスト用インスタンスでも壊れないよう getattr。
-        self.dialog_total = getattr(self, "dialog_total", 0) + 1
-        self.dialog_message = dialog.message
-        # Capture an evidence screenshot, but NEVER let it wedge the scan. While
-        # a dialog is open Playwright blocks the page, and ``page.screenshot``
-        # can in turn block until the dialog is handled — a deadlock if we
-        # screenshot *before* dismissing. Bound it with Playwright's *native*
-        # timeout (not ``asyncio.wait_for``): wait_for cancels our await at 3s
-        # but the screenshot keeps the page's default timeout running underneath,
-        # so when that later fires there is no awaiter left and asyncio logs
-        # "Future exception was never retrieved". Letting Playwright own the one
-        # timeout keeps a single timer and dismisses no matter what, so a flood
-        # of alert()-firing payloads (e.g. a stored-XSS listing) can't freeze
-        # every later navigation.
-        try:
-            shot = await self.page.screenshot(
-                full_page=False, type="jpeg", quality=80, timeout=3000
-            )
-            self.dialog_screenshot_b64 = base64.b64encode(shot).decode()
-        except Exception:
-            self.dialog_screenshot_b64 = ""
+        # A queued callback may belong to a page replaced before it starts.
+        # Legacy dialog doubles without a page attribute use the current page.
+        page = getattr(dialog, "page", self.page)
+        generation = getattr(self, "_dialog_generation", 0)
+        current = page is self.page
+        capture = False
+        if current:
+            self.dialog_fired = True
+            self.dialog_total = getattr(self, "dialog_total", 0) + 1
+            self.dialog_message = dialog.message
+            # Reserve before awaiting so a flood takes at most one screenshot.
+            capture = not getattr(self, "_dialog_screenshot_attempted", False)
+            self._dialog_screenshot_attempted = True
         try:
             # dismiss() は native timeout を持たないコマンドで、CDP 応答が返らないと await が
             # 永久に完了しない。ダイアログ未解消の間は同ページの goto/content/フォーム操作が全て
@@ -1249,7 +1240,22 @@ class BrowserManager:
             # F06/0059: dismiss 失敗＝dialog が未解消で page が wedge した可能性。直接フラグに残し、
             # _attack_one_page の recreate 判定が「_fired>3」到達を待たずに復旧できるようにする
             # （初回 alert の dismiss が wedge すると以降 dialog が開けず _fired が増えないため）。
-            self.dialog_dismiss_failed = True
+            if self.page is page:
+                self.dialog_dismiss_failed = True
+            return
+        # 開いた dialog 上での撮影は dismiss を妨げる。先に閉じ、native timeout で撮影する。
+        # 旧 page の callback は再生成後の page の signal/evidence を汚さない。
+        if (capture and self.page is page
+                and getattr(self, "_dialog_generation", 0) == generation):
+            try:
+                shot = await page.screenshot(
+                    full_page=False, type="jpeg", quality=80, timeout=3000
+                )
+                if (self.page is page
+                        and getattr(self, "_dialog_generation", 0) == generation):
+                    self.dialog_screenshot_b64 = base64.b64encode(shot).decode()
+            except Exception:
+                pass
 
     async def update_extra_headers(self, headers: dict) -> None:
         """Replace extra HTTP headers used by the refresh task."""
@@ -1281,7 +1287,9 @@ class BrowserManager:
             )
 
     def reset_dialog(self):
+        self._dialog_generation = getattr(self, "_dialog_generation", 0) + 1
         self.dialog_fired = False
+        self._dialog_screenshot_attempted = False
         # F06/0059: dialog_dismiss_failed は wedge signal。XSS 等の scanner が payload 毎に
         # reset_dialog() を呼ぶため、ここでクリアすると初回 dismiss 失敗の wedge が
         # _recover_if_dialog_flood の検査前に消え、以降 dialog が開けず dialog_total も
