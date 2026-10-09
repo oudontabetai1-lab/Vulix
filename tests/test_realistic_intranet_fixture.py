@@ -95,6 +95,39 @@ class RealisticIntranetFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/tools/ping-safe", resp.text)
         self.assertNotIn("innerHTML", resp.text)
 
+    # ── JSON body 経由の NoSQL 注入（脆弱 + 安全ツイン）────────────────────
+    async def test_json_nosql_operator_returns_all_members(self):
+        normal = await self.client.post("/api/directory/search", json={"department": "nobody"})
+        injected = await self.client.post("/api/directory/search", json={"department": {"$ne": "x"}})
+        self.assertEqual(normal.json()["count"], 0)
+        self.assertEqual(injected.json()["count"], 10)
+        self.assertGreater(len(injected.text) - len(normal.text), 500)  # boolean 膨張の閾値超
+
+    async def test_json_nosql_safe_twin_ignores_operators(self):
+        resp = await self.client.post("/api/directory/search-safe", json={"department": {"$ne": "x"}})
+        self.assertEqual(resp.json()["count"], 0)
+
+    # ── JSON body 経由の反射 XSS（脆弱 + 安全ツイン + JSON エコー）──────────
+    async def test_json_xss_reflects_unescaped_into_html(self):
+        payload = "<script>alert(1)</script>"
+        resp = await self.client.post("/api/notes/preview", json={"note": payload})
+        self.assertTrue(resp.headers["content-type"].startswith("text/html"))
+        self.assertIn(payload, resp.text)
+
+    async def test_json_xss_safe_twins(self):
+        payload = "<script>alert(1)</script>"
+        escaped = await self.client.post("/api/notes/preview-safe", json={"note": payload})
+        self.assertNotIn(payload, escaped.text)
+        echo = await self.client.post("/api/notes/echo", json={"note": payload})
+        self.assertTrue(echo.headers["content-type"].startswith("application/json"))
+        self.assertEqual(echo.json(), {"note": payload})
+
+    async def test_directory_console_exposes_json_calls_only(self):
+        resp = await self.client.get("/ops/directory")
+        for path in ("/api/directory/search-safe", "/api/notes/preview-safe", "/api/notes/echo"):
+            self.assertIn(path, resp.text)
+        self.assertNotIn("innerHTML", resp.text)
+
     # ── SSRF ──────────────────────────────────────────────────────────────
     async def test_ssrf_aws_metadata(self):
         resp = await self.client.get(

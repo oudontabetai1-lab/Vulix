@@ -208,8 +208,9 @@ class BrowserCallParityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
-    def test_both_scanners_explicitly_reject_json_body(self):
-        self.assertIs(XSSScanner.SUPPORTS_JSON_BODY, False)
+    def test_xss_opts_in_to_json_body_but_dom_xss_rejects(self):
+        # xss は HTML 応答への反射だけを JSON 経路（HTTPX）で検出する。dom_xss は DOM 実行依存で非対応。
+        self.assertIs(XSSScanner.SUPPORTS_JSON_BODY, True)
         self.assertIs(DOMXSSScanner.SUPPORTS_JSON_BODY, False)
 
     async def test_json_body_is_guarded_without_browser_submission(self):
@@ -221,6 +222,7 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         field = {"name": "target", "type": "text"}
 
+        # テンプレ未登録の JSON 点は送信不能＝陰性。どちらもブラウザ送信へ落とさない。
         for scanner_cls in (XSSScanner, DOMXSSScanner):
             with self.subTest(scanner=scanner_cls.__name__):
                 browser = _RecordingBrowser()
