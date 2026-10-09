@@ -526,6 +526,7 @@ from .oob_email import OOBEmailConfig, EmailSink, make_oob_token, oob_address
 console = Console()
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
+from wscan.state_paths import readable_state_file  # noqa: E402
 OUTPUT_BASE = Path.cwd() / "output"
 
 
@@ -1161,7 +1162,7 @@ class ScanEngine:
         payloads_data = self._load_yaml(payloads_file or str(default_payloads_path))
         using_default_payloads = not payloads_file or payloads_file == str(default_payloads_path)
         if using_default_payloads and self.enable_community_payloads:
-            community_payloads_path = CONFIG_DIR / "community_payloads.yaml"
+            community_payloads_path = readable_state_file("community_payloads.yaml")
             if community_payloads_path.exists():
                 community_payloads = self._load_yaml(str(community_payloads_path))
                 payloads_data = merge_community_payloads(payloads_data, community_payloads)
@@ -7429,8 +7430,9 @@ class ScanEngine:
         if self.enable_payload_learning:
             try:
                 self.payload_learner.save()
-            except Exception:
-                pass
+            except Exception as e:
+                # 書込不可でも scan 結果は有効（学習のみスキップ＝検査入力は減らさない）。
+                console.print(f"[yellow]payload 学習データを保存できません（学習をスキップ、scan は継続）: {e}[/yellow]")
 
     async def _phase_report_async(self):
         """Async wrapper for report phase — runs A-1 AI analysis + J remediation after report."""

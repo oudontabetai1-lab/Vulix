@@ -263,7 +263,7 @@ python3 main.py scan https://example.com --no-open-report
 
 ### 症状
 
-- 検査後に `config/payload_learning.json` が作成または更新される。
+- 検査後に `<state>/payload_learning.json` が作成または更新される（`<state>` は `WSCAN_STATE_DIR` > ソース checkout なら `config/` > `$XDG_STATE_HOME/vulix` > `~/.local/state/vulix`）。書込不可の場合は警告を出して学習のみスキップし、scan は継続する。
 
 ### 説明
 

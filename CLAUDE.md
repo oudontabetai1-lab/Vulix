@@ -435,6 +435,7 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
   `PARTIAL`（黙って全未計測を COMPLETE にしない）。benchmark case（`benchmarks/manifests/*.yaml`）を
   足したら該当 check を gaps から外す（covered なのに gap 残存＝`redundant_gaps`、registry から消えた
   gap＝`unknown_gaps`、safe twin 欠落＝`missing_safe_twin` で検出）。
+- **state パス解決は `wscan/state_paths.py` に一元化**（学習データ・community payloads の書込先。`WSCAN_STATE_DIR` > ソース checkout の `config/` > `$XDG_STATE_HOME/vulix` > `~/.local/state/vulix`。読取は state に無ければインストール内 `config/` へ後方互換フォールバック）。書込不可は警告のみで scan 継続。
 - `config/community_payloads.yaml` … `python main.py import-payloads` が公開集
   (PayloadsAllTheThings。`payload_importer.SOURCES`)から生成。**スキャン実行時はネット非依存**
   （生成済みYAMLを読むだけ）。`engine.merge_community_payloads` が既定(curated)に未収録の
