@@ -1,4 +1,4 @@
-"""state パス解決: env 上書き・checkout 後方互換・読取フォールバック・書込不可 degrade。"""
+"""state path resolution: overrides, legacy reads, fallback, and unwritable behavior."""
 import os
 from pathlib import Path
 
