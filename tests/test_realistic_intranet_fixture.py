@@ -73,6 +73,28 @@ class RealisticIntranetFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(elapsed, 0.8)
         self.assertNotRegex(resp.text, r"uid=\d+")
 
+    # ── JSON body 経由の OS 注入（脆弱 + 安全ツイン）──────────────────────
+    async def test_json_os_injection_output_based(self):
+        resp = await self.client.post("/api/tools/ping", json={"host": "; id"})
+        self.assertRegex(resp.json()["output"], r"uid=\d+")
+
+    async def test_json_os_clean_host_has_no_command_output(self):
+        resp = await self.client.post("/api/tools/ping", json={"host": "127.0.0.1"})
+        self.assertNotRegex(resp.text, r"uid=\d+")
+
+    async def test_json_os_safe_twin_rejects_metacharacters(self):
+        start = time.monotonic()
+        resp = await self.client.post("/api/tools/ping-safe", json={"host": "; sleep 3; id"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertLess(time.monotonic() - start, 0.8)
+        self.assertNotRegex(resp.text, r"uid=\d+")
+
+    async def test_api_console_exposes_json_calls_only(self):
+        # SPA harvest 入口: 両 API を fetch(JSON) で呼び、DOM シンクは持たない
+        resp = await self.client.get("/ops/api-console")
+        self.assertIn("/api/tools/ping-safe", resp.text)
+        self.assertNotIn("innerHTML", resp.text)
+
     # ── SSRF ──────────────────────────────────────────────────────────────
     async def test_ssrf_aws_metadata(self):
         resp = await self.client.get(

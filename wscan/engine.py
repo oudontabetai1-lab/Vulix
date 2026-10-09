@@ -276,7 +276,7 @@ _VERIFY_ONE_TIMEOUT_S = 180.0
 
 # SPA 収穫の JSON body を実攻撃するチェック。capability 判定に加えて明示的な
 # ホワイトリストを置き、将来の対応拡大が意図せず攻撃範囲を広げるのを防ぐ。
-_JSON_INJECTION_CHECKS = ("sqli",)
+_JSON_INJECTION_CHECKS = ("sqli", "os")
 
 
 def _stable_json_template_id(dedup_key: tuple) -> str:

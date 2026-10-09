@@ -88,12 +88,22 @@
 - API の到達キー (check,path,field,location): 161 → 161、捕捉要求 39 → 39。large fixture（page_count=4、全検査ルート保持）の到達キー 58 → 58、捕捉要求 202 → 202、.env Positive を維持。選択scannerはpage-onlyでpayloads.jsonlは両runとも無いが、largeにはengineのchain marker POSTが各1件ある。nonce値だけが変わり、同じsupport入力へ送達している。捕捉要求はブラウザ由来であり、追加のdocument GETと再検証を含む直接HTTP検査の全probe台帳ではない。これは指定fixtureの到達キー/ブラウザ捕捉件数の比較であり、実行probe総数や任意入力面の注入非回帰を保証しない。
 - 最小回帰: 修正前は別DOMのPositive/安全ツイン/取得不能の3ケース失敗、追加の実エンジン回帰も失敗。修正後は対象URL本文を判定し、既存 artifact 回帰と実E2Eを含め45 tests / 2 subtests成功。取得不能前に得た資源findingも保持する回帰を追加。
 
+## JSON body OS 注入の最終検証（OUD-96 / OUD-126、origin/main の OUD-87 修正を merge 後）
+
+- 変更: `engine._JSON_INJECTION_CHECKS` を `("sqli",)` → `("sqli", "os")`。realistic_intranet に脆弱 `/api/tools/ping`（TP 期待）と安全ツイン `/api/tools/ping-safe`（FP 禁止）を追加し、`EXPECTED_FINDINGS` へ昇格済み。
+- 非E2E: `pytest -q --ignore=tests/test_end_to_end_scan.py` → 3713 passed / 36 skipped / 失敗 0。
+- E2E（`WSCAN_E2E=1 tests/test_end_to_end_scan_extra.py`、実 Chromium）: 3 tests / 11 subtests 成功、331s（OUD-87 修正後。900s 内に収束）。
+  - TP: `os` / `/api/tools/ping` / `host` を検出（EXPECTED 全6行の recall 通過）。
+  - FP: `/api/tools/ping-safe` を含む SAFE_ENDPOINTS 全6行で finding 0。
+- 判断: FP が出なかったため `os` 追加は維持（KNOWN_GAP へ戻さない）。
+- 未確認: realistic_intranet 以外の E2E（`test_end_to_end_scan.py` / healthcare / benchmark）は今回未実行。csrf 修正の E2E（realistic_api）も未確認のまま。
+
 ## 共通ページ文脈の追加切り分け
 
 |経路|状態|理由・次の確認|
 |---|---|---|
 |info_disclosure 詳細エラー|対象URL観測を修正・実再現済み|URL別document取得と純粋判定。fallback証拠の同一性とverify Cookie同期も回帰対象|
-|csrf scan_page|FN実再現済み・未修正|現在DOMのform列挙。動的フォームを保持する対象ページ準備が必要|
+|csrf scan_page|修正済み（scan_page_context 化し crawl 済み page.html を解析。E2E 未確認）|動的フォームは crawl 時 DOM スナップショットに依存|
 |session scan_page|観測時点/帰属の候補|全context cookieをURLfilter無しで取得し、cookie名で一度だけ報告。今回API Positiveは検出済みでありFN確定とはしない|
 |js_static scan_page|API template fallback候補|通常attackはscan_page_contextでcrawl HTMLを使い保護済み。API passはscan_page直呼びで現在DOM fallbackが残る|
 |info_disclosure 技術ヘッダ / CORS wildcard|capture依存の候補|current_page_pairが対象のcapture無しで空。CORS任意Origin反射は直接HTTPで検出済み。wildcard固有経路は別検証が必要|

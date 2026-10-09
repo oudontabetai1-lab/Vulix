@@ -22,8 +22,8 @@ import asyncio
 import html
 import re
 
-from fastapi import FastAPI, File, Form, Query, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,8 @@ EXPECTED_FINDINGS = [
      "note": "クエリ tab がクライアント側で innerHTML に書き込まれる"},
     {"check": "file_upload", "path": "/documents/upload", "field": "attachment",
      "note": "拡張子/MIMEを検証せず危険なスクリプトファイルを受理する"},
+    {"check": "os", "path": "/api/tools/ping", "field": "host",
+     "note": "SPA が JSON body {host} で POST。host をシェルへ連結（JSON body 経由の OS 注入）"},
 ]
 
 # 検出されてはいけない入力。ここでの finding は誤検知。
@@ -54,6 +56,8 @@ SAFE_ENDPOINTS = [
      "note": "自己紹介を textContent で描画（innerHTML を使わない）"},
     {"path": "/documents/upload-safe", "field": "attachment",
      "note": "単一拡張子・Content-Type・画像マジックバイトを allow-list 検証する"},
+    {"path": "/api/tools/ping-safe", "field": "host",
+     "note": "JSON body の host を allow-list 検証、シェルに渡さない（JSON 版 OS 安全ツイン）"},
 ]
 
 
@@ -72,6 +76,7 @@ _NAV = [
     ('/portal/signin', 'Portal sign in'),
     ('/documents/upload', 'Document upload'),
     ('/documents/upload-safe', 'Safe document upload'),
+    ('/ops/api-console', 'API console'),
 ]
 
 
@@ -399,5 +404,39 @@ def create_app() -> FastAPI:
             </script>
             """,
         )
+
+    # ── JSON body 経由の OS 注入（SPA）：脆弱 + 安全ツイン ──────────────────
+    @app.get("/ops/api-console", response_class=HTMLResponse)
+    async def api_console():
+        # DOM シンクを置かず fetch だけ。SPA harvest が JSON body を拾う入口。
+        return _layout(
+            "API コンソール",
+            """
+            <p>疎通確認 API を呼び出します。</p>
+            <script>
+              const body = JSON.stringify({host: '127.0.0.1'});
+              const init = {method: 'POST', headers: {'Content-Type': 'application/json'}, body};
+              fetch('/api/tools/ping', init).then(r => r.json());
+              fetch('/api/tools/ping-safe', init).then(r => r.json());
+            </script>
+            """,
+        )
+
+    @app.post("/api/tools/ping", response_class=JSONResponse)
+    async def api_ping(request: Request):
+        # VULNERABLE: JSON の host をそのままシェルに連結する想定。
+        host = str((await request.json()).get("host", ""))
+        injected = await _simulate_shell(host)
+        if injected is not None:
+            return {"output": f"--- {host} ping statistics ---\n{injected}"}
+        return {"output": "1 packets transmitted, 1 received, 0% packet loss\n"}
+
+    @app.post("/api/tools/ping-safe", response_class=JSONResponse)
+    async def api_ping_safe(request: Request):
+        # SAFE: 厳格な allow-list。メタ文字は弾き、シェルに渡さない。
+        host = str((await request.json()).get("host", ""))
+        if not re.fullmatch(r"[A-Za-z0-9.\-]{1,253}", host):
+            return JSONResponse({"error": "invalid hostname"}, status_code=400)
+        return {"output": "1 packets transmitted, 1 received, 0% packet loss\n"}
 
     return app

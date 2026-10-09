@@ -85,6 +85,7 @@ async def _run_scan(port: int, output_dir: str):
         enable_payload_learning=False,
         enable_adaptive_payloads=False,
         enable_sitemap_crawl=False,
+        spa_crawl=True,  # JSON body API（/api/tools/ping*）の harvest に必要
         depth=2,
         fast_mode=True,
         max_payloads=12,
