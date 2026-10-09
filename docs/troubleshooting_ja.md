@@ -72,6 +72,12 @@ lsof -i :8765 -P -n
 python3 main.py scan https://example.com --proxy http://127.0.0.1:8080
 ```
 
+Agent / Hybrid の Agent Browser 経路では、設定した Proxy を browser-use のブラウザ profile に適用します。Chromium の既定では loopback 宛て通信を Proxy から外す場合があるため、明示 Proxy を指定した Agent Browser は localhost 宛ても Proxy を通し、Proxy に接続できなければ直通せず失敗します。Proxy listener の到達ログと Vulix の Event Log を確認してください。
+
+HTTP/HTTPS の loopback fixture と実 browser-use SDK を使った回帰では、HTTP の absolute-form URL・authority・path、HTTPS の CONNECT authority、target 側の受信、および停止した Proxy での target 受信ゼロを検証します。この回帰はローカル fixture の証拠であり、ZAP/Caido/Burp listener との実環境互換性を示すものではありません。
+
+TLS 設定は通信経路ごとに分けて確認してください。`--tls-ca-cert` と `--tls-verify` は httpx の直接リクエストに適用され、Agent Browser の Chromium 設定や Proxy の MITM CA を設定しません。Agent Browser は現在 browser-use profile の `disable_security` 設定を使うため、Agent の HTTPS 証明書検証状態は httpx の TLS オプションから推定できません。ブラウザの target TLS と Proxy の MITM 証明書は別の信頼設定です。
+
 一時的なタイムアウトがある場合は、再試行回数と待機時間を増やします。
 
 ```bash
