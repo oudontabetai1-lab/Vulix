@@ -526,7 +526,7 @@ from .oob_email import OOBEmailConfig, EmailSink, make_oob_token, oob_address
 console = Console()
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
-OUTPUT_BASE = Path(__file__).parent.parent / "output"
+OUTPUT_BASE = Path.cwd() / "output"
 
 
 def _interleave_payloads(
