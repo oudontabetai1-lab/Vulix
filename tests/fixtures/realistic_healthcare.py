@@ -86,6 +86,8 @@ EXPECTED_FINDINGS = [
      "note": "セッション Cookie を Secure/HttpOnly/SameSite 無しで発行"},
     {"check": "secret_leak", "path": "/static/vendor.js", "field": None, "difficulty": "medium",
      "note": "JS バンドルに高エントロピーの実在風キーを埋め込む"},
+    {"check": "secret_leak", "path": "/static/portal-script-only.js", "field": None,
+     "difficulty": "medium", "note": "通常 HTML が script src だけで参照する bundle に秘密を埋め込む"},
     {"check": "jwt_weak_secret", "path": "/api/v1/auth/token", "field": None, "difficulty": "medium",
      "note": "HS256 JWT を弱い秘密鍵 secret で署名して本文に露出"},
     {"check": "nosql", "path": "/api/v1/auth/login", "field": "username", "difficulty": "medium",
@@ -160,6 +162,8 @@ SAFE_ENDPOINTS = [
      "note": "Secure; HttpOnly; SameSite=Lax 付きで Cookie 発行"},
     {"check": "secret_leak", "path": "/static/vendor.safe.js", "field": None,
      "note": "プレースホルダだけを含む JS バンドル"},
+    {"check": "secret_leak", "path": "/static/portal-script-only.safe.js", "field": None,
+     "note": "script src だけで参照される安全な bundle"},
     {"check": "jwt_weak_secret", "path": "/api/v1/auth/token-safe", "field": None,
      "note": "十分長い秘密鍵で署名した exp 付き JWT を返す"},
     {"check": "nosql", "path": "/portal/signin", "field": "username",
@@ -209,6 +213,8 @@ _NAV = [
     ('/community/announcements', 'Announcements (safe)'),
     ('/portal/insights', 'Insights'),
     ('/portal/insights-safe', 'Insights (SRI safe)'),
+    ('/portal/script-only-secret', 'Script-only bundle'),
+    ('/portal/script-only-secret-safe', 'Script-only bundle (safe)'),
     ('/static/vendor.js', 'Vendor JS'),
     ('/static/vendor.safe.js', 'Vendor JS (safe)'),
     ('/portal/notice', 'Notices'),
@@ -779,6 +785,16 @@ def create_app() -> FastAPI:
             ),
         )
 
+    @app.get("/portal/script-only-secret", response_class=HTMLResponse)
+    async def portal_script_only_secret():
+        return _layout("Script bundle", "<p>Portal bundle loaded.</p>",
+                       extra_head='<script src="/static/portal-script-only.js"></script>')
+
+    @app.get("/portal/script-only-secret-safe", response_class=HTMLResponse)
+    async def portal_script_only_secret_safe():
+        return _layout("Script bundle (safe)", "<p>Portal bundle loaded.</p>",
+                       extra_head='<script src="/static/portal-script-only.safe.js"></script>')
+
     # ── js_static（source→sink） ──────────────────────────────────────────
     @app.get("/portal/notice", response_class=HTMLResponse)
     async def portal_notice():
@@ -927,6 +943,19 @@ def create_app() -> FastAPI:
     async def vendor_safe_js():
         return PlainTextResponse(
             _safe_vendor_bundle(), headers={"Content-Type": "application/javascript"}
+        )
+
+    @app.get("/static/portal-script-only.js", response_class=PlainTextResponse)
+    async def portal_script_only_bundle():
+        return PlainTextResponse(
+            'window.portalKey = "AIzaSyA-WLh38Kv9XQ7yz1bP4uMd3RTaZ2nHkLm";',
+            headers={"Content-Type": "application/javascript"},
+        )
+
+    @app.get("/static/portal-script-only.safe.js", response_class=PlainTextResponse)
+    async def portal_script_only_bundle_safe():
+        return PlainTextResponse(
+            "window.portalReady = true;", headers={"Content-Type": "application/javascript"}
         )
 
     # ── JWT 弱い秘密鍵 ────────────────────────────────────────────────────

@@ -78,11 +78,24 @@ class RealisticHealthcareFixtureTests(unittest.IsolatedAsyncioTestCase):
         for spec in EXPECTED_FINDINGS + SAFE_ENDPOINTS:
             with self.subTest(path=spec["path"]):
                 # パラメータ系はクロール用に ?field=... 付きでリンクされる。
+                if spec["path"] in {
+                    "/static/portal-script-only.js", "/static/portal-script-only.safe.js"
+                }:
+                    continue  # these bundles are deliberately reachable only through script src
                 self.assertTrue(
                     f'href="{spec["path"]}"' in resp.text
                     or f'href="{spec["path"]}?' in resp.text,
                     f'{spec["path"]} not linked from home',
                 )
+
+    async def test_script_only_resources_are_reachable_through_referring_html(self):
+        for path, resource in (
+            ("/portal/script-only-secret", "/static/portal-script-only.js"),
+            ("/portal/script-only-secret-safe", "/static/portal-script-only.safe.js"),
+        ):
+            page = (await self.client.get(path)).text
+            self.assertIn(f'src="{resource}"', page)
+            self.assertNotIn(f'href="{resource}"', page)
 
     async def test_parameterized_get_endpoints_link_their_field(self):
         # GET パラメータ系の脆弱エンドポイントは、クローラがパラメータ名を拾えるよう
@@ -232,6 +245,17 @@ class RealisticHealthcareFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("AWS Access Key ID", labels)
         self.assertIn("Stripe Secret Key", labels)
         self.assertEqual(scan_text_for_secrets(safe), [])
+
+    async def test_script_only_bundle_vulnerable_and_safe_twins(self):
+        vuln_page = (await self.client.get("/portal/script-only-secret")).text
+        safe_page = (await self.client.get("/portal/script-only-secret-safe")).text
+        vuln_bundle = (await self.client.get("/static/portal-script-only.js")).text
+        safe_bundle = (await self.client.get("/static/portal-script-only.safe.js")).text
+        self.assertIn('src="/static/portal-script-only.js"', vuln_page)
+        self.assertNotIn('href="/static/portal-script-only.js"', vuln_page)
+        self.assertIn("Google API Key", {hit["label"] for hit in scan_text_for_secrets(vuln_bundle)})
+        self.assertEqual(scan_text_for_secrets(safe_bundle), [])
+        self.assertIn('src="/static/portal-script-only.safe.js"', safe_page)
 
     async def test_medium_jwt_weak_secret(self):
         weak = (await self.client.get("/api/v1/auth/token")).json()["access_token"]

@@ -304,6 +304,16 @@ class SecretLeakScanner(BaseScanner):
     ) -> list[Finding]:
         return []
 
+    async def scan_page_context(self, page) -> list[Finding]:
+        findings = await self.scan_page(page.url)
+        in_scope = getattr(self.engine, "_is_access_allowed_url", None)
+        for url, body in (getattr(page, "external_scripts", None) or {}).items():
+            # A page may load third-party resources outside the configured scan scope.
+            if callable(in_scope) and not in_scope(url):
+                continue
+            findings.extend(await self._scan_body(url, body, referring_page_url=page.url))
+        return findings
+
     async def scan_page(self, url: str) -> list[Finding]:
         if url in self._checked_urls:
             return []
@@ -322,6 +332,19 @@ class SecretLeakScanner(BaseScanner):
         body = await self._document_body(url)
         if not body:
             return []
+        return await self._record_body_findings(url, body)
+
+    async def _scan_body(
+        self, url: str, body: str, referring_page_url: str | None = None
+    ) -> list[Finding]:
+        if url in self._checked_urls:
+            return []
+        self._checked_urls.add(url)
+        return await self._record_body_findings(url, body, referring_page_url)
+
+    async def _record_body_findings(
+        self, url: str, body: str, referring_page_url: str | None = None
+    ) -> list[Finding]:
         # record_finding の証拠用の最小 pair（本文は body 変数で保持済み）。
         pair = {"request": {"url": url, "method": "GET"}, "response": {"url": url}}
 
@@ -332,7 +355,9 @@ class SecretLeakScanner(BaseScanner):
                 field_name="(response body)",
                 payload="(no payload — passive content scan)",
                 evidence=(
-                    f"Possible {hit['label']} leaked in response body "
+                    f"Possible {hit['label']} leaked in response body from {url}"
+                    + (f" referenced by {referring_page_url}" if referring_page_url else "")
+                    + " "
                     f"(redacted: {hit['redacted']}, entropy={hit['entropy']})"
                 ),
                 pair=pair,
@@ -345,6 +370,9 @@ class SecretLeakScanner(BaseScanner):
                     "entropy": hit["entropy"],
                     "byte_offset": hit["offset"],
                     "snippet": hit["snippet"][:200],
+                    "resource_url": url,
+                    **({"referring_page_url": referring_page_url}
+                       if referring_page_url else {}),
                 },
                 reproduction_steps=[
                     f"Open {url}",

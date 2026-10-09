@@ -4515,14 +4515,16 @@ class ScanEngine:
         失敗・未捕捉は単に空のまま（best-effort）。
         """
         from urllib.parse import urljoin
-        from wscan import js_analysis
+        from wscan.component_intel import _active_script_srcs
 
         network = getattr(self.browser, "network", None)
         if not network or not hasattr(network, "latest_for_url"):
             return {}
         out: dict = {}
-        for src in js_analysis.extract_external_script_srcs(html or ""):
-            abs_url = urljoin(base_url, src)
+        srcs, base_href = _active_script_srcs(html or "")
+        script_base = urljoin(base_url, base_href) if base_href else base_url
+        for src in srcs:
+            abs_url = urljoin(script_base, src)
             if abs_url in out:
                 continue
             try:
