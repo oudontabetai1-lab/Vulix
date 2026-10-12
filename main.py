@@ -1519,6 +1519,10 @@ Examples:
     )
     agent.add_argument("url", help="Target URL (e.g. https://example.com)")
     agent.add_argument(
+        "--proxy", metavar="URL", default=_CFG.get("proxy", ""),
+        help="HTTP proxy URL for the Agent browser (e.g. http://127.0.0.1:8080)",
+    )
+    agent.add_argument(
         "--report-lang", choices=("ja", "en"), default=_CFG.get("report_lang", "ja"),
         help="HTML レポートの言語 (既定: ja)",
     )

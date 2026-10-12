@@ -226,6 +226,23 @@ def test_browser_use_agent_proxy_routes_http_https_and_fails_closed(tmp_path, mo
             server.server_close()
 
 
+@pytest.mark.parametrize(
+    "configured, cli, expected",
+    [
+        ("", [], ""),
+        ("http://127.0.0.1:8080", [], "http://127.0.0.1:8080"),
+        ("http://127.0.0.1:8080", ["--proxy", "127.0.0.1:9090"], "127.0.0.1:9090"),
+        ("http://127.0.0.1:8080", ["--proxy", ""], ""),
+    ],
+)
+def test_agent_cli_proxy_uses_config_and_explicit_override(monkeypatch, configured, cli, expected):
+    import main
+
+    monkeypatch.setitem(main._CFG, "proxy", configured)
+    monkeypatch.setattr(sys, "argv", ["main.py", "agent", "http://fixture.test", *cli])
+    assert main.parse_args().proxy == expected
+
+
 def _proxy_sdk_modules():
     browser_use = types.ModuleType("browser_use")
     browser_use.__path__ = []
