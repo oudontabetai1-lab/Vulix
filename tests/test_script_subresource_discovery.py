@@ -1,10 +1,16 @@
-"""Chromium integration for script-only URL discovery and scope enforcement."""
+"""Opt-in Chromium integration for script discovery (WSCAN_E2E=1)."""
+import os
+
 import pytest
 
 from wscan.browser import BrowserManager
 from wscan.engine import ScanEngine
 
 
+@pytest.mark.skipif(
+    os.environ.get("WSCAN_E2E", "").strip().lower() not in {"1", "true", "yes", "on"},
+    reason="set WSCAN_E2E=1 to run the script discovery browser test",
+)
 @pytest.mark.asyncio
 async def test_script_src_discovery_uses_base_uri_and_scope_blocks_external_request():
     browser = BrowserManager(headless=True)
