@@ -1252,7 +1252,7 @@ Examples:
     # A-3: Payload learning
     scan.add_argument(
         "--learning-file", metavar="FILE", default=_CFG.get("learning_file", ""),
-        help="JSON file for payload continuous learning (default: config/payload_learning.json).",
+        help="JSON file for payload continuous learning (default: <state dir>/payload_learning.json).",
     )
     # S-1: DOM XSS
     scan.add_argument(
@@ -1485,9 +1485,10 @@ Examples:
     )
     import_payloads.add_argument(
         "--output",
-        default="config/community_payloads.yaml",
+        default=None,
         metavar="FILE",
-        help="Output YAML path (default: config/community_payloads.yaml).",
+        help="Output YAML path (default: <state dir>/community_payloads.yaml; "
+             "WSCAN_STATE_DIR / XDG_STATE_HOME / ~/.local/state/vulix, source checkout: config/).",
     )
     import_payloads.add_argument(
         "--allow-destructive",
@@ -3880,9 +3881,15 @@ def run_import_payloads(args):
         allow_destructive=bool(getattr(args, "allow_destructive", False)),
         per_type_cap=per_type_cap,
     )
-    write_yaml(args.output, corpus, sources=sources)
+    from wscan.state_paths import state_file
+    output = args.output or str(state_file("community_payloads.yaml"))
+    try:
+        write_yaml(output, corpus, sources=sources)
+    except OSError as e:
+        console.print(f"[red]書込不可: {output} ({e})[/red] --output か WSCAN_STATE_DIR で書込可能な場所を指定してください。")
+        raise SystemExit(1)
 
-    console.print(f"[bold green]Community payloads written:[/bold green] {args.output}")
+    console.print(f"[bold green]Community payloads written:[/bold green] {output}")
     for check_type, payloads in corpus.items():
         console.print(f"  {check_type}: [cyan]{len(payloads)}[/cyan]")
 
