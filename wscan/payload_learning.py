@@ -37,7 +37,9 @@ from typing import Optional
 from wscan.attempt_ledger import neutralize_payload_for_prompt
 
 
-_DEFAULT_LEARNING_FILE = Path(__file__).parent.parent / "config" / "payload_learning.json"
+from wscan.state_paths import readable_state_file, state_file
+
+_LEARNING_NAME = "payload_learning.json"
 
 
 def origin_key(url: str) -> Optional[str]:
@@ -153,7 +155,9 @@ class PayloadLearner:
     """
 
     def __init__(self, learning_file: Optional[str] = None):
-        self._path = Path(learning_file) if learning_file else _DEFAULT_LEARNING_FILE
+        # 書込先は state（書込可能）。未作成でインストール内に旧ファイルがあれば読取のみ引き継ぐ。
+        self._path = Path(learning_file) if learning_file else state_file(_LEARNING_NAME)
+        self._read_path = self._path if learning_file else readable_state_file(_LEARNING_NAME)
         self._data: dict = self._load()
 
     # ------------------------------------------------------------------
@@ -161,9 +165,9 @@ class PayloadLearner:
     # ------------------------------------------------------------------
 
     def _load(self) -> dict:
-        if self._path.exists():
+        if self._read_path.exists():
             try:
-                raw = json.loads(self._path.read_text(encoding="utf-8"))
+                raw = json.loads(self._read_path.read_text(encoding="utf-8"))
                 return self._migrate(raw)
             except Exception:
                 pass

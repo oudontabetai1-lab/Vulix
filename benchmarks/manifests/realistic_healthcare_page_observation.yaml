@@ -47,6 +47,24 @@ cases:
     taxonomy: [info_leak, unauthenticated]
     gate: observed
 
+  # Ordinary HTML references the bundle only through script src; the bundle is not an anchor target.
+  - case_id: realistic_healthcare_page_observation.secret_leak.script_only.vulnerable
+    expected: vulnerable
+    check: secret_leak
+    request: {method: GET, path: /portal/script-only-secret}
+    match: {path: /static/portal-script-only.js, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.secret_leak.script_only_safe.safe
+    taxonomy: [info_leak, unauthenticated]
+    gate: observed
+  - case_id: realistic_healthcare_page_observation.secret_leak.script_only_safe.safe
+    expected: safe
+    check: secret_leak
+    request: {method: GET, path: /portal/script-only-secret-safe}
+    match: {path: /static/portal-script-only.safe.js, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.secret_leak.script_only.vulnerable
+    taxonomy: [info_leak, unauthenticated]
+    gate: observed
+
   # ── clickjacking（X-Frame-Options / CSP frame-ancestors 欠落）──────────────
   - case_id: realistic_healthcare_page_observation.clickjacking.embed.vulnerable
     expected: vulnerable

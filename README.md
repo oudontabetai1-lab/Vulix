@@ -388,7 +388,7 @@ python3 main.py scan URL [URL ...] [options]
 | `--interactive-plan` | `false` | 攻撃前に計画を編集 |
 | `--no-open-report` | 自動表示有効 | 完了時の HTML 自動表示を無効化 |
 | `--open-report` | 自動表示（`--no-monitor` 時は抑止） | `--no-monitor` でも HTML レポートを強制的に開く |
-| `--learning-file FILE` | `config/payload_learning.json` | 学習データファイル |
+| `--learning-file FILE` | `<state>/payload_learning.json` | 学習データファイル（`<state>` は下記） |
 | `--dom-xss` | `false` | DOM-based XSS を追加 |
 | `--no-ai-analysis` | 有効 | スキャン後 AI 分析を無効化 |
 | `--no-waf-detection` | 有効 | WAF 検出を無効化 |
@@ -532,9 +532,11 @@ python3 main.py import-payloads [options]
 
 | オプション | 既定 | 内容 |
 | --- | --- | --- |
-| `--output FILE` | `config/community_payloads.yaml` | 保存先 |
+| `--output FILE` | `<state>/community_payloads.yaml` | 保存先（`<state>` は下記） |
 | `--allow-destructive` | 無効 | 既定で除外する破壊的パターンも保持 |
 | `--per-type-cap N` | なし | チェック種別ごとの上限 |
+
+> **`<state>`（学習データ・community payloads の置き場）**: `WSCAN_STATE_DIR` > ソース checkout なら従来どおり `config/` > `$XDG_STATE_HOME/vulix` > `~/.local/state/vulix`。`pip install .` 等の読取専用配置でも書込可能。読取は state に無ければインストール内 `config/` の既存ファイルを使う（後方互換）。書込不可なら警告を出して学習/取込のみスキップし、scan は継続する。
 | `--check xss,sqli` | 全対応ソース | 取り込む種別を限定 |
 
 取り込み時だけネットワークを使用し、スキャン時は生成済み YAML を読みます。

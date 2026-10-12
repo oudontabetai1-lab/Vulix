@@ -279,6 +279,23 @@ _VERIFY_ONE_TIMEOUT_S = 180.0
 _JSON_INJECTION_CHECKS = ("sqli", "os", "nosql", "xss")
 
 
+def _api_plan_field_name(method: str, url: str, pointer: str) -> str:
+    """URL plan内でJSON fieldをmethod/path/pointer単位に識別する。"""
+    path = urlparse(url).path or "/"
+    return f"API {str(method or 'GET').upper()} {path} {pointer or '(root)'}"
+
+
+def _prioritized_checks(checks, plan, field_names=()) -> list[str]:
+    """既存check集合を維持し、対応するplanの優先順だけを反映する。"""
+    names = set(field_names)
+    preferred = []
+    for field_plan in getattr(plan, "fields", ()) or ():
+        if field_plan.name in names:
+            preferred.extend(field_plan.priority_checks or ())
+    ordered = [check for check in preferred if check in checks]
+    return list(dict.fromkeys(ordered + list(checks)))
+
+
 def _stable_json_template_id(dedup_key: tuple) -> str:
     """JSON 注入テンプレートの**決定論的**な識別子を dedup_key から生成する。
 
@@ -526,6 +543,7 @@ from .oob_email import OOBEmailConfig, EmailSink, make_oob_token, oob_address
 console = Console()
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
+from wscan.state_paths import readable_state_file  # noqa: E402
 OUTPUT_BASE = Path.cwd() / "output"
 
 
@@ -1161,7 +1179,7 @@ class ScanEngine:
         payloads_data = self._load_yaml(payloads_file or str(default_payloads_path))
         using_default_payloads = not payloads_file or payloads_file == str(default_payloads_path)
         if using_default_payloads and self.enable_community_payloads:
-            community_payloads_path = CONFIG_DIR / "community_payloads.yaml"
+            community_payloads_path = readable_state_file("community_payloads.yaml")
             if community_payloads_path.exists():
                 community_payloads = self._load_yaml(str(community_payloads_path))
                 payloads_data = merge_community_payloads(payloads_data, community_payloads)
@@ -2222,7 +2240,7 @@ class ScanEngine:
             for f in (findings or []):
                 self._record_finding(f, source="tls-seed")
 
-    async def _run_api_template_checks(self) -> None:
+    async def _run_api_template_checks(self, plans: dict | None = None) -> None:
         """API スペック由来の JSON 操作（``api_seed_requests``）を、クロール結果に
         依存せず検査する。
 
@@ -2275,7 +2293,21 @@ class ScanEngine:
             if await self._api_session_looks_expired(url):
                 if not await self._force_relogin(for_url=url):
                     url_auth_failed = True  # 復旧不能 → この URL の単位は済みにしない
-            for check_name, scanner in self.scanners.items():
+            plan = (plans or {}).get(url)
+            api_field_names: list[str] = []
+            from wscan.attack_planner import _json_leaf_pointers
+            for template in self.api_seed_requests:
+                if template.url != url:
+                    continue
+                body = getattr(template, "json_body", None)
+                if isinstance(body, (dict, list)):
+                    api_field_names.extend(
+                        _api_plan_field_name(template.method, url, pointer)
+                        for pointer in (_json_leaf_pointers(body) or [""])
+                    )
+            check_names = _prioritized_checks(self.scanners.keys(), plan, api_field_names)
+            for check_name in check_names:
+                scanner = self.scanners[check_name]
                 # 再開: 済みの API テンプレート単位は飛ばす（合成フィールド名で記録）。
                 # exact URL で刻む。graphql を origin で刻むと、先行テンプレ URL の後に
                 # 続く非標準 GraphQL エンドポイント（/gql 等）が丸ごと飛ばされるため。
@@ -2359,7 +2391,7 @@ class ScanEngine:
             # URL 単位で進捗＋Finding スナップショットを保存（クラッシュ耐性）。
             self._save_checkpoint()
 
-    async def _run_json_injection_checks(self) -> None:
+    async def _run_json_injection_checks(self, plans: dict | None = None) -> None:
         """SPA が収穫した JSON body 注入点を対応スキャナで実スキャンする。"""
         if not self.json_injection_points:
             return
@@ -2371,7 +2403,12 @@ class ScanEngine:
         for ip in self.json_injection_points:
             if ip.url in skipped_urls:
                 continue
-            for check_name in _JSON_INJECTION_CHECKS:
+            plan = (plans or {}).get(ip.url)
+            field_name = _api_plan_field_name(ip.method, ip.url, ip.parameter_id)
+            check_names = _prioritized_checks(
+                _JSON_INJECTION_CHECKS, plan, [field_name]
+            )
+            for check_name in check_names:
                 scanner = self.scanners.get(check_name)
                 if scanner is None or not getattr(scanner, "SUPPORTS_JSON_BODY", False):
                     continue
@@ -2961,9 +2998,9 @@ class ScanEngine:
             if not scan_aborted:
                 try:
                     self._profile("phase3b api-template: start")
-                    await self._run_api_template_checks()
+                    await self._run_api_template_checks(plans)
                     self._profile("phase3b json-injection: start")
-                    await self._run_json_injection_checks()
+                    await self._run_json_injection_checks(plans)
                     self._profile("phase3b tls-seed: start")
                     # crawl が到達できない弱プロトコル origin を取りこぼさないため、
                     # seed origin に対して TLS 検査を直接走らせる（Codex #158 P1）。
@@ -4153,18 +4190,56 @@ class ScanEngine:
         console.print(f"  Site map ({len(pages)} page(s)):")
         console.print(f"[dim]{site_map}[/dim]\n")
 
-        pages_with_inputs = [p for p in pages if p.forms or p.url_params]
-        pages_no_inputs   = [p for p in pages if not p.forms and not p.url_params]
-        for p in pages_no_inputs:
-            console.print(f"  [dim]No inputs on {p.url}, skipping[/dim]")
-
         from wscan.attack_planner import (
             build_planner_fingerprint,
             summarize_api_schema,
             canonical_origin,
+            _json_leaf_pointers,
         )
 
-        async def _plan_one(page):
+        api_fields_by_url: dict[str, list[str]] = {}
+
+        def _add_api_field(url: str, method: str, pointer: str) -> None:
+            if not url:
+                return
+            name = _api_plan_field_name(method, url, pointer)
+            fields = api_fields_by_url.setdefault(url, [])
+            if name not in fields:
+                fields.append(name)
+
+        for ip in self.json_injection_points:
+            if getattr(ip, "location", "") == "json_body":
+                _add_api_field(ip.url, ip.method, ip.parameter_id)
+        for template in self.api_seed_requests:
+            body = getattr(template, "json_body", None)
+            if not isinstance(body, (dict, list)):
+                continue
+            pointers = _json_leaf_pointers(body) or [""]
+            for pointer in pointers:
+                _add_api_field(template.url, template.method, pointer)
+
+        planner_pages: list[tuple[CrawledPage, list[str]]] = []
+        known_urls: set[str] = set()
+        for page in pages:
+            api_fields = api_fields_by_url.get(page.url, [])
+            if page.forms or page.url_params or api_fields:
+                planner_pages.append((page, api_fields))
+            known_urls.add(page.url)
+        for url, api_fields in api_fields_by_url.items():
+            if url not in known_urls:
+                # POST-only API endpoints may not produce a crawl page; retain the
+                # exact request URL so the phase-3b consumer can find this plan.
+                planner_pages.append((CrawledPage(
+                    url=url, html="", forms=[], url_params=[], depth=0,
+                ), api_fields))
+
+        pages_with_inputs = planner_pages
+        pages_no_inputs   = [p for p in pages if not p.forms and not p.url_params
+                             and not api_fields_by_url.get(p.url)]
+        for p in pages_no_inputs:
+            console.print(f"  [dim]No inputs on {p.url}, skipping[/dim]")
+
+        async def _plan_one(page, api_fields):
             console.print(f"  [dim cyan]Planning:[/dim cyan] {page.url}")
             # fingerprint はページの origin 別に構築する（multi-origin スキャンで origin B の
             # ページに origin A のスタックを渡さない）。WAF は target 単位の単一検出のため共通。
@@ -4188,11 +4263,16 @@ class ScanEngine:
                     self.json_injection_points, self.api_seed_requests, origin=_origin
                 ),
             )
+            planner_forms = page.forms[:self.max_forms]
+            if api_fields:
+                planner_forms = [*planner_forms, {
+                    "inputs": [{"name": name, "type": "json"} for name in api_fields]
+                }]
             async with self._get_llm_semaphore():
                 plan = await self.attack_planner.analyze_page(
                     url=page.url,
                     page_html=page.html,
-                    forms=page.forms[:self.max_forms],
+                    forms=planner_forms,
                     url_params=page.url_params,
                     site_map=site_map,
                     fingerprint=planner_fingerprint,
@@ -4202,7 +4282,7 @@ class ScanEngine:
             return page.url, plan
 
         results = await asyncio.gather(
-            *[_plan_one(p) for p in pages_with_inputs],
+            *[_plan_one(p, api_fields) for p, api_fields in pages_with_inputs],
             return_exceptions=True,
         )
         for r in results:
@@ -4515,14 +4595,16 @@ class ScanEngine:
         失敗・未捕捉は単に空のまま（best-effort）。
         """
         from urllib.parse import urljoin
-        from wscan import js_analysis
+        from wscan.component_intel import _active_script_srcs
 
         network = getattr(self.browser, "network", None)
         if not network or not hasattr(network, "latest_for_url"):
             return {}
         out: dict = {}
-        for src in js_analysis.extract_external_script_srcs(html or ""):
-            abs_url = urljoin(base_url, src)
+        srcs, base_href = _active_script_srcs(html or "")
+        script_base = urljoin(base_url, base_href) if base_href else base_url
+        for src in srcs:
+            abs_url = urljoin(script_base, src)
             if abs_url in out:
                 continue
             try:
@@ -7429,8 +7511,9 @@ class ScanEngine:
         if self.enable_payload_learning:
             try:
                 self.payload_learner.save()
-            except Exception:
-                pass
+            except Exception as e:
+                # 書込不可でも scan 結果は有効（学習のみスキップ＝検査入力は減らさない）。
+                console.print(f"[yellow]payload 学習データを保存できません（学習をスキップ、scan は継続）: {e}[/yellow]")
 
     async def _phase_report_async(self):
         """Async wrapper for report phase — runs A-1 AI analysis + J remediation after report."""

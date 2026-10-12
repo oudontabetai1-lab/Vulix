@@ -2092,7 +2092,7 @@ class BrowserManager:
         return source, pair
 
     async def collect_links(self, base_url: str, same_domain: bool = True) -> list[str]:
-        """Collect navigable URLs from links, forms, data attributes, and inline JS."""
+        """Collect navigable URLs from links, forms, script resources, data attributes, and inline JS."""
         try:
             links = await self.page.evaluate("""
                 (baseUrl) => {
@@ -2100,13 +2100,13 @@ class BrowserManager:
                     const links = new Set();
                     const ignoredExt = /\\.(?:png|jpe?g|gif|svg|webp|ico|css|woff2?|ttf|map|pdf|zip)(?:[?#].*)?$/i;
 
-                    function addCandidate(raw) {
+                    function addCandidate(raw, resolutionBase = baseUrl) {
                         if (!raw || typeof raw !== 'string') return;
                         let candidate = raw.trim();
                         if (!candidate || candidate === '#' || candidate.startsWith('javascript:') || candidate.startsWith('mailto:') || candidate.startsWith('tel:')) return;
                         candidate = candidate.replace(/[\\s"'`<>)}\\],;]+$/g, '');
                         try {
-                            const url = new URL(candidate, baseUrl);
+                            const url = new URL(candidate, resolutionBase);
                             if (url.protocol === 'http:' || url.protocol === 'https:') {
                                 if (ignoredExt.test(url.pathname)) return;
                                 links.add(url.href.split('#')[0]);
@@ -2116,6 +2116,15 @@ class BrowserManager:
 
                     document.querySelectorAll('a[href], area[href], form[action], iframe[src], frame[src]').forEach(el => {
                         addCandidate(el.getAttribute('href') || el.getAttribute('action') || el.getAttribute('src') || '');
+                    });
+
+                    // JS resources are scan targets even though they are not navigation controls.
+                    // Resolve through document.baseURI so <base href> matches browser loading.
+                    document.querySelectorAll('script[src]').forEach(script => {
+                        const type = (script.getAttribute('type') || '').trim().toLowerCase().split(';', 1)[0];
+                        if (!type || type === 'module' || /^(?:application|text)\/(?:x-)?(?:java|ecma)script$/.test(type)) {
+                            addCandidate(script.getAttribute('src'), document.baseURI);
+                        }
                     });
 
                     document.querySelectorAll('[data-href], [data-url], [data-route], [data-path], [data-api], [data-endpoint]').forEach(el => {
