@@ -1,6 +1,6 @@
 # Vulix — self-learning browser security exploration engine
 
-**Vulix**（VULIX = Vulnerability Understanding, Learning & Intelligent eXploration）は、対象アプリと対話しながら状態を理解し、観測結果で次の行動を決める **security exploration engine** です（設計判断 ADR-0022 による再定義。旧称 WScan）。Playwright による実ブラウザ操作、決定論スキャナ、LLM を組み合わせ、用途に応じて、再現性と確証を重視する **通常モード (`scan`)**、LLM の独自解釈と探索力を重視する **Agent モード (`agent`)**、両者を両立する **Hybrid モード（ダッシュボード）**を使い分けます。Hybrid は Agent を URL 偵察だけに使うのではなく、Agent が見つけた脆弱性仮説も最終レポートへラベル付きで併記します。
+**Vulix**（VULIX = Vulnerability Understanding, Learning & Intelligent eXploration）は、対象アプリと対話しながら状態を理解し、観測結果で次の行動を決める **security exploration engine** です（旧称 WScan）。Playwright による実ブラウザ操作、決定論スキャナ、LLM を組み合わせ、用途に応じて、再現性と確証を重視する **通常モード (`scan`)**、LLM の独自解釈と探索力を重視する **Agent モード (`agent`)**、両者を両立する **Hybrid モード（ダッシュボード）**を使い分けます。Hybrid は Agent を URL 偵察だけに使うのではなく、Agent が見つけた脆弱性仮説も最終レポートへラベル付きで併記します。
 
 > **exploration engine への進化は段階的**です。現行の実装・CLI（`python3 main.py …`・内部パッケージ `wscan/`）はそのまま利用でき、Vulix ブランドと新しいエンジン語彙（Observer/Mapper/Planner/Executor/Evaluator/Learner）へ加算的に移行します。
 
@@ -1019,6 +1019,12 @@ Depth、Max Forms、Max Payloads、Concurrency を下げ、Delay を増やしま
 
 ## 16. 免責・ライセンス
 
-本ツールはセキュリティ検証と教育を目的とします。許可のないシステムへの使用、対象データの破損、サービス停止、法令・契約違反につながる使用は禁止します。自動検出には誤検知と見逃しがあり、特に Agent 未確証 Finding は人手で証拠と再現性を確認してください。
+### 安全に利用するために
 
-本ソフトウェアは MIT License の下で提供されます。
+- Vulix を使う際は、対象環境へのアクセス権限を確認し、適用される法令や契約を守ることを推奨します。
+- スキャンによって対象データの変更やサービスへの影響が生じる場合があります。許可された範囲を確認し、影響を把握したうえで利用してください。
+- 自動検出には誤検知と見逃しがあります。特に Agent 未確証 Finding は、人手で証拠と再現性を確認してください。
+
+### ライセンス
+
+本ソフトウェアは MIT License の下で提供されます。全文はリポジトリ直下の [LICENSE](LICENSE) を参照してください。無保証で提供されます。
