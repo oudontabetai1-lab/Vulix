@@ -215,8 +215,8 @@ class BrowserCallParityTests(unittest.IsolatedAsyncioTestCase):
 class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
     def test_json_body_capability_matrix(self):
         self.assertIs(SQLiScanner.SUPPORTS_JSON_BODY, True)
-        # nosql は構造化オペレータ戦略(PR-b)が要るため 5b では json 未対応。
-        self.assertIs(NoSQLInjectionScanner.SUPPORTS_JSON_BODY, False)
+        # nosql は pointer の値を構造化オペレータ object に置換して共有 transport で送る。
+        self.assertIs(NoSQLInjectionScanner.SUPPORTS_JSON_BODY, True)
         self.assertIs(MailHeaderInjectionScanner.SUPPORTS_JSON_BODY, False)
         self.assertIs(OpenRedirectScanner.SUPPORTS_JSON_BODY, False)
 
@@ -254,7 +254,6 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
         cases = (
             (MailHeaderInjectionScanner, {"name": "email", "type": "email"}),
             (OpenRedirectScanner, {"name": "next", "type": "text"}),
-            (NoSQLInjectionScanner, {"name": "target", "type": "text"}),
         )
         for scanner_cls, field in cases:
             with self.subTest(scanner=scanner_cls.__name__):

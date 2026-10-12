@@ -144,7 +144,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 ### 主要モジュール（`wscan/`）
 | モジュール | 役割 |
 |---|---|
-| `engine.py` | 4フェーズの中枢。設定・スコープ・スキャナ実行を統括。SPA の JSON body は harvest→`json_injection_points`→`_run_json_injection_checks` で SQLi 検査 |
+| `engine.py` | 4フェーズの中枢。設定・スコープ・スキャナ実行を統括。SPA の JSON body は harvest→`json_injection_points`→`_run_json_injection_checks`（`_JSON_INJECTION_CHECKS`＝sqli/os/nosql/xss）で検査。nosql は値を `{"$ne":…}` 等の演算子 object へ置換、xss は HTML 応答への生反射のみ（`json_body_detect.py` の純粋関数が判定） |
 | `browser.py` | Playwright 操作。`NetworkCapture` が全 HTTP を捕捉（`request_logger` へ送る） |
 | `monitor.py` | FastAPI+WebSocket ダッシュボード（`MonitorServer`）。**`None` でも動く**（`--no-monitor`/バッチ） |
 | `attack_planner.py` / `action_plan.py` | 攻撃計画とデータ構造 |
@@ -401,7 +401,7 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
 
 ## 触るときの不変条件・落とし穴
 
-- SPA 由来 JSON body の実スキャンは**通常層（確実性）**で、既存 SQLi 判定を再利用する。送信成功・認証の**肯定的証拠**があるときだけ checkpoint を完了にする：`_run_json_injection_checks` は template 不在（送信不能）・再認証失敗・実 POST 失効（`_api_auth_failed`）・transport 失敗（`_json_probe_failed`）のいずれかなら mark せず resume に残す。verify も同様で、失効/transport 失敗時は scanner が `None` を返し、`_verify_one`（scanner verify・汎用フォールバックの json 再送の両方）が terminal な `assumed`（penalize しない）へ倒す（401/空応答を脆弱性応答と誤評価しない）。
+- SPA 由来 JSON body の実スキャンは**通常層（確実性）**で、既存の決定論判定（SQLi/OS/NoSQL/XSS）を再利用する。送信成功・認証の**肯定的証拠**があるときだけ checkpoint を完了にする：`_run_json_injection_checks` は template 不在（送信不能）・再認証失敗・実 POST 失効（`_api_auth_failed`）・transport 失敗（`_json_probe_failed`）のいずれかなら mark せず resume に残す。verify も同様で、失効/transport 失敗時は scanner が `None` を返し、`_verify_one`（scanner verify・汎用フォールバックの json 再送の両方）が terminal な `assumed`（penalize しない）へ倒す（401/空応答を脆弱性応答と誤評価しない）。
 - **checkpoint キーは `checkpoint.unit_key` で一元生成し、resume 安定性のため明白な揮発値だけを除く**（`template_id` を**含めない**）：json 用 `template_id` は harvest の値敏感 identity と 1:1 で、URL クエリ/body の nonce 等で run 跨ぎに変わるため、永続キーに入れると完了済み状態変更 POST の再送・検証不能 finding を招く。`template_id` は **template dict と finding-dedup（run 内の operation 識別）専用のランタイム識別子**として使う（決定論生成だが永続キー非採用）。`InjectionPoint.stable_key_parts` は生 URL を渡し、全 location の URL は `unit_key` が `url_normalize.normalize_url_for_key` で正規化する。名前だけで意味値を消さず、未知キーと実攻撃 URL は保持する。json body の値抜き構造シグネチャは安定 identity 候補だが、JSON-RPC method のような値内 operation を区別できないため未導入。
 
 - **ターゲット URL は `url.strip()` で保持**（末尾 `/` を勝手に除去しない）。スコープ照合は

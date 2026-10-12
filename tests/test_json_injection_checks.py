@@ -101,6 +101,28 @@ class _Engine:
 
 
 class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_json_checks_preserve_completion_and_failure_gates(self):
+        ip = InjectionPoint.for_json_body("POST", "http://h/api/search", "/value", template_id="t")
+        for check in ("xss", "nosql"):
+            for failure in (None, "_json_probe_failed", "_api_auth_failed"):
+                with self.subTest(check=check, failure=failure):
+                    engine = _Engine([ip], {"t": {}})
+                    engine.scanners = {check: engine.scanner}
+                    original_scan = engine.scanner.scan_injection_point
+
+                    async def scan(point, field):
+                        findings = await original_scan(point, field)
+                        if failure:
+                            setattr(engine, failure, True)
+                        return findings
+
+                    engine.scanner.scan_injection_point = scan
+                    await engine._run_json_injection_checks()
+                    self.assertEqual(len(engine.marked), 0 if failure else 1)
+                    if not failure:
+                        await engine._run_json_injection_checks()
+                        self.assertEqual(len(engine.scanner.calls), 1)
+
     async def test_missing_template_is_not_marked_done(self):
         ip = InjectionPoint.for_json_body(
             "POST", "http://h/api/login", "/email", template_id="missing"
