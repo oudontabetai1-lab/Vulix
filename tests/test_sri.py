@@ -1,6 +1,7 @@
 """Unit tests for the SRIScanner.find_unprotected_externals helper."""
 import types
 import unittest
+from unittest.mock import AsyncMock
 
 from wscan.scanners import SCANNERS
 from wscan.scanners.base import PageDocumentUnavailable, _body_looks_like_html
@@ -43,6 +44,21 @@ class DocumentBodyTransientHtmlTests(unittest.IsolatedAsyncioTestCase):
         scanner = self._sri({"status": 502, "url": PAGE, "headers": {}, "body": ""})
         with self.assertRaises(PageDocumentUnavailable):
             await scanner._document_body(PAGE, allow_non_2xx=False, html_only=True)
+
+    async def test_scan_page_reports_referring_html_tag_without_fetching_resource(self):
+        html = ('<base href="https://cdn.jsdelivr.net/assets/">'
+                '<script src="bundle.js"></script>')
+        scanner = self._sri({"status": 200, "url": PAGE,
+                             "headers": {"Content-Type": "text/html"}, "body": html})
+        scanner.record_finding = AsyncMock(return_value=object())
+
+        findings = await scanner.scan_page(PAGE)
+
+        self.assertEqual(len(findings), 1)
+        kwargs = scanner.record_finding.await_args.kwargs
+        self.assertEqual(kwargs["url"], PAGE)
+        self.assertEqual(kwargs["evidence_details"]["src"],
+                         "https://cdn.jsdelivr.net/assets/bundle.js")
 
 
 class BodyLooksLikeHtmlTests(unittest.TestCase):
@@ -134,6 +150,16 @@ class SRIDetectionTests(unittest.TestCase):
         hits = find_unprotected_externals(html, PAGE)
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["host"], "unpkg.com")
+
+    def test_script_src_uses_browser_base_uri(self):
+        html = ('<base href="https://cdn.jsdelivr.net/assets/v4/">'
+                '<script src="../vendor.js"></script>')
+        hits = find_unprotected_externals(html, PAGE)
+        self.assertEqual(hits[0]["src"], "https://cdn.jsdelivr.net/assets/vendor.js")
+
+    def test_non_javascript_script_is_not_a_loaded_subresource(self):
+        html = '<script type="application/json" src="https://cdn.example.org/data.json"></script>'
+        self.assertEqual(find_unprotected_externals(html, PAGE), [])
 
     def test_empty_html_returns_no_results(self):
         self.assertEqual(find_unprotected_externals("", PAGE), [])

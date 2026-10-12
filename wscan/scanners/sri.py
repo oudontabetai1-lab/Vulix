@@ -83,6 +83,10 @@ def find_unprotected_externals(html: str, page_url: str) -> list[dict]:
     """
     if not html:
         return []
+    from wscan.component_intel import _active_script_srcs
+
+    active_scripts, base_href = _active_script_srcs(html)
+    effective_base = urljoin(page_url, base_href) if base_href else page_url
     page_host = _host_of(page_url)
     results: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -94,7 +98,7 @@ def find_unprotected_externals(html: str, page_url: str) -> list[dict]:
         # Skip inline / data: / javascript: / protocol-relative blanks.
         if src.startswith(("data:", "javascript:", "about:", "#")):
             return
-        absolute = urljoin(page_url, src)
+        absolute = urljoin(effective_base, src)
         host = _host_of(absolute)
         if not host or host == page_host:
             return  # same origin — SRI not required
@@ -116,6 +120,8 @@ def find_unprotected_externals(html: str, page_url: str) -> list[dict]:
 
     for match in _SCRIPT_TAG_RE.finditer(html):
         attrs = _parse_attrs(match.group(1))
+        if attrs.get("src", "").strip() not in active_scripts:
+            continue
         _process("script", attrs, "src")
 
     for match in _LINK_TAG_RE.finditer(html):

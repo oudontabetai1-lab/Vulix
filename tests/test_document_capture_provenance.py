@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from wscan.browser import NetworkCapture
+from wscan.engine import ScanEngine
 from wscan.scanners import SCANNERS
 from wscan.scanners.base import PageDocumentUnavailable
 
@@ -46,6 +47,22 @@ def scanner_for(check, network):
         scanner._scan_eol = AsyncMock(return_value=[])
         scanner._scan_osv = AsyncMock(return_value=[])
     return scanner, engine
+
+
+def test_external_script_snapshot_resolves_browser_base_uri():
+    class CapturedNetwork:
+        def latest_for_url(self, url, **_kwargs):
+            if url == "http://fixture.test/assets/app.js":
+                return {"response": {"body": "window.ready = true;"}}
+            return None
+
+    engine = ScanEngine.__new__(ScanEngine)
+    engine._browser = SimpleNamespace(network=CapturedNetwork())
+    snapshot = engine._snapshot_external_scripts(
+        '<base href="/assets/"><script src="app.js"></script>',
+        "http://fixture.test/portal/page",
+    )
+    assert snapshot == {"http://fixture.test/assets/app.js": "window.ready = true;"}
 
 
 @pytest.mark.asyncio

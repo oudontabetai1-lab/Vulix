@@ -1,5 +1,7 @@
 """Unit tests for the SecretLeakScanner pure helpers."""
 import unittest
+import types
+from unittest.mock import AsyncMock
 
 from wscan.scanners.secret_leak import (
     _redact,
@@ -96,6 +98,35 @@ class SecretLeakDetectionTests(unittest.TestCase):
         self.assertEqual(self._labels(low_entropy), [])
         # Sanity check on the entropy helper itself.
         self.assertLess(_shannon_entropy("A" * 40), 1.0)
+
+
+class SecretLeakScriptContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scans_captured_in_scope_scripts_once_and_skips_out_of_scope(self):
+        from wscan.scanners.secret_leak import SecretLeakScanner
+
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None, wave_errors=[],
+            _is_access_allowed_url=lambda url: url.startswith("http://target.test/"),
+        )
+        scanner = SecretLeakScanner(engine)
+        scanner._document_body = AsyncMock(return_value="safe referring document")
+        scanner.record_finding = AsyncMock(side_effect=lambda **kw: kw)
+        page = types.SimpleNamespace(url="http://target.test/portal", external_scripts={
+            "http://target.test/assets/app.js": 'window.key="AIzaSyA-WLh38Kv9XQ7yz1bP4uMd3RTaZ2nHkLm";',
+            "https://outside.test/vendor.js": 'window.key="AIzaSyA-WLh38Kv9XQ7yz1bP4uMd3RTaZ2nHkLm";',
+            "http://target.test/assets/safe.js": "function add(a,b){return a+b}",
+        })
+
+        found = await scanner.scan_page_context(page)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["url"], "http://target.test/assets/app.js")
+        self.assertEqual(found[0]["evidence_details"]["resource_url"],
+                         "http://target.test/assets/app.js")
+        self.assertEqual(found[0]["evidence_details"]["referring_page_url"], page.url)
+        self.assertEqual(await scanner.scan_page_context(page), [])
+        self.assertEqual(await scanner.scan_page("http://target.test/assets/app.js"), [])
+        self.assertEqual(scanner.record_finding.await_count, 1)
+        self.assertEqual(scanner._document_body.await_count, 1)
 
 
 if __name__ == "__main__":

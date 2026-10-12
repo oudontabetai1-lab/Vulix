@@ -136,10 +136,10 @@ def test_realistic_healthcare_page_observation_scanner_scorecard():
         {"clickjacking", "js_static", "sri", "secret_leak"},
     )
     assert "run_error" not in out, out
-    assert out["case_counts"] == {"planned": 8, "completed": 8, "incomplete": 0}
-    # manifest 順: sri(vuln→safe), secret_leak(vuln→safe), clickjacking(vuln→safe), js_static(vuln→safe)。
+    assert out["case_counts"] == {"planned": 10, "completed": 10, "incomplete": 0}
+    # manifest 順: sri, secret_leak(vendor), secret_leak(script-only), clickjacking, js_static (vuln→safe)。
     assert [c["classification"]["candidate"] for c in out["cases"]] == [
-        "tp", "tn", "tp", "tn", "tp", "tn", "tp", "tn",
+        "tp", "tn", "tp", "tn", "tp", "tn", "tp", "tn", "tp", "tn",
     ], out
 
 
