@@ -8,7 +8,7 @@ from wscan.scanner_contract import (
 )
 
 # SUPPORTS_JSON_BODY 実値と JSON carrier supported の一致を免除する既知例外
-_JSON_FLAG_ALLOWLIST = {"mass_assignment", "prototype_pollution", "nosql"}  # 独自 HTTPX 経路で JSON を扱うが base の pointer JSON dispatch は使わない
+_JSON_FLAG_ALLOWLIST = {"mass_assignment", "prototype_pollution"}  # 独自 HTTPX 経路で JSON を扱うが base の pointer JSON dispatch は使わない
 
 
 def _contracts():

@@ -3,12 +3,12 @@ XSS (Cross-Site Scripting) Scanner
 Detects reflected and DOM-based XSS vulnerabilities.
 """
 import asyncio
-import html
 import re
 import uuid
 from typing import TYPE_CHECKING
 
 from wscan.injection_point import InjectionPoint
+from wscan.json_body_detect import XSS_MARKERS, analyze_xss_reflection, renderable_html_body
 
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
@@ -21,36 +21,6 @@ from .base import BaseScanner, Finding
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
-
-# Markers used to detect reflected payloads
-XSS_MARKERS = [
-    "<script>",
-    "onerror=",
-    "onload=",
-    "onfocus=",
-    "ontoggle=",
-    "ontouchstart=",
-    "onwheel=",
-    "onpointerenter=",
-    "onmouseover=",
-    "onanimationend=",
-    "javascript:",
-    "<svg",
-    "<img",
-    "<iframe",
-    "<body",
-    "<input",
-    "<video",
-    "<audio",
-    "<details",
-    "<marquee",
-    "alert(",
-]
-
-# Attributes whose value is a URL — a javascript: payload here executes even
-# without breaking out of the quotes, so a reflection inside them stays
-# dangerous.
-_URL_ATTRS = {"href", "src", "action", "formaction", "xlink:href", "data", "poster"}
 
 # 発火トリガの baseline 用の中立値（英数字のみ・payload とも既存ハンドラ値とも一致
 # しない）。この値を payload と同じ経路（URL パラメータ／フォーム action）で投入した
@@ -147,9 +117,11 @@ class XSSScanner(BaseScanner):
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
-                carrier=Carrier.JSON, state=CapabilityState.PLANNED,
-                reason="JSON body 検出改修は 0012/0035-D",
-                task="0035-D",
+                # JSON 値の反射のうち、応答が HTML として描画されるものだけを検出（dialog 確証は無し）。
+                carrier=Carrier.JSON, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.XML, state=CapabilityState.PLANNED,
@@ -190,7 +162,7 @@ class XSSScanner(BaseScanner):
     )
 
     SEVERITY = "high"
-    SUPPORTS_JSON_BODY = False
+    SUPPORTS_JSON_BODY = True
 
     async def scan_injection_point(
         self,
@@ -198,9 +170,9 @@ class XSSScanner(BaseScanner):
         field: dict,
     ) -> list[Finding]:
         """Scan a form field or URL parameter for XSS vulnerabilities."""
-        # dialog/DOM 実行に依存するため、ブラウザ遷移しない JSON 注入は扱わない。
+        # JSON 注入はブラウザ遷移しない（dialog 確証なし）。HTML 応答への生反射だけを検出する。
         if ip.location == "json_body":
-            return []
+            return await self._scan_json_reflection(ip, field)
 
         # F06/0059: baseline も browser を直叩きする（_apply_ip 非経由）ため時間ボックス gate を先に通す。
         # 超過なら alert-flooding sink を再訪せず truncated 記録して未完扱い（SQLi baseline と同流儀）。
@@ -455,6 +427,56 @@ class XSSScanner(BaseScanner):
 
         return findings
 
+    async def _scan_json_reflection(self, ip: InjectionPoint, field: dict) -> list[Finding]:
+        """JSON 値の反射を、応答が HTML として描画される場合に限って検出する。
+
+        application/json 等の応答は生 `<script>` を含んでもブラウザが実行しないため採らない
+        （`renderable_html_body`）。反射の文脈判定は form/URL 経路と同じ `_analyze_reflection`。
+        """
+        field_name = field.get("name") or ip.display_name or ip.parameter_id
+        await self.log_payload_test(field_name, "baseline_value_wscan", "xss_baseline", ip.url)
+        try:
+            baseline_source, baseline_pair = await self._apply_ip(ip, "baseline_value_wscan")
+        except Exception as exc:
+            self._record_scan_note(f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}")
+            return []
+        if not baseline_pair:
+            return []  # 送信不能（flag は transport 側が立てる）。比較対象が無いので陰性。
+        baseline_body = (baseline_pair.get("response") or {}).get("body") or baseline_source or ""
+
+        for payload in await self.get_payloads(field_name, ip.url, ip=ip):
+            await self.log_payload_test(field_name, payload, "xss", ip.url)
+            try:
+                _source, pair = await self._apply_ip(ip, payload)
+            except Exception as exc:
+                self._record_scan_note(
+                    f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+                )
+                continue
+            body = renderable_html_body(pair)
+            reflection = self._analyze_reflection(body, payload, baseline_body) if body else {}
+            if reflection:
+                context = reflection.get("context", "unknown")
+                confidence = reflection.get("confidence", "tentative")
+                finding = await self.record_finding(
+                    url=ip.url,
+                    field_name=field_name,
+                    payload=payload,
+                    evidence=(
+                        f"XSS payload from JSON body reflected unencoded in an HTML response "
+                        f"({context} context): '{reflection.get('snippet', '')[:100]}'"
+                    ),
+                    pair=pair,
+                    severity="high" if confidence == "likely" else "medium",
+                    confidence=confidence,
+                    evidence_type="xss_reflection",
+                    evidence_details=reflection,
+                    injection_point=ip,
+                )
+                return [finding] if finding else []
+            await asyncio.sleep(0.2 * self.sleep_factor)
+        return []
+
     async def run_equivalence_probe(
         self,
         url: str,
@@ -580,225 +602,7 @@ class XSSScanner(BaseScanner):
             return reflection.get("snippet", "")
         return ""
 
-    def _analyze_reflection(
-        self, source: str, payload: str, baseline_source: str = ""
-    ) -> dict:
-        """
-        Return structured reflection evidence.
-
-        Reflection alone is not always executable XSS.  This classifies the
-        reflected location so the report can distinguish executable-looking
-        contexts from weaker text-node reflections.
-        """
-        if payload and len(payload) > 5 and payload in source:
-            if baseline_source and source.count(payload) <= baseline_source.count(payload):
-                return {}
-            idx = source.find(payload)
-            preceding = source.lower()[max(0, idx - 300):idx]
-            if not (preceding.rfind("<!--") > preceding.rfind("-->")):
-                context = self._classify_reflection_context(source, idx)
-                if self._reflection_executable(source, idx, payload, payload, baseline_source, context):
-                    return {
-                        "context": context,
-                        "match": "full_payload",
-                        "snippet": source[max(0, idx - 10):idx + len(payload) + 50],
-                        "confidence": self._confidence_for_context(context),
-                        "raw_payload_present": True,
-                        "baseline_marker_delta": None,
-                    }
-
-        source_lower = source.lower()
-        baseline_lower = baseline_source.lower() if baseline_source else ""
-        payload_lower = payload.lower()
-
-        for marker in XSS_MARKERS:
-            marker_lower = marker.lower()
-            if marker_lower not in payload_lower:
-                continue
-            if marker_lower not in source_lower:
-                continue
-
-            # Baseline comparison: skip if marker count did not increase after injection
-            if baseline_lower:
-                if source_lower.count(marker_lower) <= baseline_lower.count(marker_lower):
-                    continue  # No new occurrence introduced by the payload
-
-            # Skip if only the HTML-encoded form is present (not the raw marker)
-            encoded = html.escape(marker).lower()
-            if encoded != marker_lower and encoded in source_lower and marker_lower not in source_lower:
-                continue
-
-            # Inspect *every* occurrence of the marker, not just the first. The
-            # first one may be an inert escaped reflection (or, on a page whose own
-            # UI carries the same handler code, a pre-existing executable handler),
-            # while a genuinely injected executable occurrence sits later. Report
-            # the first occurrence that is (a) not in a comment, (b) executable in
-            # its context, and (c) NOT pre-existing in the baseline — so a page's
-            # own handler is never mis-attributed to the payload regardless of
-            # where it sits relative to the reflection.
-            start = 0
-            while True:
-                idx = source_lower.find(marker_lower, start)
-                if idx == -1:
-                    break
-                start = idx + 1
-
-                # Skip occurrences inside HTML comments (<!-- ... -->)
-                preceding = source_lower[max(0, idx - 300):idx]
-                if preceding.rfind("<!--") > preceding.rfind("-->"):
-                    continue
-
-                context = self._classify_reflection_context(source, idx)
-                if not self._reflection_executable(
-                    source, idx, payload, marker, baseline_source, context
-                ):
-                    continue
-
-                # Per-occurrence baseline newness: skip an occurrence whose
-                # surrounding text already appears verbatim in the baseline (a
-                # pre-existing page handler, not something the payload introduced).
-                if baseline_lower:
-                    window = source_lower[max(0, idx - 40):idx + len(marker_lower) + 20]
-                    if window and window in baseline_lower:
-                        continue
-
-                delta = None
-                if baseline_lower:
-                    delta = source_lower.count(marker_lower) - baseline_lower.count(marker_lower)
-                return {
-                    "context": context,
-                    "match": marker,
-                    "snippet": source[max(0, idx - 20):idx + len(marker) + 50],
-                    "confidence": self._confidence_for_context(context),
-                    "raw_payload_present": False,
-                    "baseline_marker_delta": delta,
-                }
-
-        return {}
-
-    def _reflection_executable(
-        self,
-        source: str,
-        idx: int,
-        payload: str,
-        matched: str,
-        baseline_source: str,
-        context: str,
-    ) -> bool:
-        """Decide whether a reflection at ``idx`` can actually execute.
-
-        Reflection alone is not XSS: a correctly-escaped page echoes the payload
-        but neutralises the characters that would let it break out. ``matched``
-        is the token confirmed present *raw* at ``idx`` (the whole payload, or a
-        single marker), and ``page.content()`` is the browser's serialised DOM,
-        so the trustworthy signals are:
-
-        * ``matched`` carries a raw ``<`` — a real tag/element was formed
-          (escaped output keeps ``&lt;``, and a serialised text node re-escapes
-          ``<``, so a raw ``<`` in the matched token means a live tag);
-        * the reflection sits in an inherently executable position — a
-          ``<script>`` body, an unquoted ``on*`` handler, or a URL attribute;
-        * inside a quoted attribute value, only an ``on*`` handler / URL
-          attribute, or the value's delimiting quote actually being broken.
-
-        Bare markers (``alert(``, ``onload=`` …) and quote / backtick characters
-        survive ``html.escape`` and even reappear raw inside serialised attribute
-        values, so they are treated as data unless one of the signals above
-        holds. This is what suppresses ``value="&quot; onmouseover=alert(1)"``
-        and ``Hello, &lt;script&gt;alert(1)`` false positives while still
-        catching genuinely unescaped reflections.
-        """
-        if context == "html_comment":
-            return False
-
-        raw_tag = "<" in matched  # matched is confirmed present raw at idx
-
-        owner, delim = self._owning_quoted_attr(source, idx)
-        if owner is not None:
-            # idx sits inside a quoted attribute value: the token is data unless
-            # the owning attribute itself runs script, the payload broke the
-            # delimiting quote, or a real tag was formed. This stops the
-            # classifier from mistaking ``value="… onmouseover=alert(1)"`` text
-            # for a live event handler.
-            if owner.startswith("on") or owner in _URL_ATTRS:
-                return True
-            if raw_tag:
-                return True
-            base_l = baseline_source.lower() if baseline_source else ""
-            return bool(
-                delim
-                and delim in payload
-                and base_l
-                and source.count(delim) > baseline_source.count(delim)
-            )
-
-        # Not inside a quoted value: trust the positional classification — an
-        # unquoted on*-handler, a <script> body, or a javascript: URL attribute
-        # are executable regardless of structural characters.
-        if context in ("script", "event_handler_attribute", "url_attribute"):
-            return True
-        # html_text / bare unquoted attribute: needs a real tag-opening bracket.
-        return raw_tag
-
-    @staticmethod
-    def _owning_quoted_attr(source: str, idx: int) -> tuple:
-        """Resolve the quoted attribute value (if any) that contains ``idx``.
-
-        Returns ``(attribute_name, delimiter_quote)`` when ``idx`` is inside an
-        open, quoted attribute value, else ``(None, "")``. The attribute name is
-        lower-cased; it is ``""`` when a delimiter is open but no name precedes
-        it. Only raw quote characters are tracked, so an escaped ``&quot;`` does
-        not look like a delimiter — which is exactly what distinguishes inert
-        escaped output from a genuine attribute breakout.
-        """
-        lt = source.rfind("<", 0, idx)
-        gt = source.rfind(">", 0, idx)
-        if lt == -1 or (gt != -1 and gt > lt):
-            return (None, "")  # not inside a tag
-        seg = source[lt:idx]
-        quote = None
-        open_pos = -1
-        for j, c in enumerate(seg):
-            if quote:
-                if c == quote:
-                    quote = None
-            elif c in ('"', "'"):
-                quote = c
-                open_pos = j
-        if quote is None:
-            return (None, "")
-        head = seg[:open_pos]
-        m = re.search(r'([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*$', head)
-        return (m.group(1).lower() if m else "", quote)
-
-    def _classify_reflection_context(self, source: str, idx: int) -> str:
-        before = source[max(0, idx - 500):idx].lower()
-        after = source[idx:idx + 500].lower()
-        last_lt = before.rfind("<")
-        last_gt = before.rfind(">")
-        in_tag = last_lt > last_gt
-        tag_fragment = before[last_lt:] if in_tag else ""
-
-        if before.rfind("<!--") > before.rfind("-->"):
-            return "html_comment"
-        if "<script" in before and "</script" not in before.split("<script")[-1]:
-            return "script"
-        if in_tag:
-            if re.search(r"\son[a-z]+\s*=\s*['\"]?$", tag_fragment):
-                return "event_handler_attribute"
-            if re.search(r"\s(?:href|src|action|formaction)\s*=\s*['\"]?$", tag_fragment):
-                return "url_attribute"
-            return "html_attribute"
-        if after.startswith("</script"):
-            return "script"
-        return "html_text"
-
-    def _confidence_for_context(self, context: str) -> str:
-        if context in {"script", "event_handler_attribute", "url_attribute"}:
-            return "likely"
-        if context in {"html_attribute", "html_text"}:
-            return "tentative"
-        return "tentative"
+    _analyze_reflection = staticmethod(analyze_xss_reflection)
 
     def _response_body_for(self, url: str) -> str:
         """Raw HTTP response body captured for ``url`` (empty when unavailable).
@@ -911,6 +715,8 @@ class XSSScanner(BaseScanner):
         ip = self._verify_injection_point(finding, is_url_param)
         if ip is None:
             return None
+        if ip.location == "json_body":
+            return await self._verify_json_reflection(finding, ip)
         baseline_source = ""
         try:
             self.browser.reset_dialog()
@@ -959,6 +765,22 @@ class XSSScanner(BaseScanner):
             return False
         reflect_source = pair.get("response", {}).get("body") or source
         return bool(reflect_source and self._analyze_reflection(reflect_source, finding.payload, baseline_source))
+
+    async def _verify_json_reflection(self, finding: Finding, ip: InjectionPoint) -> bool | None:
+        """JSON 注入点の再現確認。検出時と同じ判定（HTML 応答への生反射）を再評価する。"""
+        name = finding.field_name
+        try:
+            await self.log_payload_test(name, "baseline_value_wscan", "xss_verify_baseline", finding.url)
+            baseline_source, baseline_pair = await self._apply_ip(ip, "baseline_value_wscan")
+            await self.log_payload_test(name, finding.payload, "xss_verify", finding.url)
+            _source, pair = await self._apply_ip(ip, finding.payload)
+        except Exception:
+            return None
+        if not baseline_pair or not pair:
+            return None  # 送信不能を陰性（unreproduced）と誤認しない
+        baseline_body = (baseline_pair.get("response") or {}).get("body") or baseline_source or ""
+        body = renderable_html_body(pair)
+        return bool(body and self._analyze_reflection(body, finding.payload, baseline_body))
 
     async def _apply_payload(
         self,

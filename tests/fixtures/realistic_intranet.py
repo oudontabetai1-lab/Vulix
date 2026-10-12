@@ -42,6 +42,10 @@ EXPECTED_FINDINGS = [
      "note": "拡張子/MIMEを検証せず危険なスクリプトファイルを受理する"},
     {"check": "os", "path": "/api/tools/ping", "field": "host",
      "note": "SPA が JSON body {host} で POST。host をシェルへ連結（JSON body 経由の OS 注入）"},
+    {"check": "nosql", "path": "/api/directory/search", "field": "department",
+     "note": "SPA が JSON body {department} で POST。値の演算子 object ($ne 等) がそのまま照合条件になる"},
+    {"check": "xss", "path": "/api/notes/preview", "field": "note",
+     "note": "SPA が JSON body {note} で POST。HTML プレビュー応答へ note を無エスケープで反射する"},
 ]
 
 # 検出されてはいけない入力。ここでの finding は誤検知。
@@ -58,6 +62,21 @@ SAFE_ENDPOINTS = [
      "note": "単一拡張子・Content-Type・画像マジックバイトを allow-list 検証する"},
     {"path": "/api/tools/ping-safe", "field": "host",
      "note": "JSON body の host を allow-list 検証、シェルに渡さない（JSON 版 OS 安全ツイン）"},
+    {"path": "/api/directory/search-safe", "field": "department",
+     "note": "JSON の department を常に文字列として照合し、演算子 object を受け付けない（JSON 版 nosql 安全ツイン）"},
+    {"path": "/api/notes/preview-safe", "field": "note",
+     "note": "HTML プレビューへ html.escape して反射（JSON 版 xss 安全ツイン）"},
+    {"path": "/api/notes/echo", "field": "note",
+     "note": "note を application/json で生のまま返す。JSON 応答はブラウザが描画しないので XSS ではない"},
+]
+
+
+# ディレクトリ検索（JSON 版 NoSQL 注入）用の疑似コレクション。10 件で `$ne` 全件ヒット時の
+# 応答が baseline（0 件）から十分に膨らむ。
+_DIRECTORY = [
+    {"name": f"member{i:02d}", "department": ("engineering" if i % 2 else "operations"),
+     "title": "Senior Engineer, Platform Reliability", "email": f"member{i:02d}@initech.example"}
+    for i in range(10)
 ]
 
 
@@ -77,6 +96,7 @@ _NAV = [
     ('/documents/upload', 'Document upload'),
     ('/documents/upload-safe', 'Safe document upload'),
     ('/ops/api-console', 'API console'),
+    ('/ops/directory', 'Directory'),
 ]
 
 
@@ -438,5 +458,69 @@ def create_app() -> FastAPI:
         if not re.fullmatch(r"[A-Za-z0-9.\-]{1,253}", host):
             return JSONResponse({"error": "invalid hostname"}, status_code=400)
         return {"output": "1 packets transmitted, 1 received, 0% packet loss\n"}
+
+    # ── JSON body 経由の NoSQL 注入 / 反射 XSS（SPA）：脆弱 + 安全ツイン ────────
+    @app.get("/ops/directory", response_class=HTMLResponse)
+    async def directory_console():
+        # DOM シンクを置かず fetch だけ。SPA harvest が JSON body を拾う入口。
+        return _layout(
+            "社内ディレクトリ",
+            """
+            <p>部署検索とメモのプレビュー API を呼び出します。</p>
+            <script>
+              const post = (url, body) => fetch(url, {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+              const search = {department: 'engineering'};
+              post('/api/directory/search', search);
+              post('/api/directory/search-safe', search);
+              const note = {note: 'meeting at 10'};
+              post('/api/notes/preview', note);
+              post('/api/notes/preview-safe', note);
+              post('/api/notes/echo', note);
+            </script>
+            """,
+        )
+
+    def _directory_match(dept: str, condition) -> bool:
+        if isinstance(condition, dict):  # VULNERABLE 側のみ到達: 演算子をそのまま解釈
+            if "$ne" in condition:
+                return dept != condition["$ne"]
+            if "$gt" in condition:
+                return dept > condition["$gt"]
+            if "$regex" in condition:
+                return re.search(str(condition["$regex"]), dept) is not None
+            return False
+        return dept == condition
+
+    @app.post("/api/directory/search", response_class=JSONResponse)
+    async def directory_search(request: Request):
+        # VULNERABLE: department が {"$ne": ...} 等の object でも照合条件として通す。
+        condition = (await request.json()).get("department", "")
+        hits = [m for m in _DIRECTORY if _directory_match(m["department"], condition)]
+        return {"count": len(hits), "members": hits}
+
+    @app.post("/api/directory/search-safe", response_class=JSONResponse)
+    async def directory_search_safe(request: Request):
+        # SAFE: 常に文字列へ正規化して等価比較。演算子 object は単なる（一致しない）文字列になる。
+        department = str((await request.json()).get("department", ""))
+        hits = [m for m in _DIRECTORY if m["department"] == department]
+        return {"count": len(hits), "members": hits}
+
+    @app.post("/api/notes/preview", response_class=HTMLResponse)
+    async def notes_preview(request: Request):
+        # VULNERABLE: note を HTML プレビュー断片へ無エスケープで差し込む（text/html）。
+        note = str((await request.json()).get("note", ""))
+        return HTMLResponse(f'<div class="note-preview">{note}</div>')
+
+    @app.post("/api/notes/preview-safe", response_class=HTMLResponse)
+    async def notes_preview_safe(request: Request):
+        # SAFE: 同じ HTML プレビューだが html.escape する。
+        note = str((await request.json()).get("note", ""))
+        return HTMLResponse(f'<div class="note-preview">{html.escape(note)}</div>')
+
+    @app.post("/api/notes/echo", response_class=JSONResponse)
+    async def notes_echo(request: Request):
+        # SAFE: JSON 応答（application/json）での生エコー。ブラウザは描画・実行しない。
+        return {"note": str((await request.json()).get("note", ""))}
 
     return app

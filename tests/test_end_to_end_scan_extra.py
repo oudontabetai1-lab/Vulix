@@ -31,7 +31,7 @@ from tests.fixtures.realistic_intranet import (
 from wscan.engine import ScanEngine
 
 # 検出が決定的な注入系チェック。
-CHECKS = ["os", "ssrf", "nosql", "dom_xss"]
+CHECKS = ["os", "ssrf", "nosql", "dom_xss", "xss"]
 SCAN_TIMEOUT_S = 600  # payload mutation wave 追加分の余裕を見て延長
 
 

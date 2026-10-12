@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from wscan.injection_point import InjectionPoint
+from wscan.json_body_detect import boolean_expansion, nosql_json_verdict, response_of
 
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
@@ -91,8 +92,8 @@ class NoSQLInjectionScanner(BaseScanner):
             ),
             CarrierCapability(
                 # scan_injection_point()→_test_json_body() が MongoDB 演算子 object を
-                # JSON body として HTTPX 送信し nosql_json_error を検出するため supported。
-                # base の SUPPORTS_JSON_BODY/pointer dispatch は未接続なので旧フラグ一致 test の既知例外。
+                # JSON body として HTTPX 送信し nosql_json_error を検出する（whole-body 経路）。加えて
+                # pointer 注入点は共有 transport で演算子 object へ置換して送る（SUPPORTS_JSON_BODY）。
                 carrier=Carrier.JSON, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.OBJECT}),
                 transports=frozenset({TransportKind.HTTPX}),
@@ -141,10 +142,10 @@ class NoSQLInjectionScanner(BaseScanner):
 
     ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
-    # json_body の NoSQL 攻撃は pointer に**構造化オペレータ**(dict `{"$ne": ...}`)を入れる戦略が
-    # 必要で、文字列 payload をそのまま送ると `"field": "{...}"` になり検出できない（偽陰性）。
-    # 構造化 payload 戦略は PR-b（json 実配線）の担当なので、5b では json capability を持たせない。
-    SUPPORTS_JSON_BODY = False
+    # json_body は pointer の値を**構造化オペレータ**(dict `{"$ne": ...}`)へ置換して送る
+    # （文字列 payload のままだと `"field": "{...}"` になり検出できない）。
+    # 判定は純粋関数 json_body_detect.nosql_json_verdict、送信は共有 transport(_apply_ip)。
+    SUPPORTS_JSON_BODY = True
 
     def _boolean_expansion(
         self,
@@ -152,21 +153,7 @@ class NoSQLInjectionScanner(BaseScanner):
         probe_src: str,
         baseline_src2: str = "",
     ) -> tuple[bool, dict]:
-        baseline_len = len(baseline_src or "")
-        probe_len = len(probe_src or "")
-        baseline_variance = abs(baseline_len - len(baseline_src2 or "")) if baseline_src2 else 0
-        delta = probe_len - baseline_len
-        min_delta = max(500, int(baseline_len * 0.25), baseline_variance * 4)
-        return (
-            bool(baseline_len > 0 and delta > min_delta),
-            {
-                "baseline_length": baseline_len,
-                "probe_length": probe_len,
-                "delta": delta,
-                "baseline_variance": baseline_variance,
-                "min_delta": min_delta,
-            },
-        )
+        return boolean_expansion(baseline_src, probe_src, baseline_src2)
 
     async def _apply_payload(
         self,
@@ -195,11 +182,10 @@ class NoSQLInjectionScanner(BaseScanner):
         field_name = ip.display_name or ip.parameter_id
         field_type = field.get("type", "text").lower()
 
-        # json_body は未対応（構造化オペレータ戦略は PR-b）。文字列 payload を送って
-        # 偽陰性を出さないよう、また `_test_param_payload` の url_param 用 `[$ne]` 変換や
-        # `_test_json_body` の別 POST 経路へ流さないよう、ここで明示的に打ち切る。
+        # json_body は構造化オペレータ戦略（url_param 用 `[$ne]` 変換や `_test_json_body` の
+        # 別 POST 経路には流さない）。
         if ip.location == "json_body":
-            return []
+            return await self._scan_json_operators(ip, field_name)
 
         # Skip non-text fields
         if field_type in ("file", "checkbox", "radio", "submit", "button", "image", "reset"):
@@ -333,6 +319,53 @@ class NoSQLInjectionScanner(BaseScanner):
 
         return findings
 
+    async def _scan_json_operators(
+        self, ip: InjectionPoint, field_name: str
+    ) -> list[Finding]:
+        """JSON 値を `{"$ne": ...}` 等の演算子 object に置換して送り、決定論判定する。"""
+        try:
+            await self.log_payload_test(
+                field_name, "baseline_value_wscan", "nosql_baseline", ip.url
+            )
+            baseline = response_of(*await self._apply_ip(ip, "baseline_value_wscan"))
+            await self.log_payload_test(
+                field_name, "baseline_value_wscan_2", "nosql_baseline_2", ip.url
+            )
+            baseline2 = response_of(*await self._apply_ip(ip, "baseline_value_wscan_2"))
+        except Exception as exc:
+            self._record_scan_note(f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}")
+            return []
+
+        for operator in _JSON_BODY_PAYLOADS:
+            payload = json.dumps(operator)
+            await self.log_payload_test(field_name, payload, "nosql", ip.url)
+            try:
+                source, pair = await self._apply_ip(ip, operator)
+            except Exception as exc:
+                self._record_scan_note(
+                    f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+                )
+                continue
+            verdict = nosql_json_verdict(
+                baseline, baseline2, response_of(source, pair), _NOSQL_ERROR_PATTERNS
+            )
+            if verdict:
+                finding = await self.record_finding(
+                    url=ip.url,
+                    field_name=field_name,
+                    payload=payload,
+                    evidence=verdict.evidence,
+                    pair=pair,
+                    severity="high",
+                    confidence="likely" if verdict.evidence_type == "nosql_boolean" else None,
+                    evidence_type=verdict.evidence_type,
+                    evidence_details={**verdict.details, "injected_param": field_name},
+                    injection_point=ip,
+                )
+                return [finding] if finding else []
+            await asyncio.sleep(0.2 * self.sleep_factor)
+        return []
+
     async def scan_field(
         self,
         url: str,
@@ -430,6 +463,8 @@ class NoSQLInjectionScanner(BaseScanner):
                 if is_url_param
                 else InjectionPoint.for_form(finding.url, finding.field_name, 0)
             )
+        if ip.location == "json_body":
+            return await self._verify_json_operators(finding, ip)
         try:
             # verify 時の再投入（baseline ×2 + payload）も監査ログに残す。
             await self.log_payload_test(
@@ -469,6 +504,33 @@ class NoSQLInjectionScanner(BaseScanner):
             return expanded
 
         return None
+
+    async def _verify_json_operators(
+        self, finding: Finding, ip: InjectionPoint
+    ) -> bool | None:
+        """pointer 注入点の再現確認。baseline×2 + 演算子 probe を同じ判定関数で再評価する。
+
+        送信不能（空 baseline・演算子 payload が復元できない）は None（engine が flag を見て
+        assumed に倒す）。判定が陰性なら False。
+        """
+        try:
+            operator = json.loads(finding.payload)
+        except (TypeError, ValueError):
+            return None
+        name = finding.field_name
+        try:
+            await self.log_payload_test(name, "baseline_value_wscan", "nosql_verify_baseline", finding.url)
+            baseline = response_of(*await self._apply_ip(ip, "baseline_value_wscan"))
+            await self.log_payload_test(name, "baseline_value_wscan_2", "nosql_verify_baseline_2", finding.url)
+            baseline2 = response_of(*await self._apply_ip(ip, "baseline_value_wscan_2"))
+            await self.log_payload_test(name, finding.payload, "nosql_verify", finding.url)
+            probe = response_of(*await self._apply_ip(ip, operator))
+        except Exception:
+            return None
+        if any(status is None for status, _body in (baseline, baseline2, probe)):
+            return None  # 送信不能を陰性（unreproduced）と誤認しない
+        verdict = nosql_json_verdict(baseline, baseline2, probe, _NOSQL_ERROR_PATTERNS)
+        return bool(verdict and verdict.evidence_type == finding.evidence_type)
 
     async def _verify_json_error(self, finding: Finding) -> bool | None:
         proxy = getattr(self.engine, "proxy", "") or None
