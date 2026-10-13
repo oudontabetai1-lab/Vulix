@@ -93,8 +93,19 @@ class _ActiveContentParser(HTMLParser):
         self.base_seen = False
         self.resources = set()
         self.inert_depth = 0
+        self.plaintext = False
+
+    def handle_startendtag(self, tag, attrs):
+        # HTML に自己閉じ記法は無い: <textarea/> 等も RCDATA/raw text 領域を開く。
+        self.handle_starttag(tag, attrs)
+        if tag in self.CDATA_CONTENT_ELEMENTS:
+            self.set_cdata_mode(tag)
 
     def handle_starttag(self, tag, attrs):
+        if tag == "plaintext":  # PLAINTEXT 状態: 終了タグ無しで以降すべて literal text
+            self.plaintext = True
+        if self.plaintext:
+            return
         if tag in {"template", "noscript"}:
             self.inert_depth += 1
         if self.inert_depth:

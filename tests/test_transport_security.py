@@ -253,6 +253,18 @@ def test_raw_text_contents_are_not_active_mixed_content(wrapper):
     assert rules.active_mixed_content("https://fixture.test/", "<!-- <script src=http://cdn.test/x.js></script> -->") == []
 
 
+@pytest.mark.parametrize("html", [
+    "<textarea/><script src=http://cdn.test/x.js></script>",
+    "<plaintext><script src=http://cdn.test/x.js></script>"])
+def test_self_closed_rcdata_and_plaintext_are_inert(html):
+    assert rules.active_mixed_content("https://fixture.test/", html) == []
+
+
+def test_plain_body_script_is_active_mixed_content():
+    assert rules.active_mixed_content("https://fixture.test/",
+        "<script src=http://cdn.test/x.js></script>") == ["http://cdn.test/x.js"]
+
+
 def test_raw_text_does_not_hide_real_resources():
     html = ('<title>t</title><textarea><script src="http://cdn.test/inert.js"></script></textarea>'
             '<script src="http://cdn.test/real.js"></script>'
@@ -293,13 +305,18 @@ def test_fixture_mixed_content_twins():
         vulnerable = await scan_fixture(scanner, "https://fixture.test/mixed")
         safe = await scan_fixture(scanner, "https://fixture.test/api/example-safe")
         safe += await scan_fixture(scanner, "https://fixture.test/mixed-text-safe")
+        for extra in ("mixed-selfclosed-textarea-safe", "mixed-plaintext-safe"):
+            safe += await scan_fixture(scanner, "https://fixture.test/" + extra)
         mixed = [f for f in vulnerable if f.evidence_type == "active_mixed_content"]
         assert len(mixed) == 1 and mixed[0].evidence_details["resources"] == ["http://cdn.test/example.js"]
         assert "active_mixed_content" not in {f.evidence_type for f in safe}
         assert {e["path"] for e in EXPECTED_FINDINGS} >= {"/mixed"}
-        assert {e["path"] for e in SAFE_ENDPOINTS} >= {"/api/example-safe", "/mixed-text-safe"}
+        assert {e["path"] for e in SAFE_ENDPOINTS} >= {"/api/example-safe", "/mixed-text-safe",
+                                                           "/mixed-selfclosed-textarea-safe", "/mixed-plaintext-safe"}
         units = {(r["url"], r["status"]) for r in scanner.coverage if r["unit"] == "active_mixed_content"}
         assert units == {("https://fixture.test/mixed", "observed"), ("https://fixture.test/mixed-text-safe", "observed"),
+                         ("https://fixture.test/mixed-selfclosed-textarea-safe", "observed"),
+                         ("https://fixture.test/mixed-plaintext-safe", "observed"),
                          ("https://fixture.test/api/example-safe", "not_applicable")}
     asyncio.run(scenario())
 

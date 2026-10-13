@@ -15,6 +15,10 @@ SAFE_ENDPOINTS = [
      "note": "HTTPS JSON body containing an http script-like string is not an HTML document"},
     {"check": "transport_security", "path": "/mixed-text-safe", "field": None,
      "note": "HTTPS HTML shows http script markup only as textarea/title text"},
+    {"check": "transport_security", "path": "/mixed-selfclosed-textarea-safe", "field": None,
+     "note": "self-closed textarea still opens RCDATA, so the following http script is literal text"},
+    {"check": "transport_security", "path": "/mixed-plaintext-safe", "field": None,
+     "note": "plaintext makes the rest of the document literal text"},
 ]
 
 
@@ -44,6 +48,14 @@ def create_app():
     async def mixed_text_safe():
         return HTMLResponse('<title><script src="http://cdn.test/example.js"></script></title>'
                             '<textarea><script src="http://cdn.test/example.js"></script></textarea>')
+
+    @app.get("/mixed-selfclosed-textarea-safe")
+    async def mixed_selfclosed_textarea_safe():
+        return HTMLResponse('<textarea/><script src=http://cdn.test/x.js></script>')
+
+    @app.get("/mixed-plaintext-safe")
+    async def mixed_plaintext_safe():
+        return HTMLResponse('<plaintext><script src=http://cdn.test/x.js></script>')
 
     @app.get("/mixed")
     async def mixed():
