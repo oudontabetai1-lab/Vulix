@@ -279,6 +279,20 @@ def test_ambiguous_or_closed_inert_regions_still_detect_active_content(html):
     assert rules.active_mixed_content("https://fixture.test/", html) == ["http://cdn.test/x.js"]
 
 
+@pytest.mark.parametrize("type_", [
+    "", "module", "text/javascript", "application/x-javascript", "text/javascript1.5",
+    "text/jscript", "text/livescript", "APPLICATION/X-ECMASCRIPT", " text/x-javascript "])
+def test_all_javascript_mime_script_types_are_active(type_):
+    html = f'<script type="{type_}" src=http://cdn.test/x.js></script>'
+    assert rules.active_mixed_content("https://fixture.test/", html) == ["http://cdn.test/x.js"]
+
+
+@pytest.mark.parametrize("type_", ["application/json", "text/template", "importmap"])
+def test_non_executable_script_data_blocks_are_inert(type_):
+    html = f'<script type="{type_}" src=http://cdn.test/x.js></script>'
+    assert rules.active_mixed_content("https://fixture.test/", html) == []
+
+
 def test_plain_body_script_is_active_mixed_content():
     assert rules.active_mixed_content("https://fixture.test/",
         "<script src=http://cdn.test/x.js></script>") == ["http://cdn.test/x.js"]

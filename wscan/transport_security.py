@@ -90,8 +90,13 @@ _RAW_TEXT_ELEMENTS = ("script", "style", "textarea", "title", "xmp", "iframe", "
 # 内容の終端は最初の `</name` + 空白/`/`/`>`（属性付き終了タグでも閉じる）。最早の終端＝過抑制しない側。
 _RAW_TEXT_END = {name: re.compile(rf"</{name}(?=[\t\n\f\r />])", re.I) for name in _RAW_TEXT_ELEMENTS}
 _COMMENT_END = re.compile(r"--!?>")
-_EXECUTABLE_SCRIPT_TYPES = frozenset({"", "module", "text/javascript", "application/javascript",
-                                      "text/ecmascript", "application/ecmascript"})
+# WHATWG の "JavaScript MIME type essence match" 全集合＋空/module。これ以外（json/template/importmap 等）は data block＝非実行。
+_EXECUTABLE_SCRIPT_TYPES = frozenset({
+    "", "module",
+    "application/ecmascript", "application/javascript", "application/x-ecmascript", "application/x-javascript",
+    "text/ecmascript", "text/javascript", "text/javascript1.0", "text/javascript1.1", "text/javascript1.2",
+    "text/javascript1.3", "text/javascript1.4", "text/javascript1.5", "text/jscript", "text/livescript",
+    "text/x-ecmascript", "text/x-javascript"})
 
 
 def _read_tag(html: str, i: int):
