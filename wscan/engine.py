@@ -7123,6 +7123,7 @@ class ScanEngine:
         "privesc_action",
         "privesc_bypass",
         "info_disclosure",
+        "directory_artifacts",
         "session",
         "security_headers",
     })

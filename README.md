@@ -58,7 +58,7 @@ Vulix のモジュール入口では `python -m vulix explore URL` を `scan` �
 
 ```text
 sqli xss dom_xss os ssti path_traversal csrf header_injection mail_header
-open_redirect clickjacking session privesc stored_xss cors info_disclosure
+open_redirect clickjacking session privesc stored_xss cors info_disclosure directory_artifacts
 host_header security_headers nosql deserialization request_smuggling ssrf
 graphql jwt cms xxe ldap file_upload race_condition websocket secret_leak sri
 js_static prototype_pollution cache_poisoning mass_assignment http_methods tls_scan
@@ -1031,3 +1031,9 @@ Depth、Max Forms、Max Payloads、Concurrency を下げ、Delay を増やしま
 ### ライセンス
 
 本ソフトウェアは MIT License の下で提供されます。全文はリポジトリ直下の [LICENSE](LICENSE) を参照してください。無保証で提供されます。
+
+`directory_artifacts` は `--checks directory_artifacts` または全 check 選択で有効になる加算的検査です。観測済み URL の親ディレクトリ、リンク・リダイレクト先と、観測済みファイル由来の `.bak`・`.old`・`.orig`・`~`・`.swp`・ZIP/TAR バックアップを同一 origin・許可 scope 内だけで GET 検査します。固定 wordlist の総当たりは追加しません。候補は origin ごとに最大 200 件、応答本文は最大 1 MB です。
+
+Apache/nginx/IIS/Python の autoindex は見出し・親リンク・列・ファイル entry を組み合わせて分類します。単独 signal は tentative な証拠として保持し、再取得時の複合 signal と非存在リソースの control 比較を経て確定します。soft-404 の同一本文は抑止し、取得失敗や候補上限は安全とみなさず観測ログへ残します。`candidate_planned` / `candidate_executed` / `candidate_skipped` / `candidate_error` の scan notes は observability summary に集約されます。
+
+`sourceMappingURL`、派生 `.js.map` と inline JSON map を解析し、内部パスまたは `sourcesContent` の公開を検知します。内容は有効な `secret_leak` scanner にも渡しますが、artifact finding の証拠本文は秘密保護のため保存しません。ブラウザ E2E benchmark は未計測で、純粋関数と HTTP fixture の脆弱・安全ツインで検証します。
