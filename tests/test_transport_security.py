@@ -246,6 +246,64 @@ def test_inert_scripts_are_not_active_mixed_content():
         '<script type="application/json" src="http://cdn.test/a.json"></script>') == []
 
 
+@pytest.mark.parametrize("wrapper", ["textarea", "title", "TITLE", "xmp", "noembed", "noframes", "style"])
+def test_raw_text_contents_are_not_active_mixed_content(wrapper):
+    html = f'<{wrapper}><script src="http://cdn.test/x.js"></script><iframe src="http://cdn.test/"></iframe></{wrapper}>'
+    assert rules.active_mixed_content("https://fixture.test/", html) == []
+    assert rules.active_mixed_content("https://fixture.test/", "<!-- <script src=http://cdn.test/x.js></script> -->") == []
+
+
+def test_raw_text_does_not_hide_real_resources():
+    html = ('<title>t</title><textarea><script src="http://cdn.test/inert.js"></script></textarea>'
+            '<script src="http://cdn.test/real.js"></script>'
+            '<iframe src="http://frame.test/"><script src="http://cdn.test/fallback.js"></script></iframe>'
+            '<script src="http://cdn.test/after.js"></script>')
+    assert rules.active_mixed_content("https://fixture.test/", html) == [
+        "http://cdn.test/after.js", "http://cdn.test/real.js", "http://frame.test/"]
+
+
+def test_document_kind_uses_real_content_type():
+    assert rules.document_kind("text/html; charset=utf-8") == "html"
+    assert rules.document_kind("Application/XHTML+XML") == "html"
+    assert rules.document_kind("application/json") == "non_html"
+    assert rules.document_kind("text/plain") == "non_html"
+    assert rules.document_kind("") == "unknown"
+
+
+def test_non_html_https_body_is_not_active_mixed_content():
+    async def scenario():
+        body = '{"example":"<script src=http://cdn.test/example.js></script>"}'
+        for content_type in ("application/json", "text/plain; charset=utf-8"):
+            _, scanner = engine_for(httpx.MockTransport(
+                lambda r: httpx.Response(200, text=body, headers={"content-type": content_type})))
+            found = await scan_fixture(scanner, "https://fixture.test/api")
+            assert "active_mixed_content" not in {f.evidence_type for f in found}
+            row = next(r for r in scanner.coverage if r["unit"] == "active_mixed_content")
+            assert row["status"] == "not_applicable" and row["reason"] == "non_html_document"
+        _, scanner = engine_for(httpx.MockTransport(lambda r: httpx.Response(200, content=body.encode())))
+        assert "active_mixed_content" not in {f.evidence_type for f in await scan_fixture(scanner, "https://fixture.test/api")}
+        row = next(r for r in scanner.coverage if r["unit"] == "active_mixed_content")
+        assert row["status"] == "gap" and row["reason"] == "missing_content_type"
+    asyncio.run(scenario())
+
+
+def test_fixture_mixed_content_twins():
+    async def scenario():
+        _, scanner = engine_for(httpx.ASGITransport(app=create_app()))
+        vulnerable = await scan_fixture(scanner, "https://fixture.test/mixed")
+        safe = await scan_fixture(scanner, "https://fixture.test/api/example-safe")
+        safe += await scan_fixture(scanner, "https://fixture.test/mixed-text-safe")
+        mixed = [f for f in vulnerable if f.evidence_type == "active_mixed_content"]
+        assert len(mixed) == 1 and mixed[0].evidence_details["resources"] == ["http://cdn.test/example.js"]
+        assert "active_mixed_content" not in {f.evidence_type for f in safe}
+        assert {e["path"] for e in EXPECTED_FINDINGS} >= {"/mixed"}
+        assert {e["path"] for e in SAFE_ENDPOINTS} >= {"/api/example-safe", "/mixed-text-safe"}
+        units = {(r["url"], r["status"]) for r in scanner.coverage if r["unit"] == "active_mixed_content"}
+        assert units == {("https://fixture.test/mixed", "observed"), ("https://fixture.test/mixed-text-safe", "observed"),
+                         ("https://fixture.test/api/example-safe", "not_applicable")}
+    asyncio.run(scenario())
+
+
 def test_tls_handshakes_validate_chain_and_collect_without_sockets():
     import ssl
     async def scenario():

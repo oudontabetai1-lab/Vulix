@@ -84,6 +84,9 @@ def plaintext_sensitive_fields(request: dict) -> list[str]:
 
 
 class _ActiveContentParser(HTMLParser):
+    # Raw-text/RCDATA elements: their contents are text, never parsed as elements by browsers.
+    CDATA_CONTENT_ELEMENTS = ("script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes")
+
     def __init__(self, url):
         super().__init__()
         self.base = url
@@ -114,6 +117,17 @@ class _ActiveContentParser(HTMLParser):
     def handle_endtag(self, tag):
         if tag in {"template", "noscript"} and self.inert_depth:
             self.inert_depth -= 1
+
+
+_HTML_DOCUMENT_MEDIA_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+
+
+def document_kind(content_type: str) -> str:
+    """Classify the real response: ``html`` / ``non_html`` / ``unknown`` (no Content-Type)."""
+    media = (content_type or "").split(";", 1)[0].strip().lower()
+    if not media:
+        return "unknown"
+    return "html" if media in _HTML_DOCUMENT_MEDIA_TYPES else "non_html"
 
 
 def active_mixed_content(url: str, html: str) -> list[str]:

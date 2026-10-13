@@ -1,14 +1,20 @@
 """Read-only transport twins and an isolated, disposable method fixture."""
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 EXPECTED_FINDINGS = [
     {"check": "transport_security", "path": "/status", "field": None,
      "note": "HTTP document is served without upgrading to HTTPS"},
+    {"check": "transport_security", "path": "/mixed", "field": None,
+     "note": "HTTPS HTML document declares an http script"},
 ]
 SAFE_ENDPOINTS = [
     {"check": "transport_security", "path": "/status-safe", "field": None,
      "note": "HTTP first hop redirects to the HTTPS document"},
+    {"check": "transport_security", "path": "/api/example-safe", "field": None,
+     "note": "HTTPS JSON body containing an http script-like string is not an HTML document"},
+    {"check": "transport_security", "path": "/mixed-text-safe", "field": None,
+     "note": "HTTPS HTML shows http script markup only as textarea/title text"},
 ]
 
 
@@ -29,6 +35,19 @@ def create_app():
         if request.url.scheme == "http":
             return Response(status_code=308, headers={"Location": str(request.url.replace(scheme="https"))})
         return HTMLResponse("<p>Service available</p>")
+
+    @app.get("/api/example-safe")
+    async def api_example_safe():
+        return JSONResponse({"example": '<script src="http://cdn.test/example.js"></script>'})
+
+    @app.get("/mixed-text-safe")
+    async def mixed_text_safe():
+        return HTMLResponse('<title><script src="http://cdn.test/example.js"></script></title>'
+                            '<textarea><script src="http://cdn.test/example.js"></script></textarea>')
+
+    @app.get("/mixed")
+    async def mixed():
+        return HTMLResponse('<script src="http://cdn.test/example.js"></script>')
 
     @app.api_route("/methods", methods=["GET", "OPTIONS", "TRACE", "CONNECT", "PROPFIND"])
     async def methods(request: Request):

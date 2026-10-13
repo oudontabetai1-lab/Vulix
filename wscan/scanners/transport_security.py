@@ -148,8 +148,15 @@ class TransportSecurityScanner(BaseScanner):
                                                  status=baseline.status_code, severity="low")
                     if finding:
                         findings.append(finding)
-                document = html if html is not None else baseline.text
-                if parts.scheme == "https":
+                kind = rules.document_kind(baseline.headers.get("content-type", ""))
+                if parts.scheme == "https" and kind != "html":
+                    # JSON/テキスト本文の文字列を HTML として解析しない（過検知防止）。0件扱いにせず記録する。
+                    self._coverage(target, "active_mixed_content",
+                                   "not_applicable" if kind == "non_html" else "gap",
+                                   "non_html_document" if kind == "non_html" else "missing_content_type",
+                                   {"content_type": baseline.headers.get("content-type", "")[:100]})
+                elif parts.scheme == "https":
+                    document = html if html is not None else baseline.text
                     mixed = rules.active_mixed_content(target, document)
                     self._coverage(target, "active_mixed_content", "observed")
                     if mixed:
