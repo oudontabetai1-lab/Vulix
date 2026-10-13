@@ -107,6 +107,7 @@ class _Doc(HTMLParser):
         self.last_heading = ""
         self.all_inputs: list[dict] = []              # selector 一意性の母集団（hidden 含む全 input）
         self.external_submits: list[tuple[str, dict, str, bool]] = []
+        self.external_inputs: list[tuple[str, dict, bool]] = []
         self.captcha_widget = False
         self.visible_text: list[str] = []
         # 操作可能（可視・有効・遷移/送信しうる）な a/button/submit/logout form の可視文言・パス
@@ -117,6 +118,9 @@ class _Doc(HTMLParser):
         self.feed(html or "")
         self.close()
         forms_by_id = {f.form_id: f for f in self.forms if f.form_id}
+        for form_id, attrs, blocked in self.external_inputs:
+            if form_id in forms_by_id:
+                forms_by_id[form_id].inputs.append((attrs, blocked))
         for form_id, attrs, label, operable in self.external_submits:
             if form_id in forms_by_id:
                 self._record_submit(forms_by_id[form_id], attrs, label, operable)
@@ -163,8 +167,10 @@ class _Doc(HTMLParser):
         disabled = self._disabled or (tag == "fieldset" and "disabled" in a)
         operable = not blocked and not disabled and "disabled" not in a
         name_id = (a.get("name", "") + " " + a.get("id", "") + " " + a.get("class", "")).lower()
-        if ((tag == "iframe" and any(x in a.get("src", "").lower() for x in ("recaptcha", "hcaptcha")))
-                or (tag == "input" and any(x in name_id for x in ("g-recaptcha-response", "h-captcha-response")))
+        if ((tag == "iframe" and any(x in a.get("src", "").lower() for x in ("recaptcha", "hcaptcha"))
+             and not blocked)
+                or (tag == "input" and any(x in name_id for x in ("g-recaptcha-response", "h-captcha-response"))
+                    and not blocked)
                 or (tag in {"div", "iframe"} and a.get("data-sitekey") and not blocked)
                 or (tag == "div" and any(x in name_id.split() for x in ("g-recaptcha", "h-captcha"))
                     and not blocked)):
@@ -185,7 +191,11 @@ class _Doc(HTMLParser):
                 label = a.get("value", "") or a.get("alt", "")
                 self._submit({**a, "_tag": "input"}, label, operable)
             elif t != "hidden":
-                self._form().inputs.append((a, not operable or "readonly" in a))
+                a = {**a, "_uneditable": disabled or "disabled" in a or "readonly" in a}
+                if a.get("form"):
+                    self.external_inputs.append((a["form"], a, not operable or a["_uneditable"]))
+                else:
+                    self._form().inputs.append((a, not operable or a["_uneditable"]))
         elif tag == "button":
             # type=button も logout control の文言源として集める（submit 扱いは submit 型のみ）
             is_submit = a.get("type", "").lower() in {"", "submit"}
@@ -287,7 +297,8 @@ def _strong_otp(a: dict) -> bool:
 
 def _usable(f: _Form, visible_only: bool = False) -> list:
     """操作可能な欄。送信前は reveal 可能な modal 内の非表示欄も含める（template 等は除く）。"""
-    return [a for a, b in f.inputs if not b or (f.in_modal and not visible_only)]
+    return [a for a, b in f.inputs if not a.get("_uneditable")
+            and (not b or (f.in_modal and not visible_only))]
 
 
 @dataclass
@@ -380,7 +391,8 @@ def classify_surface(html: str, *, visible_only: bool = False) -> SurfaceResult:
     groups = [(f, inputs) for f, inputs in groups if inputs]
     forms = [_classify_form(f, inputs) for f, inputs in groups]
     # MFA 画面は見出しに OTP 語が無い素っ気ない欄でも、ページ文脈で OTP 段とみなす。
-    if looks_like_mfa_page(html or ""):
+    if (looks_like_mfa_page(html or "")
+            and _has_word(" ".join(doc.visible_text), ("enter", "provide", "verify", "入力"))):
         for s, (_, inputs) in zip(forms, groups):
             if s.kind == OTHER and sum(map(_is_text, inputs)) == 1 and not any(map(_is_pw, inputs)):
                 s.kind, s.step = LOGIN, "otp"
@@ -582,7 +594,10 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
     """
     if obs.transport_error:
         # 例外メッセージ（URL の userinfo/token を含みうる）は残さず、型名だけを理由にする
-        err = obs.transport_error if _SAFE_VALUE.fullmatch(obs.transport_error) else "unknown"
+        err = obs.transport_error if obs.transport_error in {
+            "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout", "WriteError",
+            "WriteTimeout", "PoolTimeout", "RemoteProtocolError", "TimeoutError", "ConnectionError",
+        } else "unknown"
         return LoginAssessment(INCOMPLETE, reasons=[f"transport_error:{err}"])
     if obs.status == 429 or (obs.status or 0) >= 500:
         return LoginAssessment(INCOMPLETE, reasons=[f"http_{obs.status}"])
@@ -607,8 +622,7 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
         return LoginAssessment(CHALLENGE, reasons=["password_step"])
     visible_pw = any(_is_pw(a) and not b
                      for f in doc.forms + [doc.loose] for a, b in f.inputs)
-    if (visible_pw and auth_detect.has_login_form(body)) or login_step:
-        return LoginAssessment(INCOMPLETE, reasons=["login_form_still_present"])
+    login_form_present = (visible_pw and auth_detect.has_login_form(body)) or login_step
 
     evidence, reasons = [], []
     if obs.auth_cookie_set is False and not obs.api_token_issued:
@@ -627,6 +641,8 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
             explicit = True
         else:
             reasons.append("logged_in_marker_missing")
+    if login_form_present and not explicit:
+        return LoginAssessment(INCOMPLETE, reasons=["login_form_still_present"])
     if obs.post_url and not auth_detect.on_login_page(obs.post_url, obs.login_url) \
             and auth_detect._norm(obs.post_url) != auth_detect._norm(obs.login_url):
         evidence.append("left_login_page")

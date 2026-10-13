@@ -244,9 +244,56 @@ def test_otp_only_page_is_challenge():
 
 
 def test_hidden_login_modal_does_not_block_success():
-    kw = dict(post_url="http://t/home", auth_cookie_set=True, success_indicator="Dashboard")
+    kw = dict(post_url="http://t/home", auth_cookie_set=True)
     ok = ls.assess_login_state(_obs(body=_get("/home-hidden-modal"), **kw))
     assert ok.state == ls.SUCCESS
     # 安全ツイン: 可視の login modal は残存＝INCOMPLETE
     still = ls.assess_login_state(_obs(body=_get("/home-open-modal"), **kw))
     assert still.state == ls.INCOMPLETE and still.reasons == ["login_form_still_present"]
+
+
+def test_hidden_captcha_does_not_block_success_but_visible_captcha_does():
+    kw = dict(post_url="http://t/home", auth_cookie_set=True)
+    hidden = ls.assess_login_state(_obs(body=_get("/home-hidden-captcha"), **kw))
+    assert hidden.state == ls.SUCCESS
+    visible = ls.assess_login_state(_obs(body=_get("/home-visible-captcha"), **kw))
+    assert visible.state == ls.CHALLENGE and visible.reasons == ["captcha_unsupported"]
+
+
+def test_explicit_success_resolves_persistent_form_without_overriding_challenges():
+    kw = dict(post_url="http://t/home", auth_cookie_set=True, logged_in_marker="Dashboard")
+    assert ls.assess_login_state(_obs(body=_get("/home-open-modal"), **kw)).state == ls.SUCCESS
+    assert ls.assess_login_state(_obs(body=_get("/home-open-modal"), status=403, **kw)).state == ls.INCOMPLETE
+    assert ls.assess_login_state(_obs(body=_get("/home-visible-captcha"), **kw)).state == ls.CHALLENGE
+    no_cookie = {**kw, "auth_cookie_set": False}
+    assert ls.assess_login_state(_obs(body=_get("/home-open-modal"), **no_cookie)).state == ls.INCOMPLETE
+
+
+def test_transport_error_retains_only_known_type_names():
+    for error in ("secretBearerToken123", "https://user:secret@example.test/?token=secret", "SecretError"):
+        result = ls.assess_login_state(_obs(transport_error=error))
+        assert result.reasons == ["transport_error:unknown"]
+    assert ls.assess_login_state(_obs(transport_error="ConnectError")).reasons == ["transport_error:ConnectError"]
+
+
+@pytest.mark.parametrize("blocked", ["disabled", "readonly"])
+def test_modal_does_not_make_uneditable_fields_executable(blocked):
+    html = (f'<div class="modal" hidden><form action="/login"><input name="user" {blocked}>'
+            f'<input name="pw" type="password" {blocked}></form></div>')
+    assert ls.locate_auth_fields(html).incomplete_reason
+    assert not ls.locate_auth_fields(html.replace(f" {blocked}", "")).incomplete_reason
+
+
+def test_external_inputs_and_submit_belong_to_the_referenced_form():
+    html = ('<input form="f" name="email" type="email"><button form="f" id="go">Sign in</button>'
+            '<form id="f" action="/login"></form>')
+    plan = ls.locate_auth_fields(html)
+    assert plan.step == "username_first" and plan.user_selector == 'input[name="email"]'
+    assert plan.submit == 'button[id="go"]' and not plan.incomplete_reason
+
+
+def test_mfa_settings_with_unrelated_field_is_not_a_challenge():
+    body = (_get("/home-security-settings")
+            + '<form action="/preferences"><input name="displayName"></form>')
+    assert ls.assess_login_state(_obs(body=body, post_url="http://t/home", auth_cookie_set=True)).state == ls.SUCCESS
+    assert ls.assess_login_state(_obs(body=_get("/mfa"))).state == ls.CHALLENGE

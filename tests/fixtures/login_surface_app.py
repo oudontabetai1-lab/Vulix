@@ -68,6 +68,11 @@ PAGES = {
 <button>Log in</button></form></div>''',
     "/home-security-settings": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
 <p>Enable two-factor authentication and reCAPTCHA to protect your account.</p>''',
+    "/home-hidden-captcha": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
+<div hidden><iframe src="https://www.google.com/recaptcha/api2/anchor"></iframe>
+<input name="g-recaptcha-response"></div>''',
+    "/home-visible-captcha": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
+<iframe src="https://www.google.com/recaptcha/api2/anchor"></iframe>''',
     # disabled fieldset 配下の操作不能な login form（残存の根拠にしない）
     "/home-disabled-fieldset-login": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
 <form action="/do-login"><fieldset disabled><input name="user"><input name="pw" type="password">
