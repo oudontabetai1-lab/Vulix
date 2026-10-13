@@ -97,6 +97,9 @@ class DirectoryArtifactsScanner(BaseScanner):
                 if cookies and not any(k.lower() == "cookie" for k in headers):
                     headers["Cookie"] = cookies
             kwargs["headers"] = headers
+            delay = getattr(self.engine, "_effective_delay", 0)
+            if delay:
+                await asyncio.sleep(delay)
             await self.log_payload_test("(artifact probe)", "GET", self.CHECK_TYPE, current)
             async with httpx.AsyncClient(**kwargs) as client:
                 async with client.stream("GET", current) as response:

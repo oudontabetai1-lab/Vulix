@@ -129,6 +129,57 @@ async def test_source_content_handoff(monkeypatch):
     assert any('privateSetting' in c.args[1] for c in sink._record_body_findings.call_args_list)
 
 @pytest.mark.asyncio
+async def test_secret_handoff_redacts_persisted_evidence(monkeypatch, tmp_path):
+    from wscan.report import ReportGenerator
+    from wscan.scanners.secret_leak import SecretLeakScanner, _redact
+    scan = scanner(monkeypatch)
+    sink = SecretLeakScanner(scan.engine)
+    scan.engine.browser = SimpleNamespace(screenshot_b64=AsyncMock(return_value=''))
+    scan.engine.monitor = SimpleNamespace(emit_finding=AsyncMock())
+    scan.engine._finding_dedup = set()
+    sink.browser = scan.engine.browser
+    sink.monitor = scan.engine.monitor
+    scan.engine.scanners['secret_leak'] = sink
+    tokens = ['ghp_' + 'abc123XYZdef456UVWghi789RSTjkl012Mno',
+              'ghp_' + 'aBcD1234EFgh5678IJkl9012MNop3456QRst']
+    body = ' '.join(tokens * 2)
+    findings = await scan._handoff('http://fixture.test/app.js.bak', body)
+    assert len(findings) == 1
+    assert await sink._record_body_findings('http://fixture.test/app.js.bak', body) == []
+    serialized = json.dumps([f.to_dict() for f in scan.engine.all_findings], ensure_ascii=False)
+    output = tmp_path / 'findings.jsonl'
+    output.write_text(serialized + '\n')
+    emitted = json.dumps(scan.engine.monitor.emit_finding.call_args.args[0], ensure_ascii=False)
+    report = ReportGenerator(tmp_path).generate(
+        'http://fixture.test/', scan.engine.all_findings, [], ['secret_leak'])
+    for token in tokens:
+        assert token not in output.read_text()
+        assert token not in emitted
+        assert token not in report.read_text()
+    assert _redact(tokens[0]) in serialized
+    assert 'snippet' in findings[0].evidence_details
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delay', [0, 0.25])
+async def test_fetch_delay_before_each_redirect_request(monkeypatch, delay):
+    events = []
+    async def sleep(value):
+        events.append(('delay', value))
+    def handle(request):
+        events.append(('request', request.url.path))
+        if request.url.path == '/app.js':
+            return httpx.Response(302, headers={'location': '/bundle.js'})
+        return httpx.Response(200, text='const x = 1;')
+    scan = scanner(monkeypatch, handle)
+    scan.engine._effective_delay = delay
+    monkeypatch.setattr('wscan.scanners.directory_artifacts.asyncio.sleep', sleep)
+    assert await scan._fetch('http://fixture.test/app.js', 'http://fixture.test') is not None
+    expected = [('request', '/app.js'), ('request', '/bundle.js')]
+    if delay:
+        expected = [('delay', delay), expected[0], ('delay', delay), expected[1]]
+    assert events == expected
+
+@pytest.mark.asyncio
 async def test_control_auth_failure_is_unknown(monkeypatch):
     scan = scanner(monkeypatch, lambda req: httpx.Response(403, text='Denied') if 'wscan-missing-' in req.url.path else httpx.Response(200, text=LISTING))
     with pytest.raises(PageDocumentUnavailable):

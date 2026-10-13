@@ -92,6 +92,17 @@ class SecretLeakDetectionTests(unittest.TestCase):
         self.assertTrue(redacted.startswith("ghp_"))
         self.assertTrue(redacted.endswith("QRst"))
 
+    def test_snippets_redact_adjacent_and_duplicate_secrets(self):
+        import json
+        tokens = ['ghp_' + 'abc123XYZdef456UVWghi789RSTjkl012Mno',
+                  'ghp_' + 'aBcD1234EFgh5678IJkl9012MNop3456QRst']
+        hits = scan_text_for_secrets(' '.join(tokens * 2))
+        self.assertEqual(len(hits), 2)
+        serialized = json.dumps(hits, ensure_ascii=False)
+        for token in tokens:
+            self.assertNotIn(token, serialized)
+            self.assertIn(_redact(token), serialized)
+
     def test_entropy_filter_rejects_low_entropy_aws_secret(self):
         # 40 chars but trivially low entropy — should be filtered.
         low_entropy = "aws_secret=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"

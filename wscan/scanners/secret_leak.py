@@ -230,6 +230,11 @@ def scan_text_for_secrets(text: str) -> list[dict]:
                     "offset": match.start(),
                 }
             )
+    # Mask every detected value, including other credentials in the context.
+    secrets = sorted({secret for _, secret in seen}, key=len, reverse=True)
+    for hit in findings:
+        for secret in secrets:
+            hit["snippet"] = hit["snippet"].replace(secret, _redact(secret))
     return findings
 
 
