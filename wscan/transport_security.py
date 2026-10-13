@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from html.parser import HTMLParser
+from html import unescape
 import ipaddress
+import re
 import ssl
 from urllib.parse import parse_qsl, urljoin, urlsplit
 import xml.etree.ElementTree as ET
@@ -83,51 +84,133 @@ def plaintext_sensitive_fields(request: dict) -> list[str]:
     return sorted(fields)
 
 
-class _ActiveContentParser(HTMLParser):
-    # Raw-text/RCDATA elements: their contents are text, never parsed as elements by browsers.
-    CDATA_CONTENT_ELEMENTS = ("script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes")
+_TAG_WS = "\t\n\f\r "
+# Raw-text/RCDATA 要素（scripting 有効時の noscript を含む）: 中身はブラウザが要素として解釈しない。
+_RAW_TEXT_ELEMENTS = ("script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript")
+# 内容の終端は最初の `</name` + 空白/`/`/`>`（属性付き終了タグでも閉じる）。最早の終端＝過抑制しない側。
+_RAW_TEXT_END = {name: re.compile(rf"</{name}(?=[\t\n\f\r />])", re.I) for name in _RAW_TEXT_ELEMENTS}
+_COMMENT_END = re.compile(r"--!?>")
+_EXECUTABLE_SCRIPT_TYPES = frozenset({"", "module", "text/javascript", "application/javascript",
+                                      "text/ecmascript", "application/ecmascript"})
 
-    def __init__(self, url):
-        super().__init__()
-        self.base = url
-        self.base_seen = False
-        self.resources = set()
-        self.inert_depth = 0
-        self.plaintext = False
 
-    def handle_startendtag(self, tag, attrs):
-        # HTML に自己閉じ記法は無い: <textarea/> 等も RCDATA/raw text 領域を開く。
-        self.handle_starttag(tag, attrs)
-        if tag in self.CDATA_CONTENT_ELEMENTS:
-            self.set_cdata_mode(tag)
+def _read_tag(html: str, i: int):
+    """HTML tokenizer のタグ状態を近似。``(name, attrs, self_closing, end)``、EOF なら None。"""
+    n, j = len(html), i
+    while j < n and html[j] not in _TAG_WS + "/>":
+        j += 1
+    name, attrs, self_closing = html[i:j].lower(), [], False
+    while j < n:
+        c = html[j]
+        if c in _TAG_WS:
+            j += 1
+            continue
+        if c == ">":
+            return name, attrs, self_closing, j + 1
+        if c == "/":
+            self_closing = html.startswith(">", j + 1)
+            j += 1
+            continue
+        k = j + 1  # 先頭の '=' は属性名の一部
+        while k < n and html[k] not in _TAG_WS + "/>=":
+            k += 1
+        attr, j, value = html[j:k].lower(), k, ""
+        while j < n and html[j] in _TAG_WS:
+            j += 1
+        if html.startswith("=", j):
+            j += 1
+            while j < n and html[j] in _TAG_WS:
+                j += 1
+            if j < n and html[j] in "\"'":
+                k = html.find(html[j], j + 1)
+                if k < 0:
+                    return None
+                value, j = html[j + 1:k], k + 1
+            else:
+                k = j
+                while k < n and html[k] not in _TAG_WS + ">":
+                    k += 1
+                value, j = html[j:k], k
+        attrs.append((attr, unescape(value)))
+    return None
 
-    def handle_starttag(self, tag, attrs):
-        if tag == "plaintext":  # PLAINTEXT 状態: 終了タグ無しで以降すべて literal text
-            self.plaintext = True
-        if self.plaintext:
-            return
-        if tag in {"template", "noscript"}:
-            self.inert_depth += 1
-        if self.inert_depth:
-            return
-        attrs = dict(attrs)
-        if tag == "base" and attrs.get("href") and not self.base_seen:
-            self.base = urljoin(self.base, attrs["href"])
-            self.base_seen = True
-        key = {"script": "src", "iframe": "src", "object": "data", "embed": "src"}.get(tag)
-        if tag == "script" and attrs.get("type", "").lower().strip() not in {
-                "", "module", "text/javascript", "application/javascript", "text/ecmascript", "application/ecmascript"}:
-            return
-        if tag == "link" and "stylesheet" in attrs.get("rel", "").lower().split():
-            key = "href"
-        if key and attrs.get(key):
-            target = urljoin(self.base, attrs[key])
-            if urlsplit(target).scheme == "http":
-                self.resources.add(redact_url(target, drop_userinfo=True))
 
-    def handle_endtag(self, tag):
-        if tag in {"template", "noscript"} and self.inert_depth:
-            self.inert_depth -= 1
+def _active_resources(url: str, html: str) -> set:
+    """FN-safe: ブラウザが確実に inert とする範囲だけ除外し、曖昧な構文は走査側に倒す。
+
+    foreign content(svg/math) 内・select 内・template 内では HTML の raw-text/plaintext
+    規則が成り立たない/不確実なので抑制しない（残差は偽陽性側）。
+    """
+    base, base_seen, resources = url, False, set()
+    foreign, select, template = {"svg": 0, "math": 0}, 0, 0
+    i, n = 0, len(html)
+    while True:
+        i = html.find("<", i)
+        if i < 0 or i + 1 >= n:
+            break
+        if html.startswith("<!--", i):
+            if html.startswith((">", "->"), i + 4):  # <!--> / <!---> は即終了
+                i = html.index(">", i + 4) + 1
+                continue
+            m = _COMMENT_END.search(html, i + 4)
+            if not m:
+                break  # 閉じないコメントは EOF まで comment（以降は確実に inert）
+            i = m.end()
+            continue
+        is_end = html[i + 1] == "/"
+        first = html[i + 1 + is_end:i + 2 + is_end]
+        if not (first.isascii() and first.isalpha()):
+            if html[i + 1] in "!?" or (is_end and first not in ("", ">")):
+                i = html.find(">", i)  # bogus comment / doctype は最初の '>' で終わる
+                if i < 0:
+                    break
+            i += 1
+            continue
+        tag = _read_tag(html, i + 1 + is_end)
+        if tag is None:
+            break  # EOF 中のタグはブラウザも破棄する
+        name, attrs, self_closing, i = tag
+        if is_end:
+            if foreign.get(name):
+                foreign[name] -= 1
+            elif name == "select" and select:
+                select -= 1
+            elif name == "template" and template:
+                template -= 1
+            continue
+        html_ns = not (foreign["svg"] or foreign["math"] or template)
+        if name in foreign:
+            foreign[name] += not self_closing  # foreign 要素は '/>' で閉じる
+        elif name == "select":
+            select += 1
+        elif name == "template" and html_ns:
+            template += 1
+        if not template:
+            values = {}
+            for key, value in attrs:  # 重複属性はブラウザ同様に最初の値を採用
+                values.setdefault(key, value)
+            if name == "base" and values.get("href") and not base_seen:
+                base, base_seen = urljoin(base, values["href"]), True
+            key = {"script": "src", "iframe": "src", "object": "data", "embed": "src"}.get(name)
+            if name == "script" and values.get("type", "").lower().strip() not in _EXECUTABLE_SCRIPT_TYPES:
+                key = None
+            if name == "link" and "stylesheet" in values.get("rel", "").lower().split():
+                key = "href"
+            if key and values.get(key):
+                target = urljoin(base, values[key])
+                if urlsplit(target).scheme == "http":
+                    resources.add(redact_url(target, drop_userinfo=True))
+        if not html_ns:
+            continue
+        # select 内では script 以外の raw-text/plaintext 開始タグが無視されうる（不確実＝抑制しない）。
+        if name == "plaintext" and not select:
+            break  # PLAINTEXT 状態: 以降すべて literal text
+        if name in _RAW_TEXT_END and (name == "script" or not select):
+            m = _RAW_TEXT_END[name].search(html, i)
+            if not m:
+                break  # 終端が無ければ EOF まで text（以降は確実に inert）
+            i = m.start()
+    return resources
 
 
 _HTML_DOCUMENT_MEDIA_TYPES = frozenset({"text/html", "application/xhtml+xml"})
@@ -145,9 +228,7 @@ def active_mixed_content(url: str, html: str) -> list[str]:
     """Declared executable/embed/style resources, excluding passive images and links."""
     if urlsplit(url).scheme != "https":
         return []
-    parser = _ActiveContentParser(url)
-    parser.feed(html or "")
-    return sorted(parser.resources)
+    return sorted(_active_resources(url, html or ""))
 
 
 def hostname_matches(host: str, dns_names: list[str], ip_names: list[str]) -> bool:

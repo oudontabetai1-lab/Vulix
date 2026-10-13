@@ -260,6 +260,25 @@ def test_self_closed_rcdata_and_plaintext_are_inert(html):
     assert rules.active_mixed_content("https://fixture.test/", html) == []
 
 
+@pytest.mark.parametrize("html", [
+    "<textarea/>x</textarea foo><script src=http://cdn.test/x.js></script>",
+    "<title>t</title foo><script src=http://cdn.test/x.js></script>",
+    "<svg><plaintext/></svg><script src=http://cdn.test/x.js></script>",
+    "<svg><title><script src=http://cdn.test/x.js></script></title></svg>",
+    "<math><textarea><script src=http://cdn.test/x.js></script>",
+    "<!--><script src=http://cdn.test/x.js></script>",
+    "<!---><script src=http://cdn.test/x.js></script>",
+    "<!-- a --!><script src=http://cdn.test/x.js></script>",
+    "<![CDATA[ a > <script src=http://cdn.test/x.js></script> ]]>",
+    "<noscript><template></noscript><script src=http://cdn.test/x.js></script>",
+    "<select><xmp></select><script src=http://cdn.test/x.js></script>",
+    "<script src=http://cdn.test/x.js src=https://cdn.test/x.js></script>",
+    "<script data-x='>' src=http://cdn.test/x.js></script>"])
+def test_ambiguous_or_closed_inert_regions_still_detect_active_content(html):
+    # FN-safe: ブラウザが実行しうる構文は抑制しない
+    assert rules.active_mixed_content("https://fixture.test/", html) == ["http://cdn.test/x.js"]
+
+
 def test_plain_body_script_is_active_mixed_content():
     assert rules.active_mixed_content("https://fixture.test/",
         "<script src=http://cdn.test/x.js></script>") == ["http://cdn.test/x.js"]
