@@ -13,6 +13,7 @@ from .graphql import GraphQLScanner
 from .header_injection import HeaderInjectionScanner
 from .host_header import HostHeaderScanner
 from .info_disclosure import InfoDisclosureScanner
+from .directory_artifacts import DirectoryArtifactsScanner
 from .js_static import JsStaticScanner
 from .jwt_scanner import JWTScanner
 from .mail_header import MailHeaderInjectionScanner
@@ -66,6 +67,7 @@ SCANNERS: dict[str, type] = {
     "stored_xss":        StoredXSSScanner,
     "cors":              CORSScanner,
     "info_disclosure":   InfoDisclosureScanner,
+    "directory_artifacts": DirectoryArtifactsScanner,
     "host_header":       HostHeaderScanner,
     "security_headers":  SecurityHeadersScanner,
     "nosql":             NoSQLInjectionScanner,
@@ -107,5 +109,5 @@ __all__ = [
     "PrototypePollutionScanner", "CachePoisoningScanner", "MassAssignmentScanner",
     "OutdatedComponentScanner",
     "HttpMethodsScanner",
-    "TlsConfigScanner",
+    "TlsConfigScanner", "DirectoryArtifactsScanner",
 ]
