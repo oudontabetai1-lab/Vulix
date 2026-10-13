@@ -102,6 +102,21 @@ def test_api_login_detection():
     assert ls.locate_api_login("http://t/api/x", "POST", ["email", "password", "password_confirm"]) is None
     assert ls.locate_api_login("http://t/api/session", "GET", ["email", "password"]) is None
     assert ls.locate_api_login("http://t/search", "POST", ["q"]) is None
+    # 新旧パスワードのキーを持つ操作はパスワード変更（login ではない）
+    for keys in (["email", "current_password", "password"], ["email", "old_password", "password"]):
+        assert ls.locate_api_login("http://t/api/account", "POST", keys) is None
+
+
+def test_api_fixture_routes_match_classification():
+    # フィクスチャの実ルートで、login 経路だけが token を返す（正解データの整合）
+    async def go(path):
+        transport = httpx.ASGITransport(app=fx.create_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            return (await c.post(path, json={"email": "a", "password": "b"})).json()
+    for path in fx.API_LOGIN_ENDPOINTS:
+        assert "token" in asyncio.run(go(path))
+    for path in fx.API_SAFE_ENDPOINTS:
+        assert "token" not in asyncio.run(go(path))
 
 
 def _obs(**kw):
@@ -181,6 +196,29 @@ def test_logout_text_without_control_is_not_evidence():
         assert a.state == ls.SUCCESS and "logout_control" in a.evidence
     hidden = ls.assess_login_state(_obs(post_url="http://t/home", body='<a href="/logout" hidden>Log out</a>'))
     assert "logout_control" not in hidden.evidence
+
+
+@pytest.mark.parametrize("name", list(fx.NON_OPERABLE_LOGOUT))
+def test_non_operable_logout_is_not_evidence(name):
+    # 遷移で login 画面を離れただけ＋操作できない logout 要素では SUCCESS にしない
+    a = ls.assess_login_state(_obs(post_url="http://t/home", body=fx.NON_OPERABLE_LOGOUT[name]))
+    assert "logout_control" not in a.evidence
+    assert a.state == ls.INCOMPLETE and a.reasons == ["insufficient_success_evidence"]
+
+
+@pytest.mark.parametrize("name", list(fx.OPERABLE_LOGOUT))
+def test_operable_logout_is_evidence(name):
+    a = ls.assess_login_state(_obs(post_url="http://t/home", body=fx.OPERABLE_LOGOUT[name]))
+    assert a.state == ls.SUCCESS and "logout_control" in a.evidence
+
+
+def test_login_form_in_disabled_fieldset_is_not_leftover():
+    kw = dict(post_url="http://t/home", auth_cookie_set=True)
+    ok = ls.assess_login_state(_obs(body=_get("/home-disabled-fieldset-login"), **kw))
+    assert ok.state == ls.SUCCESS
+    # 安全ツイン: 有効な fieldset 配下の login form は残存＝INCOMPLETE
+    still = ls.assess_login_state(_obs(body=_get("/home-enabled-fieldset-login"), **kw))
+    assert still.state == ls.INCOMPLETE and still.reasons == ["login_form_still_present"]
 
 
 def test_otp_only_page_is_challenge():

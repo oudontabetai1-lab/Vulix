@@ -64,8 +64,34 @@ PAGES = {
     "/home-open-modal": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
 <div class="modal"><form action="/do-login"><input name="user"><input name="pw" type="password">
 <button>Log in</button></form></div>''',
+    # disabled fieldset 配下の操作不能な login form（残存の根拠にしない）
+    "/home-disabled-fieldset-login": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
+<form action="/do-login"><fieldset disabled><input name="user"><input name="pw" type="password">
+<button>Log in</button></fieldset></form>''',
+    # 安全ツイン: 有効な fieldset 配下の login form は残存＝INCOMPLETE
+    "/home-enabled-fieldset-login": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
+<form action="/do-login"><fieldset><input name="user"><input name="pw" type="password">
+<button>Log in</button></fieldset></form>''',
     "/new-password-only": '''<form action="/x"><input type="password" name="np" autocomplete="new-password">
 <button>Save</button></form>''',
+}
+
+# 操作できない logout 要素（logout_control の根拠にしない）と、操作可能な安全ツイン
+NON_OPERABLE_LOGOUT = {
+    "disabled_button": '<h1>Dashboard</h1><button type="button" disabled>Log out</button>',
+    "disabled_submit": '<h1>Dashboard</h1><form action="/logout"><input type="submit" value="Sign out" disabled></form>',
+    "anchor_without_href": '<h1>Dashboard</h1><a>Log out</a>',
+    "empty_form": '<h1>Dashboard</h1><form action="/logout" method="post"></form>',
+    "hidden_descendant_link": '<h1>Dashboard</h1><a href="/account"><span hidden>Log out</span></a>',
+    "hidden_descendant_button": '<h1>Dashboard</h1><button type="button"><span style="display:none">Sign out</span></button>',
+    "disabled_fieldset_button": '<h1>Dashboard</h1><fieldset disabled><button type="button">Log out</button></fieldset>',
+}
+OPERABLE_LOGOUT = {
+    "link": '<h1>Dashboard</h1><a href="/logout">Log out</a>',
+    "button": '<h1>Dashboard</h1><button type="button">Sign out</button>',
+    "submit": '<h1>Dashboard</h1><form action="/x"><input type="submit" value="Sign out"></form>',
+    "form": '<h1>Dashboard</h1><form action="/logout" method="post"><button>Bye</button></form>',
+    "visible_label_with_hidden_icon": '<h1>Dashboard</h1><a href="/bye"><span hidden>icon</span>Log out</a>',
 }
 
 EXPECTED_SURFACES = {
@@ -82,8 +108,10 @@ AMBIGUOUS_ENDPOINTS = ("/two-logins", "/new-password-only")
 # login と判定できても対象欄が一意に決まらず INCOMPLETE（incomplete_reason）を返すべきページ
 UNRESOLVED_FIELD_ENDPOINTS = {"/signup-then-login": "field_not_unique:pass_selector"}
 # API: ログイン（検出必須）と再設定/登録（検出禁止の安全ツイン）。いずれも email+password キー
-API_LOGIN_ENDPOINTS = ("/api/session", "/api/login")
-API_SAFE_ENDPOINTS = ("/api/register", "/api/reset", "/api/forgot", "/api/password/reset")
+API_LOGIN_ENDPOINTS = ("/api/session", "/api/login", "/api?action=login")
+API_SAFE_ENDPOINTS = ("/api/register", "/api/reset", "/api/forgot", "/api/password/reset",
+                      "/api/change-password", "/api/changePassword",
+                      "/api?action=register", "/api?action=reset-password")
 
 
 def create_app() -> FastAPI:
@@ -110,9 +138,16 @@ def create_app() -> FastAPI:
     async def home():
         return '<h1>Dashboard</h1><a href="/logout">Log out</a>'
 
+    # query で操作を切り替える /api は action=login のときだけ token を返す
+    @app.post("/api")
+    async def api_action(action: str = ""):
+        return JSONResponse({"token": "fixture-token"} if action == "login" else {"ok": True})
+
     for path in API_LOGIN_ENDPOINTS:
-        app.add_api_route(path, lambda: JSONResponse({"token": "fixture-token"}), methods=["POST"])
+        if "?" not in path:
+            app.add_api_route(path, lambda: JSONResponse({"token": "fixture-token"}), methods=["POST"])
     for path in API_SAFE_ENDPOINTS:
-        app.add_api_route(path, lambda: JSONResponse({"ok": True}), methods=["POST"])
+        if "?" not in path:
+            app.add_api_route(path, lambda: JSONResponse({"ok": True}), methods=["POST"])
 
     return app

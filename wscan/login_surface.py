@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 import re
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from . import auth_detect
 from .auth_fields import _OTP_HINTS, _SAFE_VALUE, _USER_HINTS, _hinted
@@ -75,6 +75,8 @@ class _Form:
     inputs: list = field(default_factory=list)   # (attrs, blocked)
     submits: list = field(default_factory=list)  # (attrs, text)
     in_modal: bool = False
+    visible: bool = True       # form 自体が可視か（logout form の操作可能性判定用）
+    can_submit: bool = False   # 有効かつ可視の submit 手段を持つか
 
 
 class _Doc(HTMLParser):
@@ -85,24 +87,32 @@ class _Doc(HTMLParser):
         self.forms: list[_Form] = []
         self.loose = _Form(index=-1)
         self.current: Optional[_Form] = None
-        self.stack: list[tuple[str, bool, bool]] = []  # (tag, blocked, modal)
+        self.stack: list[tuple[str, bool, bool, bool]] = []  # (tag, blocked, modal, disabled)
         self.text_target: Optional[str] = None        # 収集中の見出し/ボタン種別
         self.buf: list[str] = []
         self.button: Optional[dict] = None
         self.last_heading = ""
         self.visible_text: list[str] = []
-        self.controls: list[str] = []                 # 可視の操作要素（a/button/submit/form action）の文言・パス
-        self.link_buf: Optional[list[str]] = None
+        # 操作可能（可視・有効・遷移/送信しうる）な a/button/submit/logout form の可視文言・パス
+        self.controls: list[str] = []
+        self.ctl_buf: Optional[list[str]] = None      # 収集中の a/button の可視文言
+        self.ctl_op = False
+        self.ctl_path = ""                            # 収集中 anchor の href パス
         self.feed(html or "")
         self.close()
 
     @property
     def _blocked(self) -> bool:
-        return any(b for _, b, _ in self.stack)
+        return any(s[1] for s in self.stack)
 
     @property
     def _modal(self) -> bool:
-        return any(m for _, _, m in self.stack)
+        return any(s[2] for s in self.stack)
+
+    @property
+    def _disabled(self) -> bool:
+        # disabled な fieldset の子孫の入力/ボタンは操作不能
+        return any(s[3] for s in self.stack)
 
     def _form(self) -> _Form:
         return self.current or self.loose
@@ -119,48 +129,51 @@ class _Doc(HTMLParser):
         cls = (a.get("class", "") + " " + a.get("role", "") + " " + a.get("id", "")).lower()
         modal = tag == "dialog" or "modal" in cls or "dialog" in cls
         blocked = self._blocked or hidden
-        if not blocked and tag == "form" and a.get("action"):
-            self.controls.append(_path_words(urlparse(a["action"]).path))
+        disabled = self._disabled or (tag == "fieldset" and "disabled" in a)
+        operable = not blocked and not disabled and "disabled" not in a
         if tag == "form":
             self.current = _Form(index=len(self.forms), action=a.get("action", ""),
                                  role=a.get("role", "").lower(),
                                  context=" ".join([self.last_heading, a.get("aria-label", "")]),
-                                 in_modal=self._modal or modal)
+                                 in_modal=self._modal or modal, visible=not blocked)
             self.forms.append(self.current)
         elif tag == "input":
             t = a.get("type", "").lower()
-            if t in {"submit", "image", "button"} and not blocked:
+            if t in {"submit", "image", "button"} and operable:
                 self.controls.append(a.get("value", ""))
             if t in {"submit", "image"}:
+                self._form().can_submit |= operable
                 self._form().submits.append(({**a, "_tag": "input"}, a.get("value", "") or "submit"))
             elif t != "hidden":
-                self._form().inputs.append((a, blocked or "disabled" in a or "readonly" in a))
+                self._form().inputs.append((a, not operable or "readonly" in a))
         elif tag == "button":
             # type=button も logout control の文言源として集める（submit 扱いは submit 型のみ）
-            self.button = {**a, "_tag": "button"} if a.get("type", "").lower() in {"", "submit"} else None
+            is_submit = a.get("type", "").lower() in {"", "submit"}
+            self.button = {**a, "_tag": "button"} if is_submit else None
+            self._form().can_submit |= is_submit and operable
             self.text_target, self.buf = "button", []
+            self.ctl_buf, self.ctl_op, self.ctl_path = [], operable, ""
         elif tag == "a" and not blocked:
-            self.controls.append(_path_words(urlparse(a.get("href", "")).path))
-            self.link_buf = []
+            # href の無い anchor は遷移しないので control にしない
+            href = a.get("href", "").strip()
+            self.ctl_buf, self.ctl_op, self.ctl_path = [], bool(href), _path_words(urlparse(href).path)
         elif tag in _HEADINGS:
             self.text_target, self.buf = tag, []
         if tag == "div" and a.get("role", "").lower() == "search" and self.current is None:
             self.loose.role = "search"
         if tag not in _VOID:
-            self.stack.append((tag, blocked, modal))
+            self.stack.append((tag, blocked, modal, disabled))
 
     def handle_endtag(self, tag):
         if tag == "button" and self.text_target == "button":
             text = " ".join("".join(self.buf).split())
-            if not self._blocked:
-                self.controls.append(text)
+            self._end_control()
             if self.button is not None:
                 self._form().submits.append((self.button, text))
                 self._form().context += " " + text
             self.text_target, self.button = None, None
-        elif tag == "a" and self.link_buf is not None:
-            self.controls.append("".join(self.link_buf))
-            self.link_buf = None
+        elif tag == "a" and self.ctl_buf is not None:
+            self._end_control()
         elif self.text_target == tag and tag in _HEADINGS:
             text = " ".join("".join(self.buf).split())
             if tag in {"legend", "label"}:
@@ -170,19 +183,29 @@ class _Doc(HTMLParser):
                 if self.current is not None:
                     self.current.context += " " + text
             self.text_target = None
-        if tag == "form":
+        if tag == "form" and self.current is not None:
+            # 空 form・disabled/非表示の送信手段しか無い form は送信できない
+            if self.current.visible and self.current.can_submit and self.current.action:
+                self.controls.append(_path_words(urlparse(self.current.action).path))
             self.current = None
         for i in range(len(self.stack) - 1, -1, -1):
             if self.stack[i][0] == tag:
                 del self.stack[i:]
                 break
 
+    def _end_control(self):
+        # 可視文言の無い a/button（hidden な子孫にだけ文言がある等）は操作要素として数えない
+        text = " ".join("".join(self.ctl_buf or ()).split())
+        if self.ctl_op and text:
+            self.controls.append(f"{self.ctl_path} {text}")
+        self.ctl_buf, self.ctl_op = None, False
+
     def handle_data(self, data):
         if self.text_target:
             self.buf.append(data)
-        if self.link_buf is not None:
-            self.link_buf.append(data)
         if not self._blocked:
+            if self.ctl_buf is not None:
+                self.ctl_buf.append(data)
             self.visible_text.append(data)
 
 
@@ -397,23 +420,30 @@ class ApiLoginTarget:
 
 _API_USER_KEYS = ("username", "user", "email", "login", "userid", "user_id", "account", "mail")
 _API_PASS_KEYS = ("password", "passwd", "pass", "pwd")
-# path では単独の reset/forgot も明示的な再設定経路（/api/reset・/api/forgot）とみなす
-_API_EXCLUDE_WORDS = _REG_WORDS + _RESET_WORDS + ("reset", "forgot", "forgotten", "recovery")
+# path/query では単独の reset/forgot も明示的な再設定経路（/api/reset・/api/forgot）とみなす。
+# パスワード変更/設定も認証の再生ではない（/api/change-password・changePassword 等）。
+_API_EXCLUDE_WORDS = _REG_WORDS + _RESET_WORDS + (
+    "reset", "forgot", "forgotten", "recovery", "change password", "password change",
+    "update password", "set password", "changepassword", "updatepassword", "setpassword",
+    "resetpassword", "forgotpassword")
 
 
 def locate_api_login(url: str, method: str, body_keys) -> Optional[ApiLoginTarget]:
     """捕捉した JSON リクエスト（キー名のみ）が API ログインかを判定する（純粋関数）。
 
-    値は受け取らない。登録/リセット API（``/register`` ``/reset`` 等、確認用パスワード）は除外。
+    値は受け取らない。登録/リセット/パスワード変更 API（path か query 値の ``register``
+    ``reset-password`` ``change-password`` 等、確認用/新旧パスワードのキー）は除外。
     """
     if (method or "").upper() != "POST":
         return None
     keys = [str(k) for k in body_keys or ()]
     low = {k.lower(): k for k in keys}
-    if _has_word(_path_words(urlparse(url or "").path), _API_EXCLUDE_WORDS):
+    parsed = urlparse(url or "")
+    route = " ".join([parsed.path] + [v for _, v in parse_qsl(parsed.query)])
+    if _has_word(_path_words(route), _API_EXCLUDE_WORDS):
         return None
     pw = [low[k] for k in low if k in _API_PASS_KEYS]
-    if len(pw) != 1 or any("confirm" in k or k.startswith("new") for k in low):
+    if len(pw) != 1 or any("confirm" in k or k.startswith(("new", "old", "current")) for k in low):
         return None
     users = [low[k] for k in low if k in _API_USER_KEYS]
     if len(users) != 1:
