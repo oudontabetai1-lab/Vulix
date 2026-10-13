@@ -819,7 +819,7 @@ Examples:
         "race_condition", "websocket", "secret_leak", "sri", "js_static",
         # 新クラス
         "prototype_pollution", "cache_poisoning", "mass_assignment",
-        "http_methods", "directory_artifacts",
+        "http_methods", "directory_artifacts", "transport_security",
         # opt-in（外部 API 照会/OSS 依存が要る）検査。--checks で明示指定すると自動で有効化する。
         "outdated_components",
         "tls_scan",

@@ -54,15 +54,39 @@ Vulix のモジュール入口では `python -m vulix explore URL` を `scan` �
 
 ### 対応チェック種別
 
-`wscan.scanners.SCANNERS` に登録されている 38 種類です。
+チェック一覧の正本は `wscan.scanners.SCANNERS` です。
 
 ```text
 sqli xss dom_xss os ssti path_traversal csrf header_injection mail_header
 open_redirect clickjacking session privesc stored_xss cors info_disclosure directory_artifacts
 host_header security_headers nosql deserialization request_smuggling ssrf
 graphql jwt cms xxe ldap file_upload race_condition websocket secret_leak sri
-js_static prototype_pollution cache_poisoning mass_assignment http_methods tls_scan
+js_static prototype_pollution cache_poisoning mass_assignment http_methods tls_scan transport_security
 ```
+
+**`transport_security`（HTTP method・TLS 通信路の観測）**: `--checks transport_security` または
+`--all-checks` で実行します。既定の `sqli xss os` は変わりません。存在するページと不存在の
+同一オリジン control に GET/OPTIONS/TRACE/CONNECT/PROPFIND を送り、Allow 告知だけを確証にしません。
+TRACE の marker 反射、DAV XML の resource/capability、CONNECT の資源固有の受理を記録します。
+CONNECT は外部 tunnel を開きません。認証情報を追加せず匿名で probe するため、認証必須の資源や
+control がスコープ外の場合は未検査として表示します。method override は GET→OPTIONS のみを
+canonical OPTIONS・通常 GET・無効 override と比較し、認証回避や書込み成立は主張しません。
+
+PUT/DELETE/PATCH および状態変更 override は本番 scanner から送信しません。専用の使い捨て
+fixture でのみ書込み・読み戻し・cleanup をテストし、通常スキャンの coverage には未実行理由を残します。
+HTTP の最初の redirect が HTTPS へ移行するか、捕捉済み request の credentials/token/cookie が
+平文で送られたか、HTTPS document が active HTTP resource を宣言するかも検査します。
+mixed content は宣言の観測で、ブラウザでの実行成功を意味しません。機密値を証跡へ保存しません。
+HTTPS のみを対象にした場合、HTTP 側の upgrade は未検査です。HTTP URL も対象に含めてください。
+
+HTTPS では独立した TLS handshake で trust-chain 検証結果、peer leaf の期限・SAN hostname・
+署名/hash・key 強度、negotiated protocol/cipher を記録します。leaf 解析には optional な
+`cryptography`（TLS extras に含まれる）を利用し、未導入・取得失敗は coverage gap です。
+proxy/mTLS 経路を迂回せず、その環境では専用 analyzer が必要な旨を表示します。
+negotiated connection は全 protocol/cipher の列挙ではありません。弱 protocol の列挙は別 check
+`tls_scan` の sslyze 実行結果を確認してください。弱 cipher の全列挙・中間証明書の強度・revocation
+は本 check では未検査です。環境差で検査不能な項目を「0件＝安全」と扱わず、HTML/JSON coverage に
+理由と取得済み証拠を表示します。既存 `http_methods` の TRACE/WebDAV と同じ証拠は dedup します。
 
 **`outdated_components`（EOL・脆弱コンポーネント検査・opt-in）**: 2 種類の無料 API へ照会して
 既知の問題を持つコンポーネントを検出します。

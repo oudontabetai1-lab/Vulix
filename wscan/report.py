@@ -1752,13 +1752,24 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             except Exception:
                 capability_matrix_html = ""
 
+        transport_rows = "".join(
+            "<tr>" + "".join(f"<td>{self._escape(row.get(key, ''))}</td>"
+                             for key in ("url", "unit", "status", "reason", "details")) + "</tr>"
+            for row in coverage.get("transport_security", [])
+        )
+        transport_html = (
+            '<h3>Transport security observations</h3><p>Gaps are untested, not safe. '
+            'A negotiated connection does not enumerate all server protocols or ciphers.</p>'
+            '<div class="table-wrap"><table><thead><tr><th>URL</th><th>Probe</th><th>Status</th>'
+            f'<th>Reason</th><th>Evidence</th></tr></thead><tbody>{transport_rows}</tbody></table></div>'
+        ) if transport_rows else ""
         return f"""
         <div class="section coverage-section">
             <h2>{t('report.coverage.heading')}</h2>
             <p>{t('report.coverage.summary', reached=reached_count, attempts=attempts, findings=findings_total)}</p>
             {check_coverage_html}
             {prereq_html}
-            {capability_matrix_html}
+            {capability_matrix_html}{transport_html}
             <h3 style="margin-top:14px">{t('report.coverage.by_status')}</h3>
             <ul>{by_status_html}</ul>
             <h3 style="margin-top:14px">HTTP status</h3>

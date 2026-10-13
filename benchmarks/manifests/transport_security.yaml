@@ -1,0 +1,23 @@
+schema_version: 1
+suite_id: transport_security
+fixture_id: transport_security
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+cases:
+  - case_id: transport_security.http_status.vulnerable
+    expected: vulnerable
+    check: transport_security
+    request: {method: GET, path: /status}
+    match: {path: /status, field: "(page)", location: page-level}
+    twin_id: transport_security.https_status.safe
+    taxonomy: [misconfiguration, unauthenticated]
+    gate: observed
+  - case_id: transport_security.https_status.safe
+    expected: safe
+    check: transport_security
+    request: {method: GET, path: /status-safe}
+    match: {path: /status-safe, field: "(page)", location: page-level}
+    twin_id: transport_security.http_status.vulnerable
+    taxonomy: [misconfiguration, unauthenticated]
+    gate: observed
