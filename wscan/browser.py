@@ -1772,6 +1772,25 @@ class BrowserManager:
         except Exception:
             return []
 
+    async def has_form_field(self, form_index: int, field_name: str) -> bool:
+        """Return whether the recovered document still exposes the target form field."""
+        try:
+            return await asyncio.wait_for(
+                self.page.evaluate(
+                    """([formIndex, fieldName]) => {
+                        const form = document.querySelectorAll('form')[formIndex];
+                        if (!form) return false;
+                        return Array.from(form.querySelectorAll(
+                            'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), textarea, select'
+                        )).some(el => (el.name || el.id) === fieldName);
+                    }""",
+                    [form_index, field_name],
+                ),
+                timeout=1.0,
+            )
+        except Exception:
+            return False
+
     async def fill_and_submit_form(
         self,
         form_index: int,

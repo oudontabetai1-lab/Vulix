@@ -6536,6 +6536,7 @@ class ScanEngine:
                 self.wave_errors.append(
                     f"field_budget_retry_exhausted:{check_name}:{url}:{field_name}"
                 )
+                checks_skipped_done += 1
                 continue
 
             # 中央 budget gate: 予算超過後は scanner を呼ばない（_apply_ip を経由しない legacy 直送
@@ -6572,11 +6573,18 @@ class ScanEngine:
 
             check_errored = False
             check_wedged = False
+            _scan_note_start = len(self.wave_errors)
             checks_executed += 1
             _dlg_check = getattr(self.browser, "dialog_total", 0)
             try:
                 before_count = len(self.all_findings)
                 findings = await scanner.scan_injection_point(ip, field)
+                _ssti_control_unavailable = any(
+                    note.startswith("baseline_unavailable:ssti")
+                    for note in self.wave_errors[_scan_note_start:]
+                )
+                if _ssti_control_unavailable:
+                    check_errored = True
                 for f in (findings or []):
                     if f is None:
                         continue
@@ -6594,12 +6602,16 @@ class ScanEngine:
                     # （finding は陽性証拠なので残す）。
                     status=(
                         "finding" if new_findings
-                        else "error" if check_wedged else "tested"
+                        else "error" if check_wedged or _ssti_control_unavailable else "tested"
                     ),
                     location=location,
                     severity=_top_severity(new_findings),
                     finding_count=len(new_findings),
-                    note="field scan ran on a dialog-wedged page" if check_wedged else "",
+                    note=(
+                        "field scan ran on a dialog-wedged page" if check_wedged
+                        else "SSTI control response unavailable" if _ssti_control_unavailable
+                        else ""
+                    ),
                 )
             except AbortScan:
                 # payload 単位の即時停止でこの check は途中終了した。「済み」に
@@ -6657,6 +6669,16 @@ class ScanEngine:
                 # target へ戻す。戻れなければ残 check は未走査（未 checkpoint）で打ち切る。
                 await self._recover_if_dialog_flood(_dlg_check)
                 if not await self._recovered_page_healthy(_target_page):
+                    field_unhealthy = True
+                    break
+                if (
+                    getattr(self.browser, "_page_recreated", False)
+                    and ip.location == "form"
+                    and not await self.browser.has_form_field(ip.form_index, ip.parameter_id)
+                ):
+                    self.wave_errors.append(
+                        f"page_recreate_form_state_unavailable:{url}:{field_name}"
+                    )
                     field_unhealthy = True
                     break
 

@@ -14,6 +14,7 @@ task-local な ContextVar（_FIELD_ATTACK_DEADLINE 等）に締切を張り、ba
 import asyncio
 import time
 import unittest
+from unittest.mock import AsyncMock
 
 import wscan.engine as eng
 from wscan.scanners.base import BaseScanner
@@ -595,6 +596,34 @@ class OpenRedirectBudgetGateTests(unittest.IsolatedAsyncioTestCase):
         with _Budget(time.monotonic() - 1.0):
             self.assertEqual(await sc.scan_injection_point(ip, {"name": "next"}), [])
 
+    async def test_expired_deadline_checks_captured_location_but_not_stale_url(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import wscan.scanners.open_redirect as module
+        from wscan.scanners.open_redirect import OpenRedirectScanner
+
+        for location, expected in (
+            ("https://evil.wscan-test.example.com/", 1),
+            ("https://safe.example.test/", 0),
+        ):
+            engine = _Engine()
+            engine.browser = SimpleNamespace(page=SimpleNamespace(
+                url="https://evil.wscan-test.example.com/stale"
+            ))
+            scanner = OpenRedirectScanner(engine)
+            scanner._apply_ip = AsyncMock(return_value=("", {
+                "response": {"headers": {"Location": location}}
+            }))
+            scanner.record_finding = AsyncMock(return_value=object())
+
+            async def expire(_delay):
+                eng._FIELD_ATTACK_DEADLINE.set(time.monotonic() - 1)
+
+            ip = InjectionPoint.for_url_param("http://h/r?next=1", "next")
+            with _Budget(time.monotonic() + 5), patch.object(module.asyncio, "sleep", expire):
+                findings = await scanner.scan_injection_point(ip, {"name": "next"})
+            self.assertEqual(len(findings), expected, location)
+
 
 class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):
     def _engine(self, recreated, landed_url, params):
@@ -688,7 +717,7 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
         first.scanners = {"xss": _Slow(first), "sqli": _Later(first)}
         first.checkpoint = state
         first._field_attack_budget_s = 0.001
-        first._field_budget_retry_limit = 1
+        first._field_budget_retry_limit = 0
         first.adaptive_enabled = False
         first._save_checkpoint = lambda: None
         await first._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
@@ -703,7 +732,7 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
         resumed.scanners = {"xss": _Slow(resumed), "sqli": later}
         resumed.checkpoint = state
         resumed._field_attack_budget_s = 1.0
-        resumed._field_budget_retry_limit = 1
+        resumed._field_budget_retry_limit = 0
         resumed.adaptive_enabled = False
         resumed._save_checkpoint = lambda: None
         await resumed._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
@@ -1268,6 +1297,7 @@ class FieldCheckWedgeTests(unittest.IsolatedAsyncioTestCase):
             br.page.url = url
             return True
         br.navigate = _nav
+        br.has_form_field = AsyncMock(return_value=True)
 
         async def recreate():
             br.recreated += 1
@@ -1329,6 +1359,16 @@ class FieldCheckWedgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self._done(e, "xss"))
         self.assertFalse(self._done(e, "sqli"))
         self.assertTrue(e.browser._recovery_failed)   # 外側（_attack_page）へ伝播
+
+    async def test_recreated_page_without_target_form_stops_remaining_checks(self):
+        e = self._engine(recreate_ok=True)
+        e.browser.has_form_field = AsyncMock(return_value=False)
+        await self._run(e)
+        self.assertEqual(e.scanners["sqli"].ran, 0)
+        self.assertFalse(self._done(e, "xss"))
+        self.assertFalse(self._done(e, "sqli"))
+        self.assertTrue(any(n.startswith("page_recreate_form_state_unavailable:")
+                            for n in e.wave_errors))
 
     async def test_no_flood_is_unchanged(self):
         e = self._engine(recreate_ok=True)

@@ -34,7 +34,8 @@ if TYPE_CHECKING:
 # v4: JSON body 注入点用の6部品キーを加算。従来キーは5部品のまま保持する。
 # v6: checkpoint キーの URL を揮発クエリ正規化。旧版キーは from_dict で移行。
 # v7: budget 打切り単位の再試行回数と、上限到達後も未完である印を永続化。
-CHECKPOINT_VERSION = 7
+# v8: 初回の打切り後に設定回数ぶん再試行できるよう exhausted 閾値を補正。
+CHECKPOINT_VERSION = 8
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -150,7 +151,7 @@ class CheckpointState:
         )
         count = self.truncation_counts.get(key, 0) + 1
         self.truncation_counts[key] = count
-        exhausted = count >= max(1, int(retry_limit))
+        exhausted = count > max(0, int(retry_limit))
         if exhausted:
             self.exhausted_truncations.add(key)
         self.updated_at = time.time()
@@ -231,6 +232,11 @@ class CheckpointState:
             state.exhausted_truncations = {
                 key for key in raw_exhausted
                 if isinstance(key, str) and state.truncation_counts.get(key, 0) > 0
+            }
+        if state.source_version < 8:
+            state.exhausted_truncations = {
+                key for key in state.exhausted_truncations
+                if state.truncation_counts.get(key, 0) > 2
             }
         if state.source_version < 2:
             state._migrate_v1_adaptive_units()
