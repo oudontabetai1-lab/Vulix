@@ -21,6 +21,8 @@ PAGES = {
 <a href="/forgot">Forgot password?</a> <a href="/signup">Sign up</a>''',
     "/login-step1": '''<h2>Sign in</h2><form action="/identify" method="post">
 <input type="email" id="email" name="email"><button type="submit">Next</button></form>''',
+    "/login-external-submit": '''<button id="external-go" form="external-login">Sign in</button>
+<form id="external-login" action="/do-login"><input type="email" name="email"></form>''',
     "/login-step2": '''<h2>Enter your password</h2><form action="/do-login" method="post">
 <input type="password" name="pw"><button type="submit">Sign in</button></form>''',
     "/login-modal": '''<button id="open">Log in</button><form role="search"><input type="search" name="q"></form>
@@ -64,6 +66,8 @@ PAGES = {
     "/home-open-modal": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
 <div class="modal"><form action="/do-login"><input name="user"><input name="pw" type="password">
 <button>Log in</button></form></div>''',
+    "/home-security-settings": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
+<p>Enable two-factor authentication and reCAPTCHA to protect your account.</p>''',
     # disabled fieldset 配下の操作不能な login form（残存の根拠にしない）
     "/home-disabled-fieldset-login": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
 <form action="/do-login"><fieldset disabled><input name="user"><input name="pw" type="password">

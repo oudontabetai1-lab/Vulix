@@ -73,6 +73,14 @@ def test_modal_and_spa_submit_paths():
     assert ls.locate_auth_fields(_get("/mfa")).otp_selector == 'input[name="x1"]'
 
 
+def test_external_form_submit_is_associated_by_form_id():
+    plan = ls.locate_auth_fields(_get("/login-external-submit"))
+    assert plan.step == "username_first"
+    assert plan.user_selector == 'input[name="email"]'
+    assert plan.submit == 'button[id="external-go"]'
+    assert plan.submit_strategy == "button" and plan.incomplete_reason == ""
+
+
 def test_explicit_selectors_take_priority():
     plan = ls.locate_auth_fields(_get("/two-logins"), user_selector='input[name="staff"]',
                                  pass_selector='input[name="spw"]', submit_selector="#s")
@@ -159,7 +167,11 @@ def test_failure_challenge_and_incomplete_states():
     assert ls.assess_login_state(_obs(status=401)).state == ls.FAILURE
     assert ls.assess_login_state(_obs(body=_get("/mfa"))).reasons == ["mfa"]
     assert ls.assess_login_state(_obs(body=_get("/login-step2"))).reasons == ["password_step"]
-    assert ls.assess_login_state(_obs(body="<div>Please complete the reCAPTCHA</div>")).state == ls.CHALLENGE
+    assert ls.assess_login_state(_obs(body='<div class="g-recaptcha" data-sitekey="fixture-key"></div>')).state == ls.CHALLENGE
+    # CAPTCHA/MFA の設定案内だけでは challenge にせず、他の成功証拠を評価する
+    settings = ls.assess_login_state(_obs(post_url="http://t/home", auth_cookie_set=True,
+                                          body=_get("/home-security-settings")))
+    assert settings.state == ls.SUCCESS
     for kw in ({"transport_error": "ConnectError"}, {"status": 503}, {"status": 429}):
         assert ls.assess_login_state(_obs(**kw)).state == ls.INCOMPLETE
 
