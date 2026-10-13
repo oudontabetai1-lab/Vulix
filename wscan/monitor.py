@@ -953,7 +953,7 @@ class MonitorServer:
         async def api_scan_results():
             """findings + metadata をまとめて返す (CI/CD パイプライン用)。
 
-            件数は confirmed(verified) のみを脆弱性として数える（ADR-0015 D3）。
+            件数は confirmed(verified) のみを脆弱性として数える。
             findings 配列は未確証も含めて全件返し、verification_state で区別する。
             """
             from wscan.scanners.base import finding_dict_confirmed
@@ -1530,7 +1530,7 @@ class MonitorServer:
                 min_severity=cfg["min_severity"],
                 notify_complete=cfg["notify_complete"],
             )
-            # 完了サマリーは confirmed(verified) のみを脆弱性として数える（ADR-0015 D3）。
+            # 完了サマリーは confirmed(verified) のみを脆弱性として数える。
             from wscan.scanners.base import finding_dict_confirmed
             confirmed = [f for f in self.api_findings if finding_dict_confirmed(f)]
             sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}

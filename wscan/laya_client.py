@@ -1,4 +1,4 @@
-"""Laya 決定モデルの薄いクライアント（OUD-78 / 77a）。
+"""Laya 決定モデルの薄いクライアント。
 
 Laya（`convaiinnovations/laya`、Convai Innovations、Apache-2.0）は非自己回帰の決定モデル。
 `state` ＋ `questions` スキーマから choice/score/noul を確率つきで 1 forward 返す
@@ -8,7 +8,7 @@ Laya（`convaiinnovations/laya`、Convai Innovations、Apache-2.0）は非自己
 
 判定ロジックとは混ぜない**純粋境界**に保つ（HTTP/ブラウザ非依存、`equivalence_probe` と同型に
 テスト可能）。通常層では Laya を脆弱性判定（oracle）に使わない — 攻撃入力の選択・優先順位・
-ルーティング・triage・探索判断・確信度ラベル側でのみ利用する（設計: OUD-77 調査ノート）。
+ルーティング・triage・探索判断・確信度ラベル側でのみ利用する。
 
 有効化は環境変数 `WSCAN_LAYA`（既定 OFF）。秘匿情報は扱わない（モデルはローカル実行）。
 依存は `requirements-laya.txt` に分離（本体スキャンは Laya 非依存）。

@@ -303,7 +303,7 @@ def redact_known_secrets(text: str, secrets, mask: str = "***") -> str:
 
 @dataclass(frozen=True)
 class InjectionPoint:
-    """注入点(endpoint × parameter)の不変記述子。ADR-0008 内部層の第一歩。"""
+    """注入点(endpoint × parameter)の不変記述子。内部層の基礎型。"""
 
     location: str
     url: str

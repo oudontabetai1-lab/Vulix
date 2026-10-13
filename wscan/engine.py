@@ -7677,7 +7677,7 @@ class ScanEngine:
 
         # L: スキャン完了通知
         if self._notifier and self._notifier.notify_complete:
-            # 完了サマリーは confirmed(verified) のみを脆弱性として数える（ADR-0015 D3）。
+            # 完了サマリーは confirmed(verified) のみを脆弱性として数える。
             _confirmed = [_f for _f in self.all_findings if _f.verified]
             _counts: dict[str, int] = {}
             for _f in _confirmed:

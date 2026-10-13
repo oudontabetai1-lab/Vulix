@@ -12,7 +12,7 @@ Task 0032「全 probe 証跡台帳と LLM grounding を検査の正本にする�
 - 相関 ID（scan/attempt/parent/hypothesis、baseline/control attempt ids）で因果を結ぶ。
 - JSONL 1 行へ決定論的に直列化（正本 `probe_attempts.jsonl`）。
 
-`wscan/verification_model.py`（MODEL-001a）との関係: あちらの軽量な in-flow 型に対し、本モジュールの
+`wscan/verification_model.py`との関係: あちらの軽量な in-flow 型に対し、本モジュールの
 `ProbeAttemptRecord` は**永続・相関付きの台帳レコード**。Hypothesis/VerificationResult は将来
 この attempt ID を参照して confirmed へ昇格する（No correlation, no confirmed）。
 

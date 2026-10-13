@@ -1,6 +1,6 @@
 name: Nightly recall gate
 
-# ADR-0016 / PRINCIPLE-001（DECISION-CI-RECALL 選択肢C）:
+# 実ブラウザによる定期 recall 検証:
 # 「見逃し0＝recall 100%」を*リリースゲート*として担保する。実 scanner の recall は
 # 実ブラウザ E2E が要るため、PR ごとの CI（apt mirror 403 で不安定＝非 blocking のまま）に
 # は載せず、**定期実行の専用 job を blocking** で回す。recall 回帰は nightly で確実に検出する。

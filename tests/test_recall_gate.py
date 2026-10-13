@@ -1,4 +1,4 @@
-"""recall_gate 純粋ロジックのユニットテスト（0015 PRINCIPLE-001 / ADR-0016）。
+"""recall_gate 純粋ロジックのユニットテスト。
 
 ブラウザ非依存。見逃し0（recall 100%）ゲートの合否・分母の数え方・target_check 絞り込みを固定。
 """
