@@ -45,6 +45,25 @@ PAGES = {
     "/two-logins": '''<h2>Customer login</h2><form action="/a"><input name="user"><input name="pw" type="password">
 <button>Log in</button></form><h2>Staff login</h2><form action="/b"><input name="staff">
 <input name="spw" type="password"><button>Log in</button></form>''',
+    # 先行する登録 form の name 無し password 欄があり、login の password 欄を一意に決められない
+    "/signup-then-login": '''<h2>Create account</h2><form action="/register"><input name="email" type="email">
+<input type="password"><input type="password"><button>Sign up</button></form>
+<h2>Log in</h2><form action="/do-login"><input name="user"><input type="password"><button>Log in</button></form>''',
+    # 安全ツイン: name 無し password 欄が文書内で唯一なら型 selector で特定できる
+    "/login-unnamed-pw": '''<h2>Log in</h2><form action="/do-login"><input name="user">
+<input type="password"><button>Log in</button></form>''',
+    # OTP 欄だけの確認画面（MFA の定型文言なし）。送信後に出たら CHALLENGE
+    "/verify-code": '''<h2>Verify</h2><form action="/verify" method="post"><input name="otp">
+<button type="submit">Continue</button></form>''',
+    # 未認証でも開ける公開ヘルプ。「Log out」は説明文で操作要素ではない
+    "/help": '''<h1>Help</h1><p>When you are done, choose Log out from the account menu.</p>''',
+    # 認証後ページに閉じた login modal が残る（安全ツイン: 開いた modal は残存扱い）
+    "/home-hidden-modal": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
+<div class="modal" hidden><form action="/do-login"><input name="user"><input name="pw" type="password">
+<button>Log in</button></form></div>''',
+    "/home-open-modal": '''<h1>Dashboard</h1><a href="/logout">Log out</a>
+<div class="modal"><form action="/do-login"><input name="user"><input name="pw" type="password">
+<button>Log in</button></form></div>''',
     "/new-password-only": '''<form action="/x"><input type="password" name="np" autocomplete="new-password">
 <button>Save</button></form>''',
 }
@@ -56,9 +75,15 @@ EXPECTED_SURFACES = {
     "/login-modal": {"step": "single", "user": 'input[name="login_id"]', "pass": 'input[name="pw"]'},
     "/spa-login": {"step": "single", "user": 'input[id="u"]', "pass": 'input[id="p"]'},
     "/mfa": {"step": "otp", "user": "", "pass": ""},
+    "/login-unnamed-pw": {"step": "single", "user": 'input[name="user"]', "pass": 'input[type="password"]'},
 }
 SAFE_ENDPOINTS = {"/signup": "registration", "/forgot": "reset", "/reset-new": "reset", "/search": "search"}
 AMBIGUOUS_ENDPOINTS = ("/two-logins", "/new-password-only")
+# login と判定できても対象欄が一意に決まらず INCOMPLETE（incomplete_reason）を返すべきページ
+UNRESOLVED_FIELD_ENDPOINTS = {"/signup-then-login": "field_not_unique:pass_selector"}
+# API: ログイン（検出必須）と再設定/登録（検出禁止の安全ツイン）。いずれも email+password キー
+API_LOGIN_ENDPOINTS = ("/api/session", "/api/login")
+API_SAFE_ENDPOINTS = ("/api/register", "/api/reset", "/api/forgot", "/api/password/reset")
 
 
 def create_app() -> FastAPI:
@@ -85,8 +110,9 @@ def create_app() -> FastAPI:
     async def home():
         return '<h1>Dashboard</h1><a href="/logout">Log out</a>'
 
-    @app.post("/api/session")
-    async def api_session():
-        return JSONResponse({"token": "fixture-token"})
+    for path in API_LOGIN_ENDPOINTS:
+        app.add_api_route(path, lambda: JSONResponse({"token": "fixture-token"}), methods=["POST"])
+    for path in API_SAFE_ENDPOINTS:
+        app.add_api_route(path, lambda: JSONResponse({"ok": True}), methods=["POST"])
 
     return app

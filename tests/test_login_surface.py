@@ -53,6 +53,15 @@ def test_ambiguous_surfaces_are_incomplete(path):
     assert plan.incomplete_reason and not plan.user_selector
 
 
+@pytest.mark.parametrize("path,reason", list(fx.UNRESOLVED_FIELD_ENDPOINTS.items()))
+def test_unresolvable_fields_are_incomplete(path, reason):
+    html = _get(path)
+    assert ls.classify_surface(html).kind == ls.LOGIN
+    plan = ls.locate_auth_fields(html)
+    # 登録 form の password 欄へ fallback せず、理由付きで止める
+    assert plan.pass_selector == "" and plan.incomplete_reason == reason
+
+
 def test_modal_and_spa_submit_paths():
     modal = ls.locate_auth_fields(_get("/login-modal"))
     assert modal.requires_reveal and modal.submit == 'button[id="m-submit"]'
@@ -74,6 +83,16 @@ def test_explicit_selectors_take_priority():
     # 一部だけ明示なら残りは自動検出で補う
     mixed = ls.locate_auth_fields(_get("/login"), pass_selector="#pw")
     assert mixed.sources == {"user": "auto", "pass": "explicit"}
+
+
+@pytest.mark.parametrize("path", fx.API_LOGIN_ENDPOINTS)
+def test_api_login_endpoints(path):
+    assert ls.locate_api_login("http://t" + path, "POST", ["email", "password"]) is not None
+
+
+@pytest.mark.parametrize("path", fx.API_SAFE_ENDPOINTS)
+def test_api_reset_and_register_are_not_login(path):
+    assert ls.locate_api_login("http://t" + path, "POST", ["email", "password"]) is None
 
 
 def test_api_login_detection():
@@ -149,3 +168,35 @@ def test_results_never_carry_secret_values():
 ])
 def test_japanese_and_empty_pages(html, kind):
     assert ls.classify_surface(html).kind == kind
+
+
+def test_logout_text_without_control_is_not_evidence():
+    # 未認証で公開 /help に遷移しただけ：説明文の「Log out」は logout control ではない
+    help_page = ls.assess_login_state(_obs(post_url="http://t/help", body=_get("/help")))
+    assert help_page.state == ls.INCOMPLETE and "logout_control" not in help_page.evidence
+    # 安全ツイン: 実際のリンク/ボタン/ログアウト form は control として数える
+    for body in (_get("/home"), '<button type="button">Sign out</button>',
+                 '<form action="/logout" method="post"><button>Bye</button></form>'):
+        a = ls.assess_login_state(_obs(post_url="http://t/home", body=body))
+        assert a.state == ls.SUCCESS and "logout_control" in a.evidence
+    hidden = ls.assess_login_state(_obs(post_url="http://t/home", body='<a href="/logout" hidden>Log out</a>'))
+    assert "logout_control" not in hidden.evidence
+
+
+def test_otp_only_page_is_challenge():
+    html = _get("/verify-code")
+    assert not ls.looks_like_mfa_page(html)  # 定型 MFA 文言に頼らないケース
+    assert ls.classify_surface(html).reasons == ["login_step:otp"]
+    a = ls.assess_login_state(_obs(post_url="http://t/verify", body=html))
+    assert a.state == ls.CHALLENGE and a.reasons == ["mfa"]
+    # 安全ツイン: 通常の login form 残存は CHALLENGE にしない
+    assert ls.assess_login_state(_obs(body=_get("/login"))).state == ls.INCOMPLETE
+
+
+def test_hidden_login_modal_does_not_block_success():
+    kw = dict(post_url="http://t/home", auth_cookie_set=True, success_indicator="Dashboard")
+    ok = ls.assess_login_state(_obs(body=_get("/home-hidden-modal"), **kw))
+    assert ok.state == ls.SUCCESS
+    # 安全ツイン: 可視の login modal は残存＝INCOMPLETE
+    still = ls.assess_login_state(_obs(body=_get("/home-open-modal"), **kw))
+    assert still.state == ls.INCOMPLETE and still.reasons == ["login_form_still_present"]

@@ -26,7 +26,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from . import auth_detect
-from .auth_fields import _OTP_HINTS, _SAFE_VALUE, _USER_HINTS, _hinted, name_or_id_selector
+from .auth_fields import _OTP_HINTS, _SAFE_VALUE, _USER_HINTS, _hinted
 from .mfa import looks_like_mfa_page, mfa_field_present
 
 LOGIN = "login"
@@ -54,6 +54,10 @@ _TEXTUAL = {"", "text", "email", "tel", "search", "number"}
 _HEADINGS = {"h1", "h2", "h3", "h4", "title", "legend", "label"}
 _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input",
          "link", "meta", "param", "source", "track", "wbr"}
+
+
+def _path_words(path: str) -> str:
+    return path.replace("/", " ").replace("-", " ").replace("_", " ")
 
 
 def _has_word(text: str, words) -> bool:
@@ -87,6 +91,8 @@ class _Doc(HTMLParser):
         self.button: Optional[dict] = None
         self.last_heading = ""
         self.visible_text: list[str] = []
+        self.controls: list[str] = []                 # 可視の操作要素（a/button/submit/form action）の文言・パス
+        self.link_buf: Optional[list[str]] = None
         self.feed(html or "")
         self.close()
 
@@ -113,6 +119,8 @@ class _Doc(HTMLParser):
         cls = (a.get("class", "") + " " + a.get("role", "") + " " + a.get("id", "")).lower()
         modal = tag == "dialog" or "modal" in cls or "dialog" in cls
         blocked = self._blocked or hidden
+        if not blocked and tag == "form" and a.get("action"):
+            self.controls.append(_path_words(urlparse(a["action"]).path))
         if tag == "form":
             self.current = _Form(index=len(self.forms), action=a.get("action", ""),
                                  role=a.get("role", "").lower(),
@@ -121,13 +129,19 @@ class _Doc(HTMLParser):
             self.forms.append(self.current)
         elif tag == "input":
             t = a.get("type", "").lower()
+            if t in {"submit", "image", "button"} and not blocked:
+                self.controls.append(a.get("value", ""))
             if t in {"submit", "image"}:
                 self._form().submits.append(({**a, "_tag": "input"}, a.get("value", "") or "submit"))
             elif t != "hidden":
                 self._form().inputs.append((a, blocked or "disabled" in a or "readonly" in a))
-        elif tag == "button" and a.get("type", "").lower() in {"", "submit"}:
-            self.button = {**a, "_tag": "button"}
+        elif tag == "button":
+            # type=button も logout control の文言源として集める（submit 扱いは submit 型のみ）
+            self.button = {**a, "_tag": "button"} if a.get("type", "").lower() in {"", "submit"} else None
             self.text_target, self.buf = "button", []
+        elif tag == "a" and not blocked:
+            self.controls.append(_path_words(urlparse(a.get("href", "")).path))
+            self.link_buf = []
         elif tag in _HEADINGS:
             self.text_target, self.buf = tag, []
         if tag == "div" and a.get("role", "").lower() == "search" and self.current is None:
@@ -138,9 +152,15 @@ class _Doc(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "button" and self.text_target == "button":
             text = " ".join("".join(self.buf).split())
-            self._form().submits.append((self.button or {}, text))
-            self._form().context += " " + text
+            if not self._blocked:
+                self.controls.append(text)
+            if self.button is not None:
+                self._form().submits.append((self.button, text))
+                self._form().context += " " + text
             self.text_target, self.button = None, None
+        elif tag == "a" and self.link_buf is not None:
+            self.controls.append("".join(self.link_buf))
+            self.link_buf = None
         elif self.text_target == tag and tag in _HEADINGS:
             text = " ".join("".join(self.buf).split())
             if tag in {"legend", "label"}:
@@ -160,6 +180,8 @@ class _Doc(HTMLParser):
     def handle_data(self, data):
         if self.text_target:
             self.buf.append(data)
+        if self.link_buf is not None:
+            self.link_buf.append(data)
         if not self._blocked:
             self.visible_text.append(data)
 
@@ -196,7 +218,7 @@ def _classify_form(f: _Form) -> FormSurface:
             or _type(a) == "email" or _hinted(a, _USER_HINTS)]
     otp = [a for a in texts if a.get("autocomplete", "").lower() == "one-time-code"
            or _hinted(a, _OTP_HINTS)]
-    ctx = f.context + " " + urlparse(f.action).path.replace("/", " ").replace("-", " ").replace("_", " ")
+    ctx = f.context + " " + _path_words(urlparse(f.action).path)
     login_w, reg_w, reset_w = (_has_word(ctx, w) for w in (_LOGIN_WORDS, _REG_WORDS, _RESET_WORDS))
     r = FormSurface(index=f.index, kind=OTHER, in_modal=f.in_modal)
     words = [n for n, hit in (("login_words", login_w), ("registration_words", reg_w),
@@ -241,18 +263,21 @@ def _classify_form(f: _Form) -> FormSurface:
     return r
 
 
-def classify_surface(html: str, url: str = "") -> SurfaceResult:
+def classify_surface(html: str, *, visible_only: bool = False) -> SurfaceResult:
     """ページの login surface 種別を判定する（純粋関数）。
 
     ログイン対象 form がちょうど 1 つならそれを ``login_form`` に返す。複数の login 候補や
     曖昧 form しかない場合は ``AMBIGUOUS``（呼び出し側は INCOMPLETE として扱う）。
+    ``visible_only`` は操作可能な入力を持つ form だけを見る（送信後の残存判定用。送信前は
+    非表示 modal も reveal 対象なので既定は全 form）。
     """
     doc = _Doc(html)
-    groups = doc.forms + ([doc.loose] if doc.loose.inputs else [])
-    forms = [_classify_form(f) for f in groups if f.inputs]
+    groups = [f for f in doc.forms + [doc.loose]
+              if f.inputs and (not visible_only or any(not b for _, b in f.inputs))]
+    forms = [_classify_form(f) for f in groups]
     # MFA 画面は見出しに OTP 語が無い素っ気ない欄でも、ページ文脈で OTP 段とみなす。
     if looks_like_mfa_page(html or ""):
-        for s, f in zip(forms, [f for f in groups if f.inputs]):
+        for s, f in zip(forms, groups):
             textual = [a for a, _ in f.inputs if _type(a) in _TEXTUAL]
             if s.kind == OTHER and len(textual) == 1 and not any(
                     _type(a) == "password" for a, _ in f.inputs):
@@ -327,8 +352,11 @@ def locate_auth_fields(
                      texts if len(texts) == 1 and s.step in {"single", "username_first"} else [])
         if s.step in {"single", "username_first"} and len(users) == 1:
             plan.user_selector = _unique_selector(everything, users[0])
-        if pw:
-            plan.pass_selector = _unique_selector(everything, pw[0]) or 'input[type="password"]'
+        if len(pw) == 1:
+            # name/id で特定できない欄の型 selector は、文書内で password 欄が唯一のときだけ使う
+            # （先行する登録 form 等の password 欄を誤って埋めない。曖昧なら field_not_unique）。
+            plan.pass_selector = _unique_selector(everything, pw[0]) or (
+                'input[type="password"]' if sum(_type(a) == "password" for a in everything) == 1 else "")
         if s.step == "otp" and len(texts) == 1:
             plan.otp_selector = _unique_selector(everything, texts[0])
         buttons = [a for a, _ in form.submits]
@@ -369,6 +397,8 @@ class ApiLoginTarget:
 
 _API_USER_KEYS = ("username", "user", "email", "login", "userid", "user_id", "account", "mail")
 _API_PASS_KEYS = ("password", "passwd", "pass", "pwd")
+# path では単独の reset/forgot も明示的な再設定経路（/api/reset・/api/forgot）とみなす
+_API_EXCLUDE_WORDS = _REG_WORDS + _RESET_WORDS + ("reset", "forgot", "forgotten", "recovery")
 
 
 def locate_api_login(url: str, method: str, body_keys) -> Optional[ApiLoginTarget]:
@@ -380,8 +410,7 @@ def locate_api_login(url: str, method: str, body_keys) -> Optional[ApiLoginTarge
         return None
     keys = [str(k) for k in body_keys or ()]
     low = {k.lower(): k for k in keys}
-    path = urlparse(url or "").path.lower()
-    if _has_word(path.replace("/", " ").replace("-", " ").replace("_", " "), _REG_WORDS + _RESET_WORDS):
+    if _has_word(_path_words(urlparse(url or "").path), _API_EXCLUDE_WORDS):
         return None
     pw = [low[k] for k in low if k in _API_PASS_KEYS]
     if len(pw) != 1 or any("confirm" in k or k.startswith("new") for k in low):
@@ -435,15 +464,21 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
         return LoginAssessment(FAILURE, reasons=["http_401"])
     if auth_detect.has_failure_text(body):
         return LoginAssessment(FAILURE, reasons=["failure_text"])
-    if _has_word(" ".join(_Doc(body).visible_text), _CAPTCHA_WORDS):
+    doc = _Doc(body)
+    if _has_word(" ".join(doc.visible_text), _CAPTCHA_WORDS):
         return LoginAssessment(CHALLENGE, reasons=["captcha_unsupported"])
     if looks_like_mfa_page(body) or mfa_field_present(body, obs.mfa_field):
         return LoginAssessment(CHALLENGE, reasons=["mfa"])
-    surface = classify_surface(body)
+    # 非表示/操作不能な form（閉じた login modal の残骸等）は残存の根拠にしない。
+    surface = classify_surface(body, visible_only=True)
     login_step = next((s.step for s in surface.forms if s.kind == LOGIN), "")
     if login_step == "password_only":
         return LoginAssessment(CHALLENGE, reasons=["password_step"])
-    if auth_detect.has_login_form(body) or login_step:
+    if login_step == "otp":
+        return LoginAssessment(CHALLENGE, reasons=["mfa"])
+    visible_pw = any(_type(a) == "password" and not b
+                     for f in doc.forms + [doc.loose] for a, b in f.inputs)
+    if (visible_pw and auth_detect.has_login_form(body)) or login_step:
         return LoginAssessment(INCOMPLETE, reasons=["login_form_still_present"])
 
     evidence, reasons = [], []
@@ -469,7 +504,8 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
         evidence.append("auth_cookie_set")
     if obs.api_token_issued:
         evidence.append("api_token_issued")
-    if _has_word(" ".join(_Doc(body).visible_text), _LOGOUT_WORDS):
+    # 本文の説明文ではなく、可視の操作要素（リンク/ボタン/ログアウト form）に限る。
+    if _has_word(" ".join(doc.controls), _LOGOUT_WORDS):
         evidence.append("logout_control")
     if reasons:
         return LoginAssessment(INCOMPLETE, evidence, reasons)
