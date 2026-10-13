@@ -38,6 +38,7 @@ from .url_normalize import (
     endpoint_identity,
     normalize_proxy_server,
     route_aware_identity,
+    split_proxy_credentials,
 )
 
 from .header_scope import (
@@ -1120,7 +1121,13 @@ class AgentBrowserScanner:
             try:
                 from browser_use.browser.profile import ProxySettings
 
-                options["proxy"] = ProxySettings(server=self.proxy, bypass="<-loopback>")
+                server, username, password = split_proxy_credentials(self.proxy)
+                proxy_kwargs = {"server": server, "bypass": "<-loopback>"}
+                if username is not None:
+                    proxy_kwargs["username"] = username
+                if password is not None:
+                    proxy_kwargs["password"] = password
+                options["proxy"] = ProxySettings(**proxy_kwargs)
                 return profile_type(**options)
             except Exception as exc:
                 raise RuntimeError(

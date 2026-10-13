@@ -1,7 +1,7 @@
 """checkpoint キー専用の保守的な URL 正規化。"""
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, unquote_plus, urlencode, urlsplit, urlunsplit
 
 from wscan.url_scope import is_route_fragment
 
@@ -183,6 +183,33 @@ def normalize_proxy_server(raw: str) -> str:
             "例: http://127.0.0.1:8080"
         )
     return server
+
+
+def split_proxy_credentials(server: str) -> tuple[str, str | None, str | None]:
+    """proxy URL の userinfo を (server, username, password) へ分離する（純粋）。
+
+    Chromium の ``--proxy-server`` は URL 内の ``user:pass@`` を認証に使わないため、
+    browser-use の ``ProxySettings`` には userinfo を除いた server と username/password を
+    別々に渡す必要がある（userinfo を残すと認証が有効化されず、引数にも資格情報が残る）。
+
+    - userinfo が無い（非認証 proxy・空文字）なら入力をそのまま返し、資格情報は ``None``。
+    - username/password はパーセントデコードする（``p%40ss`` → ``p@ss``）。
+    - ``user@host`` のように password が無い場合は password を ``None`` にする。
+    - host:port・path 等の userinfo 以外の部分は変更しない（IPv6 の角括弧も保持）。
+    """
+    if not server:
+        return server, None, None
+    parsed = urlsplit(server)
+    if "@" not in parsed.netloc:
+        return server, None, None
+    userinfo, _, hostport = parsed.netloc.rpartition("@")
+    raw_user, sep, raw_pass = userinfo.partition(":")
+    username = unquote(raw_user) or None
+    password = unquote(raw_pass) if sep else None
+    stripped = urlunsplit(
+        (parsed.scheme, hostport, parsed.path, parsed.query, parsed.fragment)
+    )
+    return stripped, username, password
 
 
 def strip_path_trailing_slash(url: str) -> str:

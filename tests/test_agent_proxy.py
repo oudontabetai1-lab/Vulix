@@ -19,6 +19,7 @@ import pytest
 
 from wscan.agent_engine import AgentEngine
 from wscan.llm_agent_browser import AgentBrowserScanner
+from wscan.url_normalize import split_proxy_credentials
 
 
 @pytest.mark.skipif(os.getenv("WSCAN_E2E") != "1", reason="WSCAN_E2E=1 でbrowser-useのloopback proxy回帰を実行")
@@ -251,9 +252,12 @@ def _proxy_sdk_modules():
     profile = types.ModuleType("browser_use.browser.profile")
 
     class ProxySettings:
-        def __init__(self, *, server, bypass=None):
+        def __init__(self, *, server, bypass=None, **credentials):
             self.server = server
             self.bypass = bypass
+            self.credential_kwargs = credentials
+            self.username = credentials.get("username")
+            self.password = credentials.get("password")
 
     profile.ProxySettings = ProxySettings
     return {
@@ -276,6 +280,7 @@ def test_agent_browser_profile_receives_normalized_proxy_without_sdk_global_conf
 
     assert captured["proxy"].server == "http://127.0.0.1:8080"
     assert captured["proxy"].bypass == "<-loopback>"
+    assert captured["proxy"].credential_kwargs == {}
 
 
 def test_proxy_profile_rejects_sdk_without_proxy_support():
@@ -342,3 +347,81 @@ async def test_agent_engine_recon_forwards_proxy_to_scanner(tmp_path):
             await engine.run_recon()
 
     assert captured["proxy"] == "http://127.0.0.1:8080"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("", ("", None, None)),
+        ("http://127.0.0.1:8080", ("http://127.0.0.1:8080", None, None)),
+        ("socks5://proxy.test:1080", ("socks5://proxy.test:1080", None, None)),
+        ("http://user:pass@proxy.test:3128", ("http://proxy.test:3128", "user", "pass")),
+        ("https://u%40corp:p%3Aw%40rd@proxy.test:8443", ("https://proxy.test:8443", "u@corp", "p:w@rd")),
+        ("http://user:p@ss@proxy.test:3128", ("http://proxy.test:3128", "user", "p@ss")),
+        ("http://user@proxy.test:3128", ("http://proxy.test:3128", "user", None)),
+        ("http://user:@proxy.test:3128", ("http://proxy.test:3128", "user", "")),
+        ("http://user:pass@[::1]:8080", ("http://[::1]:8080", "user", "pass")),
+    ],
+)
+def test_split_proxy_credentials(raw, expected):
+    assert split_proxy_credentials(raw) == expected
+
+
+def test_agent_browser_profile_maps_proxy_userinfo_to_credentials():
+    scanner = AgentBrowserScanner(
+        "http://fixture.test", proxy="http://agent:s%40cret@proxy.test:3128"
+    )
+    captured = {}
+
+    class Profile:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    with patch.dict(sys.modules, _proxy_sdk_modules()):
+        scanner._build_browser_profile(Profile)
+
+    proxy = captured["proxy"]
+    assert proxy.server == "http://proxy.test:3128"
+    assert "agent" not in proxy.server and "@" not in proxy.server
+    assert proxy.username == "agent"
+    assert proxy.password == "s@cret"
+    assert proxy.bypass == "<-loopback>"
+
+
+def test_agent_browser_profile_maps_credentials_with_installed_sdk():
+    profile_module = pytest.importorskip(
+        "browser_use.browser.profile", reason="browser-use optional dependency is not installed"
+    )
+    scanner = AgentBrowserScanner("http://fixture.test", proxy="user:pass@127.0.0.1:8080")
+    captured = {}
+
+    class Profile:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    scanner._build_browser_profile(Profile)
+
+    proxy = captured["proxy"]
+    assert isinstance(proxy, profile_module.ProxySettings)
+    assert proxy.server == "http://127.0.0.1:8080"
+    assert (proxy.username, proxy.password) == ("user", "pass")
+
+
+def test_agent_engine_forwards_authenticated_proxy_and_scanner_splits_it(tmp_path):
+    captured = {}
+
+    class Scanner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def run(self):
+            return SimpleNamespace(error="fixture stop", findings=[], preserve_existing_artifacts=True)
+
+    engine = AgentEngine(
+        "http://fixture.test", proxy="http://user:pass@127.0.0.1:8080", output_dir=str(tmp_path)
+    )
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner", Scanner):
+        asyncio.run(engine.run())
+
+    assert captured["proxy"] == "http://user:pass@127.0.0.1:8080"
+    assert split_proxy_credentials(captured["proxy"]) == ("http://127.0.0.1:8080", "user", "pass")
