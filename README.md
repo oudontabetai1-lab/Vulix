@@ -371,7 +371,7 @@ python3 main.py scan URL [URL ...] [options]
 | `--accounts-file FILE` | 空 | `accounts:` 配列を持つ YAML |
 | `--auto-register` | 無効 | テストアカウント自動登録 |
 | `--auto-register-count N` | `2` | 自動登録数 |
-| `--proxy URL` | 空 | Browser/httpx の HTTP プロキシ |
+| `--proxy URL` | 空 | 通常/Agent Browser と httpx の HTTP プロキシ |
 | `--tls-client-cert FILE` / `--tls-client-key FILE` | 空 | mTLS 用 PEM 証明書/秘密鍵 |
 | `--tls-client-pfx FILE` | 空 | Playwright 用 PFX/PKCS#12 |
 | `--tls-client-cert-password TEXT` | 空 | 証明書/PFX パスフレーズ |
@@ -431,6 +431,7 @@ python3 main.py agent URL [options]
 | `--llm` | `claude` | `claude/openai/openai_compatible/ollama` |
 | `--llm-base-url URL` | 空 | OpenAI 互換ベース URL |
 | `--model MODEL` | provider 既定 | Agent 用モデル |
+| `--proxy URL` | `browser.proxy` / 空 | Agent ブラウザの HTTP プロキシ |
 | `--ollama-url URL` | `http://localhost:11434` | Ollama API |
 | `--checks CHECK...` | `xss sqli ssti os path_traversal ssrf` | Agent の検査種別 |
 | `--max-steps N` | `100` | 最大操作ステップ |

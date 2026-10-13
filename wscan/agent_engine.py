@@ -17,6 +17,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
+from .url_normalize import normalize_proxy_server
 
 from rich.console import Console
 from rich.panel import Panel
@@ -157,6 +158,7 @@ class AgentEngine:
         storage_state: str = "",
         resume: bool = False,
         report_lang: str = "ja",
+        proxy: str = "",
     ):
         self.url = url.rstrip("/")
         from .i18n import normalize_lang
@@ -182,6 +184,7 @@ class AgentEngine:
         self.totp_secret = str(totp_secret or "")
         self.storage_state = str(storage_state or "")
         self.resume = bool(resume)
+        self.proxy = normalize_proxy_server(proxy)
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / f"agent_{ts}"
@@ -229,6 +232,7 @@ class AgentEngine:
             storage_state=self.storage_state,
             harness_output_dir=self.output_dir,
             resume=self.resume,
+            proxy=self.proxy,
         )
 
         result: AgentScanResult = await scanner.run()
@@ -411,6 +415,7 @@ class AgentEngine:
             storage_state=self.storage_state,
             harness_output_dir=self.output_dir,
             resume=self.resume,
+            proxy=self.proxy,
         )
 
         result = await scanner.run()

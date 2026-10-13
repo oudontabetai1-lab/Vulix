@@ -1520,6 +1520,10 @@ Examples:
     )
     agent.add_argument("url", help="Target URL (e.g. https://example.com)")
     agent.add_argument(
+        "--proxy", metavar="URL", default=_CFG.get("proxy", ""),
+        help="HTTP proxy URL for the Agent browser (e.g. http://127.0.0.1:8080)",
+    )
+    agent.add_argument(
         "--report-lang", choices=("ja", "en"), default=_CFG.get("report_lang", "ja"),
         help="HTML レポートの言語 (既定: ja)",
     )
@@ -2126,6 +2130,7 @@ async def run_agent(args):
             totp_secret=getattr(args, "totp_secret", "") or "",
             storage_state=getattr(args, "storage_state", "") or "",
             resume=getattr(args, "resume", False),
+            proxy=getattr(args, "proxy", "") or "",
         )
         return await engine.run()
 
@@ -2169,6 +2174,7 @@ async def run_agent(args):
                 totp_secret=getattr(args, "totp_secret", "") or "",
                 storage_state=getattr(args, "storage_state", "") or "",
                 resume=getattr(args, "resume", False),
+                proxy=getattr(args, "proxy", "") or "",
             )
             result = await engine.run()
             # early-return 条件は _agent_exit_code の非0条件と一致させる（D8）。
@@ -3150,6 +3156,7 @@ async def run_serve(args):
                     monitor=monitor,
                     port=port,
                     extra_headers=_hdrs,
+                    proxy=cfg.get("proxy", "") or "",
                 )
                 _agent_result, agent_interrupted = (
                     await _run_with_time_window_monitor(
@@ -3208,6 +3215,7 @@ async def run_serve(args):
                     monitor=monitor,
                     port=port,
                     extra_headers=_hdrs,
+                    proxy=cfg.get("proxy", "") or "",
                 )
                 handoff, continue_to_phase2 = (
                     await _run_hybrid_recon_with_retries(

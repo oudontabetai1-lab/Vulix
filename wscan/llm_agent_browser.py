@@ -34,7 +34,12 @@ from urllib.parse import urlparse, urlunparse
 
 from rich.console import Console
 from rich.rule import Rule
-from .url_normalize import endpoint_identity, route_aware_identity
+from .url_normalize import (
+    endpoint_identity,
+    normalize_proxy_server,
+    route_aware_identity,
+    split_proxy_credentials,
+)
 
 from .header_scope import (
     _BLANK_URLS as _BLANK_URLS,  # re-export: tests/external callers
@@ -649,6 +654,7 @@ class AgentBrowserScanner:
         storage_state: str = "",
         harness_output_dir: str | Path | None = None,
         resume: bool = False,
+        proxy: str = "",
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
         raw_target_url = str(target_url or "").strip()
@@ -694,6 +700,7 @@ class AgentBrowserScanner:
         self.storage_state = str(storage_state or "")
         self.harness_output_dir = Path(harness_output_dir) if harness_output_dir else None
         self.resume = bool(resume)
+        self.proxy = normalize_proxy_server(proxy)
         self._header_origins = allowed_header_origins(
             self.target_url,
             self.target_urls,
@@ -1097,6 +1104,37 @@ class AgentBrowserScanner:
     # Public entry point
     # ------------------------------------------------------------------
 
+    def _build_browser_profile(self, profile_type):
+        options = {
+            "headless": self.headless,
+            "disable_security": True,
+            "allowed_domains": sorted({
+                parsed.hostname
+                for parsed in (
+                    urlparse(url) for url in [*self.target_urls, *self.access_urls]
+                )
+                if parsed.hostname
+            }),
+            "storage_state": self.storage_state or None,
+        }
+        if self.proxy:
+            try:
+                from browser_use.browser.profile import ProxySettings
+
+                server, username, password = split_proxy_credentials(self.proxy)
+                proxy_kwargs = {"server": server, "bypass": "<-loopback>"}
+                if username is not None:
+                    proxy_kwargs["username"] = username
+                if password is not None:
+                    proxy_kwargs["password"] = password
+                options["proxy"] = ProxySettings(**proxy_kwargs)
+                return profile_type(**options)
+            except Exception as exc:
+                raise RuntimeError(
+                    "設定された proxy を browser-use profile へ適用できませんでした"
+                ) from exc
+        return profile_type(**options)
+
     async def run(self) -> AgentScanResult:
         """エージェントスキャンを実行して結果を返す。"""
         console.print(Rule("[bold magenta] Agent Browser Scan [/bold magenta]", style="magenta"))
@@ -1194,6 +1232,16 @@ class AgentBrowserScanner:
 
             def _build_legacy_browser():
                 """ヘッダ無しの従来ブラウザ構築（API差異時のフォールバック兼用）。"""
+                if self.proxy:
+                    try:
+                        from browser_use.browser.profile import BrowserProfile
+
+                        profile = self._build_browser_profile(BrowserProfile)
+                        return Browser(browser_profile=profile)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "設定された proxy を browser-use ブラウザへ適用できませんでした"
+                        ) from exc
                 # browser_use ≥ 0.2 uses BrowserConfig; older versions accept direct kwargs.
                 # BrowserConfig's disable_security properly disables SecurityWatchdog,
                 # while the legacy Browser(disable_security=True) only affects Playwright flags.
@@ -1248,7 +1296,7 @@ class AgentBrowserScanner:
             if self._harness:
                 agent_kwargs["register_should_stop_callback"] = self._harness_should_stop
 
-            if self.extra_headers or sensitive_data or self.storage_state or self._harness:
+            if self.extra_headers or sensitive_data or self.storage_state or self._harness or self.proxy:
                 # browser-use 0.12.6 の実 API:
                 # BrowserSession(browser_profile=...) → Agent(browser_session=...)。
                 # 注意: BrowserProfile.headers は「ブラウザ/CDP エンドポイントへの接続時
@@ -1260,35 +1308,31 @@ class AgentBrowserScanner:
                     from browser_use import BrowserSession
                     from browser_use.browser.profile import BrowserProfile
 
-                    browser_profile = BrowserProfile(
-                        headless=self.headless,
-                        disable_security=True,
-                        allowed_domains=sorted({
-                            parsed.hostname
-                            for parsed in (
-                                urlparse(url) for url in [*self.target_urls, *self.access_urls]
-                            )
-                            if parsed.hostname
-                        }),
-                        storage_state=self.storage_state or None,
-                    )
+                    browser_profile = self._build_browser_profile(BrowserProfile)
                     browser = BrowserSession(browser_profile=browser_profile)
                     agent_browser_arg = "browser_session"
                     agent = None if self._harness else Agent(
                         browser_session=browser, **agent_kwargs
                     )
                 except Exception:
-                    if sensitive_data or self.storage_state:
+                    if self.proxy:
+                        browser = _build_legacy_browser()
+                        agent_browser_arg = "browser"
+                        agent = None if self._harness else Agent(
+                            browser=browser, **agent_kwargs
+                        )
+                    elif sensitive_data or self.storage_state:
                         raise RuntimeError(
                             "認証情報を domain scope で保護できる BrowserSession を初期化できませんでした"
                         )
-                    console.print(
-                        "[yellow]追加HTTPヘッダをブラウザへ設定できなかったため、"
-                        "従来構成で続行します。[/yellow]"
-                    )
-                    browser = _build_legacy_browser()
-                    agent_browser_arg = "browser"
-                    agent = None if self._harness else Agent(browser=browser, **agent_kwargs)
+                    else:
+                        console.print(
+                            "[yellow]追加HTTPヘッダをブラウザへ設定できなかったため、"
+                            "従来構成で続行します。[/yellow]"
+                        )
+                        browser = _build_legacy_browser()
+                        agent_browser_arg = "browser"
+                        agent = None if self._harness else Agent(browser=browser, **agent_kwargs)
             else:
                 # ヘッダ未指定時は完全に従来どおりの構築経路を使う。
                 browser = _build_legacy_browser()
