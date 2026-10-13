@@ -1685,6 +1685,9 @@ class ScanEngine:
             "check_coverage": check_coverage,
             "prerequisite_coverage": prerequisite_coverage,
             "capability_matrix": capability_matrix,
+            **({"transport_security": list(getattr(
+                self.scanners["transport_security"], "coverage", []))}
+               if "transport_security" in (getattr(self, "scanners", None) or {}) else {}),
         }
 
     def _scan_matrix_for_display(self) -> list[dict]:

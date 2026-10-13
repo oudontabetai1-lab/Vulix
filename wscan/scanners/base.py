@@ -55,6 +55,7 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     "outdated_components": ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L",  4.8),
     "http_methods":      ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",  6.5),
     "tls_scan":          ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",  5.9),
+    "transport_security": ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N", 5.9),
     "nosql":             ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",  9.1),
     "deserialization":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
     "request_smuggling": ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N",  8.7),
@@ -315,6 +316,13 @@ def finding_dedup_key(
     (for example SQL error disclosure and authentication bypass).  Treating the
     whole (url, field, check) tuple as duplicate loses those findings.
     """
+    if check_type == "transport_security" and evidence_type in {"http_trace_xst", "http_webdav_enabled"}:
+        check_type = "http_methods"
+        # Match the existing method scanner's origin-root identity without changing its keys.
+        from urllib.parse import urlsplit
+        parts = urlsplit(url)
+        if parts.path == "/" and not parts.query:
+            url = url[:-1]
     return (url, field_name, check_type, evidence_type or check_type)
 
 

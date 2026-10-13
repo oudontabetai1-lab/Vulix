@@ -149,6 +149,8 @@ class SarifExporter:
         cc = coverage.get("check_coverage") or {}
         pc = coverage.get("prerequisite_coverage") or {}
         props: dict = {}
+        if coverage.get("transport_security"):
+            props["transport_security"] = coverage["transport_security"]
         if cc:
             props["check_coverage"] = {
                 "registry_total": cc.get("registry_total", 0),
