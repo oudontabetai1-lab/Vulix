@@ -753,7 +753,7 @@ def _adaptive_checkpoint_check(check_name: str) -> str:
 
 
 def _dialog_flooded(fired: int, dismiss_failed: bool) -> bool:
-    """区間内の dialog 発火数と dismiss 失敗フラグから flood/wedge を判定する（純粋・F06/0059）。"""
+    """区間内の dialog 発火数と dismiss 失敗フラグから flood/wedge を判定する（純粋）。"""
     return fired > 3 or bool(dismiss_failed)
 
 
@@ -5612,7 +5612,7 @@ class ScanEngine:
         # 長時間スキャンでセッションが切れると以降が全てログイン画面/401 に化け、
         # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
         # 失効レスポンスに当ててしまわないよう、page-level・field 双方の前に実行する。
-        # F06/0059: 失効チェック/pre-attack flow の準備 navigate が stored-XSS sink を読んで 4+ dialog を
+        # 失効チェック/pre-attack flow の準備 navigate が stored-XSS sink を読んで 4+ dialog を
         # 発火し全 dismiss 成功すると、page-level の baseline は準備後に取るため delta 0＝flood 未検知になる。
         # 準備区間をここから bracket し、page-level 検査の前に回復する（正常時 fired<=3 で不変）。
         _dlg_prep = getattr(self.browser, "dialog_total", 0)
@@ -6473,7 +6473,7 @@ class ScanEngine:
         # 「(adaptive) 完了マーカー」と併せて判定する（abort 中断時の再開網羅性のため）。
         checks_executed = 0
         checks_skipped_done = 0
-        # F06/0059: 早い check（XSS 等）が dialog flood/wedge させた page で後続 check が空振りし
+        # 早い check（XSS 等）が dialog flood/wedge させた page で後続 check が空振りし
         # tested/checkpoint 完了化される偽陰性を防ぐため、check 毎に bracket して回復する。
         # 回復不能なら残 check と adaptive を未 checkpoint のまま打ち切る（resume で回収）。
         field_unhealthy = False

@@ -86,7 +86,7 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             _record_scan_matrix=MagicMock(),
             _record_finding=MagicMock(),
             _save_checkpoint=MagicMock(),
-            # F06/0059: _scan_field の check 毎 dialog flood 判定の最小スタブ（flood なし）。
+            # _scan_field の check 毎 dialog flood 判定の最小スタブ（flood なし）。
             _dialog_wedged_since=lambda since: False,
         )
         engine._adaptive_attack_field = types.MethodType(
@@ -430,7 +430,7 @@ class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
             _record_scan_matrix=MagicMock(),
             _record_finding=MagicMock(),
             _save_checkpoint=MagicMock(),
-            # F06/0059: _scan_field の check 毎 dialog flood 判定の最小スタブ（flood なし）。
+            # _scan_field の check 毎 dialog flood 判定の最小スタブ（flood なし）。
             _dialog_wedged_since=lambda since: False,
         )
         engine._adaptive_attack_field = types.MethodType(

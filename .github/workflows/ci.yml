@@ -7,6 +7,18 @@ on:
   pull_request:
 
 jobs:
+  # 内部管理用の強い識別子（課題番号・設計ノート・vault リンク）の混入を防ぐ。依存不要で高速。
+  internal-refs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Internal reference gate
+        run: python scripts/check_internal_refs.py
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20

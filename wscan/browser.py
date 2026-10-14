@@ -574,7 +574,7 @@ class BrowserManager:
         # dismiss 失敗（未解消で wedge した可能性）の直接フラグ（recreate 判定に使用）。
         self.dialog_dismiss_failed: bool = False
         # navigate 成功時に best-effort で控える origin 別 sessionStorage。
-        # recreate_page が wedge した old page 読取に依存せずこれを init script で seed する（F06/0059#3）。
+        # recreate_page が wedge した old page 読取に依存せずこれを init script で seed する。
         self._last_session_storage: dict[str, str] = {}
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
