@@ -204,8 +204,8 @@ class RealisticHealthcareFixtureTests(unittest.IsolatedAsyncioTestCase):
         probe = "{{2654435761*2654435761}}"
         vuln = await self.client.get("/messages/preview", params={"name": probe})
         safe = await self.client.get("/messages/draft", params={"name": probe})
-        self.assertIn("7045744422742119121", vuln.text)
-        self.assertNotIn("7045744422742119121", safe.text)
+        self.assertIn("7046029209275649121", vuln.text)
+        self.assertNotIn("7046029209275649121", safe.text)
 
     async def test_medium_path_traversal(self):
         vuln = await self.client.get("/documents/view", params={"doc": "../../../../etc/passwd"})
@@ -401,13 +401,13 @@ class RealisticHealthcareFixtureTests(unittest.IsolatedAsyncioTestCase):
         # {{ }} はブロックされる。
         blocked = await self.client.get("/reports/render", params={"title": "{{2654435761*2654435761}}"})
         self.assertIn("Blocked template syntax", blocked.text)
-        self.assertNotIn("7045744422742119121", blocked.text)
+        self.assertNotIn("7046029209275649121", blocked.text)
         # 代替構文 ${ } は評価される。
         vuln = await self.client.get("/reports/render", params={"title": "${2654435761*2654435761}"})
-        self.assertIn("7045744422742119121", vuln.text)
+        self.assertIn("7046029209275649121", vuln.text)
         # 安全ツインは描画しない。
         safe = await self.client.get("/reports/title-safe", params={"title": "${2654435761*2654435761}"})
-        self.assertNotIn("7045744422742119121", safe.text)
+        self.assertNotIn("7046029209275649121", safe.text)
 
 
 if __name__ == "__main__":

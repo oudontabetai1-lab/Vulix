@@ -799,6 +799,8 @@ Phase 1 が失敗した場合、ダッシュボードは警告を出し、URL �
 
 通常スキャンは既定で `output/<timestamp>/checkpoint.json` に進捗と既出 Finding を保存します。通常攻撃は `(URL × フィールド × フォーム位置 × チェック種別)` の単位で完了を記録し、例外で終わった単位は未完了のまま残します。
 
+フィールド時間枠により途中で打ち切られた unit は完了として記録しません。resume で 2 回まで再試行し、なお同じ unit が時間枠を使い切る場合も「未完」の記録を残してその unit だけを以後の run で明示的に除外します。これにより送達されなかった検査を成功扱いにせず、同じ先頭 check による後続 check の永久停止を防ぎます。レポートの observability / scan matrix に `field_budget_retry_exhausted` がある場合は、その未完 unit を別途調査してください。
+
 ```bash
 python3 main.py scan https://example.com \
   --allowed-hours "Mon-Fri 22:00-06:00" \

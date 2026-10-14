@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import wscan.browser as browser_mod
-from wscan.browser import BrowserManager
+from wscan.browser import BrowserManager, WorkerBrowser
 
 
 class _HangingPage:
@@ -180,6 +180,46 @@ class ChromiumDialogFloodTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bm.dialog_fired)
         self.assertEqual(await self._page.evaluate('() => document.body.dataset.recovered'), 'yes')
 
+    async def test_worker_recovery_preserves_private_storage_for_each_origin(self):
+        context = await self._browser.new_context()
+        await context.route(
+            "**/*",
+            lambda route: route.fulfill(
+                content_type="text/html",
+                body="<script>window.bootToken = sessionStorage.getItem('token');</script>",
+            ),
+        )
+        real = BrowserManager()
+        real._context = context
+        workers = [await real.create_worker(), await real.create_worker()]
+        origins = ["http://first.test", "http://second.test"]
+        for index, worker in enumerate(workers):
+            for origin in origins:
+                await worker.page.goto(origin)
+                await worker.page.evaluate(
+                    "token => sessionStorage.setItem('token', token)",
+                    f"worker-{index}-{origin}",
+                )
+                await worker._snapshot_session_storage()
+
+        self.assertIsNot(workers[0]._last_session_storage, workers[1]._last_session_storage)
+        self.assertEqual(real._last_session_storage, {})
+        for index, worker in enumerate(workers):
+            old = worker.page
+            self.assertTrue(await worker.recreate_page())
+            self.assertTrue(old.is_closed())
+            for origin in origins:
+                await worker.page.goto(origin)
+                self.assertEqual(
+                    await worker.page.evaluate("window.bootToken"),
+                    f"worker-{index}-{origin}",
+                )
+        # Recovering one worker must not replace or close the other's page.
+        other_page = workers[1].page
+        self.assertTrue(await workers[0].recreate_page())
+        self.assertIs(workers[1].page, other_page)
+        self.assertFalse(other_page.is_closed())
+
     async def test_delayed_old_page_dialog_does_not_mark_replacement(self):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
@@ -273,3 +313,18 @@ def test_on_dialog_dismisses_before_screenshot():
     asyncio.run(bm._on_dialog(dialog))
     assert time.monotonic() - start < 1.0      # native timeout(3s) を待たない
     assert bm.dialog_screenshot_b64            # 閉じた後に証跡撮影できている
+
+
+def test_worker_snapshot_is_initialized_and_private():
+    from unittest.mock import AsyncMock
+
+    real = BrowserManager()
+    real._last_session_storage = {"http://parent.test": '{"token":"parent"}'}
+    page = AsyncMock()
+    page.evaluate.return_value = ["http://worker.test", '{"token":"worker"}']
+    worker = WorkerBrowser(real, page)
+    other = WorkerBrowser(real, AsyncMock())
+    asyncio.run(worker._snapshot_session_storage())
+    assert worker._last_session_storage == {"http://worker.test": '{"token":"worker"}'}
+    assert other._last_session_storage == {}
+    assert real._last_session_storage == {"http://parent.test": '{"token":"parent"}'}
