@@ -75,7 +75,7 @@ def _norm(url: str) -> str:
 
 _LOGIN_URL_KEYWORDS = ("/login", "/signin", "/sign-in", "/auth/login", "/account/login")
 # クエリルータの param 名（値がルートを表す）。redirect 系（next/redirect/return/url/...）は
-# 含めない＝redirect 値を login と誤判定しないため（#108）。
+# 含めない＝redirect 値を login と誤判定しないため。
 # 検索用 param（q/query/search 等）はルータでないため含めない（/search?q=/login を誤判定しない）。
 _ROUTE_PARAM_NAMES = ("route", "page", "action", "controller", "module", "mod", "do", "view", "option")
 
@@ -115,7 +115,7 @@ def url_looks_like_login(url: str) -> bool:
         if _path_has_login_hint(frag_path):
             return True
     # クエリ param（``?route=…`` / ``?page=…`` 等）は**アプリのルータ仕様を知らないと曖昧**で、
-    # どの param 名も content になりうる（#108 で next/q/page 等の false positive が続いた）。
+    # どの param 名も content になりうる（next/q/page 等で false positive が続いた）。
     # そこで **login_url 未設定の heuristic では query を判定に使わない**（曖昧さを閉じる）。
     # クエリ符号化された login ルート（例 ``/index.php?route=account/login``）は、login_url を
     # 明示設定した場合に _is_login_target_url の完全一致分岐（query param を厳密照合）で扱う。

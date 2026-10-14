@@ -1,4 +1,4 @@
-"""UvicornFixtureLauncher の起動前ガードを browser/実サーバ無しで固定する（0034-R1）。"""
+"""UvicornFixtureLauncher の起動前ガードを browser/実サーバ無しで固定する。"""
 import pytest
 
 from wscan.benchmark_fixtures import (
@@ -43,7 +43,7 @@ def test_unknown_fixture_id_rejected():
 
 
 def test_launch_refused_when_fixture_workers_at_cap():
-    """予約が上限なら launch を拒否（実サーバを起動しない・Codex #133）。"""
+    """予約が上限なら launch を拒否（実サーバを起動しない）。"""
     _establish_fixture_limit(2)
     assert _try_reserve_fixture() is True
     assert _try_reserve_fixture() is True
@@ -60,7 +60,7 @@ def test_launch_refused_when_fixture_workers_at_cap():
 
 
 def test_inconsistent_fixture_limit_rejected():
-    """異なる max_abandoned_fixtures の混在は拒否（プロセス横断で単一 limit・Codex #133）。"""
+    """異なる max_abandoned_fixtures の混在は拒否（プロセス横断で単一 limit）。"""
     _establish_fixture_limit(1)
     launcher = UvicornFixtureLauncher(max_abandoned_fixtures=100)
     with pytest.raises(ValueError):

@@ -1,4 +1,4 @@
-"""0018: TLS 設定不備検査（sslyze 活用）の単体テスト。
+"""TLS 設定不備検査（sslyze 活用）の単体テスト。
 
 judgment（結果→issue）は sslyze 非依存の純粋関数 extract_tls_issues を fake 結果で検証。
 scanner は tls_scan をモックして実 TLS ハンドシェイクなしで分岐を確認する。
@@ -202,7 +202,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cvss_mapped_by_kind_not_severity(self):
         # Heartbleed は OOB read＝機密性のみ。severity バケツの critical(9.1, I:H) ではなく
-        # kind 整合の 7.5 / I:N を publish する（Codex #158）。
+        # kind 整合の 7.5 / I:N を publish する。
         engine = _FakeEngine(enabled=True)
         scanner = SCANNERS["tls_scan"](engine)
         recorded = []
@@ -224,7 +224,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("C:H/I:N/A:N", recorded[0]["cvss_vector"])  # 完全性影響なし
 
     async def test_proxy_configured_skips_with_note(self):
-        # proxy 設定時は別経路の直接接続を避け、明示的に skip を記録する（#158）。
+        # proxy 設定時は別経路の直接接続を避け、明示的に skip を記録する。
         engine = _FakeEngine(enabled=True)
         engine.proxy = "http://127.0.0.1:8080"
         scanner = SCANNERS["tls_scan"](engine)
@@ -322,7 +322,7 @@ class EngineEnableTests(unittest.TestCase):
         self.assertFalse(e.tls_scan_enabled)
 
     def test_explicit_false_disables_even_with_check(self):
-        # serve が None を渡せば checks 推論が効く（明示 False 上書きで no-op にしない・Codex #158）。
+        # serve が None を渡せば checks 推論が効く（明示 False 上書きで no-op にしない）。
         from wscan.engine import ScanEngine
         e = ScanEngine("https://x.test", checks=["tls_scan"], enable_tls_scan=None,
                        llm_provider="none", monitor=None)
@@ -336,7 +336,7 @@ class EngineEnableTests(unittest.TestCase):
 class SeedScanTests(unittest.IsolatedAsyncioTestCase):
     async def test_tls_seed_scan_probes_only_attack_scope_origins(self):
         # crawl 非依存で seed origin を検査するが、能動 TLS プローブは攻撃スコープ内に限定する。
-        # http/重複は除く。out-of-scope の偵察 seed（別ホスト）へは SSLyze を送らない（Codex #158 P1）。
+        # http/重複は除く。out-of-scope の偵察 seed（別ホスト）へは SSLyze を送らない。
         from wscan.engine import ScanEngine
         # origin レベルの攻撃スコープ（/ 終端）。weak.test 配下は全 path が in-scope。
         engine = ScanEngine("https://weak.test/", checks=["tls_scan"],

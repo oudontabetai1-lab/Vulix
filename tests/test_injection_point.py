@@ -38,7 +38,7 @@ class JsonPointerTests(unittest.TestCase):
             "empty_dict": {},
             "empty_list": [],
         }
-        # 幅優先（#90 FN-C）: 浅い葉（/a, /a~0~1b）が深い b の子より先に列挙される。
+        # 幅優先: 浅い葉（/a, /a~0~1b）が深い b の子より先に列挙される。
         self.assertEqual(
             enumerate_leaf_pointers(doc),
             ["/a", "/a~0~1b", "/b/0", "/b/1/c"],
@@ -51,7 +51,7 @@ class JsonPointerTests(unittest.TestCase):
             enumerate_leaf_pointers(doc, max_depth=1),
             ["/a", "/e"],
         )
-        # 幅優先（#90 FN-C）: cap=2 でも浅い /a と /e を確保（DFS だと b の子 /b/c で埋まり /e を飢餓）。
+        # 幅優先: cap=2 でも浅い /a と /e を確保（DFS だと b の子 /b/c で埋まり /e を飢餓）。
         self.assertEqual(
             enumerate_leaf_pointers(doc, max_pointers=2),
             ["/a", "/e"],

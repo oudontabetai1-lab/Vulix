@@ -120,7 +120,7 @@ def enumerate_leaf_pointers(
     ならないため列挙せず、上限到達時はそれまでの決定的な順序を保って打ち切る。
     **幅優先**にするのは、深さ優先だと先頭キーが巨大な部分木（例: 250 要素の配列）だと
     pointer_cap を使い切って後続の浅い攻撃対象フィールド（例: 末尾の promo_code）が丸ごと
-    列挙されないため（#90 FN-C）。幅優先なら浅い葉が先に確保される。
+    列挙されないため。幅優先なら浅い葉が先に確保される。
     """
     pointers: list[str] = []
     try:
@@ -316,7 +316,7 @@ class InjectionPoint:
     dom_index: int = -1
     template_id: str = ""
     source: str = ""
-    # 0035-B 加算（provenance・すべて既定値でキー/挙動に非影響）:
+    # 加算（provenance・すべて既定値でキー/挙動に非影響）:
     value_kind: ValueKind = ValueKind.UNKNOWN
     operation_id: str = ""          # 安定 operation identity（compute_operation_id）
     template_source: str = ""       # crawl / spa / har / openapi / manual / proxy
@@ -324,7 +324,7 @@ class InjectionPoint:
 
     @property
     def carrier(self) -> Carrier:
-        """canonical location を 0035 の共通 carrier 語彙へ写す（alias は拒否）。"""
+        """canonical location を 共通 carrier 語彙へ写す（alias は拒否）。"""
         try:
             return _CANONICAL_LOCATION_CARRIER[self.location]
         except KeyError:

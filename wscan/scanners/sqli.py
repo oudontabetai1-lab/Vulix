@@ -409,12 +409,12 @@ class SQLiScanner(BaseScanner):
                 false_pair = partner_pair if payload == true_payload else pair
                 # transport 失敗（json_body の timeout/TLS/DNS/proxy 等）は空応答("")を返す。
                 # 空を「false 条件の相違」と誤認して高 severity の偽陽性を出さないよう、
-                # どちらかが空なら比較不能としてこの pair をスキップする（Codex #99 R5）。
+                # どちらかが空なら比較不能としてこの pair をスキップする。
                 if not true_src or not false_src:
                     continue
                 # transport 失敗（json_body の timeout/TLS/DNS/proxy 等）は空応答("")を返す。
                 # 空を「false 条件の相違」と誤認して高 severity の偽陽性を出さないよう、
-                # どちらかが空なら比較不能としてこの pair をスキップする（Codex #99 R5）。
+                # どちらかが空なら比較不能としてこの pair をスキップする。
                 sim_true_base = self._body_similarity(true_src, baseline_source)
                 sim_false_base = self._body_similarity(false_src, baseline_source)
                 # 判定は純粋関数 `_boolean_blind_divergence` に集約（ブラウザ非依存でテスト可能）。
@@ -682,7 +682,7 @@ class SQLiScanner(BaseScanner):
         if baseline and ip.location != "json_body":
             if not self.may_scan_injection_point(ip):
                 return "", {}
-            # F06/0059: baseline は base._apply_ip を経由せず browser を直叩きするため、時間ボックス
+            # baseline は base._apply_ip を経由せず browser を直叩きするため、時間ボックス
             # gate をここにも適用する（さもないと budget 枯渇後も baseline 2回投入で同じ stored sink を
             # 再 flood しうる）。超過なら注入せず truncated 記録して短絡。
             if self._field_budget_gate():
@@ -717,8 +717,8 @@ class SQLiScanner(BaseScanner):
         )
         # verify 中に session 失効(401)すると、transport(_apply_json_payload)が
         # _api_auth_failed を立てる。401/login 本文を脆弱性応答として評価し real finding を
-        # unreproduced に誤格下げしないよう、失効を検知したら indeterminate(None)を返す
-        # （Codex #99 R4）。json_body 限定（httpx replay 経路のみ flag を立てる）。
+        # unreproduced に誤格下げしないよう、失効を検知したら indeterminate(None)を返す。
+        # json_body 限定（httpx replay 経路のみ flag を立てる）。
         if ip.location == "json_body":
             try:
                 self.engine._api_auth_failed = False
@@ -751,7 +751,7 @@ class SQLiScanner(BaseScanner):
             _, control_pair = await self._apply_ip(ip, "1")
             # 対照リクエストが transport 失敗/失効したら、有効な対照を測れない。恒常的に
             # 遅いだけの endpoint を「対照が無いから」reproduced と誤確認しないよう、
-            # indeterminate(None)を返す（_verify_one が terminal な assumed にする。Codex #99 R6）。
+            # indeterminate(None)を返す（_verify_one が terminal な assumed にする。）。
             if ip.location == "json_body" and (
                 getattr(self.engine, "_api_auth_failed", False)
                 or getattr(self.engine, "_json_probe_failed", False)
@@ -787,8 +787,7 @@ class SQLiScanner(BaseScanner):
             false_src, false_pair = await self._apply_ip(ip, false_payload)
             # boolean verify は初回 replay 後に baseline/true/false と複数回 replay する。
             # その途中で session 失効(401)しても _api_auth_failed が立つので、いずれかで
-            # 失効したら login/401 本文を SQL 応答と比較せず indeterminate(None)を返す
-            # （Codex #99 R5）。
+            # 失効したら login/401 本文を SQL 応答と比較せず indeterminate(None)を返す。
             if ip.location == "json_body" and getattr(self.engine, "_api_auth_failed", False):
                 return None
             baseline_len = len(baseline_source)

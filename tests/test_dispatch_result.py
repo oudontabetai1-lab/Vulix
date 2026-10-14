@@ -1,4 +1,4 @@
-"""0035-C: dispatcher facade の純粋な結果型と分類 hint のテスト。"""
+"""dispatcher facade の純粋な結果型と分類 hint のテスト。"""
 from dataclasses import FrozenInstanceError
 
 import pytest

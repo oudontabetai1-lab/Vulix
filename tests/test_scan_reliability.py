@@ -460,13 +460,13 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engine.spa_crawl)
         self.assertTrue(browser.spa_settle)
         # 自動有効化（既定）はクリック探索を read-only 運用にするため、opt-in が無ければ
-        # explore は呼ばない（Codex #104 P1）。settle と harvest は継続。
+        # explore は呼ばない。settle と harvest は継続。
         self.assertEqual(browser.explore_calls, 0)
         # settle は初回ページで2回: 自動有効化直後の hydration 待ち＋harvest 前の XHR 待ち。
         self.assertEqual(browser.settle_calls, 2)
 
     async def test_auto_enabled_spa_click_exploration_requires_opt_in(self):
-        # allow_state_changing_probes の opt-in があればクリック探索を行う（Codex #104 P1）。
+        # allow_state_changing_probes の opt-in があればクリック探索を行う。
         engine = self._engine(depth=1, allow_state_changing_probes=True)
         browser = _SpaMarkerCrawlBrowser()
         engine._browser = browser
@@ -502,7 +502,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
     async def test_auto_enabled_spa_settles_first_page_before_form_extraction(self):
         # 初回 navigate は spa_settle=False で完了済み。自動有効化した本番シェルでは、
         # find_forms/get_url_params の前に settle して html を採り直さないと hydration
-        # 前の空 DOM から 0 件になる（Codex #104 P1）。
+        # 前の空 DOM から 0 件になる。
         engine = self._engine(depth=1)
         browser = _SpaHydrationCrawlBrowser()
         engine._browser = browser
@@ -526,7 +526,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first.forms)
 
     async def test_spa_route_enqueue_respects_depth_limit(self):
-        # --depth 1 では探索ルートを訪問しない（通常リンクと同じ深度ガード・Codex #104 P2）。
+        # --depth 1 では探索ルートを訪問しない（通常リンクと同じ深度ガード）。
         engine = self._engine(depth=1, allow_state_changing_probes=True)
         engine._browser = _SpaRouteDiscoveryBrowser()
 
@@ -546,7 +546,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_spa_detection_not_locked_to_first_page(self):
         # 主 URL が通常ページでも、後続のリンク先 SPA で自動有効化される
-        # （検出は _first_page に縛られない・Codex #104 P1）。
+        # （検出は _first_page に縛られない）。
         engine = self._engine(depth=2)
         engine._browser = _LateSpaTargetBrowser()
 
@@ -556,7 +556,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_spa_detected_even_when_page_is_fingerprint_duplicate(self):
         # origin 非依存の _page_fingerprint で SPA シェルが既出ページと衝突して重複
-        # スキップされても、検出は重複スキップより前に走り自動有効化される（Codex #104 P1）。
+        # スキップされても、検出は重複スキップより前に走り自動有効化される。
         engine = self._engine(depth=1)
         browser = _SpaMarkerCrawlBrowser()  # content()=<app-root></app-root>
         engine._browser = browser
@@ -571,7 +571,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_spa_explore_uses_landed_url_as_base(self):
         # 相対 href/routing 属性の解決基準に合わせ、explore の base_url は landed_url
-        # （リダイレクト後）を渡す（Codex #104 P1）。
+        # （リダイレクト後）を渡す。
         engine = self._engine(
             "http://fixture.test/", depth=1, allow_state_changing_probes=True
         )
@@ -585,7 +585,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_settle_redirect_refreshes_landed_url_and_blocks_explore(self):
         # settle 中の client-side redirect で out-of-scope へ移ったら、landed_url を採り直して
-        # explore ガードで弾く（古い in-scope 値でクリック探索しない・Codex #104 P1）。
+        # explore ガードで弾く（古い in-scope 値でクリック探索しない）。
         engine = self._engine(
             "http://fixture.test/", depth=1, allow_state_changing_probes=True
         )
@@ -599,7 +599,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_settle_redirect_out_of_scope_skips_iteration(self):
         # settle 中に out-of-scope へリダイレクトしたら、外部ドキュメントを CrawledPage
-        # として保存せず、そのイテレーションを中断する（Codex #104 P2）。
+        # として保存せず、そのイテレーションを中断する。
         engine = self._engine(
             "http://fixture.test/", depth=1, allow_state_changing_probes=True
         )
@@ -614,8 +614,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_active_spa_out_of_scope_landing_skips_iteration(self):
         # SPA モード有効時（明示 --spa-crawl 含む）は、検出イテレーションに限らず、
-        # navigate 内 settle で out-of-scope へ出た全ページで外部ドキュメントを保存しない
-        # （Codex #104 P2）。
+        # navigate 内 settle で out-of-scope へ出た全ページで外部ドキュメントを保存しない。
         engine = self._engine("http://fixture.test/", depth=1, spa_crawl=True)
         engine._browser = _ExternalRedirectSpaBrowser()
 
@@ -626,7 +625,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     def test_access_scope_allows_query_and_fragment_on_path_target(self):
         # path-scoped target に対し同一パスの ?query / #fragment は access 許可する
-        # （pagination/hash ルート探索を落とさない・Codex #104 P2）。
+        # （pagination/hash ルート探索を落とさない）。
         engine = self._engine("http://fixture.test/", depth=1)
         engine.target_urls = ["http://fixture.test/catalog"]
         self.assertTrue(engine._is_access_allowed_url("http://fixture.test/catalog?page=2"))
@@ -636,7 +635,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     def test_access_scope_query_target_allows_fragment_variant(self):
         # query 付きで明示スコープした target の fragment 付き変種は許可（fragment は
-        # サーバに送られない）。別 query は許可しない（Codex #104 P2）。
+        # サーバに送られない）。別 query は許可しない。
         engine = self._engine("http://fixture.test/", depth=1)
         engine.target_urls = ["http://fixture.test/action?op=save"]
         self.assertTrue(
@@ -648,7 +647,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_out_of_scope_landing_does_not_auto_enable_spa(self):
         # in-scope URL が access スコープ外の外部 SPA へリダイレクトしたら、
-        # マーカーがあっても自動有効化しない（外部ページを探索しない・Codex #104 P1）。
+        # マーカーがあっても自動有効化しない（外部ページを探索しない）。
         engine = self._engine(depth=1)
         engine._browser = _ExternalRedirectSpaBrowser()
 
@@ -657,19 +656,19 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(engine.spa_crawl)
 
     def test_page_fingerprint_is_origin_aware(self):
-        # 別 origin の構造的に同一なページは別 fingerprint（重複スキップで落とさない・Codex #104 P1）。
+        # 別 origin の構造的に同一なページは別 fingerprint（重複スキップで落とさない）。
         html = "<html><body><app-root></app-root><form><input name='q'></form></body></html>"
         fp_a = ScanEngine._page_fingerprint(html, "https://a.example/")
         fp_b = ScanEngine._page_fingerprint(html, "https://b.example/")
         self.assertNotEqual(fp_a, fp_b)
-        # scheme も含める（同一ホストの HTTP/HTTPS アプリを区別・Codex #104 P2）。
+        # scheme も含める（同一ホストの HTTP/HTTPS アプリを区別）。
         fp_http = ScanEngine._page_fingerprint(html, "http://a.example/")
         fp_https = ScanEngine._page_fingerprint(html, "https://a.example/")
         self.assertNotEqual(fp_http, fp_https)
 
     async def test_auto_spa_json_body_harvest_gated_on_probe_opt_in(self):
         # 自動有効化（既定 read-only）では非GET body の harvest→再送を行わない。
-        # 明示 opt-in（allow_state_changing_probes）でのみ json_injection_points を積む（Codex #104 P1）。
+        # 明示 opt-in（allow_state_changing_probes）でのみ json_injection_points を積む。
         json_pair = {
             "request": {
                 "method": "POST",
@@ -839,7 +838,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_postauth_landing_recorded_before_abort_at_first_wait(self):
         # 初回 post-auth ナビが成功した直後、BFS ループ先頭の abort でループ内 navigate に
-        # 到達しなくても、実際に読めたランディングが reached に残る（Codex #102 P2）。
+        # 到達しなくても、実際に読めたランディングが reached に残る。
         from wscan.intervention import AbortScan
 
         engine = self._engine("http://fixture.test/private", depth=1)

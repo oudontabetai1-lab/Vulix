@@ -1,7 +1,7 @@
 """WAFDetector が「署名が一致した応答」の最終到達 origin を記録することの検証。
 
 detect() は normal(resp) と anomaly probe(resp2) を送る。両者が別 origin に到達し得るため、
-planner fingerprint（G5）で WAF を正しい origin に帰属させるには、当たった側の origin を記録する。
+planner fingerprint で WAF を正しい origin に帰属させるには、当たった側の origin を記録する。
 """
 import asyncio
 

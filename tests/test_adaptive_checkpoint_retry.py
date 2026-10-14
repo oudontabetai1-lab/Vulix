@@ -119,7 +119,7 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_deadline_exceeded_does_not_mark_adaptive_done(self):
-        """#5(F06/0059): フィールド時間ボックス超過中は adaptive を完了化しない。
+        """フィールド時間ボックス超過中は adaptive を完了化しない。
 
         期限切れ deadline 下では送信が gate されて空振りするため、checkpoint を完了化すると
         resume が adaptive payload を恒久 skip する。break で未完のまま残す（resume 回収）。
@@ -144,7 +144,7 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         engine.adaptive_engine.generate.assert_not_awaited()
 
     async def test_truncation_during_scan_does_not_mark_adaptive_done(self):
-        """#4(F06/0059): pre-check で deadline 有効でも adaptive scan 実行中に期限切れになると
+        """pre-check で deadline 有効でも adaptive scan 実行中に期限切れになると
         scanner gate が _FIELD_BUDGET_TRUNCATED に記録し正常 return する。ここで mark_done すると
         resume が未送信 adaptive payload を恒久 skip する。truncated を再チェックし完了化しない。"""
         import wscan.engine as _eng

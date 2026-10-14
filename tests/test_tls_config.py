@@ -6,7 +6,7 @@ from pathlib import Path
 from wscan.tls_config import TLSConfig
 
 # CI のクリーン環境（requirements.txt のみ）でも動くよう、証明書は静的に埋め込む。
-# cryptography 等の未宣言パッケージへ依存しない（F05 の CI 失敗対策）。
+# cryptography 等の未宣言パッケージへ依存しない（CI 失敗対策）。
 # 用途はテスト専用の使い捨て自己署名証明書（CA:TRUE）。有効期限 2036 まで。
 _TEST_CERT_PEM = """-----BEGIN CERTIFICATE-----
 MIIDCzCCAfOgAwIBAgIUMv9bHmIhKKJveEL3v83vlrJ9zzAwDQYJKoZIhvcNAQEL
@@ -93,7 +93,7 @@ class TLSConfigTests(unittest.TestCase):
         )
 
     def test_httpx_builds_ssl_context_for_mtls(self):
-        # httpx 0.28 は cert=/verify=path を廃止。mTLS では明示 SSLContext を返す（F05）。
+        # httpx 0.28 は cert=/verify=path を廃止。mTLS では明示 SSLContext を返す。
         with tempfile.TemporaryDirectory() as d:
             cert, key = _write_self_signed(Path(d))
             cfg = TLSConfig.from_values(

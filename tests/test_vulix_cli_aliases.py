@@ -1,6 +1,6 @@
-"""0069 Phase1 残差分: `vulix` console_scripts エントリ と `replay` サブコマンドの後方互換。
+"""`vulix` console_scripts エントリ と `replay` サブコマンドの後方互換。
 
-中核（vulix/ re-export・docs 改称）は #174/#180 済。ここでは本 PR で足した2点だけを守る:
+中核（vulix/ re-export・docs 改称）は実装済み。ここでは追加した2点だけを守る:
   1. pyproject.toml の console_scripts `vulix` が vulix/__main__:main を指し、呼び出し可能。
   2. `replay` が `scan` の別名として動作し、flow/HAR 再生フラグ(--flows/--har)を受け、
      dispatch で run_scan へ委譲される（独立実装を足さない）。

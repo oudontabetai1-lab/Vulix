@@ -12,7 +12,7 @@ PAGE = "https://app.example.com/dashboard"
 
 
 class DocumentBodyTransientHtmlTests(unittest.IsolatedAsyncioTestCase):
-    """_document_body(html_only=True, allow_non_2xx=False)＝SRI の取得経路（Codex #147）。"""
+    """_document_body(html_only=True, allow_non_2xx=False)＝SRI の取得経路。"""
 
     def _sri(self, raw):
         engine = types.SimpleNamespace(browser=None, monitor=None, payload_gen=None,

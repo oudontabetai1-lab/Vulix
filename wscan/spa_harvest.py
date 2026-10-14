@@ -37,7 +37,7 @@ _STATIC_ASSET_SUFFIXES = (
 # - proxy-authorization: プロキシ認証は httpx_client_kwargs 側の設定に委ねる。
 # **Authorization / X-Api-Key / X-Auth-Token / X-Access-Token は敢えて残す**：SPA が JS でログイン後に
 # localStorage 等から付与する bearer/API トークンは `--header` でも cookie でもないため、落とすと
-# `auth_headers_for_url` が再構築できず、認証済み JSON エンドポイントが 401 で未スキャンになる（Codex #90 R3, P1）。
+# `auth_headers_for_url` が再構築できず、認証済み JSON エンドポイントが 401 で未スキャンになる。
 # テンプレは in-memory・非永続で、送信時は merge_template_headers が configured --header を優先し、
 # 永続/配信は record_finding=_redact_json_evidence_pair が _CREDENTIAL_HEADERS をマスクする（平文非保存）。
 _REPLAY_DROP_HEADERS = frozenset({
@@ -46,20 +46,20 @@ _REPLAY_DROP_HEADERS = frozenset({
     # 資格情報のことがあり、engine の単一 self.cookies（別ページ URL 同期の可能性）だけに頼ると
     # replay が 401/403 になる。captured Cookie を fallback として温存し、evidence では redact される
     # （cookie は sensitive 集合）。configured Cookie 優先や template URL 向け jar 同期は replay を持つ
-    # b2 の領分＝バックログ（#90 R14）。
+    # 側で今後対応する。
     # body 依存/転送エンコーディング系。JSON replay は葉を差し替えて body を再直列化するため、
-    # 元 body 用の checksum/encoding を残すと検証するサーバが全プローブを弾く（Codex #90 R6）。
+    # 元 body 用の checksum/encoding を残すと検証するサーバが全プローブを弾く。
     # 再計算しないので落とす。
     "content-md5", "digest", "content-digest", "content-encoding", "transfer-encoding",
     # accept-encoding: Chromium 観測値が br/zstd を広告し得るが、requirements の plain httpx は
     # それらの codec を持たないため、サーバがその codec を選ぶと replay の応答 read が例外→
     # _apply_json_payload が ("",{}) を返し当該 endpoint の全プローブが偽陰性になる。落として
-    # httpx が実行時に扱える codec だけを広告させる（#90 R11）。
+    # httpx が実行時に扱える codec だけを広告させる。
     "accept-encoding",
     # 注: Idempotency-Key の扱いは **replay 時のプローブ毎の再生成**が正解（削除だと必須キー API で
     # 400/422、温存だと冪等 API でキャッシュ返し）。どちらも b1（present but unfed）では replay しない
     # ため未決定にし、template には温存して b2 の attack replay で fresh key をプローブ毎に生成する
-    # （#90 R14・b2 バックログ）。ここでは落とさない。
+    # （今後の対応）。ここでは落とさない。
 })
 
 
@@ -170,24 +170,24 @@ def harvest_get_targets(
     return results
 
 
-# 1 body の parse/保持サイズ上限（target 支配下の巨大 JSON で CPU/メモリを食わせない・#90 R8）。
+# 1 body の parse/保持サイズ上限（target 支配下の巨大 JSON で CPU/メモリを食わせない）。
 _MAX_JSON_BODY_BYTES = 256 * 1024
 # Phase 1（parse 前）のメモリ/CPU 上限。noisy/hostile な SPA が大量の distinct JSON body を
-# 出しても、raw_first/buckets が無制限に post_data（各最大 256KiB）を保持しないよう有界化する
-# （#90 R21f）。max_targets は Phase 2 の parse 数のみを縛り Phase 1 は縛らないため別途必要。
+# 出しても、raw_first/buckets が無制限に post_data（各最大 256KiB）を保持しないよう有界化する。
+# max_targets は Phase 2 の parse 数のみを縛り Phase 1 は縛らないため別途必要。
 _MAX_PER_BUCKET = 64          # 1 endpoint バケツが保持する distinct body の上限（最古を evict）
 _MAX_TOTAL_CANDIDATES = 1024  # 全体で保持する distinct body の上限（Phase2 parse 予算に十分な余裕）
 
 # 値で operation を多重化する既知の discriminator キー（小文字）。これらの葉の**値**だけを identity に
-# 含め、timestamp/id/nonce 等の通常値は無視して同一注入 shape を 1 つに collapse する（#90 R9）。
+# 含め、timestamp/id/nonce 等の通常値は無視して同一注入 shape を 1 つに collapse する。
 _OPERATION_DISCRIMINATOR_KEYS = frozenset({
     "method", "operationname", "operation", "action", "op", "command", "cmd", "type",
     # 匿名 GraphQL は operationName を省き、operation を `query` フィールド（クエリ本文）で識別する
-    # ため query も discriminator に含める（#90 R10）。
+    # ため query も discriminator に含める。
     "query",
     # Apollo persisted query(APQ) は query/operationName を省き extensions.persistedQuery.sha256Hash で
     # operation を識別する。hash を discriminator に含めないと別 operation が collapse し片方が未 probe に
-    # なる（#90 R14）。leaf キー名で判定（値は operation ごとに安定なため通常値churn にはならない）。
+    # なる。leaf キー名で判定（値は operation ごとに安定なため通常値churn にはならない）。
     "sha256hash",
 })
 
@@ -197,11 +197,11 @@ def _collect_discriminators(node, tokens, out, *, depth_cap=None) -> None:
 
     enumerate_leaf_pointers は葉を 200 で打ち切るため、200 葉より後ろにある discriminator
     （例: 大きな body の末尾 method）を pointer 経由で拾うと取りこぼす。ここは parsed_body 全体を
-    直接歩いて discriminator を発見する（#90 R14）。**発見数の上限は設けない** ―― 先に現れた
+    直接歩いて discriminator を発見する。**発見数の上限は設けない** ―― 先に現れた
     discriminator 名の葉（nested な type 等）でカットオフすると、その後の operation selector（method）
-    を走査せず別 operation を collapse する（#90 R14）。
+    を走査せず別 operation を collapse する。
 
-    深さ上限は設けない（#90 R21b）: injectable な葉が浅くても discriminator（例: JSON-RPC method）が
+    深さ上限は設けない: injectable な葉が浅くても discriminator（例: JSON-RPC method）が
     8 段より深いと以前の depth_cap=8 で識別子を取りこぼし collapse していた。署名は
     ``tuple(sorted(disc))`` で順序非依存（_injection_signature）なので、明示スタックの反復 DFS で
     全走査してよい。json.loads 済み構造を歩くだけで深いネストでも RecursionError にならず、コストは
@@ -217,11 +217,11 @@ def _collect_discriminators(node, tokens, out, *, depth_cap=None) -> None:
                 key = str(k)
                 if key.lower() in _OPERATION_DISCRIMINATOR_KEYS:
                     if isinstance(v, (str, int, float, bool)):
-                        # repr で JSON 型を保持（{"action":1} と {"action":"1"} を区別・#90 R13）。
+                        # repr で JSON 型を保持（{"action":1} と {"action":"1"} を区別）。
                         out.append((path + (key,), repr(v)))
                     elif isinstance(v, (dict, list)):
                         # discriminator 値が非スカラ（{"type":{"name":"create"}} 等）でも別 operation を
-                        # 区別する。正規化 body の hash を署名に含め collapse を防ぐ（#90 FN-F）。
+                        # 区別する。正規化 body の hash を署名に含め collapse を防ぐ。
                         out.append((path + (key,), _canon_nonscalar(v)))
                 stack.append((v, path + (key,)))
         elif isinstance(cur, list):
@@ -237,12 +237,12 @@ def _canon_nonscalar(value) -> str:
         s = repr(value)
     # ハッシュ前に切り詰めない。SHA1 は任意長を扱え、正規化文字列は既に materialize 済み
     # なので prefix 切り詰めはコスト削減にならず、2048 字以降だけ異なる 2 operation が同一署名へ
-    # collapse して一方が未探索になる偽陰性を生む（#90 R21）。全文をハッシュする。
+    # collapse して一方が未探索になる偽陰性を生む。全文をハッシュする。
     return "ns:" + hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
 # 値ではなく**ヘッダ**で operation を選択する API のヘッダ名（小文字）。body/url が同一でも
-# これらの値が違えば別 operation なので、値を signature に含め collapse を防ぐ（#90 FN-E）。
+# これらの値が違えば別 operation なので、値を signature に含め collapse を防ぐ。
 # 例: AWS JSON プロトコル(X-Amz-Target)、SOAP(SOAPAction)、method override、GraphQL operation 名。
 _OPERATION_DISPATCH_HEADERS = frozenset({
     "x-amz-target", "soapaction", "x-http-method-override", "x-graphql-operationname",
@@ -266,7 +266,7 @@ def _injection_signature(parsed_body, pointers, headers=None) -> str:
     ＋operation-dispatch ヘッダの値を署名する。JSON-RPC method / GraphQL operationName /
     APQ sha256Hash / X-Amz-Target 等の operation は区別しつつ、timestamp/resource id/CSRF nonce/
     autosave 等の通常値変化は collapse して重複 probe を防ぐ。discriminator は **full body から**収集し、
-    200 葉上限を超えた位置の discriminator も拾う（#90 R14）。非スカラ discriminator 値も区別する（#90 FN-F）。"""
+    200 葉上限を超えた位置の discriminator も拾う。非スカラ discriminator 値も区別する。"""
     disc: list[tuple] = []
     try:
         _collect_discriminators(parsed_body, [], disc)
@@ -288,7 +288,7 @@ def _raw_content_type(request_headers) -> str | None:
 
 
 def _norm_content_type(ct) -> str:
-    """Content-Type を正規化（小文字・パラメータ除去）。operation identity 用（#90 R21c）。
+    """Content-Type を正規化（小文字・パラメータ除去）。operation identity 用。
 
     vendor media type（application/vnd.acme.v1+json vs v2+json）で版/operation を分ける API を、
     同一 method/url/body でも別 operation として identity に反映するため、raw/semantic 双方の
@@ -309,7 +309,7 @@ def _is_jsonish_content_type(ct: str) -> bool:
 # ※ text/plain は含めない ―― fetch() が Content-Type 未指定のとき、および navigator.sendBeacon は
 #   JSON 文字列を `text/plain;charset=UTF-8` で送る（CORS simple-request 回避パターン）。これを弾くと
 #   modern SPA の JSON API を丸ごと見逃す（偽陰性）。text/plain・content-type 無し・未知の text/* は
-#   Phase 2 の json.loads に最終判定を委ねる（#90 FN-A）。
+#   Phase 2 の json.loads に最終判定を委ねる。
 _NON_JSON_BODY_CT_MARKERS = (
     "application/x-www-form-urlencoded",
     "multipart/form-data",
@@ -359,14 +359,14 @@ def harvest_json_body_targets(
 
     ``is_in_scope`` は呼び出し側（engine）の精密スコープ判定（_is_attack_target_url かつ
     not _is_url_excluded）を url→bool で受け取る述語。body を parse/materialize する**前**に適用し、
-    対象外の大きな body を無駄に展開しない（CPU/メモリ保護・Codex #90 R3）。``max_targets`` は
+    対象外の大きな body を無駄に展開しない（CPU/メモリ保護）。``max_targets`` は
     実 parse 数（グローバル parse 作業）の上限。**endpoint バケツ間 round-robin で parse する**ため、
-    1 endpoint の値churn がこの予算を独占して他 endpoint を飢餓させない（#90 R14）。両者を engine から
+    1 endpoint の値churn がこの予算を独占して他 endpoint を飢餓させない。両者を engine から
     渡すことで、除外パスばかりの観測が有効ターゲットを飢餓させず、untrusted な大量観測でも parse が有界になる。
     """
     results: list[dict] = []
     # semantic identity (method, observed_url, body_signature) -> result idx。値まで含む正規化 body で、
-    # JSON-RPC/GraphQL のように**値で** operation を多重化する場合も別ターゲットに保つ（#90 R8）。
+    # JSON-RPC/GraphQL のように**値で** operation を多重化する場合も別ターゲットに保つ。
     seen_index: dict[tuple[str, str, str], int] = {}
     processed = 0  # 実 parse 数（グローバル parse 作業の上限＝max_targets）
 
@@ -385,7 +385,7 @@ def harvest_json_body_targets(
         except (TypeError, ValueError):
             cap = None
 
-        # --- Phase 1: フィルタ＋endpoint 単位のバケツ化（parse 前・#90 R14）---
+        # --- Phase 1: フィルタ＋endpoint 単位のバケツ化（parse 前）---
         # pairs を観測順に走査し cheap なフィルタ（method/scope/size/content-type）だけを適用。
         # 同一生 body（method,url,post_data）の連投は 1 entry に潰し、headers は最新観測へ更新する
         # （malformed の連投も生 body dedup で 1 回に潰れる＝負キャッシュ不要）。生き残った候補を
@@ -403,7 +403,7 @@ def harvest_json_body_targets(
 
                 method = str(request.get("method") or "").lower()
                 # DELETE も body を持てる（bulk-delete: `axios.delete(url,{data:{ids,reason}})`）。
-                # body 無し DELETE は下の post_data チェックで自然に落ちる（#90 FN-B）。
+                # body 無し DELETE は下の post_data チェックで自然に落ちる。
                 if method not in {"post", "put", "patch", "delete"}:
                     continue
 
@@ -432,13 +432,13 @@ def harvest_json_body_targets(
                 post_data = request.get("post_data")
                 if not isinstance(post_data, str):
                     continue
-                # C3: 1 body のサイズ上限（parse 前）。巨大 body でメモリ/CPU を食わせない。
+                # 1 body のサイズ上限（parse 前）。巨大 body でメモリ/CPU を食わせない。
                 if len(post_data) > _MAX_JSON_BODY_BYTES:
                     continue
-                # C4: content-type が**明示的に非 JSON（form/multipart/バイナリ）**なら budget 消費前に skip。
+                # content-type が**明示的に非 JSON（form/multipart/バイナリ）**なら budget 消費前に skip。
                 # content-type 無し・text/plain（fetch 既定/sendBeacon）・未知 text/* は JSON かもしれないので
                 # 候補に残し Phase 2 の json.loads に委ねる。text/plain を弾くと modern SPA の JSON API を
-                # 丸ごと見逃す（#90 FN-A）。form 大量送信は _is_non_json_body_ct で従来どおり弾く。
+                # 丸ごと見逃す。form 大量送信は _is_non_json_body_ct で従来どおり弾く。
                 raw_ct = _raw_content_type(request.get("headers"))
                 if raw_ct and _is_non_json_body_ct(raw_ct):
                     continue
@@ -447,34 +447,34 @@ def harvest_json_body_targets(
                 endpoint_url = parsed_url._replace(query="", fragment="").geturl()
                 request_headers = request.get("headers")
                 # 生 body dedup: 同一 (method,url,body) の連投(polling/autosave)は 1 entry に潰し、
-                # headers（refresh された Authorization/CSRF）だけ最新観測へ更新する（#90 R7）。
+                # headers（refresh された Authorization/CSRF）だけ最新観測へ更新する。
                 # ただし operation-dispatch ヘッダ(X-Amz-Target 等)の値まで含める ―― body が同一でも
-                # ヘッダで別 operation を選ぶ API を Phase 1 の raw dedup で潰さないため（#90 FN-E）。
+                # ヘッダで別 operation を選ぶ API を Phase 1 の raw dedup で潰さないため。
                 raw_key = (
                     method_upper, observed_url, post_data,
                     tuple(sorted(_dispatch_header_values(request_headers))),
-                    # 同一 body でも media type で operation/版を分ける API を区別（#90 R21c）。
+                    # 同一 body でも media type で operation/版を分ける API を区別。
                     _norm_content_type(raw_ct),
                 )
                 obs_seq += 1
                 existing = raw_first.get(raw_key)
                 if existing is not None:
                     # 同一生 body の再観測: headers を最新に、order も最新観測へ進める（A/B/A で
-                    # 古い collapse に上書きされて stale 認証を残さない・#90 R14）。
+                    # 古い collapse に上書きされて stale 認証を残さない）。
                     existing["request_headers"] = request_headers
                     existing["order"] = obs_seq
                     continue
                 # バケツキーは (method, observed_url)。queryless endpoint で束ねると ?op=create/
                 # ?op=delete や別 HTTP method の operation が同一バケツに入り、round-robin 公平配分が
-                # それらを区別できず片方を未 parse にする（#90 R14）。値churn は同一 observed_url なので
+                # それらを区別できず片方を未 parse にする。値churn は同一 observed_url なので
                 # 引き続き 1 バケツに束ねられ、fairness は保たれる。
                 bkey = (method_upper, observed_url)
                 bucket = buckets.get(bkey)
-                # Phase 1 有界化（#90 R21f/R21g）: バケツ満杯なら**このバケツの**最古 distinct を
+                # Phase 1 有界化: バケツ満杯なら**このバケツの**最古 distinct を
                 # evict（最新観測を保持）。全体上限に達したら**破棄でなく最大バケツから evict**して
                 # この候補を受け入れる ―― global cap を新規 distinct の一律 drop にすると、先行の
                 # high-churn バケツが予算を食い潰し**後発の別 endpoint が丸ごと未 bucket 化**して
-                # two-phase の endpoint fairness を壊す（#90 R21g）。endpoint-aware に最大バケツを
+                # two-phase の endpoint fairness を壊す。endpoint-aware に最大バケツを
                 # 削って後発 endpoint に foothold を与える。既存の再観測更新は上の existing 分岐で継続。
                 if bucket is not None and len(bucket) >= _MAX_PER_BUCKET:
                     evicted = bucket.pop(0)
@@ -500,11 +500,11 @@ def harvest_json_body_targets(
             except Exception:
                 continue
 
-        # --- Phase 2: バケツ間 round-robin parse（#90 R14）---
+        # --- Phase 2: バケツ間 round-robin parse ---
         # 各 endpoint バケツから 1 body ずつ順に parse し、global parse 予算(cap)まで繰り返す。
         # これにより 1 endpoint の値churn（多数の distinct body）が予算を独占して他 endpoint を
         # 飢餓させず（fair）、かつ churn endpoint の後続の genuine な新 operation も予算内で parse
-        # される（blacklist しない＝#90 R14 で give-up を撤去）。
+        # される（blacklist しない＝give-up を撤去）。
         bucket_lists = list(buckets.values())
         result_order: dict[int, int] = {}  # result idx -> 採用済み観測の order（最新のみ更新するため）
         depth = 0
@@ -521,12 +521,12 @@ def harvest_json_body_targets(
                 entry = blist[depth]
                 processed += 1
                 # per-entry 隔離: json.loads の RecursionError（深いネスト）や pointer 列挙の想定外
-                # 例外が 1 entry で起きても、それ以前の正常 target を巻き添えにしない（#90 R14）。
+                # 例外が 1 entry で起きても、それ以前の正常 target を巻き添えにしない。
                 try:
                     parsed_body = json.loads(entry["post_data"])
                     # container を要求しない。top-level スカラ（"term" / 42 / true / null）も valid JSON で、
                     # enumerate_leaf_pointers はそれをルート pointer "" で表し whole-body 置換に対応する。
-                    # container 限定にすると検索系など scalar body の endpoint が注入点を得られない（#90 R14）。
+                    # container 限定にすると検索系など scalar body の endpoint が注入点を得られない。
                     # 空 container は pointers が空になり下の not pointers で除外される。
                     pointers = enumerate_leaf_pointers(parsed_body)
                     if not pointers:
@@ -534,19 +534,19 @@ def harvest_json_body_targets(
                     content_type, headers = _extract_replay_headers(entry["request_headers"])
                     # 注入 shape の signature を identity に。pointer 集合＋operation discriminator の値
                     # ＋operation-dispatch ヘッダ(X-Amz-Target 等)の値で、JSON-RPC method/GraphQL/AWS JSON 等の
-                    # operation は区別しつつ、timestamp/id/nonce 等の通常値変化は collapse する（#90 R9/FN-E）。
+                    # operation は区別しつつ、timestamp/id/nonce 等の通常値変化は collapse する（/FN-E）。
                     body_signature = _injection_signature(
                         parsed_body, pointers, entry["request_headers"]
                     )
                     semantic_key = (
                         entry["method_upper"], entry["observed_url"], body_signature,
-                        _norm_content_type(content_type),  # media type で版/operation を分ける API を区別（#90 R21c）
+                        _norm_content_type(content_type),  # media type で版/operation を分ける API を区別
                     )
                     if semantic_key in seen_index:
                         # 注入 shape が同じ collapse（キー順違い or 通常値変化）。**最新観測（order 最大）
                         # だけ** headers/content_type/json_body を更新する。round-robin は観測順に並ばない
                         # ため、order で守らないと古い body（stale な CSRF nonce/version/id）で上書きして
-                        # replay が 403/409 になる（#90 R10/R14）。pointer 集合は同一なので注入点は不変。
+                        # replay が 403/409 になる。pointer 集合は同一なので注入点は不変。
                         idx = seen_index[semantic_key]
                         if entry["order"] >= result_order.get(idx, -1):
                             results[idx]["headers"] = headers
@@ -578,7 +578,7 @@ def harvest_json_body_targets(
 
 
 def allocate_pointers_round_robin(targets, cap) -> list[tuple[int, str]]:
-    """target 間で pointer を **round-robin** に配分する（純粋・#90 R13）。
+    """target 間で pointer を **round-robin** に配分する（純粋）。
 
     ``targets`` は各 dict が ``pointers`` (list) を持つ harvest 結果。``cap`` は配分する
     pointer の総数上限（engine のキュー残容量）。1 pass で各 target から 1 pointer ずつ取り、

@@ -39,7 +39,7 @@ def _origin_of(url: str) -> str:
 
 # severity に整合する代表 CVSS（score, vector）。OSV の深刻度は issue ごとに
 # critical〜low まで動くため、check_type 一律の _CVSS_TABLE 値ではなくこれを per-finding で渡す
-# （high/critical の脆弱ライブラリを medium 4.8 で出さない・Codex #155）。
+# （high/critical の脆弱ライブラリを medium 4.8 で出さない）。
 _SEV_CVSS: dict[str, tuple[float, str]] = {
     "critical": (9.1, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"),
     "high":     (7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
@@ -63,7 +63,7 @@ import re as _re
 
 # OSV は exact version でのみ advisory を正しく対応づけられる。CDN セレクタは jquery@3 /
 # jquery@3.4 / jquery@3.x のような非 exact も受けるため、これらを OSV へ送ると誤対応する。
-# major.minor.patch を先頭に持ち wildcard を含まないものだけ exact とみなす（Codex #155 P2）。
+# major.minor.patch を先頭に持ち wildcard を含まないものだけ exact とみなす。
 _EXACT_VERSION_RE = _re.compile(r"^\d+\.\d+\.\d+")
 
 
@@ -75,10 +75,10 @@ def _is_exact_version(version: str) -> bool:
 
 
 # 悪性ページが任意個の unique な version 風 URL を宣言して外部 OSV 照会を増幅するのを防ぐ
-# per-page 上限（unique はキャッシュを迂回するため・Codex #155 P2）。
+# per-page 上限（unique はキャッシュを迂回するため）。
 _OSV_MAX_PER_PAGE = 50
 # バナー由来の EOL 照会の per-page 上限。敵対的応答が大量の product/version を並べても同じ
-# product JSON への重複照会で外部 API 枠やスキャン時間を消費させない（Codex #155 P2）。
+# product JSON への重複照会で外部 API 枠やスキャン時間を消費させない。
 _EOL_MAX_PER_PAGE = 10
 
 
@@ -118,7 +118,7 @@ class OutdatedComponentScanner(BaseScanner):
 
     async def scan_page_context(self, page) -> list[Finding]:
         # CrawledPage 経由。full HTML と捕捉済み external_scripts（全件）を使い、
-        # 大きなページで末尾の script を取りこぼさない（Codex #155）。
+        # 大きなページで末尾の script を取りこぼさない。
         full_html = getattr(page, "html", None)
         scripts = getattr(page, "external_scripts", None) or {}
         return await self._run(getattr(page, "url", ""), full_html=full_html,
@@ -138,7 +138,7 @@ class OutdatedComponentScanner(BaseScanner):
         # 空 pair（408/429/5xx 等の transient）を「正常な空レスポンス」と取り違えない。
         # [] を返すと page-level ループが tested 完了として checkpoint を埋め、pair もキャッシュ済みで
         # この run 内の再試行もできず resume でも skip される。他の document 観測系と同様に
-        # PageDocumentUnavailable を投げ、engine に error（resume 再試行）扱いさせる（Codex #155）。
+        # PageDocumentUnavailable を投げ、engine に error（resume 再試行）扱いさせる。
         if not pair:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:page_unavailable")
             raise PageDocumentUnavailable(
@@ -170,8 +170,8 @@ class OutdatedComponentScanner(BaseScanner):
 
         # 外部照会は record_finding を**末尾まで遅延**する。各 _scan_* は finding の spec(kwargs)を
         # 集め、transient 失敗は invocation ローカルな state に記録する（self に持たせると
-        # --concurrency>1 で別 page と混信する・Codex #155）。transient があれば record 前に raise
-        # するので、dedup 汚染も配信漏れも起きず、resume で安全に再試行できる（Codex #155）。
+        # --concurrency>1 で別 page と混信する）。transient があれば record 前に raise
+        # するので、dedup 汚染も配信漏れも起きず、resume で安全に再試行できる。
         state = {"transient": False}
         specs: list[dict] = []
         # ① 技術バナー/CMS → endoflife.date で EOL 判定
@@ -200,7 +200,7 @@ class OutdatedComponentScanner(BaseScanner):
         return findings
 
     def _lookup_locks(self, attr: str):
-        """engine 単位の per-key ロック表を返す（in-flight 照会の直列化用・#155 P2）。"""
+        """engine 単位の per-key ロック表を返す（in-flight 照会の直列化用）。"""
         locks = getattr(self.engine, attr, None)
         if locks is None:
             locks = {}
@@ -211,7 +211,7 @@ class OutdatedComponentScanner(BaseScanner):
         return locks
 
     async def _cached_lookup(self, cache, locks_attr, key, compute):
-        """per-key ロックで in-flight 照会を直列化し、engine 単位キャッシュを共有する（#155 P2）。
+        """per-key ロックで in-flight 照会を直列化し、engine 単位キャッシュを共有する。
 
         --concurrency>1 では複数 worker が本 scanner とキャッシュを共有するが、cache チェックと
         await が非アトミックなため、同一サーババナー等で全 worker が同じ key を同時に不在と見て
@@ -276,7 +276,7 @@ class OutdatedComponentScanner(BaseScanner):
             sev = (info.get("max_severity") or "").lower()
             id_disp = ", ".join(ids[:5])
             # max_severity は取得した先頭サンプル（resultsPerPage 件）での最大であり、total 全件の
-            # 真の最大とは限らない（後続ページに上位 severity があり得る）。その旨を明示する（Codex #155）。
+            # 真の最大とは限らない（後続ページに上位 severity があり得る）。その旨を明示する。
             sampled = info.get("total", 0) > len(ids)
             sev_phrase = ""
             if info.get("max_severity"):
@@ -304,7 +304,7 @@ class OutdatedComponentScanner(BaseScanner):
                     "cve_count": info["total"], "cve_ids": ids,
                     "max_severity": info.get("max_severity", ""),
                     # 人間が辿る参照リンクは公開 UI サイト（nvd.nist.gov）。API ホスト
-                    # （services.nvd.nist.gov）由来の /vuln/search は存在せず 404 になる（Codex #155 P3）。
+                    # （services.nvd.nist.gov）由来の /vuln/search は存在せず 404 になる。
                     "reference": "https://nvd.nist.gov/vuln/search",
                 },
                 reproduction_steps=[
@@ -378,13 +378,13 @@ class OutdatedComponentScanner(BaseScanner):
                 evidence_details={
                     "product": comp.product, "version": comp.version, "source": comp.source,
                     "cycle": result.get("cycle"), "eol": eol_val, "latest": latest,
-                    # self-hosted eol_base_url の userinfo 等を evidence_details に残さない（Codex #155 P2）。
+                    # self-hosted eol_base_url の userinfo 等を evidence_details に残さない。
                     "reference": redact_url(f"{base_url.rstrip('/')}/{result.get('slug')}"),
                 },
                 reproduction_steps=[
                     f"Request {url}",
                     # CMS 由来は HTML（generator meta 等）から検出され得るので、存在しない 'cms'
-                    # ヘッダではなく CMS 検出の実根拠を示す（Codex #155 P3）。
+                    # ヘッダではなく CMS 検出の実根拠を示す。
                     (f"Inspect the page for the CMS detection evidence "
                      f"({comp.raw or 'generator meta tag / CMS asset paths'}) "
                      f"indicating {comp.product} {comp.version}")
@@ -406,9 +406,9 @@ class OutdatedComponentScanner(BaseScanner):
                 if (lib.name, lib.version) not in seen:
                     seen.add((lib.name, lib.version))
                     libs.append(lib)
-        # 非 exact version（CDN セレクタ由来の 3 / 3.4 / 3.x 等）は OSV へ送らない（誤対応防止・#155 P2）。
+        # 非 exact version（CDN セレクタ由来の 3 / 3.4 / 3.x 等）は OSV へ送らない（誤対応防止）。
         libs = [lib for lib in libs if _is_exact_version(lib.version)]
-        # per-page 上限で target 主導の外部照会増幅を抑止する（#155 P2）。
+        # per-page 上限で target 主導の外部照会増幅を抑止する。
         if len(libs) > _OSV_MAX_PER_PAGE:
             self._record_scan_note(
                 f"osv_lookup_capped:{self.CHECK_TYPE}:{len(libs)}>{_OSV_MAX_PER_PAGE}"
@@ -474,7 +474,7 @@ class OutdatedComponentScanner(BaseScanner):
             specs.append(dict(
                 url=url,
                 # 同一ページが同一パッケージの複数版を読む場合、版を identity に含めないと
-                # record_finding の dedup(field_name+check+evidence_type+url)で 2 つ目が消える・Codex #155。
+                # record_finding の dedup(field_name+check+evidence_type+url)で 2 つ目が消える・。
                 field_name=f"(Library: {lib.name}@{lib.version})",
                 payload="(no payload — JS library / OSV lookup)",
                 evidence=evidence,
@@ -488,7 +488,7 @@ class OutdatedComponentScanner(BaseScanner):
                     "library": lib.name, "version": lib.version, "ecosystem": lib.ecosystem,
                     # 署名/トークン付き script URL（?token=... 等）の資格情報を伏せる。これらは
                     # checkpoint/レポートへそのまま直列化され、Finding.to_dict の request URL 伏字化を
-                    # 迂回して artifact 読者へ漏れるため、格納前に redact する（Codex #155）。
+                    # 迂回して artifact 読者へ漏れるため、格納前に redact する。
                     "src": redact_url(lib.url), "osv_ids": ids, "cves": cves,
                     "max_severity": info["max_severity"],
                 },

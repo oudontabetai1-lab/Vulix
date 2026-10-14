@@ -1,4 +1,4 @@
-"""probe 台帳 recorder のユニットテスト（0032-B・簡素化 durability モデル）。
+"""probe 台帳 recorder のユニットテスト（簡素化 durability モデル）。
 
 単一 source（jsonl）＋write 失敗＝quarantine の規律を固定する:
 attempt_id 決定論・append-only 追記・manifest 集計・**write 失敗で quarantine・以後 append 拒否**・
@@ -161,7 +161,7 @@ def test_resume_skips_non_object_json_without_crash(tmp_path):
     led = ProbeLedger(tmp_path, "s")
     assert led.next_attempt_id() == "s:000004"
     assert led.manifest.to_dict()["total"] == 1
-    # 破損/非 object 行は証跡欠落＝gate を倒す（Codex P1）
+    # 破損/非 object 行は証跡欠落＝gate を倒す
     assert led.evidence_incomplete is True
     assert any(e["error"] == "ledger_rows_skipped_on_resume" for e in led.manifest.write_errors)
 
@@ -186,7 +186,7 @@ def test_resume_prior_incomplete_preserves_gate(tmp_path):
 
 
 def test_resume_detects_missing_rows(tmp_path):
-    # manifest total > 実在 jsonl 行＝行が失われている → evidence_incomplete（Codex P1）
+    # manifest total > 実在 jsonl 行＝行が失われている → evidence_incomplete
     (tmp_path / LEDGER_FILENAME).write_text(
         '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n', encoding="utf-8")
     (tmp_path / MANIFEST_FILENAME).write_text(json.dumps({"total": 3, "write_errors": []}),
@@ -197,7 +197,7 @@ def test_resume_detects_missing_rows(tmp_path):
 
 
 def test_resume_non_object_manifest_marks_incomplete(tmp_path):
-    # 非 object manifest（[]/null）で crash せず evidence_incomplete（Codex P2）
+    # 非 object manifest（[]/null）で crash せず evidence_incomplete
     (tmp_path / MANIFEST_FILENAME).write_text("[]", encoding="utf-8")
     led = ProbeLedger(tmp_path, "s")
     assert led.evidence_incomplete is True
@@ -231,7 +231,7 @@ def test_concurrent_appends_are_thread_safe(tmp_path):
 
 
 def test_manifest_write_failure_marks_incomplete(tmp_path):
-    # 最終 manifest 書出しが失敗したら evidence_incomplete を立てる（Codex P1）
+    # 最終 manifest 書出しが失敗したら evidence_incomplete を立てる
     led = ProbeLedger(tmp_path, "s")
     led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
     # manifest の出力先ディレクトリを消して write を失敗させる
@@ -250,7 +250,7 @@ def test_resume_non_utf8_manifest_handled(tmp_path):
 
 
 def test_truncated_tail_marks_evidence_gap(tmp_path):
-    # 不完全な末尾断片を truncate＝実行済み probe の証跡喪失→evidence_incomplete（Codex P1）
+    # 不完全な末尾断片を truncate＝実行済み probe の証跡喪失→evidence_incomplete
     path = tmp_path / LEDGER_FILENAME
     path.write_bytes(
         b'{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
@@ -262,7 +262,7 @@ def test_truncated_tail_marks_evidence_gap(tmp_path):
 
 
 def test_schema_invalid_rows_are_gaps(tmp_path):
-    # {} / foreign scan_id / 壊れ attempt_id / 語彙外 role は成功に数えず gap（Codex P1）
+    # {} / foreign scan_id / 壊れ attempt_id / 語彙外 role は成功に数えず gap
     (tmp_path / LEDGER_FILENAME).write_text(
         '{}\n'
         '{"scan_id":"OTHER","attempt_id":"x:000001","role":"attack"}\n'          # foreign scan
@@ -277,7 +277,7 @@ def test_schema_invalid_rows_are_gaps(tmp_path):
 
 
 def test_ledger_row_with_bad_utf8_quarantines(tmp_path):
-    # jsonl 行の不正バイト列で iteration が UnicodeDecodeError→crash させず quarantine（Codex P2）
+    # jsonl 行の不正バイト列で iteration が UnicodeDecodeError→crash させず quarantine
     (tmp_path / LEDGER_FILENAME).write_bytes(
         b'{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
         b'{"bad": "\xff\xfe not utf8"}\n'
@@ -288,7 +288,7 @@ def test_ledger_row_with_bad_utf8_quarantines(tmp_path):
 
 
 def test_manifest_write_failure_flag_clears_on_success(tmp_path):
-    # 一過性の manifest 書出し失敗→回復（retry 成功）で sticky flag が解除される（Codex P1）
+    # 一過性の manifest 書出し失敗→回復（retry 成功）で sticky flag が解除される
     led = ProbeLedger(tmp_path, "s")
     led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
     (tmp_path / MANIFEST_FILENAME).mkdir()          # os.replace 先が dir＝失敗
@@ -300,7 +300,7 @@ def test_manifest_write_failure_flag_clears_on_success(tmp_path):
 
 
 def test_foreign_attempt_id_prefix_rejected(tmp_path):
-    # attempt_id の prefix が scan_id と一致しない行は不正＝gap（Codex P1）
+    # attempt_id の prefix が scan_id と一致しない行は不正＝gap
     (tmp_path / LEDGER_FILENAME).write_text(
         '{"scan_id":"s","attempt_id":"other:999999","role":"attack","outcome":"matched"}\n'
         '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n',
@@ -312,7 +312,7 @@ def test_foreign_attempt_id_prefix_rejected(tmp_path):
 
 
 def test_append_lone_surrogate_quarantines(tmp_path):
-    # 文字列フィールドの lone surrogate で encode 失敗→crash させず quarantine（Codex P2）
+    # 文字列フィールドの lone surrogate で encode 失敗→crash させず quarantine
     led = ProbeLedger(tmp_path, "s")
     bad = ProbeAttemptRecord(
         scan_id="s", attempt_id=led.next_attempt_id(), role=ProbeRole.ATTACK,
@@ -322,7 +322,7 @@ def test_append_lone_surrogate_quarantines(tmp_path):
 
 
 def test_resume_detects_sequence_hole(tmp_path):
-    # 連番の穴（:000001 が無く :000002 のみ）＝並列採番後の crash 等→evidence_incomplete（Codex P1）
+    # 連番の穴（:000001 が無く :000002 のみ）＝並列採番後の crash 等→evidence_incomplete
     (tmp_path / LEDGER_FILENAME).write_text(
         '{"scan_id":"s","attempt_id":"s:000002","role":"attack","outcome":"matched"}\n',
         encoding="utf-8")
@@ -332,7 +332,7 @@ def test_resume_detects_sequence_hole(tmp_path):
 
 
 def test_resume_rejects_foreign_outcome(tmp_path):
-    # 語彙外 outcome の行は成功に数えず gap（Codex P1）
+    # 語彙外 outcome の行は成功に数えず gap
     (tmp_path / LEDGER_FILENAME).write_text(
         '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"bogus"}\n',
         encoding="utf-8")
@@ -342,7 +342,7 @@ def test_resume_rejects_foreign_outcome(tmp_path):
 
 
 def test_manifest_retry_persists_complete_state(tmp_path):
-    # 一過性の manifest 書出し失敗→retry 成功で、永続化 manifest は complete（Codex P2）
+    # 一過性の manifest 書出し失敗→retry 成功で、永続化 manifest は complete
     led = ProbeLedger(tmp_path, "s")
     led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
     led._manifest_write_failed = True  # 直前の write_manifest が一過性失敗したと仮定
@@ -353,7 +353,7 @@ def test_manifest_retry_persists_complete_state(tmp_path):
 
 
 def test_manifest_encode_failure_marks_incomplete(tmp_path):
-    # scan_id に lone surrogate → write_text が UnicodeEncodeError → incomplete（crash させない）（Codex P2）
+    # scan_id に lone surrogate → write_text が UnicodeEncodeError → incomplete（crash させない）
     led = ProbeLedger(tmp_path, "s\ud800bad")
     led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
     assert led.write_manifest() is False
@@ -361,7 +361,7 @@ def test_manifest_encode_failure_marks_incomplete(tmp_path):
 
 
 def test_append_rejects_foreign_scan_record(tmp_path):
-    # 別 scan のレコードを渡されたら正本へ書かず gap（Codex P1）
+    # 別 scan のレコードを渡されたら正本へ書かず gap
     led = ProbeLedger(tmp_path, "s")
     foreign = ProbeAttemptRecord(scan_id="OTHER", attempt_id="OTHER:000001",
                                  role=ProbeRole.ATTACK, outcome=ProbeOutcome.MATCHED)
@@ -372,7 +372,7 @@ def test_append_rejects_foreign_scan_record(tmp_path):
 
 
 def test_resume_detects_duplicate_attempt_ids(tmp_path):
-    # 重複 attempt_id は穴を隠しうる＝distinct 連番数で穴も重複も検知（Codex P1）
+    # 重複 attempt_id は穴を隠しうる＝distinct 連番数で穴も重複も検知
     (tmp_path / LEDGER_FILENAME).write_text(
         '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
         '{"scan_id":"s","attempt_id":"s:000003","role":"attack","outcome":"matched"}\n'
@@ -386,7 +386,7 @@ def test_resume_detects_duplicate_attempt_ids(tmp_path):
 
 
 def test_resume_rejects_unparseable_seq_suffix(tmp_path):
-    # isdigit だが int() 不能な suffix（非 ASCII 上付き数字）は valid にせず gap（Codex P2）
+    # isdigit だが int() 不能な suffix（非 ASCII 上付き数字）は valid にせず gap
     (tmp_path / LEDGER_FILENAME).write_text(
         '{"scan_id":"s","attempt_id":"s:\u00b2","role":"attack","outcome":"matched"}\n'
         '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n',

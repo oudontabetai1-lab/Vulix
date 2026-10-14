@@ -94,7 +94,7 @@ class TLSConfig:
 
         httpx 0.28 は ``cert=`` / ``verify="<path>"`` のショートカットを廃止し、
         クライアント証明書付き（mTLS）接続には ``ssl.SSLContext`` を要求する。旧実装は
-        ``cert=(crt,key)`` を渡していたため mTLS がサイレントに確立できなかった（F05）。
+        ``cert=(crt,key)`` を渡していたため mTLS がサイレントに確立できなかった。
         検証も client 証明書も不要なら ``None`` を返す（呼び出し側は verify=False）。
         """
         want_validation = self.verify_tls or bool(self.ca_cert)

@@ -1,4 +1,4 @@
-"""0035-C: typed facade が既存 dispatch の挙動を変えないことを fake で検証する。"""
+"""typed facade が既存 dispatch の挙動を変えないことを fake で検証する。"""
 from types import SimpleNamespace
 
 import pytest
@@ -122,7 +122,7 @@ async def test_dispatch_blocked_by_state_profile_does_not_send_or_log_twice():
     assert result.state is DispatchState.BLOCKED
     assert result.carrier is Carrier.FORM
     assert scanner.apply_calls == []
-    # legacy _apply_ip 経路と同じく blocked を観測ログへ1回だけ残す（0035-C レビュー3）。
+    # legacy _apply_ip 経路と同じく blocked を観測ログへ1回だけ残す。
     assert scanner.engine.wave_errors == ["state_change_skipped:fake"]
 
 
@@ -170,7 +170,7 @@ async def test_dispatch_rejects_noncanonical_location_before_apply(alias):
 @pytest.mark.asyncio
 async def test_dispatch_returns_unsupported_for_page_scanner_carrier():
     """page scanner（CONTRACT で query/form unsupported・_apply_payload 無し）に dispatch を
-    query で呼んでも _apply_ip へ達して AttributeError にならず UNSUPPORTED を返す（0035-C レビュー）。"""
+    query で呼んでも _apply_ip へ達して AttributeError にならず UNSUPPORTED を返す。"""
     from wscan.scanners.clickjacking import ClickjackingScanner
 
     scanner = ClickjackingScanner.__new__(ClickjackingScanner)
@@ -186,7 +186,7 @@ async def test_dispatch_returns_unsupported_for_page_scanner_carrier():
 @pytest.mark.asyncio
 async def test_dispatch_send_override_preserves_dom_xss_argument_order():
     """DOMXSSScanner の独自 _apply_payload シグネチャ (url, field_name, payload, form_index,
-    is_url_param) を facade が正しい順で呼ぶ（base の _apply_ip 順ではない）（0035-C レビュー）。"""
+    is_url_param) を facade が正しい順で呼ぶ（base の _apply_ip 順ではない）。"""
     from wscan.scanners.dom_xss import DOMXSSScanner
 
     scanner = DOMXSSScanner.__new__(DOMXSSScanner)
@@ -214,7 +214,7 @@ async def test_dispatch_send_override_preserves_dom_xss_argument_order():
 @pytest.mark.asyncio
 async def test_dispatch_unexecutable_when_no_compatible_driver():
     """CONTRACT が supported でも facade に互換 driver が無い scanner（標準 _apply_payload 無し・
-    _dispatch_send 未 override）は crash せず UNEXECUTABLE を返す（0035-C レビュー2）。"""
+    _dispatch_send 未 override）は crash せず UNEXECUTABLE を返す。"""
     class _NoDriverScanner(_FakeScanner):
         # _FakeScanner の _apply_ip override を外し、_apply_payload も持たない構成にする。
         _apply_ip = BaseScanner._apply_ip  # 標準 _apply_ip（_apply_payload を呼ぶ）
@@ -233,7 +233,7 @@ async def test_dispatch_unexecutable_when_no_compatible_driver():
 @pytest.mark.asyncio
 async def test_policy_block_precedes_driver_classification():
     """driver 不在の supported carrier でも policy が拒否するなら BLOCKED（＋skip 記録）を優先し、
-    UNEXECUTABLE で観測ログを落とさない（0035-C レビュー4・順序）。"""
+    UNEXECUTABLE で観測ログを落とさない（順序）。"""
     # driver 不在（標準 _apply_ip・_apply_payload 無し）かつ controlled-write で拒否される
     # 破壊的 FORM を用意する。
     class _NoDriverScanner(_FakeScanner):

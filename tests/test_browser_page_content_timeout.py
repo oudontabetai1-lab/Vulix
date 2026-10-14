@@ -1,4 +1,4 @@
-"""F06: get_page_source が page.content() の無限ハングで停止しないことを検証する。
+"""get_page_source が page.content() の無限ハングで停止しないことを検証する。
 
 realistic_site 通し E2E が SQLi 再検証の page.content() 待ちで 900 秒 timeout していた。
 待機を asyncio.wait_for で有界化したので、(1) ハングしても "" を返して速やかに戻る、
@@ -83,7 +83,7 @@ def test_caller_cancel_propagates_after_inner_drained():
     assert finished["v"]                       # 内側 task の cleanup 完了後に伝播した
 
 
-# --- dialog.dismiss() の有界化（F06/0059）--------------------------------
+# --- dialog.dismiss() の有界化--------------------------------
 
 class _HangingDialog:
     def __init__(self):
@@ -125,7 +125,7 @@ def _make_dialog_bm():
 
 def test_on_dialog_returns_quickly_when_dismiss_hangs():
     # alert() の dismiss() がハングしても _on_dialog は有界時間で戻る（以降のページ操作を
-    # wedge しない）。内側 task は cancel+drain され orphan future を残さない（F06/0059）。
+    # wedge しない）。内側 task は cancel+drain され orphan future を残さない。
     bm = _make_dialog_bm()
     dialog = _HangingDialog()
     with patch.object(browser_mod, "_DIALOG_DISMISS_TIMEOUT", 0.05):

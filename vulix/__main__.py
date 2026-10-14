@@ -1,6 +1,6 @@
 """``python -m vulix <subcommand> ...`` の入口。
 
-0069 Phase 1（加算的リブランド）: 現行 CLI（``main.py`` の argparse）へ**そのまま委譲**する
+現行 CLI（``main.py`` の argparse）へ**そのまま委譲**する
 薄いラッパ。既存の ``python main.py <subcommand>`` 挙動を一切変えない。
 
 サブコマンド別名（Vulix ブランド語彙）:

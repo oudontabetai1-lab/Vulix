@@ -1,4 +1,4 @@
-"""dispatcher facade の typed 結果（0035-C）。純粋・決定論。挙動は持たない。"""
+"""dispatcher facade の typed 結果。純粋・決定論。挙動は持たない。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

@@ -1,4 +1,4 @@
-"""_evolution_probe が navigate 失敗時に probe 投入をスキップすることの回帰テスト（G7/P1）。
+"""_evolution_probe が navigate 失敗時に probe 投入をスキップすることの回帰テスト。
 
 navigate() が False（timeout/HTTP エラー）のまま fill_and_submit_form を送ると、
 前 scanner の残存ページや別フォームへ probe が入り、観測を誤ったフィールドへ

@@ -67,7 +67,7 @@ def incomplete_commands(scan_result: Any) -> list[str]:
     """要求したのに COMPLETED しなかったコマンド名の一覧を返す（純粋）。
 
     一部コマンドだけ ERROR（例: TLS1.0 は成功だが Heartbleed/ROBOT が失敗）でも、
-    その失敗を黙って捨てて「issue 無しで検査成功」にしないためのシグナル（Codex #158）。
+    その失敗を黙って捨てて「issue 無しで検査成功」にしないためのシグナル。
     存在するフィールドのうち attempt が非 COMPLETED のものだけを返す（未取得は無視）。
     """
     sr = getattr(scan_result, "scan_result", None) or scan_result
@@ -99,7 +99,7 @@ _WEAK_PROTOCOLS = (
 
 
 # issue kind → CVSS v3.1 (score, vector)。severity バケツ一律ではなく、検出した脆弱性ごとの
-# 実 impact を反映する（Codex #158）。score は対応 vector から計算される基本値で自己整合する。
+# 実 impact を反映する。score は対応 vector から計算される基本値で自己整合する。
 #   - Heartbleed: メモリ over-read による機密性喪失のみ（完全性/可用性は無傷）→ C:H/I:N/A:N, AC:L。
 #   - CCS Injection: MITM による鍵材料奪取で復号＋改ざん → C:H/I:H/A:N, AC:H。
 #   - ROBOT / 弱プロトコル受理: 記録トラフィックの復号/ダウングレード（機密性）→ C:H/I:N/A:N, AC:H。

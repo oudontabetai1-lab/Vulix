@@ -1,4 +1,4 @@
-"""注入型 benchmark runner と反射 XSS 用の最小 HTTP executor（0034-R1）。"""
+"""注入型 benchmark runner と反射 XSS 用の最小 HTTP executor。"""
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, ExitStack
@@ -33,8 +33,8 @@ _MISSING = object()  # box に結果が「入っていない」ことを falsey 
 
 # spawn 済みでまだ完了していない worker 数を **プロセス横断**で数える予約カウンタ。per-call の
 # cap や「後から登録」方式だと、①長命プロセスが run_suite を繰り返すと cap 分ずつ跨いで累積
-# ②並行 run_suite が「確認」と「登録」の隙間で同時に spawn して cap を超過（TOCTOU）する
-# （Codex #133）。よって spawn 前に atomic に**予約**し、worker 完了時に解放する。ハングした
+# ②並行 run_suite が「確認」と「登録」の隙間で同時に spawn して cap を超過（TOCTOU）する。
+# よって spawn 前に atomic に**予約**し、worker 完了時に解放する。ハングした
 # worker は解放されないので予約が残り、cap がプロセス全体で正しく効く。
 _lingering_lock = threading.Lock()
 _reserved_workers = 0
@@ -42,7 +42,7 @@ _worker_limit: int | None = None  # プロセス横断の単一 limit（最初�
 
 
 def _establish_worker_limit(cap: int) -> None:
-    """プロセス横断の単一 limit を確立/検証する。異なる値の混在は拒否する（Codex #133）。
+    """プロセス横断の単一 limit を確立/検証する。異なる値の混在は拒否する。
 
     caller ごとに cap が違うと「自分の cap でしか判定しない」ため、cap1 の後 cap100 が
     大量予約して bound を回避できる。プロセス全体で一つの limit を強制し、不整合は loud に拒否。
@@ -146,28 +146,28 @@ class Finding(Protocol):
 
 @dataclass(frozen=True)
 class ScanOutcome:
-    """1 スキャンの結果。findings に加え「実際に攻撃した注入点」の集合を持つ（0034-R2）。
+    """1 スキャンの結果。findings に加え「実際に攻撃した注入点」の集合を持つ。
 
     ``exercised`` は ``(check, path, field, location)`` の集合。ran_checks（要求した check）だけ
     では「crawler が注入点に到達し実際に突いたか」が分からず、未実行の safe case を空マッチ＝TN
-    と誤計上して precision を水増しする（Codex #134 P1）。実行台帳から exercised を渡すことで、
+    と誤計上して precision を水増しする。実行台帳から exercised を渡すことで、
     突いていない case は NOT_REACHED（未計測）にできる。error/skip 行は「成功して突いた」ではない
     ので exercised に入れない。location も含め、同名の別 carrier を突いただけの case を exercised と
-    誤認しない（Codex #134 P2）。location の語彙は case.match.location と揃える（adapter が正規化）。
+    誤認しない。location の語彙は case.match.location と揃える（adapter が正規化）。
     """
 
     findings: list[Any]
     exercised: frozenset[tuple[str, str, str, str]] = frozenset()
     # このスキャンが実際にプロビジョニングした前提の集合（例: 認証済みなら auth_session）。
     # ScanEngineScanRunner は匿名スキャンなので空。前提を宣言した case のうち、ここに無いものは
-    # 契約未充足として UNSUPPORTED にし、満たされない環境で TP/FN/FP/TN を作らない（Codex #134 P2）。
+    # 契約未充足として UNSUPPORTED にし、満たされない環境で TP/FN/FP/TN を作らない。
     fulfilled_prerequisites: frozenset[str] = frozenset()
 
 
 # この scanner-backed adapter が忠実に採点できる carrier。query/form は field/location=form の
 # scan_matrix identity と一致する。json_body 等は scan_matrix の field/location が report 用
 # プレースホルダ（"(json-body)"/"(page)"）で finding の実 identity と一致せず、method 次元も台帳に
-# 無い。R2 はこれらを UNSUPPORTED にし、R3 で carrier 固有の実行 identity を導入する（Codex #134 P2）。
+# 無い。現状はこれらを UNSUPPORTED にし、carrier 固有の実行 identity は今後導入する。
 _SCOREABLE_CARRIERS = frozenset({"query", "form"})
 
 
@@ -178,7 +178,7 @@ def _multipart_scoreable_for_check(check: str) -> bool:
     採点できるが、それは scanner が実際に multipart を実行できる場合のみ。CONTRACT で multipart を
     SUPPORTED と宣言する check（file_upload 等）に限定し、multipart=PLANNED/UNSUPPORTED の scanner
     （XSS 等）の multipart case を採点対象にして unsupported coverage を TP/TN 化しない
-    （registry completeness の過大評価を防ぐ・Codex #148 P2）。
+    （registry completeness の過大評価を防ぐ）。
     """
     try:
         from wscan.scanner_contract import Carrier
@@ -217,7 +217,7 @@ def _location_compatible(case_location: str, other_location: str) -> bool:
     """宣言側と相手側（finding/実行台帳）の両方が location を持つときだけ一致を要求する。
 
     どちらかが空なら弁別できないので compatible とみなす（3 キー一致で採る）。両方 populated で
-    値が違うときのみ不一致＝別 carrier の取り違えを防ぐ（Codex #134 P2）。
+    値が違うときのみ不一致＝別 carrier の取り違えを防ぐ。
     """
     if not case_location or not other_location:
         return True
@@ -228,7 +228,7 @@ def _case_exercised(
     exercised: frozenset[tuple[str, str, str, str]],
     check: str, path: str, field: str, location: str,
 ) -> bool:
-    """実行台帳に (check, path, field) が location 互換で存在するか（Codex #134 P2）。"""
+    """実行台帳に (check, path, field) が location 互換で存在するか。"""
     return any(
         entry[0] == check and entry[1] == path and entry[2] == field
         and _location_compatible(location, entry[3])
@@ -237,7 +237,7 @@ def _case_exercised(
 
 
 def _finding_check_matches(finding_check: str, case_check: str) -> bool:
-    """finding の check_type が case の check ファミリに属するか（Codex #134 P2）。
+    """finding の check_type が case の check ファミリに属するか。
 
     engine の ``_check_type_in_scope`` と同型: 完全一致・``"<check>_"`` 前置（graphql_*/jwt_*/
     privesc_* 等のサブタイプ）・エイリアス表（cache_poisoning→cache_deception 等）で判定する。
@@ -260,7 +260,7 @@ def score_cases(
     """実 findings の候補/確証を照合する。期待値との比較は scorecard 側に委ねる。
 
     注入点が実際に突かれていない（exercised に無い）case は NOT_REACHED にし、TN/FN へ
-    混ぜない（未実行を陰性に計上しない・Codex #134 P1）。location が宣言されている場合は
+    混ぜない（未実行を陰性に計上しない）。location が宣言されている場合は
     finding.injection_location とも一致を要求し、同名 query/form の取り違えを防ぐ（P2）。
     """
     exercised = outcome.exercised
@@ -274,11 +274,11 @@ def score_cases(
         # info_disclosure 等）＝注入点を持たずページ/レスポンス自体を観測する check。field/location
         # （注入概念）で照合せず (check, path) で採点する。exercised は scan_page が記録する page-level
         # 行（field="(page)"/location="page-level"）を要求するので、「page-level スキャナが実際に
-        # そのページで走った」genuine な証拠に基づく（プレースホルダ誤マッチではない＝#141 の XML
-        # carrier 偽陽性とは別物）。passive 判定は injection 省略だけでなく **canonical な page identity**
+        # そのページで走った」genuine な証拠に基づく（プレースホルダ誤マッチではない＝XML
+        # carrier の偽陽性とは別物）。passive 判定は injection 省略だけでなく **canonical な page identity**
         # （match.field="(page)" かつ location="page-level"）も要求する。injection を偶発的に省いた
         # field carrier case を passive 化して field/location 照合を bypass し TP/FP を汚さない（そうした
-        # case は field≠"(page)" で passive にならず carrier ゲートで UNSUPPORTED になる・Codex #142 P2）。
+        # case は field≠"(page)" で passive にならず carrier ゲートで UNSUPPORTED になる）。
         _m = _attribute(case, "match", None)
         is_passive = (
             _attribute(case, "injection", None) is None
@@ -318,7 +318,7 @@ def score_cases(
                 or (
                     _attribute(finding, "field_name") == field
                     # location は「宣言側 *と* finding 側の両方が populated のときだけ」照合して carrier
-                    # を弁別する。finding が空のときは 3 キー一致で採る（Codex #134 P2）。
+                    # を弁別する。finding が空のときは 3 キー一致で採る。
                     and _location_compatible(location, _attribute(finding, "injection_location", ""))
                 )
             )
@@ -337,12 +337,12 @@ def run_scanned_suite(
 ) -> dict[str, Any]:
     """suite ごとに一度スキャンする。失敗/期限切れ時の部分 findings は採用しない。
 
-    強制停止できない worker は R1 と共有する予約枠に残る。実 runner 自身にも
+    強制停止できない worker は run_suite と共有する予約枠に残る。実 runner 自身にも
     cooperative timeout が必要で、この期限は待機を打ち切る backstop とする。
     """
     if not math.isfinite(scan_timeout) or scan_timeout <= 0:
         raise ValueError("scan_timeout must be finite and positive")
-    # R1 が設定済みならその共有 limit を尊重し、未設定時のみ既定値を確立する。
+    # run_suite が設定済みならその共有 limit を尊重し、未設定時のみ既定値を確立する。
     global _worker_limit
     with _lingering_lock:
         if _worker_limit is None:
@@ -404,7 +404,7 @@ def run_suite(
 
     daemon スレッドは「終了を待たない」だけで worker を止められないので、非協調的な
     executor（自前 I/O timeout 無し）や per_case_timeout が executor の I/O timeout より
-    短い設定だと、期限切れ worker が累積してプロセスを枯渇させうる（Codex #133）。よって
+    短い設定だと、期限切れ worker が累積してプロセスを枯渇させうる。よって
     生存中の worker が ``max_lingering_workers`` に達したら新規 case を起動せず、未処理を
     NOT_REACHED として run_error=worker_exhaustion で loud に打ち切る（黙って積み続けない）。
     """
@@ -479,8 +479,8 @@ class HttpxCaseExecutor(CaseExecutor):
 
     fixture の健全性チェック（脆弱は反射・安全は非反射）と runner 配管の検証に使う参照実装。
     製品の検出ロジック（XSSScanner/ScanEngine）を一切呼ばないので、**これで採点した scorecard は
-    製品スキャナの recall/回帰を測れない**（Codex #133 P1）。実スキャナを走らせて実 findings から
-    採点する scanner-backed executor は 0034-R2 で追加する。期待値との比較は集計側（build_scorecard）。
+    製品スキャナの recall/回帰を測れない**。実スキャナを走らせて実 findings から
+    採点する scanner-backed executor は で追加する。期待値との比較は集計側（build_scorecard）。
     """
 
     def __init__(self, timeout: float = 5.0) -> None:
@@ -493,7 +493,7 @@ class HttpxCaseExecutor(CaseExecutor):
         #  - carrier は query/form のみ。
         #  - **前提を1つでも持つ case は UNSUPPORTED**。auth_session/multi_account/second_request/
         #    oob_sink/api_spec 等はこのオラクルが一切セットアップしないので、満たされないまま反射だけで
-        #    採点すると TP/FN/FP/TN を汚染する。browser だけでなく全前提を弾く（Codex #133 P2）。
+        #    採点すると TP/FN/FP/TN を汚染する。browser だけでなく全前提を弾く。
         if (
             case.check != "xss"
             or injection is None

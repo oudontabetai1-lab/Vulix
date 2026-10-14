@@ -180,7 +180,7 @@ class LDAPScanner(BaseScanner):
             field_name, "normaluser", "ldap_baseline", ip.url
         )
         try:
-            # 0035-D1: typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
+            # typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
             # source が非空のことがある。state で分岐して捨てず判定は従来どおり source/pair のみ）。
             baseline_html = (await self.dispatch(ip, "normaluser")).source
         except Exception as exc:

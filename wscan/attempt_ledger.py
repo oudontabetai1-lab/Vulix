@@ -2,8 +2,8 @@
 
 default → evolution → mutation → adaptive の各波が同じ注入点へ投げた payload と
 その応答メタ（status/len/reflected/timing/error）を1箇所へ蓄積する。層内 dedup しか
-持たなかった従来（0007-D5）を横断台帳へ引き上げ、baseline LLM 生成のステートレス性
-（0006-G1）と応答の捨て置き（0006-G2）を解消する共通基盤。
+持たなかった従来を横断台帳へ引き上げ、baseline LLM 生成のステートレス性
+と応答の捨て置きを解消する共通基盤。
 
 判定ロジックではなく**観測の記録**に徹する純粋データ構造（CLAUDE.md: 判定は決定論
 スキャナが握る／検出ロジックは純粋関数に分離）。プロンプト整形も純粋関数に切り出し、
@@ -33,7 +33,7 @@ def neutralize_payload_for_prompt(payload: str, max_len: int = 120) -> str:
     """
     # 改行・タブ・制御文字（行構造・命令行注入の起点）を単一空白へ。
     # ASCII 制御に加え、Python の str.splitlines() が行境界として分割する Unicode 行区切り
-    # ——NEL(U+0085) / LINE SEPARATOR(U+2028) / PARAGRAPH SEPARATOR(U+2029)——も潰す
+    # ——NEL(U+) / LINE SEPARATOR(U+2028) / PARAGRAPH SEPARATOR(U+2029)——も潰す
     # （これらを残すとプロンプトブロックが別の論理行に割れ、閉じ backtick が攻撃テキストの
     # 後ろに残って命令注入が成立しうる）。
     cleaned = re.sub(r"[\x00-\x1f\x7f\x85\u2028\u2029]+", " ", payload)

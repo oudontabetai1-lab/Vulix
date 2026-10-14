@@ -1,4 +1,4 @@
-"""per-finding 通知タスクの並行 drain 回帰（#107 Codex P2）。
+"""per-finding 通知タスクの並行 drain 回帰。
 
 検出/昇格通知は ensure_future で非ブロッキングに投げ、_drain_notifications が
 gather する。await 直列化（低速 webhook で verify がブロック）を避けつつ取りこぼさない。

@@ -89,7 +89,7 @@ class PreAuthLoginScanTests(unittest.TestCase):
         self.assertIn("page", captured)
         self.assertEqual(captured["page"].url, "http://app.test/login")
         self.assertTrue(captured["page"].forms)
-        # pre-auth 検査では pre-attack flow を実行しない（#167 P2）。
+        # pre-auth 検査では pre-attack flow を実行しない。
         self.assertFalse(captured.get("run_pre_attack_flows", True))
         # Navigated to the login page in the (still unauthenticated) context.
         self.assertIn("http://app.test/login", engine._browser.navigated)

@@ -1,4 +1,4 @@
-"""0069 Phase1: vulix が wscan の主要 API を同一オブジェクトで re-export する。"""
+"""vulix が wscan の主要 API を同一オブジェクトで re-export する。"""
 import vulix
 import vulix.__main__ as vulix_main
 import wscan.engine

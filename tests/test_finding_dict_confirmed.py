@@ -1,4 +1,4 @@
-"""finding_dict_confirmed の解決規則と SARIF 後方互換の回帰（#107 Codex P2）。
+"""finding_dict_confirmed の解決規則と SARIF 後方互換の回帰。
 
 verified 欠落の旧 dict や verification_state だけの dict を未確証へ格下げしない。
 """
@@ -38,14 +38,14 @@ def test_sarif_unverified_is_note_and_excluded_from_confirmed_total():
 
 
 def test_state_overrides_legacy_verified_boolean():
-    # 旧 dict で state="assumed" と旧既定 verified=True が同居しても未確証（#107 P1）。
+    # 旧 dict で state="assumed" と旧既定 verified=True が同居しても未確証。
     assert finding_dict_confirmed({"verification_state": "assumed", "verified": True}) is False
     # 逆に reproduced なら stale な verified=False より state を優先し confirmed。
     assert finding_dict_confirmed({"verification_state": "reproduced", "verified": False}) is True
 
 
 def test_agent_source_dict_without_state_is_hypothesis():
-    # 生 AgentFinding dict（source=agent, verified/state 無し）は confirmed 既定に落とさない（#107 P2 防御）。
+    # 生 AgentFinding dict（source=agent, verified/state 無し）は confirmed 既定に落とさない。
     assert finding_dict_confirmed({"source": "agent", "agent_verified": False}) is False
     # 旧スキャナ dict（source 非 agent）は従来の confirmed 既定を保つ。
     assert finding_dict_confirmed({"source": "scanner"}) is True

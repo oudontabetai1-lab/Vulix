@@ -33,7 +33,7 @@ def test_origin_key_variants():
 
 
 def test_origin_key_normalizes_default_ports():
-    # デフォルトポートは省いて同一 origin を1つのキーにする（R12）。
+    # デフォルトポートは省いて同一 origin を1つのキーにする。
     assert origin_key("https://example.com:443/path") == "https://example.com"
     assert origin_key("https://example.com/path") == "https://example.com"
     assert origin_key("http://example.com:80/x") == "http://example.com"
@@ -139,13 +139,13 @@ def test_non_dict_and_missing_payload_rows_are_skipped():
 
 
 def test_domain_scoped_stats_are_not_double_counted(tmp_path):
-    """G4 が使う domain 限定・非二重計上バケツ（include_global=False）を固定する。
+    """学習サマリのプロンプト注入が使う domain 限定・非二重計上バケツ（include_global=False）を固定する。
 
     本番の唯一経路（engine._record_finding）は success=True・domain 付きで記録し、record は
     global と domain の両バケツへ書く。したがって:
       - stats(domain=X)                    … global+domain を加算＝二重計上（tries 2 → 4）
       - stats(domain=X, include_global=False) … domain 単体＝正確な per-target カウント
-    G4 は後者を使う。
+    プロンプト注入は後者を使う。
     """
     lf = tmp_path / "learn.json"
     learner = PayloadLearner(learning_file=str(lf))
@@ -157,7 +157,7 @@ def test_domain_scoped_stats_are_not_double_counted(tmp_path):
                       if r["payload"] == "<svg onload=x>")
     assert row_merged["tries"] == 4
 
-    # G4 経路: domain 単体は二重計上しない。
+    # プロンプト注入経路: domain 単体は二重計上しない。
     rows_scoped = learner.stats("xss", domain="a.test", include_global=False)
     block = format_learning_for_prompt(rows_scoped)
     assert "- `<svg onload=x>` -> 2/2 succeeded" in block
@@ -165,7 +165,7 @@ def test_domain_scoped_stats_are_not_double_counted(tmp_path):
 
 def test_legacy_hostname_bucket_used_for_sorting_not_prompt(tmp_path):
     """後方互換: 旧 hostname 学習は **並べ替え（ローカル）** では使うが、**プロンプト（外部送信）**
-    では使わない（R13）。旧データは同一ホストの全 scheme/port に現れるため、プロンプトへ混ぜると
+    では使わない。旧データは同一ホストの全 scheme/port に現れるため、プロンプトへ混ぜると
     別 origin のプロンプトへ payload が漏れる。並べ替えは既存候補の順序を変えるだけで安全。"""
     lf = tmp_path / "learn.json"
     learner = PayloadLearner(learning_file=str(lf))

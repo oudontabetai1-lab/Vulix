@@ -19,7 +19,7 @@ from wscan.verification_model import (
 
 
 def test_state_values_match_base_py_strings():
-    # base.py の verification_state 文字列（#105 RESULT-001）と一致＝str Enum で相互運用可
+    # base.py の verification_state 文字列と一致＝str Enum で相互運用可
     assert VerificationState.REPRODUCED == "reproduced"
     assert VerificationState.ASSUMED == "assumed"
     assert VerificationState.UNREPRODUCED == "unreproduced"

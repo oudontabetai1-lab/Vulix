@@ -254,7 +254,7 @@ def test_finalize_reports_incomplete_when_final_artifact_write_fails(
 
 def test_real_manifest_failure_downgrades_durable_checkpoint(tmp_path):
     # 実際の manifest 書き込み失敗（_evidence_failed が立つ）後も downgrade checkpoint を永続化し、
-    # agent_state.json が complete のまま残らない（Codex #154 P2）。
+    # agent_state.json が complete のまま残らない。
     harness = AgentHarness(tmp_path, spec())
     harness.manifest_path.mkdir()  # os.replace が失敗する（ディレクトリ）
     status = harness.finalize(success=True, coverage_complete=True)
@@ -342,7 +342,7 @@ def test_short_secret_preserves_candidate_id_through_resume_and_verification(tmp
 
 
 def test_redaction_happens_before_truncation(tmp_path):
-    # 境界を跨ぐ JSON 秘密の先頭を永続化しない（Codex #154 P1）。
+    # 境界を跨ぐ JSON 秘密の先頭を永続化しない。
     harness = AgentHarness(tmp_path, spec())
     item = harness.enqueue(AgentRole.EXPLORER, "http://fixture.test")
     harness.next_work()
@@ -352,7 +352,7 @@ def test_redaction_happens_before_truncation(tmp_path):
 
 
 def test_trace_failure_persists_evidence_incomplete_state(tmp_path):
-    # trace 等で _evidence_failed が立ち manifest は書ける場合も、最終 state を durable に揃える（Codex #154 P1）。
+    # trace 等で _evidence_failed が立ち manifest は書ける場合も、最終 state を durable に揃える。
     harness = AgentHarness(tmp_path, spec())
     harness._evidence_failed = True
     harness.state.evidence_errors.append("trace_write:OSError")
@@ -362,7 +362,7 @@ def test_trace_failure_persists_evidence_incomplete_state(tmp_path):
 
 
 def test_loop_detection_considers_page_state(tmp_path):
-    # URL 固定でも DOM が進んでいれば loop としない（Codex #154 P2）。
+    # URL 固定でも DOM が進んでいれば loop としない。
     harness = AgentHarness(tmp_path, spec(max_steps=20), repeat_threshold=3)
     for step, state in enumerate(("s1", "s2", "s3", "s4"), start=1):
         record = harness.record_step(

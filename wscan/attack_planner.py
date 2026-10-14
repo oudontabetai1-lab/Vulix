@@ -335,7 +335,7 @@ class PageAttackPlan:
 # ---------------------------------------------------------------------------
 
 def _safe_int(value, default: int) -> int:
-    """LLM 由来の値を安全に int 化する（None/非数値/範囲外文字列は default・#92 r7）。"""
+    """LLM 由来の値を安全に int 化する（None/非数値/範囲外文字列は default）。"""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -343,7 +343,7 @@ def _safe_int(value, default: int) -> int:
 
 
 def _is_complete_plan(d) -> bool:
-    """LLM 応答 object が完全な attack-plan か（純粋・#92 r4/r5/r6）。
+    """LLM 応答 object が完全な attack-plan か（純粋）。
 
     list 値の fields を持ち、その中に **dict でかつ非空 name を持つ要素が最低 1 つ** ある
     ことを要求する。page_purpose だけの metadata・空 fields 下書き・文字列要素だけの
@@ -567,7 +567,7 @@ Consider stored / second-order attacks carefully:
         with self.payload_gen.use_role("planner"):
             # role モデルは context 内でのみ解決される（claude_model 等は _active_role 依存の
             # property）。監査に「実際に使ったモデル」を残すため context 内で捕捉する。context を
-            # 抜けた後に読むと provider 既定に戻ってしまう（Codex #172 P2）。
+            # 抜けた後に読むと provider 既定に戻ってしまう。
             _resolved_model = getattr(self.payload_gen, f"{provider}_model", "") or ""
             if provider == "claude":
                 raw = await self._call_claude(prompt)
@@ -577,10 +577,10 @@ Consider stored / second-order attacks carefully:
                 raw = await self._call_gemini(prompt)
             else:
                 raw = await self._call_ollama(prompt)
-        # LLM 呼び出し観測性（0065）。planner は complete_text 非経由の自前実装なので個別記録する。
+        # LLM 呼び出し観測性。planner は complete_text 非経由の自前実装なので個別記録する。
         # timeout_seconds は各 provider の実効 HTTP timeout（claude は SDK stream で明示 deadline を
-        # 持たないため None・Codex #172 P2）。失敗種別の transient/permanent 細分は self-streaming
-        # 経路の status 露出（#173 の streaming-deadline と同経路）を要する follow-up で対応する。
+        # 持たないため None）。失敗種別の transient/permanent 細分は self-streaming
+        # 経路の status 露出（streaming-deadline と同経路）を要する follow-up で対応する。
         _planner_timeout = {"openai": 90.0, "ollama": 90.0, "gemini": 90.0}.get(provider)
         record_llm_call(
             self.payload_gen, provider=provider, role="planner",
@@ -588,7 +588,7 @@ Consider stored / second-order attacks carefully:
             timeout_seconds=_planner_timeout, elapsed_seconds=_time.monotonic() - _t0,
             status=("ok" if raw else "empty"),
             # Claude は Anthropic SDK が透過 retry しうるため実回数不明＝None。OpenAI/Gemini/Ollama の
-            # 自前 helper は httpx 1 回きりで retry ループを持たないので 0 と確定できる（Codex #172 P2）。
+            # 自前 helper は httpx 1 回きりで retry ループを持たないので 0 と確定できる。
             retries=(None if provider == "claude" else 0),
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(raw) if isinstance(raw, str) else 0,
@@ -612,7 +612,7 @@ Consider stored / second-order attacks carefully:
             _timeout = self.payload_gen.llm_stream_timeout_seconds
 
             # AsyncAnthropic の単一 create を wait_for(_timeout) で縛る（猶予なし・executor 不使用で
-            # cancel が HTTP リクエストを打ち切る・Codex #173 P2）。max_retries=0 で SDK retry も抑止。
+            # cancel が HTTP リクエストを打ち切る）。max_retries=0 で SDK retry も抑止。
             _c = (client.with_options(timeout=_timeout, max_retries=0)
                   if hasattr(client, "with_options") else client)
             resp = await asyncio.wait_for(
@@ -678,7 +678,7 @@ Consider stored / second-order attacks carefully:
                             pass
         try:
             # scalar httpx timeout は操作単位のため、streaming 全体を wait_for で有界化する
-            # （llm_stream_timeout_seconds を1応答の上限として効かせる・Codex #173 P2）。
+            # （llm_stream_timeout_seconds を1応答の上限として効かせる）。
             await asyncio.wait_for(_run(), timeout=self.payload_gen.llm_stream_timeout_seconds)
             _thinking_footer()
             if status_holder["bad"] is not None:
@@ -740,7 +740,7 @@ Consider stored / second-order attacks carefully:
                         except (json.JSONDecodeError, KeyError, IndexError):
                             pass
         try:
-            # scalar httpx timeout は操作単位のため streaming 全体を wait_for で有界化する（Codex #173 P2）。
+            # scalar httpx timeout は操作単位のため streaming 全体を wait_for で有界化する。
             await asyncio.wait_for(_run(), timeout=self.payload_gen.llm_stream_timeout_seconds)
             _thinking_footer()
             if status_holder["bad"] is not None:
@@ -789,14 +789,14 @@ Consider stored / second-order attacks carefully:
 
     def _parse_llm_response(self, url: str, raw: str) -> Optional[PageAttackPlan]:
         """Parse the LLM's JSON response into a PageAttackPlan."""
-        # D7: フォールバック連鎖で JSON オブジェクトを頑健に抽出（`<think>`/フェンス/
+        # フォールバック連鎖で JSON オブジェクトを頑健に抽出（`<think>`/フェンス/
         # 前置き/貪欲マッチの取りこぼしを解消）。前置きに無関係な object があっても、
         # **attack-plan スキーマ（fields/page_purpose を持つ）** に合う候補まで探索する。
         # 合致無し/壊れは None＝ヒューリスティックへ安全側フォールバック。
         from .llm_output_parser import extract_json_object
         # 完全な plan スキーマ（**非空** list 値の fields を持つ）を要求する。page_purpose
         # だけの前置き metadata や、下書きの zero-field object（{"fields":[]}）を採用して
-        # heuristic を握りつぶさないため（Codex #92 r4/r5）。_llm_plan は入力ゼロなら
+        # heuristic を握りつぶさないため。_llm_plan は入力ゼロなら
         # _parse 前に return するので、このパスでは有効 plan は必ず 1 つ以上の field を持つ。
         # 空 fields なら候補探索を続け、無ければ None＝heuristic fallback。
         data = extract_json_object(
@@ -811,13 +811,13 @@ Consider stored / second-order attacks carefully:
 
         for fd in data.get("fields", []):
             # 非 dict 要素（{"fields":["username"]} のような文字列）は skip する。
-            # predicate ですり抜けても fd.get(...) の AttributeError を出さない防御（#92 r6）。
+            # predicate ですり抜けても fd.get(...) の AttributeError を出さない防御。
             if not isinstance(fd, dict):
                 continue
             name = str(fd.get("name", ""))
             if not name:
                 continue
-            # collection-valued メンバは **malformed 値耐性** で読む（#92 r7）。LLM は
+            # collection-valued メンバは **malformed 値耐性** で読む。LLM は
             # priority_checks:null / custom_payloads:null / 非 list を返しうる。dict.get の
             # default は「キー欠落時のみ」効き値が None のときは None を返すため、型を明示
             # 検査して None/非コレクションは空扱いにする。1 フィールドの型崩れで analyze_page

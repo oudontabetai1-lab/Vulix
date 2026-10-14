@@ -329,10 +329,10 @@ class SecretLeakScanner(BaseScanner):
 
         # 対象リソースの本文は直接 GET で確実に取得する。current_page_pair は latest() フォールバックで
         # 別リクエストの pair を返し body が欠落しうるため、JS アセット等の本文を取りこぼして FN になる
-        # （0034 benchmark で /static/vendor.js の埋め込み秘密を検出できなかった原因）。
+        # （benchmark で /static/vendor.js の埋め込み秘密を検出できなかった原因）。
         # content 観測系は _document_body で本文を得る。secret_leak は 401/403/404/500 等の error/auth
         # 応答本文に漏れた秘密も走査する必要があるため、恒久非 2xx でも**本文を保持**する（transport_error も
-        # 刻まない・Codex #147 P2）。transient/完全失敗のみ PageDocumentUnavailable（resume 再試行）。
+        # 刻まない）。transient/完全失敗のみ PageDocumentUnavailable（resume 再試行）。
         # live DOM へはフォールバックしない（wrong-page FP/FN 防止）。header 監査と per-URL raw キャッシュ共有。
         body = await self._document_body(url)
         if not body:

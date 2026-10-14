@@ -523,7 +523,7 @@ def create_app() -> FastAPI:
     def _crawl_link(spec: dict) -> str:
         # GET パラメータ系エンドポイントは代表的なクエリ文字列付きでリンクする。
         # こうしないとクローラがパラメータ名を field_queue に積めず、E2E で
-        # ref/url/dest/title 等が未検査（false negative）になる（Codex 指摘 #1）。
+        # ref/url/dest/title 等が未検査（false negative）になる。
         field = spec.get("field")
         if not (field and re.fullmatch(r"[A-Za-z_]\w*", field)):
             return spec["path"]
@@ -779,7 +779,7 @@ def create_app() -> FastAPI:
             extra_head=(
                 f'<script src="{_CHART_SRC}" crossorigin="anonymous" '
                 # chart.umd.min.js@4.4.1 の実 digest（openssl sha384→base64）。実ブラウザでも
-                # 読み込める機能する safe twin にする（旧値は別ライブラリの hash だった・Codex #147 P2）。
+                # 読み込める機能する safe twin にする（旧値は別ライブラリの hash だった）。
                 'integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4">'
                 "</script>"
             ),

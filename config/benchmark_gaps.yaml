@@ -1,4 +1,4 @@
-# benchmark registry gaps（0034-B）
+# benchmark registry gaps
 # registry の各 scanner のうち、まだ E2E benchmark の ground truth case を持たないものを
 # 「明示 INCOMPLETE」として owner_task/deadline 付きで承認する記録。黙って未計測にしない。
 # benchmark manifest に vulnerable/safe twin case を足したら、その check を gaps から外す。
@@ -18,7 +18,7 @@ gaps:
     owner_task: "0034"
     deadline: "2026-12-31"
   csrf:
-    reason: DOM 依存 page-level scanner が navigation 前に実行され宣言ページを観測しない（engine._attack_one_page の順序課題・Codex #183 P1）。修正後に case 追加
+    reason: DOM 依存 page-level scanner が navigation 前に実行され宣言ページを観測しない（engine._attack_one_page の順序課題）。修正後に case 追加
     owner_task: "0034"
     deadline: "2026-12-31"
   deserialization:
@@ -30,7 +30,7 @@ gaps:
     owner_task: "0034"
     deadline: "2026-12-31"
   info_disclosure:
-    reason: DOM 依存 page-level scanner が navigation 前に実行され宣言ページを観測しない（engine._attack_one_page の順序課題・Codex #183 P1）。修正後に case 追加
+    reason: DOM 依存 page-level scanner が navigation 前に実行され宣言ページを観測しない（engine._attack_one_page の順序課題）。修正後に case 追加
     owner_task: "0034"
     deadline: "2026-12-31"
   mail_header:

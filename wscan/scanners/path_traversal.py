@@ -127,7 +127,7 @@ class PathTraversalScanner(BaseScanner):
         await self.log_payload_test(
             field_name, "baseline_test_value", "path_traversal_baseline", ip.url
         )
-        # 0035-D1: typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま
+        # typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま
         # 取り出す（非 SENT でも source が非空のことがある＝pair 未捕捉のフォーム送信。
         # state で分岐して捨てると偽陰性になるため判定は従来どおり source/pair のみ）。
         baseline_result = await self.dispatch(ip, "baseline_test_value")

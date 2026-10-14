@@ -127,7 +127,7 @@ def test_meaningful_and_unknown_query_keys_are_preserved_without_reencoding():
 
 def test_query_order_is_preserved():
     # クエリ順は app 定義で order-sensitive なため観測順を保持する（別 operation を
-    # 同一 identity にしない・Codex #103 P1）。
+    # 同一 identity にしない）。
     assert normalize_url_for_key("https://h/p?a=1&b=2") != normalize_url_for_key(
         "https://h/p?b=2&a=1"
     )
@@ -239,7 +239,7 @@ def test_stable_key_parts_ledger_url_is_stable_across_rotating_tokens():
 
 def test_path_trailing_slash_preserved_when_query_follows():
     from wscan.url_normalize import normalize_url_for_key as n
-    # クエリが続くと /app/?x と /app?x は別（baseline 挙動・Codex #103 P1）。
+    # クエリが続くと /app/?x と /app?x は別（baseline 挙動）。
     assert n("http://h/app/?mode=x") != n("http://h/app?mode=x")
     assert n("http://h/app/?mode=x") == "http://h/app/?mode=x"
     # クエリ無しでは /app/ と /app は同一（吸収）。
@@ -250,7 +250,7 @@ def test_path_trailing_slash_preserved_when_query_follows():
 
 def test_opaque_query_octet_does_not_abort_normalization():
     from wscan.url_normalize import normalize_url_for_key as n
-    # 非 UTF-8 percent-encoded オクテットで正規化全体を無効化しない（Codex #103 P2）。
+    # 非 UTF-8 percent-encoded オクテットで正規化全体を無効化しない。
     a = n("http://h/p?blob=%FF&nonce=1699999999")
     b = n("http://h/p?blob=%FF&nonce=1700000001")
     assert a == b  # 回転 nonce は除去され同一キー
@@ -260,7 +260,7 @@ def test_opaque_query_octet_does_not_abort_normalization():
 
 def test_spa_fragment_path_slash_is_distinct_and_idempotent():
     from wscan.url_normalize import normalize_url_for_key as n
-    # 保持 SPA fragment の前の path スラッシュは区別する（Codex #103）。
+    # 保持 SPA fragment の前の path スラッシュは区別する。
     assert n("http://h/app/#/admin") != n("http://h/app#/admin")
     assert n("http://h/app/#/admin") == "http://h/app/#/admin"
     # 冪等（keep_frag/query_str は正規化後も不変）。
@@ -271,7 +271,7 @@ def test_spa_fragment_path_slash_is_distinct_and_idempotent():
 
 def test_empty_query_delimiter_is_preserved_and_idempotent():
     from wscan.url_normalize import normalize_url_for_key as n
-    # /p と /p? は区別する（明示的空クエリ・Codex #103 P2）。
+    # /p と /p? は区別する（明示的空クエリ）。
     assert n("http://h/p") != n("http://h/p?")
     assert n("http://h/p") == "http://h/p"
     assert n("http://h/p?") == "http://h/p?"
@@ -319,7 +319,7 @@ def test_endpoint_identity_ignores_payloads_order_duplicates_and_fragment():
     assert endpoint_identity("https://a/search?q=<script>&tag=1") == endpoint_identity(
         "https://a/search?q=%3Cscript%3E&q=1%27&tag=1#anchor"
     )
-    # 観測順は保持する（順序で操作を選ぶアプリを同一 identity に潰さない・Codex #154 P1）。
+    # 観測順は保持する（順序で操作を選ぶアプリを同一 identity に潰さない）。
     assert endpoint_identity("https://a/wf?action=transfer&stage=confirm") != endpoint_identity(
         "https://a/wf?stage=confirm&action=transfer"
     )
@@ -344,7 +344,7 @@ def test_endpoint_identity_collapses_injection_values(value):
     "https://evil.com", "//evil.com", "gopher://x/y",
 ])
 def test_endpoint_identity_collapses_url_valued_payloads(value):
-    # SSRF/open-redirect の URL 値はメタ文字無し・短くても payload として畳む（budget 膨張防止・#154 P1）。
+    # SSRF/open-redirect の URL 値はメタ文字無し・短くても payload として畳む（budget 膨張防止）。
     from urllib.parse import urlencode
     from wscan.url_normalize import endpoint_identity
     assert endpoint_identity("/go?" + urlencode({"next": value})) == "/go?next="
@@ -360,7 +360,7 @@ def test_endpoint_identity_url_payloads_do_not_blow_up_but_routes_stay_distinct(
 
 @pytest.mark.parametrize("value", ["/home", "/admin", "/a/b/c", "/"])
 def test_endpoint_identity_preserves_slash_routing_values(value):
-    # `/` を含む path/route 値は payload ではなく routing 値として保持する（Codex #154 P1）。
+    # `/` を含む path/route 値は payload ではなく routing 値として保持する。
     from urllib.parse import urlencode
     from wscan.url_normalize import endpoint_identity
 
@@ -390,7 +390,7 @@ def test_endpoint_identity_distinguishes_routes():
 
 def test_route_aware_identity_normalizes_payload_in_fragment_query():
     # SPA route fragment 内の query payload も正規化し、payload 変種で probe が膨張しないこと。
-    # route path 自体（/search vs /admin）は区別を保つ（Codex #154 P1）。
+    # route path 自体（/search vs /admin）は区別を保つ。
     from wscan.url_normalize import route_aware_identity
     # 注入 payload 変種は fragment 内でも同一 identity へ畳む（budget 膨張防止）。
     assert route_aware_identity("http://h/app#/search?q=<script>") == \
@@ -404,7 +404,7 @@ def test_route_aware_identity_normalizes_payload_in_fragment_query():
 
 
 def test_route_aware_identity_distinguishes_hash_routes():
-    # hash ルート SPA は fragment を保持して別 identity にする（Codex #154 P1・偽 COMPLETE 防止）。
+    # hash ルート SPA は fragment を保持して別 identity にする（偽 COMPLETE 防止）。
     from wscan.url_normalize import route_aware_identity, endpoint_identity
 
     assert route_aware_identity("http://h/app#/users") != route_aware_identity("http://h/app#/admin")
@@ -427,7 +427,7 @@ def test_route_aware_identity_ignores_non_route_fragment():
 
 
 def test_route_aware_identity_normalizes_url_payload_in_fragment_query():
-    # fragment query の URL 値（SSRF/open-redirect payload）も空化し、probe 変種で再帰 enqueue しない（Codex #154 P1）。
+    # fragment query の URL 値（SSRF/open-redirect payload）も空化し、probe 変種で再帰 enqueue しない。
     from wscan.url_normalize import route_aware_identity
     assert route_aware_identity("http://h/app#/redirect?next=https://evil.com") == \
         route_aware_identity("http://h/app#/redirect?next=//169.254.169.254/")

@@ -324,7 +324,7 @@ python3 main.py scan URL [URL ...] [options]
 | `URL` | 必須 | 検査対象 URL（複数指定可。先頭がクロール起点、以降は追加攻撃スコープ） |
 | `-p, --payloads FILE` | `output.payloads_file` / なし | カスタムペイロード YAML |
 | `--checks CHECK...` | `sqli xss os` | 実行するチェック。選択肢は「対応チェック種別」参照 |
-| `--all-checks` | 無効 | 登録済みの全 scanner を実行（`--checks` を上書き）。全検査カバレッジを一度に得る（0016） |
+| `--all-checks` | 無効 | 登録済みの全 scanner を実行（`--checks` を上書き）。全検査カバレッジを一度に得る |
 | `-d, --depth N` | `2` | クロール深度 |
 | `--headless` | `browser.headless` (`false`) | ブラウザ非表示 |
 | `--no-monitor` | monitor 有効 | ライブモニターを無効化（HTML レポートの自動表示も抑止） |

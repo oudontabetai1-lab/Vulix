@@ -1,4 +1,4 @@
-"""F08: triage の LLM 分析（散文）を payload 配列パーサへ通さず保持する。
+"""triage の LLM 分析（散文）を payload 配列パーサへ通さず保持する。
 
 以前は `pg._call_llm`（→`_extract_json_list`）に散文を通して失い、結果欄に文字列 "None" を
 出していた。text 完了で生の分析文を保持し、空応答/失敗は空欄で区別することを検証する。

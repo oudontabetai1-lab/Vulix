@@ -1,6 +1,6 @@
 """base.py が検証状態を VerificationState enum を正本に扱うことの回帰。
 
-挙動は #105 と不変（str Enum なので文字列比較と等価）。canonical 語彙の採用を固定する。
+挙動は従来と不変（str Enum なので文字列比較と等価）。canonical 語彙の採用を固定する。
 """
 from wscan.scanners.base import Finding, finding_dict_confirmed
 from wscan.verification_model import VerificationState

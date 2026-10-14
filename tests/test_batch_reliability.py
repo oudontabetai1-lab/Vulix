@@ -1,8 +1,8 @@
-"""F01/F02: batch の LLM 設定変換と全失敗時の終了コードの回帰テスト。
+"""batch の LLM 設定変換と全失敗時の終了コードの回帰テスト。
 
-- F01: `global.llm` を `llm_provider` へ写像せずそのまま渡すと ScanEngine が
+- `global.llm` を `llm_provider` へ写像せずそのまま渡すと ScanEngine が
   未知 kwarg で TypeError となり全対象が開始前に失敗する。
-- F02: 全対象失敗でも CLI 終了 0・「合計0件」で自動運用が成功と誤認する。
+- 全対象失敗でも CLI 終了 0・「合計0件」で自動運用が成功と誤認する。
 """
 import asyncio
 import textwrap
@@ -25,7 +25,7 @@ def test_global_llm_is_mapped_to_llm_provider(tmp_path):
 
     runner = BatchRunner.load_from_yaml(str(yaml_path))
 
-    # そのまま llm= で渡すと ScanEngine が TypeError → 全対象失敗（F01）。
+    # そのまま llm= で渡すと ScanEngine が TypeError → 全対象失敗。
     assert "llm" not in runner.global_kwargs
     assert runner.global_kwargs.get("llm_provider") == "none"
 

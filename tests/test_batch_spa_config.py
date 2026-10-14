@@ -1,4 +1,4 @@
-"""batch 経路で SPA 自動有効化の opt-out が効くことを検証する（Codex #104 P2）。"""
+"""batch 経路で SPA 自動有効化の opt-out が効くことを検証する。"""
 from __future__ import annotations
 
 import textwrap

@@ -209,7 +209,7 @@ def test_dashboard_selector_defaults_and_scan_payload_are_wired():
 @pytest.mark.parametrize("action", ["/deleteAccount", "/payments", "/checkoutSession",
                                     "/account/delete", "/transferFunds", "/removeItems"])
 def test_looks_destructive_matches_identifier_style_urls(action):
-    # camelCase/複数形の identifier も破壊語として検出する（#109 P2）。
+    # camelCase/複数形の identifier も破壊語として検出する。
     from wscan.state_profile import looks_destructive
     assert looks_destructive(method="POST", action=action) is True
 
@@ -229,7 +229,7 @@ class _ConcreteScanner(BaseScanner):
 
 
 def test_gate_uses_url_when_action_is_benign():
-    # action が benign でも url が destructive なら controlled-write は送信しない（#109 P1・XXE 経路）。
+    # action が benign でも url が destructive なら controlled-write は送信しない（XXE 経路）。
     engine = SimpleNamespace(state_profile="controlled-write", wave_errors=[])
     scanner = _ConcreteScanner.__new__(_ConcreteScanner)  # __init__ を回避（engine 属性のみ必要）
     scanner.engine = engine
@@ -244,7 +244,7 @@ def test_gate_uses_url_when_action_is_benign():
 
 
 def test_always_state_changing_scanner_gated_as_post():
-    # 常時状態変更 scanner（deserialization 等）は GET url_param でも read-only で skip（#109 P1）。
+    # 常時状態変更 scanner（deserialization 等）は GET url_param でも read-only で skip。
     from wscan.scanners.deserialization import DeserializationScanner
     from wscan.scanners.sqli import SQLiScanner
 
@@ -263,7 +263,7 @@ def test_always_state_changing_scanner_gated_as_post():
 
 
 def test_page_level_always_state_changing_gated():
-    # page-level 常時状態変更 scanner（graphql）は read-only で scan_page を skip（#109 P1）。
+    # page-level 常時状態変更 scanner（graphql）は read-only で scan_page を skip。
     from wscan.scanners.graphql import GraphQLScanner
 
     g = GraphQLScanner.__new__(GraphQLScanner)

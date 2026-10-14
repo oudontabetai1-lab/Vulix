@@ -187,7 +187,7 @@ def test_passive_finding_field_location_ignored():
 def test_injection_omitted_without_page_identity_is_unsupported():
     """injection を省いても canonical page identity（field="(page)"/location="page-level"）が
     無ければ passive にせず UNSUPPORTED にする（偶発省略の field carrier を passive 化して
-    field/location 照合を bypass し TP/FP を汚さない・Codex #142 P2）。
+    field/location 照合を bypass し TP/FP を汚さない）。
     """
     suite = _passive_suite()
     # canonical でない match（url_param の field 名）に差し替え、injection は None のまま。
@@ -202,7 +202,7 @@ def test_injection_omitted_without_page_identity_is_unsupported():
 
 def test_non_field_carrier_is_unsupported(suite):
     """field carrier（query/form）以外は UNSUPPORTED。xss は multipart 非対応なので multipart も
-    UNSUPPORTED（Codex #134 P2 / #148 P2）。"""
+    UNSUPPORTED。"""
     from wscan.scanner_contract import Carrier
     # xss の CONTRACT は multipart=PLANNED（SUPPORTED でない）ため multipart も採点対象外。
     for carrier in (Carrier.JSON, Carrier.HEADER, Carrier.COOKIE, Carrier.MULTIPART):
@@ -215,7 +215,7 @@ def test_non_field_carrier_is_unsupported(suite):
 def test_multipart_scoreable_only_for_capable_check():
     """multipart は scanner が CONTRACT で SUPPORTED を宣言する check（file_upload）でのみ採点対象。
     非対応 scanner（xss=PLANNED）の multipart case を採点して unsupported coverage を TP/TN 化しない
-    （registry completeness 過大評価の防止・Codex #148 P2）。"""
+    （registry completeness 過大評価の防止）。"""
     assert br._carrier_scoreable_for_check("file_upload", "multipart") is True
     assert br._carrier_scoreable_for_check("xss", "multipart") is False
     # query/form は capability に関係なく常に採点可。
@@ -224,7 +224,7 @@ def test_multipart_scoreable_only_for_capable_check():
 
 
 def test_unprovisioned_prerequisite_is_unsupported(suite):
-    """前提を宣言した case は、スキャンがそれを用意したときだけ採点する（Codex #134 P2）。"""
+    """前提を宣言した case は、スキャンがそれを用意したときだけ採点する。"""
     case = replace(suite.cases[0], prerequisites=("auth_session",))
     s = replace(suite, cases=(case,))
     ex = exercised_of(s)
@@ -238,7 +238,7 @@ def test_unprovisioned_prerequisite_is_unsupported(suite):
 
 
 def test_unexercised_case_is_not_reached(suite):
-    """宣言された注入点をスキャンが突いていない case は NOT_REACHED（TN/FN に混ぜない・Codex #134 P1）。"""
+    """宣言された注入点をスキャンが突いていない case は NOT_REACHED（TN/FN に混ぜない）。"""
     # exercised に vulnerable だけ入れ、safe(/help query) は未実行にする。
     vuln = suite.cases[0]
     exercised = frozenset({(vuln.check, vuln.match.path, vuln.match.field, vuln.match.location)})
@@ -250,7 +250,7 @@ def test_unexercised_case_is_not_reached(suite):
 
 
 def test_other_carrier_exercised_is_not_reached(suite):
-    """同名 field でも別 carrier だけ突いた場合は NOT_REACHED（location を exercised に含める・#134 P2）。"""
+    """同名 field でも別 carrier だけ突いた場合は NOT_REACHED（location を exercised に含める）。"""
     vuln = suite.cases[0]  # location=form
     # 実行台帳には url_param だけ（form は突いていない）。case は form なので未計測扱い。
     exercised = frozenset({(vuln.check, vuln.match.path, vuln.match.field, "url_param")})
@@ -259,7 +259,7 @@ def test_other_carrier_exercised_is_not_reached(suite):
 
 
 def test_location_disambiguates_findings(suite):
-    """同名 field でも injection_location が異なれば candidate にしない（Codex #134 P2）。"""
+    """同名 field でも injection_location が異なれば candidate にしない。"""
     # vulnerable case は location=form。url_param 由来 finding は別 carrier なので一致しない。
     other = ScanOutcome(findings=[finding(injection_location="url_param")], exercised=exercised_of(suite))
     assert not br.score_cases(suite, other, ran_checks={"xss"})[0].candidate_match
@@ -272,7 +272,7 @@ def test_location_disambiguates_findings(suite):
 
 
 def test_subtype_and_alias_findings_match_check_family(suite):
-    """サブタイプ/エイリアスの finding も check ファミリに一致させ FN にしない（Codex #134 P2）。"""
+    """サブタイプ/エイリアスの finding も check ファミリに一致させ FN にしない。"""
     # 完全一致（xss）は当然一致。<check>_ 前置（xss_stored）も一致する。
     for ct in ("xss", "xss_stored"):
         outcome = ScanOutcome(findings=[finding(check_type=ct)], exercised=exercised_of(suite))
@@ -353,7 +353,7 @@ def test_timeout_validation(suite, timeout):
 
 
 def test_default_scan_timeout_exceeds_runner_default():
-    """外側 backstop の既定は内側 runner の既定より大きい（健全な scan を誤って中断しない・#134 P2）。"""
+    """外側 backstop の既定は内側 runner の既定より大きい（健全な scan を誤って中断しない）。"""
     import inspect
     outer = inspect.signature(br.run_scanned_suite).parameters["scan_timeout"].default
     inner = inspect.signature(ScanEngineScanRunner.__init__).parameters["timeout"].default
@@ -370,7 +370,7 @@ def test_empty_suite(suite):
 
 
 def test_exercised_from_scan_matrix_filters_status_and_normalizes_location():
-    """tested/finding だけ exercised に入れ error/skip を除く・location を正規化（Codex #134 P1/P2）。"""
+    """tested/finding だけ exercised に入れ error/skip を除く・location を正規化。"""
     from wscan.benchmark_scan import _exercised_from_scan_matrix
     rows = [
         {"check": "xss", "url": "http://h/search?q=1", "field_name": "q", "location": "form field", "status": "finding"},
@@ -385,7 +385,7 @@ def test_exercised_from_scan_matrix_filters_status_and_normalizes_location():
 
 
 def test_degraded_checks_excluded_from_exercised():
-    """transport 握りつぶし等が観測された check の tested 行は exercised から除く（Codex #134 P1）。"""
+    """transport 握りつぶし等が観測された check の tested 行は exercised から除く。"""
     from wscan.benchmark_scan import _exercised_from_scan_matrix, _degraded_checks
     wave = ["transport_error:xss: NavigationError: boom", "unexecutable_template:mass_assignment",
             "state_change_skipped:sqli"]  # state_change は劣化ではない
@@ -396,7 +396,7 @@ def test_degraded_checks_excluded_from_exercised():
     assert _exercised_from_scan_matrix(tested, degraded_checks=degraded) == frozenset()
     # 劣化していなければ入る。
     assert _exercised_from_scan_matrix(tested, degraded_checks=frozenset())
-    # finding 行は送達の陽性証拠なので、同 check が劣化していても残す（Codex #134 P2）。
+    # finding 行は送達の陽性証拠なので、同 check が劣化していても残す。
     found = [{"check": "xss", "url": "http://h/s?q=1", "field_name": "q", "location": "form field", "status": "finding"}]
     assert _exercised_from_scan_matrix(found, degraded_checks=degraded) == frozenset(
         {("xss", "/s", "q", "form")}
@@ -404,7 +404,7 @@ def test_degraded_checks_excluded_from_exercised():
 
 
 def test_field_budget_exceeded_excluded_from_exercised():
-    """#6(F06/0059): フィールド時間ボックス超過で打ち切った check の tested 行は exercised から除く。
+    """フィールド時間ボックス超過で打ち切った check の tested 行は exercised から除く。
 
     _field_budget_gate は ('',{}) を返すため _scan_field が status="tested" を記録するが、未送信
     probe が残る＝送達していない。field_budget_exceeded: を degraded 扱いにし NOT_REACHED にすることで、
@@ -418,7 +418,7 @@ def test_field_budget_exceeded_excluded_from_exercised():
 
 
 def test_field_budget_degradation_scoped_per_injection_point():
-    """R4#2(0059/F06): IP 情報付き field_budget note は当該 injection point だけを NOT_REACHED にし、
+    """IP 情報付き field_budget note は当該 injection point だけを NOT_REACHED にし、
     同 check の別 field の完全実行行を巻き込まない（check 全体 degrade で誤 NOT_REACHED 化しない）。"""
     from wscan.benchmark_scan import (
         _exercised_from_scan_matrix, _degraded_checks, _field_budget_degraded_ips,
@@ -446,7 +446,7 @@ def test_field_budget_degradation_scoped_per_injection_point():
 
 
 def test_field_budget_degradation_scoped_per_carrier():
-    """Codex #181 P2: 同 path/field 名の form と URL param のうち、打ち切った carrier だけ NOT_REACHED。"""
+    """同 path/field 名の form と URL param のうち、打ち切った carrier だけ NOT_REACHED。"""
     from wscan.benchmark_scan import _exercised_from_scan_matrix, _field_budget_degraded_ips
     wave = ["field_budget_exceeded:sqli:/p|q|URL param"]
     ips = _field_budget_degraded_ips(wave)
@@ -469,7 +469,7 @@ def test_field_budget_legacy_note_degrades_whole_check():
 
 
 def test_degraded_passive_page_row_excluded():
-    """passive の page-level tested 行も、その check が劣化していれば exercised から除く（Codex #142 P2）。
+    """passive の page-level tested 行も、その check が劣化していれば exercised から除く。
 
     security_headers の fetch 失敗（_response_pair の握りつぶし）は transport_error:security_headers
     を刻む。degraded_checks がこれを拾い page-level tested 行を除外するので、失敗した受動観測は

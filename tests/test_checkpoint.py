@@ -171,7 +171,7 @@ class StateTests(unittest.TestCase):
         })
 
         # 揮発 nonce は除去されるが、元 URL の明示的な `?` は保持する（/p と /p? を
-        # 区別・Codex #103 P2）。
+        # 区別）。
         self.assertEqual(state.target_url, "https://h/start?")
 
     def test_v5_migration_trims_path_but_keeps_query_value_slash(self):
@@ -761,7 +761,7 @@ class AttemptLedgerPersistenceTests(unittest.TestCase):
         self.assertEqual([attempt.payload for attempt in history], ["'"])
 
 def test_legacy_fallback_excludes_units_marked_during_v5_resume():
-    """v5 resume 中に新規 mark した単位は legacy fallback の対象外（Codex #103 P1）。
+    """v5 resume 中に新規 mark した単位は legacy fallback の対象外。
 
     v5 state をロード後、`?z=/admin` を新規に mark_done しても、distinct な
     `?z=/admin/` は完了扱いにならない（新規 mark は _legacy_units に含めない）。
@@ -784,7 +784,7 @@ def test_legacy_fallback_excludes_units_marked_during_v5_resume():
 
 def test_v5_migration_no_longer_false_matches_distinct_slash_variant():
     """v5 の genuine な ?z=/admin 完了は、distinct な ?z=/admin/ を誤って done にしない
-    （whole-rstrip alias を撤去し検出偽陰性を回避・Codex #103 P1）。migration 自体は
+    （whole-rstrip alias を撤去し検出偽陰性を回避）。migration 自体は
     削除/揮発クエリ正規化を維持する。
     """
     from wscan.checkpoint import CheckpointState, unit_key

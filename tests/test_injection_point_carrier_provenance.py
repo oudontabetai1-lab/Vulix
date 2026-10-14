@@ -1,4 +1,4 @@
-"""0035-B: InjectionPoint の carrier/value_kind/operation/template provenance 加算のテスト。
+"""InjectionPoint の carrier/value_kind/operation/template provenance 加算のテスト。
 
 最重要の不変条件は **stable_key_parts()（checkpoint/resume キー）が加算フィールドの有無で
 変わらない**こと。純粋ヘルパ（structure_digest / compute_operation_id）の決定論性・値非依存性も

@@ -36,7 +36,7 @@ def test_configured_login_url_behavior_preserved():
 
 
 def test_hash_routed_spa_login_recognized():
-    # SPA の hash ルート login（/#/login）も意図的訪問と認識する（#108 Codex P2）。
+    # SPA の hash ルート login（/#/login）も意図的訪問と認識する。
     # is_on_login_page は全 URL を見て True、path だけ見る on_login_page では取りこぼす非対称を解消。
     eng = _eng("")
     assert eng._is_login_target_url("https://app.test/#/login") is True
@@ -52,11 +52,11 @@ def test_shared_heuristic_matches_browser_keywords():
               "http://s/auth/login", "http://s/account/login",
               "http://s/#/login", "http://s/#!/login", "http://s/login?next=/x", "http://s/login#top"):
         assert url_looks_like_login(u) is True, u
-    # クエリ値に login パスを含む無関係 URL は login と誤判定しない（#108 Codex P2）。
+    # クエリ値に login パスを含む無関係 URL は login と誤判定しない。
     for u in ("http://s/dashboard", "http://s/login-history", "http://s/#/home",
               "http://s/dashboard?next=/login", "http://s/report?source=https://idp/login",
-              "http://s/docs#examples/login",   # 通常アンカーはルートでない（#108）
-              "http://s/search?q=/login",       # 検索 param はルータでない（#108）
+              "http://s/docs#examples/login",   # 通常アンカーはルートでない
+              "http://s/search?q=/login",       # 検索 param はルータでない
               # クエリ符号化ルートは曖昧なので heuristic では判定しない（login_url 設定時のみ完全一致で扱う）。
               "http://s/index.php?route=account/login",
               "http://s/articles?page=login"):

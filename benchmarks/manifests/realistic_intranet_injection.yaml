@@ -4,8 +4,8 @@ fixture_id: realistic_intranet
 runner_profile: scan_engine
 mode: normal-deterministic
 source_kind: first_party
-# realistic_intranet の HTTP 注入系（field carrier）を実採点する（0034-R3・page系は scorer 未対応の
-# ため後回し＝#134 の _SCOREABLE_CARRIERS={query,form}）。carrier/location は fixture の一次情報
+# realistic_intranet の HTTP 注入系（field carrier）を実採点する（page系は scorer 未対応の
+# ため後回し＝_SCOREABLE_CARRIERS={query,form}）。carrier/location は fixture の一次情報
 # （GET クエリ=url_param / POST フォーム=form）で宣言し、実 injection_location は E2E で検証する。
 # EXPECTED_FINDINGS（脆弱）と SAFE_ENDPOINTS（安全ツイン=検出禁止）を正本にする。
 cases:

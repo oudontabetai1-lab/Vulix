@@ -1,4 +1,4 @@
-"""0009 C1: JS 資産由来のゴミ URL 除去（純粋関数）の回帰テスト。
+"""JS 資産由来のゴミ URL 除去（純粋関数）の回帰テスト。
 
 誤抽出0（regex/式片を弾く）と実ルート維持（到達性を落とさない）を同時に守る。
 """
@@ -18,7 +18,7 @@ from wscan.url_extraction import (
 
 
 class PlausibleRouteCandidateTests(unittest.TestCase):
-    # 実ルート/API は維持する（到達性を落とさないことが C1 の要件）。
+    # 実ルート/API は維持する（到達性を落とさないことが要件）。
     REAL_ROUTES = [
         "http://juice-shop.test/rest/products/search",
         "http://juice-shop.test/api/Users",
@@ -31,18 +31,18 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         "http://juice-shop.test/rest/products/search?q=apple",  # クエリのメタ文字は許容
         "http://juice-shop.test/api/BasketItems;matrix=1",       # matrix param(;) は path で許容
         "http://juice-shop.test/%E3%83%86%E3%82%B9%E3%83%88/route",  # percent-encoded
-        "http://odata.test/Products(1)",                         # OData: 括弧は実ルート（Codex #100）
+        "http://odata.test/Products(1)",                         # OData: 括弧は実ルート
         "http://odata.test/Users('alice')",                      # OData: 引用キー付き括弧
         "http://odata.test/Categories(1)/Products",              # OData: 括弧の後にセグメント継続
         "http://juice-shop.test/search?pattern=.*",              # クエリ値の regex 片は path 無関係で許容
         "http://juice-shop.test/rest/x?re=(?:a|b)",              # クエリの regex は path を汚さない
-        "http://juice-shop.test/languages/C++",                  # + は path の正当な文字（Codex #100 R2）
+        "http://juice-shop.test/languages/C++",                  # + は path の正当な文字
         "http://juice-shop.test/rest/tags/a*b",                  # * も path で正当
-        "http://juice-shop.test/files/.*",                       # .* は path で合法（Codex #100 R12）
+        "http://juice-shop.test/files/.*",                       # .* は path で合法
         "http://juice-shop.test/packages/.+",                    # .+ も path で合法
         "http://juice-shop.test/a.*b",                           # bare .* も content では弾かない
         "http://odata.test/odata/GetDefault()/value",            # parameterless 関数ルート（識別子直後の()）
-        "http://juice-shop.test/docs/(archived)/index",          # 均衡した非空括弧は前置文字不問で残す（R13）
+        "http://juice-shop.test/docs/(archived)/index",          # 均衡した非空括弧は前置文字不問で残す
         "https://api.example.test/",                             # origin-root（別オリジンで実ルートになりうる）
     ]
 
@@ -98,7 +98,7 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertEqual(filter_route_candidates(None), [])
 
     def test_strip_trailing_noise_keeps_balanced_parens(self):
-        # OData/関数の均衡した末尾括弧は残す（Codex #100 R4）。
+        # OData/関数の均衡した末尾括弧は残す。
         self.assertEqual(strip_trailing_noise("/Products(1)"), "/Products(1)")
         self.assertEqual(strip_trailing_noise("/odata/GetDefault()"), "/odata/GetDefault()")
         # 余分な閉じ（外側の () を取り込んだ）だけ剥がす。
@@ -120,7 +120,7 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
                 self.assertTrue(is_regex_literal_extraction(prev, "/foo.bar/"))
         self.assertTrue(is_regex_literal_extraction("=", "/foo$/"))
         self.assertTrue(is_regex_literal_extraction("(", "/foo+/g"))
-        # 現行の全 JS フラグ（d/v を含む）を認識する（Codex #100 R5）。
+        # 現行の全 JS フラグ（d/v を含む）を認識する。
         for flags in ("d", "v", "gd", "dgimsuvy"):
             with self.subTest(flags=flags):
                 self.assertTrue(is_regex_literal_extraction("=", f"/foo/{flags}"))
@@ -130,18 +130,18 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertFalse(is_regex_literal_extraction("o", "/foo/"))  # 識別子直後
         # 形が /…/ でない（末尾が / でない実ルート）→ 文脈が regex でも対象外。
         self.assertFalse(is_regex_literal_extraction("=", "/rest/products/search"))
-        # 式キーワード直後の regex（return/throw/yield 等）も文脈として認識（Codex #100 R6）。
+        # 式キーワード直後の regex（return/throw/yield 等）も文脈として認識。
         for kw in ("return", "throw ", "yield", "typeof", "x=case", "instanceof"):
             with self.subTest(kw=kw):
                 self.assertTrue(is_regex_literal_extraction(kw, "/foo/"))
         # 通常の識別子直後（メソッド名等）は regex 文脈ではない → 実ルート扱い。
         self.assertFalse(is_regex_literal_extraction("myfunc", "/foo/"))
-        # メンバ呼び出しで使う regex（/foo/.method(x)）も形として認識（Codex #100 R6）。
+        # メンバ呼び出しで使う regex（/foo/.method(x)）も形として認識。
         self.assertTrue(is_regex_literal_extraction("=", "/foo/.test(value)"))
         self.assertTrue(is_regex_literal_extraction("return", "/foo/g.match(s)"))
         # 行頭（式先頭）も regex 文脈。
         self.assertTrue(is_regex_literal_extraction("", "/foo/"))
-        # 文字列/テンプレートリテラル内（in_string=True）は regex 文脈でない → 実ルート維持（R13）。
+        # 文字列/テンプレートリテラル内（in_string=True）は regex 文脈でない → 実ルート維持。
         self.assertFalse(is_regex_literal_extraction("const r = `name: ", "/api/users/", True))
         self.assertFalse(is_regex_literal_extraction("x = 'prefix: ", "/api/users/", True))
 
@@ -164,7 +164,7 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertIsNone(advance_string_state("abc`", 0, 4, "`"))  # 開いていた ` を閉じる
 
     def test_balanced_nonempty_parens_kept_regardless_of_prefix(self):
-        # 区切り直後でも均衡した非空括弧は実ルート（R13）。
+        # 区切り直後でも均衡した非空括弧は実ルート。
         self.assertTrue(is_plausible_route_candidate("http://h/docs/(archived)/index"))
         # bare 空 () と (? は引き続き弾く。
         self.assertFalse(is_plausible_route_candidate("http://h/()"))
@@ -173,7 +173,7 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertTrue(is_plausible_route_candidate("http://h/GetDefault()"))
         # escaped slash 後に再抽出される regex 片（/foo\/bar/ → /bar/）も、直前 \ を文脈として弾く。
         self.assertTrue(is_regex_literal_extraction("\\", "/bar/"))
-        # 制御ヘッダの `)` 直後の regex は文脈として認識（Codex #100 R8）。
+        # 制御ヘッダの `)` 直後の regex は文脈として認識。
         self.assertTrue(is_regex_literal_extraction("if (ready)", "/foo/.test(value)"))
         self.assertTrue(is_regex_literal_extraction("while (x > 0)", "/foo/"))
         # 関数呼び出しの `)` は除算文脈 → regex 扱いしない。
@@ -257,9 +257,9 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             "fetch('/bq/search?filters[]=active');"
             # テンプレートリテラル内のルート（: の後でも文字列内なので regex 扱いしない）。
             "const routes = `name: /tmpl/users/`;"
-            # 均衡した非空括弧を持つ実ルート（区切り直後の ( ）。
+            # 均衡した非空括弧を持つ実ルート（区切り直後の (）。
             "fetch('/docs/(archived)/index');"
-            # ブロックコメント内のバッククォートが後続のテンプレートルートを隠さない（R14）。
+            # ブロックコメント内のバッククォートが後続のテンプレートルートを隠さない。
             "/* note ` x */ const t = `p: /cmtbq/list/`;"
             # OData/関数の末尾括弧を持つ実ルート（文字列リテラル由来 → 残す）。
             "fetch('/Products(1)'); fetch('/odata/GetDefault()');"
@@ -305,12 +305,12 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             any(u.startswith("http://juice-shop.test/bq/search") for u in found),
             f"bracket-query route が失われた: {found}",
         )
-        # テンプレートリテラル内のルート・均衡括弧ルートも残す（R13）。
+        # テンプレートリテラル内のルート・均衡括弧ルートも残す。
         self.assertIn("http://juice-shop.test/tmpl/users/", found)
         self.assertIn("http://juice-shop.test/docs/(archived)/index", found)
-        # コメント内バッククォートの後のテンプレートルートも残す（R14）。
+        # コメント内バッククォートの後のテンプレートルートも残す。
         self.assertIn("http://juice-shop.test/cmtbq/list/", found)
-        # OData/関数の末尾括弧を持つ実ルートは残る（C1-g）。
+        # OData/関数の末尾括弧を持つ実ルートは残る。
         self.assertIn("http://juice-shop.test/Products(1)", found)
         self.assertIn("http://juice-shop.test/odata/GetDefault()", found)
         # regex 由来のゴミ（path のメタ文字）は 1 件も残らない。query の [] は array-query で

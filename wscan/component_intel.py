@@ -87,7 +87,7 @@ _PRODUCT_SLUGS: dict[str, str] = {
     "python": "python",
     "node": "nodejs",
     "nodejs": "nodejs",
-    "node.js": "nodejs",  # 正規表記 `Node.js/18.12.1`（Codex #155 P2）
+    "node.js": "nodejs",  # 正規表記 `Node.js/18.12.1`
     "openssl": "openssl",
     "tomcat": "tomcat",
     "iis": "internet-explorer",  # 注: IIS 単体 slug は無いため既定では扱わない（下の除外を参照）
@@ -118,7 +118,7 @@ def _norm_product(name: str) -> str:
 #   cdnjs/google: .../ajax/libs/jquery/3.4.1/jquery.min.js
 #   unpkg: https://unpkg.com/jquery@3.4.1/dist/jquery.min.js
 # 各パターンは PATH の先頭（^）に固定し、クエリ文字列や無関係ホストで誤って cdn 認定しない
-# （例: cdn.jsdelivr.net/app.js?fallback=/npm/jquery@3.4.1 は path=/app.js で不一致・Codex #155）。
+# （例: cdn.jsdelivr.net/app.js?fallback=/npm/jquery@3.4.1 は path=/app.js で不一致）。
 _CDN_LAYOUTS = (
     (re.compile(r"^/npm/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"), frozenset({"cdn.jsdelivr.net"})),
     (re.compile(r"^/ajax/libs/([\w.-]+)/(\d[\w.\-]*)/"),
@@ -127,7 +127,7 @@ _CDN_LAYOUTS = (
 )
 # CDN 固有の識別子を npm 名へ写す（cdnjs/Google AJAX は npm と名前が食い違うことがある）。
 # 一律 `.js` 除去は誤り（`chart.js` は npm 名そのもの）なので、確実に食い違う既知識別子だけを
-# 明示マップする。未知の名前は従来どおり保持（保守側＝実在パッケージを誤マップしない・Codex #155）。
+# 明示マップする。未知の名前は従来どおり保持（保守側＝実在パッケージを誤マップしない）。
 _CDN_NPM_ALIASES = {
     "lodash.js": "lodash",
     "angularjs": "angular",
@@ -173,7 +173,7 @@ def _library_from_url(absolute: str) -> "Optional[Library]":
                        url=absolute, reliability=reliability)
     # 構造化 URL に一致しなければ、ファイル名埋め込み（任意 origin の推測＝filename）を試す。
     # query/fragment ではなく path に対して照合する。`app.js?fallback=/jquery-3.4.1.js` のように
-    # クエリに版付きファイル名を持つ URL を誤ってそのライブラリと判定しない（Codex #155）。
+    # クエリに版付きファイル名を持つ URL を誤ってそのライブラリと判定しない。
     m = _LIB_FILENAME_PATTERN.search(path)
     if m:
         name = m.group(1).strip().lower()
@@ -188,7 +188,7 @@ def parse_js_libraries_from_urls(urls) -> list[Library]:
     """script URL の集合から (name, version, npm) を抽出する（純粋・ネットワーク非依存）。
 
     クロールが捕捉した external_scripts のキー（絶対 URL・全件）を直接渡す用途。50KB 打ち切りの
-    HTML 本文に依存しないため、大きなページで末尾の script を取りこぼさない（Codex #155）。
+    HTML 本文に依存しないため、大きなページで末尾の script を取りこぼさない。
     重複は (name, version) で排除。
     """
     out: list[Library] = []
@@ -217,7 +217,7 @@ def parse_js_libraries(html: str, base_url: str = "") -> list[Library]:
     if not html:
         return []
     srcs, base_href = _active_script_srcs(html)
-    # ブラウザと同じく <base href> を文書の base URI にしてから相対 src を解決する（Codex #155 P2）。
+    # ブラウザと同じく <base href> を文書の base URI にしてから相対 src を解決する。
     doc_base = urljoin(base_url, base_href) if base_href else base_url
     return parse_js_libraries_from_urls(urljoin(doc_base, src) for src in srcs)
 
@@ -236,7 +236,7 @@ def _is_js_script_type(value: str) -> bool:
     """script の type 属性が実行される JS か（空/module/JS MIME。parameter は essence で判定・純粋）。
 
     ``text/javascript; charset=utf-8`` や ``application/ecmascript`` も実行されるため、完全一致の
-    allowlist だと有効な依存を取りこぼす（Codex #155 P2）。
+    allowlist だと有効な依存を取りこぼす。
     """
     t = (value or "").strip().lower()
     if t in ("", "module"):
@@ -248,7 +248,7 @@ def _active_script_srcs(html: str) -> tuple[list[str], str]:
     """HTML から**実際に読み込まれる**外部 script の src と最初の ``<base href>`` を返す（純粋）。
 
     regex だとコメント・``<template>``/``<noscript>`` 内・非 JS type の ``<script src>`` まで拾い、
-    実行時に存在しない依存を OSV finding にしてしまう（Codex #155 P2）。stdlib の HTMLParser で
+    実行時に存在しない依存を OSV finding にしてしまう。stdlib の HTMLParser で
     要素として解析し（コメントは要素にならない）、inert な文脈を除外する。
     """
     from html.parser import HTMLParser
@@ -266,7 +266,7 @@ def _active_script_srcs(html: str) -> tuple[list[str], str]:
                 self._inert += 1
             elif (tag == "base" and not self._inert and not self.base
                   and a.get("href", "").strip()):
-                # template/noscript 内の <base> はブラウザが無視する（Codex #155 P2）。
+                # template/noscript 内の <base> はブラウザが無視する。
                 self.base = a["href"].strip()
             elif tag == "script" and not self._inert:
                 src = a.get("src", "").strip()
@@ -458,7 +458,7 @@ def match_cycle(cycles: list[dict], version: str) -> Optional[dict]:
             continue
         # 完全一致 / ドット区切りの子（1.1.1 に対する 1.1.1.x）に加え、ドットを挟まない
         # letter-suffix リリース（OpenSSL の 1.1.1f 等）も cycle 1.1.1 に一致させる。数字が続く
-        # 場合（1.1.10 → cycle 1.1.1 でない）は除外する（Codex #155 P2）。
+        # 場合（1.1.10 → cycle 1.1.1 でない）は除外する。
         letter_suffix = (
             ver.startswith(cyc)
             and len(ver) > len(cyc)
@@ -532,7 +532,7 @@ async def fetch_product_cycles(
 
     到達失敗（timeout/接続断/5xx/429/JSON 破損）は ``ComponentIntelUnavailable`` を投げる
     （黙って None にしない＝偽陰性の可視化・キャッシュ汚染防止）。**404 のみ**「無データ」＝None。
-    401/403 等（自己ホスト EOL の認証拒否・誤設定）は照会失敗として投げる（Codex #155）。
+    401/403 等（自己ホスト EOL の認証拒否・誤設定）は照会失敗として投げる。
     外部へ送るのは product slug のみ。``client`` を注入するとテストで差し替え可能。
     """
     slug = (product_slug or "").strip().strip("/")
@@ -554,14 +554,14 @@ async def fetch_product_cycles(
         return None  # 404 のみ「無データ」（product 未登録・確定・キャッシュ可）
     if resp.status_code != 200:
         # 401/403 等（自己ホスト EOL の認証拒否・誤設定）は無データではなく照会失敗。None を
-        # _scan_eol がキャッシュし checkpoint 完了＝恒久 FN になるので投げる（OSV/NVD と同様・Codex #155）。
+        # _scan_eol がキャッシュし checkpoint 完了＝恒久 FN になるので投げる（OSV/NVD と同様）。
         raise ComponentIntelUnavailable(f"eol:{slug}: HTTP {resp.status_code}")
     try:
         data = resp.json()
     except Exception as exc:
         raise ComponentIntelUnavailable(f"eol:{slug}:bad_json") from exc
     # 200 だが cycle リストでない（誤設定の self-host EOL / proxy が JSON エラーを 200 で返す等）は
-    # 「無データ」ではなく照会失敗。None キャッシュで恒久 FN にせず、bad_json 同様に投げる（Codex #155）。
+    # 「無データ」ではなく照会失敗。None キャッシュで恒久 FN にせず、bad_json 同様に投げる。
     if not isinstance(data, list):
         raise ComponentIntelUnavailable(f"eol:{slug}:not_a_list")
     return data
@@ -639,7 +639,7 @@ async def lookup_osv(
     _raise_if_transient(resp.status_code, f"osv:{name}")
     # OSV の /v1/query は固定エンドポイント。脆弱性なしは 200＋空 vulns で返るため、401/403/404
     # 等の非 200 は「advisory 無し」ではなく照会失敗（base URL 誤設定/権限）。None で返すと
-    # _scan_osv がキャッシュし checkpoint 完了＝恒久 FN になるので、失敗として投げる（Codex #155）。
+    # _scan_osv がキャッシュし checkpoint 完了＝恒久 FN になるので、失敗として投げる。
     if resp.status_code != 200:
         raise ComponentIntelUnavailable(f"osv:{name}: HTTP {resp.status_code}")
     try:
@@ -651,9 +651,9 @@ async def lookup_osv(
     if vulns is None:
         return []  # 脆弱性なし（vulns 省略）
     # 200 でも vulns が list でない（{"vulns": {"error": ...}} 等）応答は照会失敗。空扱いで
-    # キャッシュ・checkpoint 完了すると resume で再照会されず恒久 FN になる（Codex #155 P2）。
+    # キャッシュ・checkpoint 完了すると resume で再照会されず恒久 FN になる。
     # 要素も object であること。`{"vulns": ["upstream error"]}` を受けると truthy な list が
-    # 「advisory 0 件の vulnerable_library」finding を生む（Codex #155 P2）。
+    # 「advisory 0 件の vulnerable_library」finding を生む。
     if not isinstance(vulns, list) or not all(isinstance(v, dict) for v in vulns):
         raise ComponentIntelUnavailable(f"osv:{name}:malformed_vulns")
     return vulns
@@ -732,7 +732,7 @@ async def lookup_nvd(
     _raise_if_transient(resp.status_code, f"nvd:{product}")
     # NVD の /cves も固定エンドポイント。CVE 無しは 200＋totalResults:0 で返るため、401/403/404 等の
     # 非 200 は「CVE 無し」ではなく照会失敗（base URL 誤設定/APIキー不正・throttle）。None ではなく
-    # 失敗として投げ、恒久 FN（checkpoint 完了）を防ぐ（Codex #155）。
+    # 失敗として投げ、恒久 FN（checkpoint 完了）を防ぐ。
     if resp.status_code != 200:
         raise ComponentIntelUnavailable(f"nvd:{product}: HTTP {resp.status_code}")
     try:
@@ -741,7 +741,7 @@ async def lookup_nvd(
         raise ComponentIntelUnavailable(f"nvd:{product}:bad_json") from exc
     data = _require_dict(data, f"nvd:{product}")
     # 必須フィールドの型も検証する。不正型を 0 件扱いにするとキャッシュ・checkpoint 完了で恒久 FN
-    # になる（OSV と同様・Codex #155 P2）。
+    # になる（OSV と同様）。
     total = data.get("totalResults")
     vulns = data.get("vulnerabilities")
     if (not isinstance(total, int) or isinstance(total, bool)

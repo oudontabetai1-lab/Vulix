@@ -144,14 +144,14 @@ class BatchRunner:
                     "request_delay", "fast_mode",
                     # SPA クロールと自動有効化を batch でも制御可能にする。
                     # auto_spa_crawl は既定 ON のため、global.auto_spa_crawl: false で
-                    # opt-out できないと既存バッチが検出 SPA を勝手にクリックし始める
-                    # （Codex #104 P2）。spa_crawl: true で明示 ON も可。
+                    # opt-out できないと既存バッチが検出 SPA を勝手にクリックし始める。
+                    # spa_crawl: true で明示 ON も可。
                     "spa_crawl", "auto_spa_crawl"):
             if key in global_cfg:
                 global_kwargs[key] = global_cfg[key]
 
         # global.llm は ScanEngine の llm_provider へ写像する。そのまま llm= で渡すと
-        # ScanEngine が未知 kwarg で TypeError となり全対象が開始前に失敗していた（F01）。
+        # ScanEngine が未知 kwarg で TypeError となり全対象が開始前に失敗していた。
         if "llm" in global_kwargs:
             global_kwargs["llm_provider"] = global_kwargs.pop("llm")
 
@@ -268,7 +268,7 @@ class BatchRunner:
         lines.append("-" * 60)
         lines.append(f"  合計: {total_findings} 件の脆弱性が検出されました")
         if failed:
-            # 全失敗と一部失敗を明示する（0件表示を「成功」と誤認させない・F02）。
+            # 全失敗と一部失敗を明示する（0件表示を「成功」と誤認させない）。
             scope = "全対象が失敗" if succeeded == 0 else f"{len(failed)}/{len(self.results)} 対象が失敗"
             names = ", ".join((r.target.label or r.target.url)[:40] for r in failed)
             lines.append(f"  ⚠️  {scope}（成功 {succeeded} / 失敗 {len(failed)}）: {names}")

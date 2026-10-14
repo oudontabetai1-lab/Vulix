@@ -89,7 +89,7 @@ class StoredEndpointBaselineGuardTests(unittest.TestCase):
         self.assertTrue(self._executed_with_baseline(executed, baseline))
 
     def test_stored_and_truly_injectable_is_detected(self):
-        # Codex 指摘: stored で probe marker が baseline に残っていても、実際に注入可能なら
+        # stored で probe marker が baseline に残っていても、実際に注入可能なら
         # 実行出力の素 marker が1つ増える。出現数の差分で「真の検出」を握り潰さない。
         post_probe_baseline = "<article>wscanEVO253</article>\n"          # probe 反射のみ(1)
         injectable_source = (

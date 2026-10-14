@@ -63,7 +63,7 @@ class CookieHeaderForUrlTests(unittest.TestCase):
         return asyncio.run(ScanEngine.cookie_header_for_url(eng, url))
 
     def test_origin_vs_page_path_scope(self):
-        # cookie_header_for_url は URL 単位で path スコープする（#157）。
+        # cookie_header_for_url は URL 単位で path スコープする。
         cookies = [
             {"name": "root", "value": "r", "domain": "example.com", "path": "/"},
             {"name": "adm", "value": "a", "domain": "example.com", "path": "/admin"},
@@ -90,7 +90,7 @@ class CookieHeaderForUrlTests(unittest.TestCase):
         self.assertIsNone(asyncio.run(ScanEngine.cookie_header_for_url(eng, "https://x.test")))
 
     def test_secure_cookie_excluded_over_http(self):
-        # Secure Cookie は HTTP 宛には送らず、HTTPS 宛には送る（Codex #157）。
+        # Secure Cookie は HTTP 宛には送らず、HTTPS 宛には送る。
         from wscan.engine import _scoped_cookie_header
         cookies = [
             {"name": "sid", "value": "s", "domain": "example.com", "path": "/", "secure": True},
@@ -146,7 +146,7 @@ class CookieDomainSyncTests(unittest.TestCase):
 
 
 class ParallelWorkerCookieIsolationTests(unittest.TestCase):
-    """並列 worker の pre-attack flow 後 Cookie が worker task 内に閉じることの検証（0067）。
+    """並列 worker の pre-attack flow 後 Cookie が worker task 内に閉じることの検証。
 
     共有 engine を複数 task が同時に使っても、_sync_cookies_from_browser の書き込みが
     task-local な ContextVar に閉じ、別 worker（と直列用 self.cookies）を汚染しないこと。
@@ -231,7 +231,7 @@ class ParallelWorkerCookieIsolationTests(unittest.TestCase):
 
 
 class WorkerCookieAccessorTests(unittest.TestCase):
-    """0067 Codex P1: 直読み consumer の worker-local 経由・排他ゲート。"""
+    """直読み consumer の worker-local 経由・排他ゲート。"""
 
     def _engine(self, cookies="base=1"):
         return ScanEngine("https://example.com/", cookies=cookies, checks=["xss"])
@@ -294,7 +294,7 @@ class WorkerCookieAccessorTests(unittest.TestCase):
         self.assertEqual(eng._cookies, "keep=1")  # 失敗は据え置き
 
     def test_verify_resync_failure_skips_instead_of_stale_cookie(self):
-        # Codex P2: 並列 attack 後の per-finding 再同期が失敗したら、前 finding の scoped Cookie で
+        # 並列 attack 後の per-finding 再同期が失敗したら、前 finding の scoped Cookie で
         # 検証せず skipped（未検証・要手動確認）に倒す。finding は保持し CONFIRMED にしない。
         from wscan.engine import Finding
         eng = self._engine("base=1")

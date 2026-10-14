@@ -112,12 +112,12 @@ async def _call_llm(payload_gen, prompt: str, system: Optional[str] = None) -> O
     """PayloadGenerator のバックエンドを使ってテキストを生成する。
 
     ``system`` を渡すと system プロンプトを差し替える（既定はウィザード用 _SYSTEM_PROMPT）。
-    setup など別スキーマの呼び出し側は、期待する JSON 形と矛盾しない system を渡すこと（#170 P2）。
+    setup など別スキーマの呼び出し側は、期待する JSON 形と矛盾しない system を渡すこと。
     """
     provider = payload_gen.provider
     system = system or _SYSTEM_PROMPT
     # auto-config も one-shot 呼び出し。固定 60s ではなく設定済み one-shot timeout を使う
-    # （--llm-timeout / config を尊重・Codex #173 P2）。
+    # （--llm-timeout / config を尊重）。
     _to = float(getattr(payload_gen, "llm_timeout_seconds", 60.0) or 60.0)
     try:
         if provider == "claude":

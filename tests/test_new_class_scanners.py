@@ -134,14 +134,14 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertEqual(out["X-API-Version"], "v2")
 
     def test_merge_normalizes_template_vs_base_case(self):
-        # 大小違いの同名ヘッダを重複させず、非認証はテンプレ値で単一キーにする（#90 R14）。
+        # 大小違いの同名ヘッダを重複させず、非認証はテンプレ値で単一キーにする。
         from wscan.scanners.base import merge_template_headers
         out = merge_template_headers({"X-API-Version": "v1"}, {"x-api-version": "v2"})
         vals = [v for k, v in out.items() if k.lower() == "x-api-version"]
         self.assertEqual(vals, ["v2"])
 
     def test_merge_dedupes_case_variants_within_base(self):
-        # base 自体が大小違いの同名キーを持っても単一化する（後勝ち・#90 R14）。
+        # base 自体が大小違いの同名キーを持っても単一化する（後勝ち）。
         from wscan.scanners.base import merge_template_headers
         out = merge_template_headers({"Authorization": "first", "authorization": "last"}, {})
         vals = [v for k, v in out.items() if k.lower() == "authorization"]
@@ -149,7 +149,7 @@ class MergeTemplateHeadersTests(unittest.TestCase):
 
     def test_api_key_alias_spellings_treated_as_credential(self):
         # Api-Key/ApiKey（x- 無し綴り）も request_logger の機密集合と同期し、base の実キーを
-        # 観測/テンプレ値で上書きしない・evidence で redact する（#90 R13）。
+        # 観測/テンプレ値で上書きしない・evidence で redact する。
         from wscan.scanners.base import (
             merge_template_headers, _redact_json_evidence_pair,
         )
@@ -164,7 +164,7 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertEqual(red["request"]["headers"]["ApiKey"], "***")
 
     def test_reflected_credential_header_value_redacted_from_response_body(self):
-        # #90 R21b: reflect された認証ヘッダ値が response body にエコーされても evidence へ
+        # reflect された認証ヘッダ値が response body にエコーされても evidence へ
         # 残さない。ヘッダ dict のマスクだけでなく body 内の値も伏せる。
         from wscan.scanners.base import _redact_json_evidence_pair
         pair = {
@@ -182,7 +182,7 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertEqual(red["request"]["headers"]["Authorization"], "***")
 
     def test_response_issued_credential_redacted_from_response_body(self):
-        # #90 R21e: サーバ発行の機密レスポンスヘッダ値(X-Access-Token)が body にも repeat
+        # サーバ発行の機密レスポンスヘッダ値(X-Access-Token)が body にも repeat
         # されても evidence へ残さない（request 側だけでなく response 側ヘッダも集める）。
         from wscan.scanners.base import _redact_json_evidence_pair
         pair = {
@@ -197,7 +197,7 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertEqual(red["response"]["headers"]["X-Access-Token"], "***")
 
     def test_ordinary_short_header_value_not_substring_redacted(self):
-        # #90 R21f: 通常設定ヘッダ（X-Tenant:a 等の短い値）を body から無制限 substring 置換
+        # 通常設定ヘッダ（X-Tenant:a 等の短い値）を body から無制限 substring 置換
         # しない（`database payload`→`d***t***b***se...` の evidence 破壊を防ぐ）。
         from wscan.scanners.base import _redact_json_evidence_pair
         pair = {
@@ -218,7 +218,7 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertEqual(red["response"]["body"], "a grab bag of abbreviations")
 
     def test_set_cookie_value_redacted_from_response_body(self):
-        # #90 R21g: narrow 化で漏れた Set-Cookie（確実な credential）を body 伏字に含める。
+        # narrow 化で漏れた Set-Cookie（確実な credential）を body 伏字に含める。
         from wscan.scanners.base import _redact_json_evidence_pair
         pair = {
             "request": {"headers": {}, "post_data": '{"q": "x"}'},
@@ -232,14 +232,14 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertEqual(red["response"]["headers"]["Set-Cookie"], "***")
 
     def test_evidence_redaction_uses_broad_canon_but_merge_uses_narrow(self):
-        # 2 概念を分ける（#90 R13-2）: evidence redaction は broad（静的＋runtime）、
+        # 2 概念を分ける（-2）: evidence redaction は broad（静的＋runtime）、
         # merge の「上書き禁止」は静的な認証情報のみ（runtime redaction ヘッダは含めない）。
         from wscan.scanners.base import merge_template_headers, _mask_credential_headers
         from wscan import request_logger
         request_logger.register_sensitive_headers(["X-Company-Auth", "X-API-Version"])
         try:
             # (2) redaction は broad: cookie/set-cookie・x-access-token・runtime 登録すべて伏せる。
-            # cookie は replay 用に harvest template で温存するが（#90 R14）、evidence では必ず redact。
+            # cookie は replay 用に harvest template で温存するが、evidence では必ず redact。
             masked = _mask_credential_headers({
                 "cookie": "sid=secret", "Set-Cookie": "sid=abc", "X-Access-Token": "t",
                 "X-Company-Auth": "c", "X-API-Version": "v2",
@@ -375,7 +375,7 @@ class MassAssignmentTests(unittest.TestCase):
 
 class MassAssignmentUrlFilterTests(unittest.TestCase):
     """scan_page(url) は URL 一致の POST/PUT/PATCH テンプレートのみ検査すること
-    （resume 時の全テンプレート再送を防ぐ Codex P2 回帰）。"""
+    （resume 時の全テンプレート再送を防ぐ 回帰）。"""
 
     def _scanner(self, templates):
         from wscan.scanners.mass_assignment import MassAssignmentScanner
@@ -409,7 +409,7 @@ class MassAssignmentUrlFilterTests(unittest.TestCase):
 
 class GraphQLAuthFailureTests(unittest.TestCase):
     """保護 GraphQL の POST が 401 のとき engine._api_auth_failed を立てること
-    （GET プレフライトで検知できない失効を救済する Codex P2 回帰）。"""
+    （GET プレフライトで検知できない失効を救済する 回帰）。"""
 
     def _scanner(self):
         from wscan.scanners.graphql import GraphQLScanner
@@ -436,7 +436,7 @@ class GraphQLAuthFailureTests(unittest.TestCase):
 
 class GraphQLExactUrlGateTests(unittest.TestCase):
     """具体 URL probe は API スペック由来 or GraphQL らしいパスのみ
-    （全クロールページへ probe を撒かない Codex P2 回帰）。"""
+    （全クロールページへ probe を撒かない 回帰）。"""
 
     def _scanner(self, api_urls=(), templates=()):
         from wscan.scanners.graphql import GraphQLScanner
@@ -469,7 +469,7 @@ class GraphQLExactUrlGateTests(unittest.TestCase):
 
 class PrototypePollutionMultiTemplateTests(unittest.TestCase):
     """server-side proto は URL 一致の全 body テンプレートを試すこと
-    （POST/PATCH で必須フィールドが異なるケースの取りこぼし防止 Codex P2 回帰）。"""
+    （POST/PATCH で必須フィールドが異なるケースの取りこぼし防止 回帰）。"""
 
     def _scanner(self, templates):
         from wscan.scanners.prototype_pollution import PrototypePollutionScanner

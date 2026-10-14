@@ -263,7 +263,7 @@ class ChainScanner:
         """probe が現ページで実 DOM 要素（``id=wscc_{uid}``）として parse されたか。
 
         安全に escape された格納はテキストノードになり要素にならないので False。生タグとして
-        描画された HTML injection のときだけ True（部分文字列一致の安全ツイン FP を防ぐ・#184）。
+        描画された HTML injection のときだけ True（部分文字列一致の安全ツイン FP を防ぐ）。
         uid は ``uuid4().hex`` 断片＝英数字のみで CSS セレクタとして安全。
         注: DOM 要素照合は iframe / shadow DOM 内を貫通しない（escape 済みテキストの FP 防止を優先した許容トレードオフ）。
         """
@@ -323,7 +323,7 @@ class ChainScanner:
                     # 素朴な部分文字列一致は誤検知する: 安全に escape された格納
                     # （`&lt;img ... id="..."&gt;` = テキスト表示）でも browser の page.content() は
                     # escape 済みテキスト内の `"` を戻すため `id="wscc_UID"` が部分文字列として残る
-                    # （安全ツイン FP・Codex #184）。escape 済みテキストは要素にならないので DOM 照合で弾く。
+                    # （安全ツイン FP）。escape 済みテキストは要素にならないので DOM 照合で弾く。
                     if await self._probe_rendered_as_element(uid):
                         cf = await self._make_html_injection_finding(
                             probe=probe,

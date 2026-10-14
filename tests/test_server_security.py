@@ -85,7 +85,7 @@ class ServerGuardEndpointTests(unittest.TestCase):
         self.assertGreater(srv.list_schedules()[0]["next_run"], 0)
 
     def test_websocket_start_scan_enforces_scope(self):
-        # Codex指摘(High): WS 経由の start_scan もスコープ検査を通すこと。
+        # WS 経由の start_scan もスコープ検査を通すこと。
         import json
         srv = MonitorServer(port=0, auth_token="")
         srv.allowed_target_hosts = ["example.com"]
@@ -95,7 +95,7 @@ class ServerGuardEndpointTests(unittest.TestCase):
         self.assertTrue(srv.scan_request_event.is_set())
 
     def test_scope_covers_all_target_urls(self):
-        # Codex指摘(High): url だけでなく target_urls / login_url 等も検査。
+        # url だけでなく target_urls / login_url 等も検査。
         srv = MonitorServer(port=0, auth_token="")
         srv.allowed_target_hosts = ["example.com"]
         self.assertIsNotNone(srv._config_scope_error({"url": "http://example.com", "target_urls": "http://evil.com"}))
@@ -103,12 +103,12 @@ class ServerGuardEndpointTests(unittest.TestCase):
         self.assertIsNone(srv._config_scope_error({"url": "http://example.com", "target_urls": ["http://a.example.com"]}))
 
     def test_trailing_dot_does_not_bypass_deny(self):
-        # Codex指摘(P2): "example.com." は example.com と同一ホスト → deny を回避させない。
+        # "example.com." は example.com と同一ホスト → deny を回避させない。
         self.assertFalse(target_in_scope("http://example.com.", [], ["example.com"]))
         self.assertTrue(target_in_scope("http://example.com.", ["example.com"], []))
 
     def test_flow_navigate_urls_are_scoped(self):
-        # Codex指摘(P1): フローの navigate 先もスコープ検査する。
+        # フローの navigate 先もスコープ検査する。
         srv = MonitorServer(port=0, auth_token="")
         srv.allowed_target_hosts = ["example.com"]
         bad = {"url": "http://example.com",
@@ -119,7 +119,7 @@ class ServerGuardEndpointTests(unittest.TestCase):
         self.assertIsNone(srv._config_scope_error(good))
 
     def test_websocket_scan_start_is_audited(self):
-        # Codex指摘(P2): WS 経由の開始も監査ログに残す。
+        # WS 経由の開始も監査ログに残す。
         import json
         srv = MonitorServer(port=0, auth_token="")
         srv._handle_client_message(
@@ -128,7 +128,7 @@ class ServerGuardEndpointTests(unittest.TestCase):
         self.assertTrue(any(a["action"] == "scan_start" and a["ip"] == "9.9.9.9" for a in aud))
 
     def test_crawl_review_filters_out_of_scope(self):
-        # Codex指摘(P1の補足): レビュー時追加の extra_urls / flows もスコープ外を除外。
+        # レビュー時追加の extra_urls / flows もスコープ外を除外。
         import json
         srv = MonitorServer(port=0, auth_token="")
         srv.allowed_target_hosts = ["example.com"]

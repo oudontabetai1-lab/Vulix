@@ -106,19 +106,19 @@ def url_userinfo_secrets(target: str) -> tuple[str, ...]:
 
 
 def redact_url(target: str) -> str:
-    """URL から userinfo（Basic 認証資格情報）と機微 query 値を除去する（純粋・#157 P2）。
+    """URL から userinfo（Basic 認証資格情報）と機微 query 値を除去する（純粋）。
 
     probe は userinfo 付き URL で行うが、finding.url・request-pair・reproduction 等
     **永続化する証跡**にはこの redacted URL を使う（checkpoint/レポート/ダッシュボードへ
     資格情報を残さない）。判定は正典の ``url_scope.redact_url``。userinfo は ``<redacted>@`` を
-    残さず**丸ごと除去**する（証跡 URL をそのまま再実行できる形に保つ意図的な差・#157 P2）。
-    page probe は query を保持するため、access_token 等の機微 query 値も同時に伏せる（#157 P1）。
+    残さず**丸ごと除去**する（証跡 URL をそのまま再実行できる形に保つ意図的な差）。
+    page probe は query を保持するため、access_token 等の機微 query 値も同時に伏せる。
     """
     return url_scope.redact_url(target, drop_userinfo=True)
 
 
 def url_query_secrets(target: str) -> list[str]:
-    """正典の URL redaction が伏せる query/fragment 値（原文）を返す（純粋・Codex #157 P1）。
+    """正典の URL redaction が伏せる query/fragment 値（原文）を返す（純粋）。
 
     TRACE 反射本文にも URL 由来の秘密（``?access_token=...``）が載り得るため、同じ値を本文でも伏せる。
     """
@@ -146,7 +146,7 @@ def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), targe
     (1) 行頭 `Header: value` 形は is_sensitive_header（runtime 登録のカスタム認証ヘッダも含む正規述語）で値を伏字化。
     (2) ``sent_secret_values`` に送信した秘匿ヘッダの実値を渡すと、行頭に現れない直列化でも本文中
         どこでも伏字化する。実値そのものに加え、HTML 実体参照（&amp;/&quot; 等）・percent エンコード・
-        JSON 文字列エスケープ（クォートやバックスラッシュのエスケープ）といった一般的なエンコード変種も生成して置換する（Codex #157）。
+        JSON 文字列エスケープ（クォートやバックスラッシュのエスケープ）といった一般的なエンコード変種も生成して置換する。
     """
     if not body:
         return ""
@@ -159,8 +159,8 @@ def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), targe
     text = body
     # (2) 送信した秘匿値を literal に伏字化（直列化形式に依らない）。反射器が安全に直列化した
     # エンコード形（HTML 属性の &amp;/&quot;・percent エンコード・JSON のクォート/バックスラッシュ
-    # エスケープ）でも可逆な資格情報が残らないよう、各値の一般的なエンコード変種も生成して置換する
-    # （Codex #157）。長い値（＝より具体的な変種）から先に置換する。
+    # エスケープ）でも可逆な資格情報が残らないよう、各値の一般的なエンコード変種も生成して置換する。
+    # 長い値（＝より具体的な変種）から先に置換する。
     variants: set[str] = set()
     # URL 由来と確定した資格情報は短くても伏せる。切り詰めは秘匿後に行う。
     values = [v for v in (sent_secret_values or []) if v and len(v) >= 4]
@@ -173,14 +173,14 @@ def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), targe
         _pct = _quote(val, safe="")                      # percent エンコード（%XX は大文字）
         variants.add(_pct)
         # アプリが小文字 hex（%3a 等）で直列化した変種も伏せる。大文字 %3A だけだと素通りし
-        # 可逆な資格情報が finding に残る（Codex #157 P1）。%XX の hex だけ小文字化する。
+        # 可逆な資格情報が finding に残る。%XX の hex だけ小文字化する。
         variants.add(_re.sub(r"%[0-9A-Fa-f]{2}", lambda m: m.group(0).lower(), _pct))
         variants.add(_json.dumps(val)[1:-1])             # JSON 文字列本体のエスケープ
     for v in sorted({x for x in variants if x}, key=len, reverse=True):
         text = text.replace(v, "[REDACTED]")
     # (3) 短い秘匿値（4 字未満）は本文全体の literal 置換だと誤伏字が広がるため、名前と組の文脈で
     # 伏せる：Cookie は ``name=value`` 対、その他ヘッダは ``Name: value`` / ``"Name":"value"`` 形。
-    # JSON/HTML 等の行頭以外の直列化でも短い資格情報を残さない（Codex #157 P1）。
+    # JSON/HTML 等の行頭以外の直列化でも短い資格情報を残さない。
     for hname, hval in (sent_secret_headers or ()):
         hval = str(hval or "")
         if not hval:
@@ -224,7 +224,7 @@ class HttpMethodsScanner(BaseScanner):
     SEVERITY = "medium"
 
     # origin だけでなくページのパスも検査するが、リクエスト増を抑えるため **origin 単位**で
-    # 検査対象数を上限で抑える（グローバル上限だと多パスの 1 origin が後続 origin の枠を奪う・Codex #157）。
+    # 検査対象数を上限で抑える（グローバル上限だと多パスの 1 origin が後続 origin の枠を奪う）。
     _MAX_TARGETS_PER_ORIGIN = 25
 
     def __init__(self, engine: "ScanEngine"):
@@ -248,10 +248,10 @@ class HttpMethodsScanner(BaseScanner):
             # engine.auth_headers は Cookie 文字列を path 非依存で付ける（同期時のページ path で
             # スコープされ Path=/ と Path=/admin の両方を含む）。origin と page で送るべき Cookie が
             # 異なるため、cookie_override（URL 単位で再スコープした Cookie。engine.cookie_header_for_url
-            # 由来）があればそれで置換する。None のときは従来どおり Cookie を付与しない（Codex #157）。
+            # 由来）があればそれで置換する。None のときは従来どおり Cookie を付与しない。
             headers = dict(self.auth_headers_for_url(target, include_cookie=False))
             # operator が -H / refresh で明示した Cookie（HeaderManager 由来）は上書きしない。
-            # engine 生成 Cookie の置換だけ行う（明示認証セッションを破壊しない・Codex #157）。
+            # engine 生成 Cookie の置換だけ行う（明示認証セッションを破壊しない）。
             if cookie_override and not any(k.lower() == "cookie" for k in headers):
                 headers["Cookie"] = cookie_override
             kwargs["headers"] = headers
@@ -262,8 +262,8 @@ class HttpMethodsScanner(BaseScanner):
         origin = f"{parsed.scheme}://{parsed.netloc}"
         # origin ルートに加えてページ自身のパスも検査する（パス単位の WebDAV/メソッド設定を
         # 見逃さない）。fragment だけ落とす。query は保持する（/index.php?route=dav のように query で
-        # リソースを振り分けるアプリで別リソースを probe し tested 扱いにしない・Codex #157 P2）。
-        # `;params`（/dav;jsessionid=...）も crawl したリソースの一部なので保持する（Codex #157 P2）。
+        # リソースを振り分けるアプリで別リソースを probe し tested 扱いにしない）。
+        # `;params`（/dav;jsessionid=...）も crawl したリソースの一部なので保持する。
         _path = url_scope.request_path(url)
         page_target = (
             origin if _path == "/" and not parsed.query
@@ -276,8 +276,8 @@ class HttpMethodsScanner(BaseScanner):
             if target in self._checked_targets:
                 continue
             # 上限は **origin 単位**で数える。グローバル上限だと 1 origin の多数パスが枠を食い潰し、
-            # 後続 origin が 1 度も probe されないのに tested 完了扱いになり恒久的な偽カバレッジになる
-            # （Codex #157）。origin ルート probe は常に許可して各 origin の最低限の検査を確保する。
+            # 後続 origin が 1 度も probe されないのに tested 完了扱いになり恒久的な偽カバレッジになる。
+            # origin ルート probe は常に許可して各 origin の最低限の検査を確保する。
             is_origin_probe = target == origin
             if not is_origin_probe:
                 per_origin = sum(
@@ -295,11 +295,11 @@ class HttpMethodsScanner(BaseScanner):
             # 各 probe(OPTIONS/TRACE/PROPFIND)は独立した finding クラスを担う（OPTIONS だけが
             # 危険 Allow メソッドの唯一の情報源等）。従って 1 つでも request 時失敗があれば、その
             # finding クラスのカバレッジが欠けるので target を未検査扱いにして resume へ回す
-            # （全 probe 失敗だけを未検査とすると、OPTIONS だけ失敗したケースを取りこぼす・Codex #157）。
+            # （全 probe 失敗だけを未検査とすると、OPTIONS だけ失敗したケースを取りこぼす）。
             probe_state = {"failed": False}
             # Cookie は URL 単位で再スコープして送る。origin ルート(/) には Path=/ の Cookie だけ、
             # page(/admin) には Path=/ と Path=/admin の Cookie を送る（Path=/admin を / に漏らさず、
-            # かつ認証専用の root TRACE/WebDAV を匿名で見逃さない・Codex #157）。
+            # かつ認証専用の root TRACE/WebDAV を匿名で見逃さない）。
             cookie_override = None
             if hasattr(self.engine, "cookie_header_for_url"):
                 cookie_override = await self.engine.cookie_header_for_url(target)
@@ -328,11 +328,11 @@ class HttpMethodsScanner(BaseScanner):
                 target_failed = True
         # いずれかの target が完全に未検査（応答ゼロ）なら、他 target の finding の有無に関わらず
         # observability 失敗を伝播する。engine に error 扱いさせ resume で再試行させる（返り値で
-        # 正常終了すると checkpoint 完了で恒久 skip される・Codex #157）。
+        # 正常終了すると checkpoint 完了で恒久 skip される）。
         if target_failed:
             # 既に得た finding を例外に載せる。raise だけだと engine の page-level ループが
             # 返り値を受け取れず、それら finding の _record_finding 副作用（通知等）が走らない
-            # （record_finding で all_findings には既登録・Codex #157 P2）。
+            # （record_finding で all_findings には既登録）。
             raise PageDocumentUnavailable(
                 f"{self.CHECK_TYPE}: 未検査のターゲットがあります（認証情報または応答の取得に失敗）",
                 findings=findings,
@@ -340,7 +340,7 @@ class HttpMethodsScanner(BaseScanner):
         return findings
 
     # 告知のみ（悪用可能性そのものではない）low finding 用の CVSS。check 既定(6.5 Medium)を継承すると
-    # severity=low と矛盾するため明示上書きする（Codex #157 P2）。
+    # severity=low と矛盾するため明示上書きする。
     _LOW_CVSS_VECTOR = "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"
     _LOW_CVSS_SCORE = 3.7
 
@@ -348,7 +348,7 @@ class HttpMethodsScanner(BaseScanner):
         """一時応答(408/429/5xx)は観測できていない＝カバレッジ欠落。失敗扱いにし resume 対象へ残す。
 
         telemetry だけ残して正常完了すると、その probe でしか見えない finding を見逃したまま
-        checkpoint 完了になる（OPTIONS/TRACE/PROPFIND 共通・Codex #157 P2）。
+        checkpoint 完了になる（OPTIONS/TRACE/PROPFIND 共通）。
         """
         if r.status_code not in (408, 429, 500, 502, 503, 504):
             return False
@@ -371,12 +371,12 @@ class HttpMethodsScanner(BaseScanner):
             return []
         # 危険メソッド/WebDAV の判定は Allow（そのエンドポイントが実際に受理するメソッド）だけに
         # 基づく。Access-Control-Allow-Methods は cross-origin ポリシーの告知でありメソッド対応の
-        # 証明ではない（汎用 CORS ミドルウェアが PUT 等を返すと空 Allow で誤検知になる・Codex #157）。
+        # 証明ではない（汎用 CORS ミドルウェアが PUT 等を返すと空 Allow で誤検知になる）。
         allowed = parse_allow_methods(r.headers.get("allow", ""))
         dav = webdav_methods(allowed) or bool(r.headers.get("dav"))
         findings: list[Finding] = []
         danger = dangerous_methods(allowed)
-        display = redact_url(target)  # 永続化用（userinfo 資格情報を残さない・#157 P2）
+        display = redact_url(target)  # 永続化用（userinfo 資格情報を残さない）
         if danger:
             pair = {"request": {"url": display, "method": "OPTIONS"},
                     "response": {"status": r.status_code, "headers": dict(r.headers), "body": ""}}
@@ -396,7 +396,7 @@ class HttpMethodsScanner(BaseScanner):
                     "Disable unused methods (PUT/DELETE/PATCH/TRACE/CONNECT).",
                 ],
             )
-            if f:  # dedup で None のとき coverage を水増ししない（#157 P2）
+            if f:  # dedup で None のとき coverage を水増ししない
                 findings.append(f)
         # WebDAV は「有効の告知」であり悪用可能性そのものではないため low（告知≠悪用可能）。
         # OPTIONS で報告したら origin 単位で記録し、PROPFIND 側の二重報告を抑止する。
@@ -443,10 +443,10 @@ class HttpMethodsScanner(BaseScanner):
             return []
         # 反射本文には送信した Authorization/Cookie 等が含まれ得るのでマスクして保存する。
         # 実際に送信したヘッダ（client.headers）から秘匿値を拾い、JSON/属性/エスケープ等で
-        # 行頭に現れない直列化でも literal 置換で伏字化する（Codex #157）。
+        # 行頭に現れない直列化でも literal 置換で伏字化する。
         from wscan.request_logger import is_sensitive_header
         sent_secrets = [v for k, v in client.headers.items() if is_sensitive_header(k)]
-        display = redact_url(target)  # 永続化用（userinfo を残さない・#157 P2）
+        display = redact_url(target)  # 永続化用（userinfo を残さない）
         pair = {"request": {"url": display, "method": "TRACE"},
                 "response": {"status": r.status_code, "headers": dict(r.headers),
                              "body": redact_trace_body(
@@ -473,7 +473,7 @@ class HttpMethodsScanner(BaseScanner):
                 "Disable the TRACE method on the server/proxy.",
             ],
         )
-        return [f] if f else []  # dedup で None なら coverage を水増ししない（#157 P2）
+        return [f] if f else []  # dedup で None なら coverage を水増ししない
 
     async def _check_webdav(self, client, target, origin, probe_state=None) -> list[Finding]:
         # OPTIONS で既に WebDAV を報告済みなら二重報告しない（origin 単位）。
@@ -494,11 +494,11 @@ class HttpMethodsScanner(BaseScanner):
         if r.status_code != 207:
             return []
         # await 中に別パスの検査（--concurrency>1）が同 origin を報告済みにし得るので、
-        # 記録直前に再チェックして二重報告を防ぐ（入口ガードは await 前でレースする・Codex #157）。
+        # 記録直前に再チェックして二重報告を防ぐ（入口ガードは await 前でレースする）。
         if origin in self._webdav_reported:
             return []
         self._webdav_reported.add(origin)
-        display = redact_url(target)  # 永続化用（userinfo を残さない・#157 P2）
+        display = redact_url(target)  # 永続化用（userinfo を残さない）
         pair = {"request": {"url": display, "method": "PROPFIND"},
                 "response": {"status": r.status_code, "headers": dict(r.headers),
                              "body": r.text[:2000]}}
@@ -518,4 +518,4 @@ class HttpMethodsScanner(BaseScanner):
                 "Disable WebDAV if not required.",
             ],
         )
-        return [f] if f else []  # dedup で None なら coverage を水増ししない（#157 P2）
+        return [f] if f else []  # dedup で None なら coverage を水増ししない

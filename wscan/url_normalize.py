@@ -8,13 +8,13 @@ from wscan.url_scope import is_route_fragment
 
 # `/` は **含めない**：``?next=/home`` と ``?next=/admin`` のような path/route 値まで空化すると
 # 別ルートを「既知」と誤判定し、_enqueue_observed_probe_work が probe を作らず偽 COMPLETE に
-# なる（Codex #154 P1）。真の注入マーカー（``<>"'`` 等）を含む値だけ空化して payload 変種を dedup
+# なる。真の注入マーカー（``<>"'`` 等）を含む値だけ空化して payload 変種を dedup
 # する。純粋な path 値（``/`` と英数のみ）は routing 値として保持する。
 _INJECTION_META_CHARS = frozenset("<>\"'`;(){}|\\%*")
 
 
 def _looks_url_valued(value: str) -> bool:
-    """値が URL/準 URL（SSRF・open-redirect payload）かを判定する（純粋・Codex #154 P1）。
+    """値が URL/準 URL（SSRF・open-redirect payload）かを判定する（純粋）。
 
     ``http://127.0.0.1/``・``http://169.254.169.254/...``・``https://evil.com``・``//evil.com`` は
     メタ文字を含まず 64 字以下でも payload。scheme:// 始まり・protocol-relative ``//``・``://`` 含有を
@@ -32,7 +32,7 @@ def _normalized_query(query: str) -> str:
 
     **観測順を保持**する。key ソートすると ``?action=transfer&stage=confirm`` と
     ``?stage=confirm&action=transfer`` のように順序で操作を選ぶアプリで別ページが同一 identity になり、
-    後者を「既知」として probe せず偽の完全カバレッジになる（Codex #154 P1）。
+    後者を「既知」として probe せず偽の完全カバレッジになる。
     """
     pairs: list = []
     for key, value in parse_qsl(query, keep_blank_values=True):
@@ -53,12 +53,12 @@ def endpoint_identity(url: str) -> str:
 
 
 def _normalize_fragment_query(fragment: str) -> str:
-    """route-like fragment 内の query payload を正規化する（純粋・Codex #154 P1）。
+    """route-like fragment 内の query payload を正規化する（純粋）。
 
     ``/search?q=' OR 1=1`` と ``/search?q=x`` が別 identity にならないよう、fragment の
     ``?`` 以降を endpoint_identity と同じ規則で正規化（注入値の空化＋key ソート）する。
     ``?`` を持たない fragment はそのまま返す。URL 値（SSRF/open-redirect payload）の空化も
-    endpoint_identity と共通の判定で行う（Codex #154 P1）。
+    endpoint_identity と共通の判定で行う。
     """
     path, sep, query = fragment.partition("?")
     if not sep:
@@ -68,7 +68,7 @@ def _normalize_fragment_query(fragment: str) -> str:
 
 def route_aware_identity(url: str) -> str:
     """endpoint_identity（注入値の空化＋query ソートで payload 変種を dedup）に、
-    client-side route を示す fragment を **保持**して合成した identity（Codex #154 P1）。
+    client-side route を示す fragment を **保持**して合成した identity。
 
     endpoint_identity は fragment を落とすため、hash ルート SPA の ``/app#/users`` と
     ``/app#/admin`` が同一 identity になり、2つ目のルートが「既知」として probe queue から
@@ -80,7 +80,7 @@ def route_aware_identity(url: str) -> str:
     if is_route_fragment(fragment):
         # fragment 内の query payload も正規化する。さもないと SPA route の payload 変種
         # （`/app#/search?q=<payload>`）が毎回別 identity になり probe queue を再帰的に膨張させ
-        # global budget を食い潰す（Codex #154 P1）。route path 自体は保持する。
+        # global budget を食い潰す。route path 自体は保持する。
         return f"{base}#{_normalize_fragment_query(fragment)}"
     return base
 
@@ -137,7 +137,7 @@ def _split_query_item(item: str) -> tuple[str, str]:
     """raw query item から判定用の key/value をデコードして返す。"""
     # 判定用のデコードのみ（raw item は kept で保持）。非 UTF-8 の
     # percent-encoded オクテット(blob=%FF 等)で例外を出して正規化全体を無効化
-    # しないよう errors="replace" で寛容にデコードする（Codex #103 P2）。
+    # しないよう errors="replace" で寛容にデコードする。
     raw_key, separator, raw_value = item.partition("=")
     key = unquote_plus(raw_key, encoding="utf-8", errors="replace")
     value = (
@@ -258,23 +258,23 @@ def normalize_url_for_key(url: str) -> str:
 
         # クエリ順は app 定義で order-sensitive なエンドポイント（?action=transfer&stage=confirm
         # vs ?stage=confirm&action=transfer）を潰さないよう、**非揮発パラメータの観測順を保持**する
-        # （ソートすると別 operation を同一 checkpoint identity にして初回でも偽陰性・Codex #103 P1）。
+        # （ソートすると別 operation を同一 checkpoint identity にして初回でも偽陰性）。
         # 揮発項目のみ除去済み。
         # route fragment の判定は url_scope.is_route_fragment が正典
         # （manual_crawl._strip_in_page_anchor / engine の flow マッチと同じ規則）。
         keep_frag = parsed.fragment if is_route_fragment(parsed.fragment) else ""
         # パス末尾スラッシュは **除去後クエリ(query_str)も保持 fragment(keep_frag)も無い**
         # ときだけ吸収する。query_str と keep_frag はどちらも正規化後に不変なので **冪等**
-        # （normalize∘normalize=normalize・Codex #103 P1）。同時に: (a) slash 非依存 /a/≡/a
+        # （normalize∘normalize=normalize）。同時に: (a) slash 非依存 /a/≡/a
         # （長年の中核契約）、(b) 生存クエリがあれば /app/?x と /app?x を区別、(c) 保持 SPA
-        # fragment があれば /app/#/admin と /app#/admin を区別（Codex #103）。volatile のみの
+        # fragment があれば /app/#/admin と /app#/admin を区別。volatile のみの
         # クエリ(/app/?nonce・fragment 無し)は除去後 slash だけの差になり /app へ収束する
         # （slash 非依存の帰結として容認）。クエリ値/ fragment は不変。
         query_str = "&".join(item for _, item in kept)
         norm_path = parsed.path if (query_str or keep_frag) else parsed.path.rstrip("/")
         # 元 URL に明示的な `?`（空クエリ含む）があったかを保持する。urlsplit は /p と /p?
         # を両方 query="" で表し urlunsplit は両方 /p に潰すため、アプリが両者を区別すると
-        # 誤って同一 checkpoint キーになり片方を skip する（Codex #103 P2）。volatile 除去で
+        # 誤って同一 checkpoint キーになり片方を skip する。volatile 除去で
         # query が空になった場合も元に `?` があれば保持する。had_query_delim/query_str/keep_frag は
         # 正規化後も不変なので冪等。
         had_query_delim = bool(parsed.query) or ("?" in url.split("#", 1)[0])

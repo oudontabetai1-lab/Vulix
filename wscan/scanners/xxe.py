@@ -211,7 +211,7 @@ class XXEScanner(BaseScanner):
             )
         except Exception as exc:
             # baseline 取得失敗＝この check 全体が落ちる。黙って total:0 と誤表示しないよう
-            # transport_error を記録する（Codex #101 P1・挙動不変）。
+            # transport_error を記録する（挙動不変）。
             self._record_scan_note(
                 f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
             )
@@ -227,7 +227,7 @@ class XXEScanner(BaseScanner):
                 body, status_code, elapsed = await self._post_xml(url, payload)
 
             except Exception as exc:
-                # 個々の攻撃 payload の送信失敗も観測可能にする（Codex #101 P1・挙動不変）。
+                # 個々の攻撃 payload の送信失敗も観測可能にする（挙動不変）。
                 self._record_scan_note(
                     f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
                 )

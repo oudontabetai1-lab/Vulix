@@ -52,7 +52,7 @@ _CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
 # Per-task payload override: maps check_type → list[str].  Set for the duration
 # of a single scan_field call so parallel workers never clobber each other.
 _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", default=None)
-# F06/0059: フィールド単位 attack 時間ボックスの task-local 状態。engine 属性だと
+# フィールド単位 attack 時間ボックスの task-local 状態。engine 属性だと
 # --concurrency>1 の並行ワーカー（各 _scan_field は別タスク）が共有 deadline を上書きし合い、
 # 遅い stored-sink の deadline が前進し続けて budget が効かなくなる。payload override と同じく
 # ContextVar でタスクローカル化する。base._apply_ip が遅延 import で参照する。
@@ -61,7 +61,7 @@ _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", def
 #  - _FIELD_BUDGET_TRUNCATED: budget 超過で注入を打ち切った check 集合（checkpoint 完了抑止に使用）
 #  - _FIELD_BUDGET_IDENT: 現フィールドの (url, field_name)。time-box 打ち切りノートに injection point
 #    情報を載せ、benchmark が「同 check の別 field の完全実行行」を巻き込まず per-IP に degradation を
-#    絞れるようにする（0059/F06 Codex R4#2）。
+#    絞れるようにする。
 _FIELD_ATTACK_DEADLINE: ContextVar = ContextVar("wscan_field_deadline", default=None)
 _FIELD_BUDGET_NOTES: ContextVar = ContextVar("wscan_field_budget_notes", default=None)
 _FIELD_BUDGET_TRUNCATED: ContextVar = ContextVar("wscan_field_budget_truncated", default=None)
@@ -99,7 +99,7 @@ def _effective_cookies(engine) -> str:
 
 
 class _FlowGate:
-    """pre-attack flow 付きページを排他実行する読み書きゲート（0067 Codex P1）。
+    """pre-attack flow 付きページを排他実行する読み書きゲート。
 
     worker は同一 BrowserContext（= cookie jar）を共有するため、flow が jar を書き換える間に
     他 worker が動くと別 flow の Cookie を拾う。flow を持つページ（exclusive）は他ページが
@@ -162,7 +162,7 @@ def _top_severity(findings) -> str:
     """findings の最重 severity を明示順序で返す（純粋）。空なら空文字。
 
     severity 文字列の max() は辞書順比較になり critical+medium を medium と誤評価する
-    ため、_SEVERITY_RANK（0=critical が最重）で最小ランクの severity を選ぶ（Codex #102）。
+    ため、_SEVERITY_RANK（0=critical が最重）で最小ランクの severity を選ぶ。
     """
     best = None
     best_rank = None
@@ -182,7 +182,7 @@ def _coverage_summary_text(coverage: dict) -> str:
         f"attempts={int(coverage.get('attempts', 0) or 0)} / "
         f"blocked={int((coverage.get('http_status', {}) or {}).get('blocked', 0) or 0)}"
     )
-    # check レベル coverage（0016）があれば「36 中 N 実行（STATUS）」を併記し、
+    # check レベル coverage があれば「36 中 N 実行（STATUS）」を併記し、
     # 「既定 scan は少数 check だけ＝残りは未検査」を末尾要約でも見えるようにする。
     cc = coverage.get("check_coverage") or {}
     if cc:
@@ -192,7 +192,7 @@ def _coverage_summary_text(coverage: dict) -> str:
             f"{int(cc.get('registry_total', 0) or 0)} in-scope "
             f"({cc.get('coverage_status', '')})"
         )
-    # 前提会計（0016）: 選択されても前提不足/state profile skip で実質検査できない check 数を
+    # 前提会計: 選択されても前提不足/state profile skip で実質検査できない check 数を
     # 併記する。--no-monitor/バッチ/CI では HTML を見ないため console 行が唯一のシグナル
     # （monitor 非依存の観測性）。警告があるときだけ出して常態の noise を避ける。
     pc = coverage.get("prerequisite_coverage") or {}
@@ -271,7 +271,7 @@ _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 
 # 1 件の finding 検証（_verify_one）の上限秒。正常な verify_finding は実測で ~50-115s に収まるため
 # 十分な余裕を取りつつ、内部 await が返らない病的ケースが verify フェーズ全体（＝スキャン）を
-# 止めるのを防ぐ（超過は "skipped"＝未検証/要手動確認へ・F06/0059）。
+# 止めるのを防ぐ（超過は "skipped"＝未検証/要手動確認へ）。
 _VERIFY_ONE_TIMEOUT_S = 180.0
 
 # SPA 収穫の JSON body を実攻撃するチェック。capability 判定に加えて明示的な
@@ -364,15 +364,15 @@ def _idna_host(host: str) -> str:
 
 
 def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
-    """手動巡回の実効 URL が target と異なる同一ホストなら、追加すべき scope を返す（純粋・Codex #153）。
+    """手動巡回の実効 URL が target と異なる同一ホストなら、追加すべき scope を返す（純粋）。
     該当しなければ ""。
 
     別ホストや同一 origin では "" を返し、scheme・ポート変更だけを反映する。
     設定 scope のパス・query 限定（例 ``http://host/app`` / ``http://host/action?op=save``）は昇格後
     scope にも引き継ぐ。origin 全体へ広げると未許可パスへ能動 probe が及び、query を落とすと query 限定
-    target が access-only 扱いになって検査されない（Codex #153 P1）。ホスト/ポートの正規化は
+    target が access-only 扱いになって検査されない。ホスト/ポートの正規化は
     ``url_scope.origin_tuple``（IDNA・既定ポート補完）が正典（Unicode 設定と Punycode 保存の
-    不一致で昇格を落とさない・Codex #153 P2）。
+    不一致で昇格を落とさない）。
     """
     if not effective_origin:
         return ""
@@ -407,7 +407,7 @@ def _promote_redirect_scope(
     target_urls: list,
     access_urls: list,
 ) -> tuple[str, bool]:
-    """手動巡回の実効 URL を昇格すべき scope と、その役割を返す（純粋・Codex #153 P1）。
+    """手動巡回の実効 URL を昇格すべき scope と、その役割を返す（純粋）。
 
     戻り値 ``(scope, is_attack)``。攻撃対象 scope（target_url/target_urls）由来なら ``True``、
     access-only scope 由来なら ``False``（access-only の IdP/支援 origin を攻撃対象へ昇格させない）。
@@ -417,7 +417,7 @@ def _promote_redirect_scope(
     該当なしは ``("", False)``。
     """
     # primary の攻撃 scope は init で origin（scheme://netloc）へ正規化されている。生の target_url の
-    # パスを引き継ぐと https 昇格後の scope が縮みカバレッジが減る（Codex #153 P1）ため origin で評価する。
+    # パスを引き継ぐと https 昇格後の scope が縮みカバレッジが減るため origin で評価する。
     from urllib.parse import urlparse as _up
     _pp = _up(target_url or "")
     primary = f"{_pp.scheme}://{_pp.netloc}" if _pp.scheme and _pp.netloc else target_url
@@ -459,7 +459,7 @@ def _scoped_cookie_header(cookies: list | None, url: str) -> str | None:
         if not name:
             continue
         # Secure Cookie は HTTPS 宛以外に送らない（ブラウザの Secure 強制と同じ）。手組み Cookie を
-        # 平文 HTTP へ送ると TRACE 反射等で秘匿値が漏れる（Codex #157）。
+        # 平文 HTTP へ送ると TRACE 反射等で秘匿値が漏れる。
         if c.get("secure") and not is_https:
             continue
         raw_dom = str(c.get("domain", ""))
@@ -473,7 +473,7 @@ def _scoped_cookie_header(cookies: list | None, url: str) -> str | None:
             continue
         # CHIPS（partitioned）Cookie は partitionKey の top-level site でだけ送られる。直接 probe の
         # top-level は宛先自身なので、宛先の schemeful site に一致しない partition の Cookie は送らない
-        # （別 partition の資格情報で認証・TRACE で露出しない・Codex #157 P1）。
+        # （別 partition の資格情報で認証・TRACE で露出しない）。
         pkey = c.get("partitionKey")
         if pkey:
             kp = _up(pkey if "://" in str(pkey) else f"https://{pkey}")
@@ -731,12 +731,12 @@ def _crawl_review_wants_recrawl(command: str) -> bool:
 
 
 _ADAPTIVE_PAGE_LEVEL_CHECKS = frozenset({"csrf", "session", "clickjacking"})
-# G7: js_analysis の DOM sink 観測（ページ全体）を付与する check。DOM XSS 系のみ。
+# js_analysis の DOM sink 観測（ページ全体）を付与する check。DOM XSS 系のみ。
 # SQLi/OS 等の無関係 check に DOM XSS flow を grounded 証拠として渡さない。
 _DOM_OBS_CHECKS = frozenset({"xss", "dom_xss"})
 
 
-# G7 の反射/生存文字 probe を動かしてよい check。evolution wave（evolved_payloads）が
+# 反射/生存文字 probe を動かしてよい check。evolution wave（evolved_payloads）が
 # 配線され、かつ **任意のテキストフィールドを一律に攻撃する** generic 注入系のみ。
 # ここに:
 #  - 受動スキャナ（js_static/security_headers 等）を入れない＝受動監査を能動化しない。
@@ -963,7 +963,7 @@ class ScanEngine:
         self.detected_spa = None
         # 自動検出で spa_crawl を有効化したか（明示 --spa-crawl と区別）。
         # 自動有効化時はクリック探索を read-only 運用にし、状態変更しうる操作は
-        # allow_state_changing_probes の opt-in を要求する（Codex #104 P1）。
+        # allow_state_changing_probes の opt-in を要求する。
         self._spa_auto_enabled = False
         # SPA harvest のページ跨ぎ大域 dedup キー集合 (endpoint, param集合)。
         self._spa_harvest_seen: set = set()
@@ -1048,7 +1048,7 @@ class ScanEngine:
         # C: CMS 検出結果 (crawl時に設定)
         self.detected_cms = None
         self._cms_origin: str = ""
-        # G7: ページ単位の js_analysis risk キャッシュ（url -> list[JsRisk]）。
+        # ページ単位の js_analysis risk キャッシュ（url -> list[JsRisk]）。
         self._js_risks_cache: dict = {}
         # origin(scheme://netloc) → 主要応答ヘッダ dict。multi-origin(--target-url)で
         # planner fingerprint を origin 別に出すため origin キーで保持する。
@@ -1114,7 +1114,7 @@ class ScanEngine:
         _ci_cfg = _component_intel_config()
         # enable 未指定なら、checks に outdated_components が明示されていれば有効化し、無ければ config。
         # これで CLI/ダッシュボード経由でなく checks を直接渡す BatchRunner 等でも、明示指定した
-        # 検査が config off のまま黙って no-op にならない（TLS 隣接ロジックと対称・Codex #155）。
+        # 検査が config off のまま黙って no-op にならない（TLS 隣接ロジックと対称）。
         _ci_enabled = (
             ("outdated_components" in self.checks or _ci_cfg["enabled"])
             if enable_component_intel is None
@@ -1135,7 +1135,7 @@ class ScanEngine:
         # 有効/無効は enable_tls_scan（ダッシュボード/CLI 上書き）優先。未指定なら、checks に
         # tls_scan が明示されていれば有効化し、無ければ config に従う。これで CLI/ダッシュボード
         # 経由でなく checks を直接渡す呼び出し（batch_runner 等）でも、明示指定した TLS 検査が
-        # 無効のまま黙って no-op にならない（Codex #158 P1）。
+        # 無効のまま黙って no-op にならない。
         if enable_tls_scan is None:
             self.tls_scan_enabled = ("tls_scan" in self.checks) or _tls_scan_enabled_by_config()
         else:
@@ -1301,7 +1301,7 @@ class ScanEngine:
         )
         # ブラウザ初期化が成功したかを追跡する。init() 失敗（Chromium 不在等）でも finally で
         # partial report を出すため、browser 前提の scanner（csrf/session 等）を「実行できた」と
-        # 誤分類しないよう coverage 会計で参照する（0016 前提会計）。
+        # 誤分類しないよう coverage 会計で参照する（前提会計）。
         self._browser_ready = False
         # SPA モード時は navigate() 成功後に描画確定待ち(settle_spa)を行う。crawl だけ
         # でなく attack フェーズの navigate でも待つことで、非同期描画フォームの取りこぼしを防ぐ。
@@ -1344,7 +1344,7 @@ class ScanEngine:
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
         )
-        # LLM 呼び出し観測性（0065）：complete_text がここから logger を getattr で拾う。
+        # LLM 呼び出し観測性：complete_text がここから logger を getattr で拾う。
         self.payload_gen.request_logger = self.request_logger
 
         # Central registry lives in wscan/scanners/__init__.py
@@ -1376,8 +1376,8 @@ class ScanEngine:
         # A-3: Payload continuous learning
         self.payload_learner = PayloadLearner(learning_file=learning_file)
 
-        # D5/G1/G2: 波状層を横断する試行台帳（(注入点, check) 単位で payload→応答メタを一次データ化）。
-        # baseline LLM 生成へ履歴を戻し（0006 G1）、層間の重複再送を観測可能にする（0007 D5）。
+        # 波状層を横断する試行台帳（(注入点, check) 単位で payload→応答メタを一次データ化）。
+        # baseline LLM 生成へ履歴を戻し、層間の重複再送を観測可能にする。
         from wscan.attempt_ledger import AttemptLedger
         self.attempt_ledger = AttemptLedger()
 
@@ -1415,7 +1415,7 @@ class ScanEngine:
         # State
         self.all_findings: list = []
         self.wave_errors: list = []                  # 検出力低下事象の観測ログ（base から共有）
-        # F06/0059: フィールド単位の attack 時間ボックス。stored sink（コメント欄等）で反射
+        # フィールド単位の attack 時間ボックス。stored sink（コメント欄等）で反射
         # スキャナ＋evolution/mutation wave が alert flood を積み、単一フィールドが数千秒を消費して
         # 以降のフィールドを SCAN_TIMEOUT で starve させる回帰を防ぐ（実測: comment 1 件で 2587s）。
         # deadline/notes/truncated 状態は task-local な ContextVar（_FIELD_ATTACK_DEADLINE 等）に持ち、
@@ -1470,8 +1470,8 @@ class ScanEngine:
             category = note.split(":", 1)[0].strip() if ":" in note else "other"
             category = category or "other"
             by_category[category] = by_category.get(category, 0) + 1
-        # LLM 呼び出し総数を併記（llm_calls.jsonl の件数・0065）。詳細な role/status/latency 集計は
-        # RequestLogger に構造化カウンタを足す follow-up（step2）で。ここは可視化の第一歩の count のみ。
+        # LLM 呼び出し総数を併記（llm_calls.jsonl の件数）。詳細な role/status/latency 集計は
+        # RequestLogger に構造化カウンタを足す follow-up で。ここは可視化の第一歩の count のみ。
         rl = getattr(self, "request_logger", None)
         return {
             "total": len(self.wave_errors),
@@ -1486,7 +1486,7 @@ class ScanEngine:
         # SPA の hash route は fragment 付きで reached に載る一方、queue/visited_urls は
         # fragment を剥いた base を持つ（explore_spa_interactions は spa_link を queue に、
         # split("#")[0] を visited_urls に入れる）。unreached 判定は fragment を無視して
-        # 比較し、到達済み base（例 /app）を「未試行」と誤計上しない（Codex #102 P2・
+        # 比較し、到達済み base（例 /app）を「未試行」と誤計上しない（
         # 純粋集計のみ・巡回挙動は不変）。
         reached_url_nofrag = {str(u).split("#", 1)[0] for u in reached_url_set}
         attack_rows = [
@@ -1527,7 +1527,7 @@ class ScanEngine:
                     "reason": str(row.get("note", "") or ""),
                 }
         # abort/incomplete: queued(visited_urls)だが reached でも access/error 行でもない URL は
-        # 「未試行」として unreached に含める（reached/unreached のどちらにも出ない穴を防ぐ・Codex #102）。
+        # 「未試行」として unreached に含める（reached/unreached のどちらにも出ない穴を防ぐ）。
         for vurl in (getattr(self, "visited_urls", None) or set()):
             u = str(vurl or "")
             if (
@@ -1566,7 +1566,7 @@ class ScanEngine:
             pass
             # cleanup 前の per-page 保存でも live worker のカウンタを含める（クラッシュで
         # 失われないため）。cleanup は accumulator へ transfer 後に _coverage_workers から
-        # 除くので二重計上しない（Codex #102）。
+        # 除くので二重計上しない。
         for _cw in (getattr(self, "_coverage_workers", ()) or ()):
             try:
                 merged_status_counts.update(
@@ -1592,7 +1592,7 @@ class ScanEngine:
             pass
 
         reached_urls = sorted(str(url) for url in reached_url_set)
-        # check レベル coverage（0016）: registry の全 scanner のうち何が選択され、何が
+        # check レベル coverage: registry の全 scanner のうち何が選択され、何が
         # 未実行か。「既定 scan は少数 check だけ＝残りは未検査」を可視化し「0件＝安全」の
         # 誤解を防ぐ（純粋集計・巡回挙動は不変）。
         try:
@@ -1617,13 +1617,13 @@ class ScanEngine:
             )
         except Exception:
             check_coverage = {}
-        # prerequisite 会計（0016）: in-scope でも前提（OOB/API仕様/認証/複数account）が
+        # prerequisite 会計: in-scope でも前提（OOB/API仕様/認証/複数account）が
         # 無ければ実質検査できない。理由付きで残し 0 findings=安全 の誤解を防ぐ（選択会計とは別軸）。
         try:
             from .check_coverage import compute_prerequisite_coverage
             # second_request はブラウザ非依存で常に満たせる。browser は init 成功時のみ充足と
             # みなす（init 失敗でも finally で partial report を出すため、csrf/session 等を
-            # 「実行できた」と誤分類しない・Codex P2）。
+            # 「実行できた」と誤分類しない）。
             available_prereqs = {"second_request"}
             if getattr(self, "_browser_ready", False):
                 available_prereqs.add("browser")
@@ -1632,7 +1632,7 @@ class ScanEngine:
             # api_spec は「テンプレートが存在する」ではなく「scanner が実際に消費できる
             # mutation テンプレート（POST/PUT/PATCH）が1つ以上ある」ことを条件にする。
             # GET/DELETE のみの seed では mass_assignment.scan_page が probe を送らないため、
-            # runnable と偽らない（Codex P2）。
+            # runnable と偽らない。
             if any(
                 (getattr(t, "method", "") or "").upper() in ("POST", "PUT", "PATCH")
                 for t in (getattr(self, "api_seed_requests", []) or [])
@@ -1657,7 +1657,7 @@ class ScanEngine:
             )
         except Exception:
             prerequisite_coverage = {}
-        # capability matrix（0035-E）: in-scope の scanner × carrier を report へ供給する。
+        # capability matrix: in-scope の scanner × carrier を report へ供給する。
         # check_coverage と同じ in_scope に限定＝「今回動かした検査」の carrier 射程だけ出す
         # （全 36 を毎回出すと noise）。CONTRACT 未宣言 scanner は除外（build 側が要求）。
         try:
@@ -1817,10 +1817,10 @@ class ScanEngine:
         """JSON 注入ターゲットのスコープ判定（harvest 用の述語）。
 
         - **exclusion は observed 原文（query 込み）** で判定（exclude_urls の query 固有 full URL /
-          full-URL ワイルドカードを尊重。query を落とすと明示除外が効かない。#90 R5 P1）。
+          full-URL ワイルドカードを尊重。query を落とすと明示除外が効かない。 P1）。
         - **scope は原文→query 除去の順で試す**。原文一致は query 付きで設定された attack scope
-          （例 --target-url .../action?op=save）を拾い（#90 R6）、query 除去は path-scoped target と
-          observed?query 付きを一致させる（#90 R4。JSON 注入は body 対象で query は注入対象でない）。
+          （例 --target-url .../action?op=save）を拾い、query 除去は path-scoped target と
+          observed?query 付きを一致させる（JSON 注入は body 対象で query は注入対象でない）。
         """
         if self._is_url_excluded(url):
             return False
@@ -1834,7 +1834,7 @@ class ScanEngine:
             return True
         # fragment はサーバに送られないので常に除いて再判定する。これで query 付きで
         # 明示スコープした target（例 .../action?op=save）の fragment 付き変種
-        # （.../action?op=save#details）も許可される（設定 query は保持・Codex #104 P2）。
+        # （.../action?op=save#details）も許可される（設定 query は保持）。
         no_frag = url_scope.without_fragment(url)
         if no_frag != url and (
             self._is_attack_target_url(no_frag)
@@ -1979,7 +1979,7 @@ class ScanEngine:
         """実効 Cookie 文字列。並列 worker task 内なら task-local 値を返す。
 
         auth_headers だけでなく ``engine.cookies`` を直読みする全 consumer（cms/jwt/graphql/
-        privesc 等）が worker-local 値を見るよう、アクセサ自体を worker-aware にする（0067）。
+        privesc 等）が worker-local 値を見るよう、アクセサ自体を worker-aware にする。
         """
         return _effective_cookies_of(self)
 
@@ -2111,7 +2111,7 @@ class ScanEngine:
                     f"  [green][Resume] {len(state.completed_units)} 済み単位 / "
                     f"{restored} 件の既出 Finding を復元しました。[/green]"
                 )
-                # D5: 試行台帳を復元し、resume 後の adaptive が実履歴（status/reflection/
+                # 試行台帳を復元し、resume 後の adaptive が実履歴（status/reflection/
                 # timing/evolved payload）を失って静的 list へ退化するのを防ぐ。
                 try:
                     from wscan.attempt_ledger import AttemptLedger
@@ -2145,7 +2145,7 @@ class ScanEngine:
             self.checkpoint.reached_urls = sorted(
                 getattr(self, "reached_urls", set()) or set()
             )
-            # D5: 試行台帳も保存（resume で adaptive 履歴を維持）。台帳未配線でも安全。
+            # 試行台帳も保存（resume で adaptive 履歴を維持）。台帳未配線でも安全。
             ledger = getattr(self, "attempt_ledger", None)
             if ledger is not None:
                 self.checkpoint.attempt_ledger = ledger.to_dict()
@@ -2170,7 +2170,7 @@ class ScanEngine:
                 pass
             # cleanup 前の per-page 保存でも live worker のカウンタを含める（cleanup 前の
             # クラッシュでも resume で復元できる）。cleanup は accumulator へ transfer 後に
-            # _coverage_workers から除くので二重計上しない（Codex #102）。
+            # _coverage_workers から除くので二重計上しない。
             for _cw in (getattr(self, "_coverage_workers", ()) or ()):
                 try:
                     merged_status_counts.update(
@@ -2203,14 +2203,14 @@ class ScanEngine:
 
         tls_scan は page-level のため、Playwright がナビゲートできたページでしか scan_page が
         呼ばれない。弱いプロトコル（TLS1.0/1.1 のみ受理等）で Chromium がネゴシエートできない
-        origin は crawl 段階で seed ごと捨てられ、まさに検出したい弱プロトコル対象を取りこぼす
-        （Codex #158 P1）。ここで seed の https origin を直接検査する。scanner は origin 単位で
+        origin は crawl 段階で seed ごと捨てられ、まさに検出したい弱プロトコル対象を取りこぼす。
+        ここで seed の https origin を直接検査する。scanner は origin 単位で
         dedup するため crawl 済み origin は no-op。TLS は read-only なので状態変更を伴わない。
 
         ただし TLS ハンドシェイクは能動的プローブなので、**攻撃スコープ内の URL から導いた origin
         だけ**を対象にする。seed_urls は Hybrid の偵察で発見した探索専用 URL（外部リンク・
         PAGE_FOUND 等）を含み得るため、_is_attack_target_url（＋除外）で濾して、operator が
-        テスト許可していないホストへ SSLyze を送らない（Codex #158 P1）。
+        テスト許可していないホストへ SSLyze を送らない。
         """
         scanner = self.scanners.get("tls_scan")
         if scanner is None:
@@ -2367,7 +2367,7 @@ class ScanEngine:
                     console.print(
                         f"  [yellow]API template check ({check_name}) on {url}: {e}[/yellow]"
                     )
-                    # 劣化した実行を coverage に残す（Codex #102 P2）。
+                    # 劣化した実行を coverage に残す。
                     self._record_scan_matrix(
                         url=url,
                         field_name="(api-template)",
@@ -2425,7 +2425,7 @@ class ScanEngine:
                 # 再開: 済み単位は auth/network 操作の**前**に飛ばす。完了済み JSON 点で
                 # _maybe_relogin_for_page（browser 遷移）や _api_session_looks_expired
                 # （HTTP GET）を再実行すると、resume で完了エンドポイントを無駄に再訪し
-                # GET 副作用/ログインを繰り返すため（Codex #99 R4）。
+                # GET 副作用/ログインを繰り返すため。
                 if self._checkpoint_is_done_ip(ip, check_name):
                     continue
                 await self._maybe_relogin_for_page(ip.url)
@@ -2446,7 +2446,7 @@ class ScanEngine:
                 # logout で _api_auth_failed を立てる。mark は「送信成功あり・失敗なし・
                 # 未認証でない」の全条件を満たすときだけ。baseline は通ったが後続の攻撃
                 # payload が落ちたケースも _json_probe_failed で捕らえ、attack 未実行の点を
-                # 「済み」にしない（Codex #99 R4）。
+                # 「済み」にしない。
                 self._api_auth_failed = False
                 self._json_probe_sent = False
                 self._json_probe_failed = False
@@ -2699,7 +2699,7 @@ class ScanEngine:
         ``self.cookies`` は同期時の for_url（=ページ path）でスコープされ Path=/ と Path=/admin の
         両方を含むため、origin ルート(/) の probe へそのまま送ると Path=/admin の Cookie を漏らす。
         本メソッドは URL 単位で再スコープした文字列を返し、origin と page で送り分けられるようにする
-        （http_methods 等が使用・Codex #157）。jar 空は ""、ブラウザ未接続・取得例外時は None（呼び出し側で記録・未完了扱い）。"""
+        （http_methods 等が使用）。jar 空は ""、ブラウザ未接続・取得例外時は None（呼び出し側で記録・未完了扱い）。"""
         try:
             page = getattr(self.browser, "page", None)
             if page is None:
@@ -2839,7 +2839,7 @@ class ScanEngine:
     # =========================================================================
 
     def _profile(self, msg: str) -> None:
-        """WSCAN_PROFILE=1 のとき scan 開始からの経過秒を stderr へ即時 flush 出力する（F06/0059 計測用）。
+        """WSCAN_PROFILE=1 のとき scan 開始からの経過秒を stderr へ即時 flush 出力する。
 
         E2E が SCAN_TIMEOUT_S で殺されても「どこで時間が集中したか / 最後にどの単位で止まったか」を
         残すため、まとめてでなく逐次出力する。本番は環境変数未設定で完全 no-op（オーバーヘッドなし）。
@@ -2885,7 +2885,7 @@ class ScanEngine:
             await self._browser.init()
             self._browser_ready = True  # init 成功後のみ browser 前提を「充足」とみなす
             # coverage の blocked カウンタ用 origin フィルタは、pre-auth ログインフロー等の
-            # 最初のトラフィックより前に main browser へ設定する（Codex #102 P2）。
+            # 最初のトラフィックより前に main browser へ設定する。
             _configure_network_coverage_hosts(
                 self._browser, getattr(self, "_coverage_hosts", set())
             )
@@ -3006,7 +3006,7 @@ class ScanEngine:
                     await self._run_json_injection_checks(plans)
                     self._profile("phase3b tls-seed: start")
                     # crawl が到達できない弱プロトコル origin を取りこぼさないため、
-                    # seed origin に対して TLS 検査を直接走らせる（Codex #158 P1）。
+                    # seed origin に対して TLS 検査を直接走らせる。
                     await self._run_tls_seed_scans()
                     self._profile("phase3b: done")
                 except AbortScan:
@@ -3058,7 +3058,7 @@ class ScanEngine:
             # snapshot — verifiers near token expiry would 401 and mark real
             # findings unconfirmed.
             try:
-                # F06/0059: verify は時間ボックス対象外（attack フィールドの stale deadline が
+                # verify は時間ボックス対象外（attack フィールドの stale deadline が
                 # verify_finding の再注入を誤って skip し finding を落とすのを防ぐ）。ContextVar は
                 # 通常 _scan_field 末尾で reset 済みだが、例外離脱時の漏れに備えた安全ネット。
                 _FIELD_ATTACK_DEADLINE.set(None)
@@ -3075,7 +3075,7 @@ class ScanEngine:
                     await self._browser.close()
                 finally:
                     # planner/adaptive 用の AsyncAnthropic を決定的に閉じる。serve の反復スキャンで
-                    # 接続プールが放置され transport/FD が蓄積するのを防ぐ（Codex #173 P2）。
+                    # 接続プールが放置され transport/FD が蓄積するのを防ぐ。
                     # 以降の report 分析は sync client 経路なので、ここで閉じてよい。
                     _aclose = getattr(self.payload_gen, "aclose", None)
                     if _aclose is not None:
@@ -3218,8 +3218,7 @@ class ScanEngine:
             parsed = urlparse(url)
             # 完全な正規化 origin（scheme+netloc）を含めて origin-aware にする。別 origin の
             # 構造的に同一なページ（複数ターゲットの SPA ルート `/` 等）を重複スキップで
-            # 落とさない。scheme も含めるので同一ホストの HTTP/HTTPS アプリも区別する
-            # （Codex #104 P1/P2）。
+            # 落とさない。scheme も含めるので同一ホストの HTTP/HTTPS アプリも区別する。
             route_sig = f"route:{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
             query_names = sorted(
                 {
@@ -3382,7 +3381,7 @@ class ScanEngine:
                 # 保ったまま昇格する。訪問だけでなく手動巡回で捕捉したフォーム・パラメータも
                 # 検査対象にするが、**攻撃対象 scope に一致したときだけ target_urls（攻撃可）へ**、
                 # access-only scope に一致したときは access_urls（訪問のみ）へ加える。access-only の
-                # IdP/支援 origin が https へリダイレクトしても攻撃対象へ昇格させない（Codex #153 P1）。
+                # IdP/支援 origin が https へリダイレクトしても攻撃対象へ昇格させない。
                 # primary（target_url）だけでなく設定済みの全 scope と突き合わせる：副 target が
                 # https へリダイレクトすると実効 origin が primary と別ホストになり、primary 比較だけ
                 # だと scope に入らず副 target が未スキャンになる。無関係 origin は
@@ -3398,7 +3397,7 @@ class ScanEngine:
                 # 昇格した origin には認証ヘッダを送れるよう header scope も更新する。init 時に
                 # 算出済みの _header_scope_origins と、_phase_crawl 前に BrowserManager へ渡した
                 # コピーの双方を同期しないと headers_for_url()／リクエスト interceptor が新 origin を
-                # 弾き、未認証でクロール・攻撃してしまう（Codex #153 P1）。
+                # 弾き、未認証でクロール・攻撃してしまう。
                 if _added_scope:
                     self._header_scope_origins = allowed_header_origins(
                         self.target_url,
@@ -3609,11 +3608,11 @@ class ScanEngine:
             # SPA 検出は _first_page にも重複スキップにも縛らず、有効化されるまで各ページで
             # 評価する。マルチターゲット/マルチオリジン scan で、主 URL が通常ページだったり、
             # 二次オリジンの SPA シェルが origin 非依存の _page_fingerprint で主ページと衝突して
-            # 重複スキップされると、後続 SPA の動的ルート/API を見逃す（Codex #104 P1）。
+            # 重複スキップされると、後続 SPA の動的ルート/API を見逃す。
             # そのため重複スキップより前に検出し、必要なら settle して html を採り直す。
             # ただし landed_url が access スコープ外（in-scope URL が未設定の外部 IdP/SSO 等へ
             # リダイレクトした場合）は検出も有効化もしない。さもないと後段の explore が外部
-            # ページの相対リンク/タブ/ボタンをスコープ外でクリックする（Codex #104 P1）。
+            # ページの相対リンク/タブ/ボタンをスコープ外でクリックする。
             spa_just_enabled = False
             if (
                 html
@@ -3639,13 +3638,13 @@ class ScanEngine:
                         # 反転は以降のナビゲーションにしか効かない。到達ページが本番シェル
                         # （空マウント）の場合、この場で settle して html を採り直さないと、
                         # 直後の重複判定・find_forms()/get_url_params()・CrawledPage が hydration
-                        # 前の空 DOM を見て forms/route/url_params が 0 件になる（Codex #104 P1）。
+                        # 前の空 DOM を見て forms/route/url_params が 0 件になる。
                         try:
                             await self.browser.settle_spa()
                             html = await self.browser.page.content()
                             # settle 中の client-side redirect で landed が変わりうる。以降の
                             # スコープ判定（explore ガード・base_url）が古い in-scope 値を使わ
-                            # ないよう landed_url を採り直す（Codex #104 P1）。
+                            # ないよう landed_url を採り直す。
                             landed_url = self.browser.page.url or landed_url
                         except Exception:
                             pass
@@ -3656,7 +3655,7 @@ class ScanEngine:
             # このイテレーションで外部ドキュメントを forms 抽出・CrawledPage 記録・
             # collect_links_rich(url) すると、外部ページを元 URL のターゲットとして保存し
             # 相対リンクを元 origin に解決して偽のクロール/攻撃対象を作る。外部へ出たら
-            # unscannable として記録し、以降の処理をスキップする（Codex #104 P2）。
+            # unscannable として記録し、以降の処理をスキップする。
             # SPA モードが有効な間は navigate() 内でも settle が走る（検出イテレーション
             # 以降の全ページ）ので、self.spa_crawl 有効時の全ナビに適用する。非SPA の
             # リダイレクト挙動は変えない。
@@ -3679,7 +3678,7 @@ class ScanEngine:
                 # このイテレーションで SPA を自動検出したページは、origin 非依存の
                 # fingerprint が別 origin の既出ページと衝突しても重複スキップしない
                 # （下の add で登録はする）。さもないと唯一の SPA ページの forms/探索/
-                # harvest を落とす（Codex #104 P1）。
+                # harvest を落とす。
                 if spa_just_enabled:
                     pass
                 elif fp in self._seen_page_fingerprints:
@@ -3749,7 +3748,7 @@ class ScanEngine:
                     landed = ""
                 # scheme/host/path で比較する。パスだけだと、同一パスで別オリジンへ飛ぶ
                 # リダイレクト（例: 社内 /login → 外部 SSO /login）を「同一ページ」と誤認し、
-                # 外部ページの form を元 URL に残してしまう（Codex 指摘）。
+                # 外部ページの form を元 URL に残してしまう。
                 def _origin_path(u: str) -> tuple:
                     p = urlparse(u)
                     return (p.scheme, p.netloc, p.path.rstrip("/"))
@@ -3834,13 +3833,13 @@ class ScanEngine:
             # ① SPA crawl: discover dynamically-rendered routes via click interaction
             # landed_url が access スコープ外（in-scope URL が外部 IdP/SSO へリダイレクト等）の
             # ときはクリック探索しない。外部ページの相対リンク/タブ/ボタンをスコープ外で
-            # 操作するのを防ぐ（spa_crawl が既に有効でも landed で判定・Codex #104 P1）。
+            # 操作するのを防ぐ（spa_crawl が既に有効でも landed で判定）。
             #
             # クリック探索は state を変えうる（削除/送信/管理操作の nav a や button[data-route]）。
             # 自動有効化（既定 ON）では read-only 運用とし、クリック探索は明示 --spa-crawl か
             # allow_state_changing_probes の opt-in がある場合のみ行う。opt-in が無くても
             # settle と GET XHR harvest（ページが自ら投げた read-only な観測）は継続する
-            # ので、API 到達性の主要な利得は保たれる（Codex #104 P1）。
+            # ので、API 到達性の主要な利得は保たれる。
             _spa_click_allowed = (
                 not self._spa_auto_enabled or self.allow_state_changing_probes
             )
@@ -3852,14 +3851,14 @@ class ScanEngine:
                 try:
                     # base_url は landed_url を渡す。相対 href/routing 属性は landed
                     # ドキュメント URL で解決されるため、pre-redirect の url を渡すと
-                    # スコープ判定と実リクエスト先がずれる（Codex #104 P1）。
+                    # スコープ判定と実リクエスト先がずれる。
                     spa_links = await self._browser.explore_spa_interactions(
                         self._browser.page, landed_url, max_clicks=20,
                         is_in_scope=self._is_access_allowed_url,
                     )
                     # 発見ルートの巡回キュー投入は通常リンクと同じ深度ガードに従う。
                     # これが無いと --depth 1 でも探索ルートを訪問し再帰的に深追いして
-                    # 操作者の深度=トラフィック上限を超える（Codex #104 P2）。現ページの
+                    # 操作者の深度=トラフィック上限を超える。現ページの
                     # クリック探索と XHR harvest（同一ページの攻撃面拡充）は深度非依存で継続。
                     if depth + 1 < self.depth:
                         for spa_link in spa_links:
@@ -3931,7 +3930,7 @@ class ScanEngine:
                             self._spa_harvest_seen.add(endpoint_key)
                             self.visited_urls.add(clean)
                             # harvest した GET endpoint は observed かつ以降 attack 対象＝到達済み。
-                            # reached にも入れ、not-attempted 誤分類を防ぐ（Codex #102）。
+                            # reached にも入れ、not-attempted 誤分類を防ぐ。
                             self.reached_urls.add(clean)
                             pages.append(CrawledPage(
                                 url=target["url"],
@@ -3955,7 +3954,7 @@ class ScanEngine:
             # 非GET body の harvest→_run_json_injection_checks は変異 body を再送する
             # 状態変更操作。自動有効化（既定 read-only）ではクリック探索と同様、明示
             # --spa-crawl か allow_state_changing_probes の opt-in がある場合のみ行う
-            # （autosave/cart 等の POST/PUT/PATCH を勝手に攻撃再送しない・Codex #104 P1）。
+            # （autosave/cart 等の POST/PUT/PATCH を勝手に攻撃再送しない）。
             # GET XHR harvest（上）は read-only 相当なので既定でも継続する。
             if self.spa_crawl and (
                 not self._spa_auto_enabled or self.allow_state_changing_probes
@@ -3969,22 +3968,22 @@ class ScanEngine:
                         if urlparse(t).netloc
                     }
                     json_ip_cap = max(200, self.depth * 50)
-                    # 2 予算を分離する（#90 R13）。**キュー予算**＝json_ip_cap は engine が cross-page
+                    # 2 予算を分離する。**キュー予算**＝json_ip_cap は engine が cross-page
                     # dedup **後**に json_injection_points へ掛ける（下）。**parse 作業予算**は harvester の
                     # max_targets で、キュー予算より広くとる（×4）。両者を等値にすると、1 endpoint の
                     # 値churn（autosave/polling で timestamp/nonce だけ変わる distinct body 群）が
                     # semantic collapse する前に parse 予算を食い潰し、後続の別 endpoint が未 parse＝
-                    # 未 queue になる（#90 R13）。headroom を与えて churn を吸収する。
+                    # 未 queue になる。headroom を与えて churn を吸収する。
                     # 残容量ではなく固定上限にするのは、後続ページが先頭で cross-page 重複を出すと
-                    # 残容量ベースの budget を重複が食い潰し新規 endpoint が未 queue になるため（#90 R10）。
+                    # 残容量ベースの budget を重複が食い潰し新規 endpoint が未 queue になるため。
                     json_parse_budget = json_ip_cap * 4
-                    # キュー満杯でも harvest は続ける（#90 R14）。既出 endpoint の再観測は下の
+                    # キュー満杯でも harvest は続ける。既出 endpoint の再観測は下の
                     # existing_tid 分岐で template の headers/body を最新化するため、満杯を理由に harvest を
                     # 止めると、後続ページで token/nonce/version/resource-id が rotate しても stale なまま
                     # attack replay して 401/403/409 を招く。**新規 point の追加**だけを容量で抑える
                     # （下の round-robin 配分が残容量 0 で空を返す）。
                     # 精密スコープ判定（scope=query除去/exclusion=原文）で body パース前にフィルタ。
-                    # 新規 target を一旦集め、pointer 配分は target 間 round-robin で行う（#90 R13）。
+                    # 新規 target を一旦集め、pointer 配分は target 間 round-robin で行う。
                     accepted_targets: list = []
                     for target in spa_harvest.harvest_json_body_targets(
                         self.browser.network.pairs,
@@ -3995,7 +3994,7 @@ class ScanEngine:
                         # dedup identity は **observed url（query 込み）**＋**body_signature**（値まで含む
                         # 正規化 body の署名）。キー順違いは collapse しつつ、query 別 operation
                         # （?op=create/delete）や値で多重化する operation（JSON-RPC method/GraphQL
-                        # operationName）を別扱いにする（#90 R7/R8）。body_signature が無い旧形式は
+                        # operationName）を別扱いにする。body_signature が無い旧形式は
                         # sorted pointer に fallback。
                         dedup_key = (
                             target["method"],
@@ -4003,14 +4002,14 @@ class ScanEngine:
                             target.get("body_signature")
                             or tuple(sorted(target["pointers"])),
                             # media type で版/operation を分ける API（vnd.acme.v1+json vs v2+json）を
-                            # page 跨ぎの engine dedup でも collapse しない（#90 R21d・harvest 側の
+                            # page 跨ぎの engine dedup でも collapse しない（harvest 側の
                             # raw/semantic 識別子と一貫）。
                             spa_harvest._norm_content_type(target.get("content_type")),
                         )
                         existing_tid = self._spa_json_harvest_seen.get(dedup_key)
                         if existing_tid is not None:
                             # 再観測: point は追加せず、template を最新観測の headers/body で更新して
-                            # refresh された Authorization/CSRF を attack 時に最新へ保つ（#90 R7）。
+                            # refresh された Authorization/CSRF を attack 時に最新へ保つ。
                             tmpl = self.injection_templates.get(existing_tid)
                             if isinstance(tmpl, dict):
                                 tmpl["headers"] = target["headers"]
@@ -4020,7 +4019,7 @@ class ScanEngine:
                         # 新規 target は一旦集める（template 登録と pointer 配分は下で round-robin）。
                         accepted_targets.append((dedup_key, target))
 
-                    # 公平配分（#90 R13）: 1 endpoint（多 pointer body）が global キューを独占して
+                    # 公平配分: 1 endpoint（多 pointer body）が global キューを独占して
                     # 後続 endpoint を全廃しないよう、残容量を target 間 round-robin で配る（純粋関数）。
                     # スロットを得た target のみ template 登録＋dedup mark する（0 slot の dead template を作らない）。
                     json_remaining_slots = json_ip_cap - len(self.json_injection_points)
@@ -4058,7 +4057,7 @@ class ScanEngine:
 
             # explore が張ったスコープ外リクエスト遮断 route を、settle/harvest 完了後に
             # 剥がす。遅延リクエスト（setTimeout fetch 等）を settle 中も遮断するため探索
-            # 直後には剥がさない（Codex #104 P1）。
+            # 直後には剥がさない。
             if self.spa_crawl:
                 try:
                     await self._browser.clear_scope_route()
@@ -4069,7 +4068,7 @@ class ScanEngine:
             # いることがある。collect_links_rich(url) が誤 DOM から相対リンクを拾って
             # 偽ルートを作らないよう、landed から drift していたら landed へ戻す。
             # navigate の成否と最終 URL を検証し、復元できなければ link 収集をスキップする
-            # （誤 DOM から偽ルートを拾わない・Codex #104 P2）。
+            # （誤 DOM から偽ルートを拾わない）。
             _links_ok = True
             if self.spa_crawl and landed_url:
                 try:
@@ -5047,7 +5046,7 @@ class ScanEngine:
             self._note_coverage_origin(landing_url)
             # 成功したランディングを BFS ループ前に reached 計上する。ループ先頭の
             # abort でループ内 navigate に到達しなくても、実際に読めたページが部分
-            # カバレッジから欠落しないようにする（Codex #102 P2・reached を足すのは
+            # カバレッジから欠落しないようにする（reached を足すのは
             # unreached を減らすだけで偽警告を生まない安全側）。
             self.reached_urls.add(landing_url)
 
@@ -5074,7 +5073,7 @@ class ScanEngine:
                 await self._sync_cookies_from_browser(self._browser)
                 landing_url = self._browser.page.url.rstrip("/")
                 self._note_coverage_origin(landing_url)
-                # 再ログイン後のランディングも同様に reached 計上（Codex #102 P2）。
+                # 再ログイン後のランディングも同様に reached 計上。
                 self.reached_urls.add(landing_url)
 
         new_pages: list = []
@@ -5132,7 +5131,7 @@ class ScanEngine:
             self._note_coverage_origin(actual_url)
             self.reached_urls.add(actual_url)
             # redirect で actual_url が queued url と違っても、queued url(visited_urls に登録済み)を
-            # reached にして not-attempted 誤分類を防ぐ（Codex #102）。
+            # reached にして not-attempted 誤分類を防ぐ。
             self.reached_urls.add(url.rstrip("/"))
             try:
                 html = await self._browser.page.content()
@@ -5214,7 +5213,7 @@ class ScanEngine:
                         auth_visited.add(clean_key)  # dedup はキー、queue は元 URL（slash 保持）
                         # queued post-auth URL を scan-level state にも残し、abort 時に
                         # coverage が pending を unreached(not attempted)へ分類できるようにする
-                        # （main crawl と同型・Codex #102）。
+                        # （main crawl と同型）。
                         self.visited_urls.add(clean)
                         self._transition_via.setdefault(clean, {
                             "text": entry.get("text", ""),
@@ -5336,7 +5335,7 @@ class ScanEngine:
         )
         # reached: login target(canonical host+path)に着地した、または form/URL param が
         # 実際に見つかった(=このあと検査/攻撃する)なら path が違っても login ページは到達済み
-        # （/login→/auth/login 等・Codex #102）。form 無しで別ページへ逸れた場合のみ未到達。
+        # （/login→/auth/login 等）。form 無しで別ページへ逸れた場合のみ未到達。
         if (
             self._is_login_target_url(landed_url)
             or _same_canonical_login(landed_url, login_seed)
@@ -5364,7 +5363,7 @@ class ScanEngine:
         )
 
         # 認証前のログインフォーム検査。pre-attack flow（ログイン等）をここで走らせると
-        # auto-login 前の pre-auth 検査を汚染するため無効化する（#167 P2）。
+        # auto-login 前の pre-auth 検査を汚染するため無効化する。
         await self._attack_one_page(page, {}, run_pre_attack_flows=False)
 
         # Prevent the authenticated crawl/attack from re-visiting the login page
@@ -5375,7 +5374,7 @@ class ScanEngine:
         """このページを target とする pre-attack flow を **file 順に全て** 返す（無ければ空）。
 
         flow の最後の navigate step の URL がページ URL と一致するものを prerequisite とみなす。
-        同一遷移先の flow が複数あっても取りこぼさず、呼び出し側が順次再生する（Codex #170 P2）。
+        同一遷移先の flow が複数あっても取りこぼさず、呼び出し側が順次再生する。
         `_urls_same_page` 等価を使うので `/checkout` と `/checkout/`・fragment 差も同一視して選ぶ。
         """
         matched = []
@@ -5385,7 +5384,7 @@ class ScanEngine:
             last_nav = next(
                 (s for s in reversed(flow.steps) if s.action == "navigate"), None
             )
-            # 着地先検証と同じ比較器を使う（Codex #167 P2）：fragment 差（`#settings`）は
+            # 着地先検証と同じ比較器を使う：fragment 差（`#settings`）は
             # 同一ページ扱いで flow を選び、query 値差（`?next=/` と `?next=`）は別物として
             # 誤選択しない。生の rstrip("/") 比較だと fragment 付き flow を取りこぼす一方、
             # query 末尾スラッシュだけ違う別 target を同一視して誤った state 変更 flow を走らせうる。
@@ -5401,21 +5400,20 @@ class ScanEngine:
         """成功した pre-attack flow の後、現在のページから form/url_param を採り直して page に union する。
 
         flow が新たに露出したフォーム/パラメータ（add-to-cart 後の checkout/coupon 等）を攻撃対象へ
-        含める（再生前 crawl 時の stale な CrawledPage のまま攻撃すると新出フォームを検査しない・
-        Codex #170 P1）。既存の crawl フォームは失わず、新規のみ署名で重複排除して追加する。
+        含める（再生前 crawl 時の stale な CrawledPage のまま攻撃すると新出フォームを検査しない）。既存の crawl フォームは失わず、新規のみ署名で重複排除して追加する。
         ベストエフォート（抽出失敗時は既存のまま）。
         """
         # flow 最終 action が非同期 DOM 更新（click→AJAX→coupon モーダル等）を起こす場合、
         # runner の domcontentloaded 待ちは document 既ロードで即返り、直後の find_forms が描画前に
         # 走って空 form を authoritative に採用し露出フォームを取りこぼす。ネットワークが静まるのを
-        # 短く待ってからスナップショットする（bounded・失敗は無視）（Codex #170 P2）。
+        # 短く待ってからスナップショットする（bounded・失敗は無視）。
         try:
             await self.browser.page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:
             pass
         try:
             # raise_on_error=True で「成功して空」と「抽出失敗」を区別する。find_forms は既定で
-            # 例外を握り潰し [] を返すため、これが無いと transient 失敗で crawl form を消す（#170 P2）。
+            # 例外を握り潰し [] を返すため、これが無いと transient 失敗で crawl form を消す。
             fresh_forms = await self.browser.find_forms(raise_on_error=True)  # 成功時は list（空もあり）
         except Exception:
             fresh_forms = None  # 抽出失敗（None で成功-空 [] と区別する）
@@ -5432,7 +5430,7 @@ class ScanEngine:
 
         if page.forms is None:
             page.forms = []
-        # 抽出が **成功** したら fresh を正典にする（Codex #170 P2）。crawl 時に採った form の
+        # 抽出が **成功** したら fresh を正典にする。crawl 時に採った form の
         # DOM index は flow が form を削除/並べ替えると陳腐化し、stale な crawl-only form を
         # 後ろに残すと _attack_page がその index を fill_and_submit_form へ渡して別 form を掴む/
         # 署名変化で同一 live form を二重攻撃する。post-flow の現在ページ（_on_target 済み）から
@@ -5452,7 +5450,7 @@ class ScanEngine:
                     page.url_params.append(name)
                     existing.add(name)
         # flow が URL を変えずに inline/外部 JS を露出し得る。js_static は page.html /
-        # page.external_scripts を見るため、HTML スナップショットも採り直す（Codex #170 P2）。
+        # page.external_scripts を見るため、HTML スナップショットも採り直す。
         # 相対 script の解決基点は **ブラウザの実 URL**（page.url は crawl 時の値で、末尾
         # スラッシュ等価な遷移先だと `/app` vs `/app/` がずれ `src="bundle.js"` を `/bundle.js`
         # と誤解決して external_scripts を空にする）。現在 URL が取れなければ page.url へ退避。
@@ -5470,7 +5468,7 @@ class ScanEngine:
         # flow が入力（form/url_param）を露出したら「flow-exposed」marker を **page-level 検査より
         # 前に** 永続化する。field checkpoint が1つも書かれる前に中断されても、resume が本ページを
         # 「入力なし＝page-level のみ」と誤断して flow を捨て、露出フィールドを恒久的に取りこぼすのを
-        # 防ぐ（Codex #170 P2）。sentinel 名なので _checkpoint_has_field_units には数えられない。
+        # 防ぐ。sentinel 名なので _checkpoint_has_field_units には数えられない。
         if page.forms or page.url_params:
             self._checkpoint_mark_done(page.url, "(flow-exposed)", 0, "(flow-exposed)")
         if added:
@@ -5488,18 +5486,18 @@ class ScanEngine:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
     def _checkpoint_mark_flow_ran(self, url: str, flow) -> None:
-        """この URL で当該 flow（内容 fingerprint）が完走したことを永続化する（Codex #170 P2）。"""
+        """この URL で当該 flow（内容 fingerprint）が完走したことを永続化する。"""
         fp = self._flow_fingerprint(flow)
         self._checkpoint_mark_done(url, "(flow-ran)", 0, f"(flow-ran:{fp})")
 
     def _checkpoint_flow_ran(self, url: str, flow) -> bool:
         """当該 flow が過去 run でこの URL に対し完走済みか。resume で新規/変更された --flows を
-        「完全 checkpoint 済み」として捨て、露出フォームを取りこぼすのを防ぐ（Codex #170 P2）。"""
+        「完全 checkpoint 済み」として捨て、露出フォームを取りこぼすのを防ぐ。"""
         fp = self._flow_fingerprint(flow)
         return self._checkpoint_is_done(url, "(flow-ran)", 0, f"(flow-ran:{fp})")
 
     def _checkpoint_has_flow_exposed_marker(self, url: str) -> bool:
-        """この URL で過去 run の flow が入力を露出した marker が checkpoint にあるか（#170 P2）。
+        """この URL で過去 run の flow が入力を露出した marker が checkpoint にあるか。
 
         flow-exposed だが field checkpoint 完了前に中断されたページを resume で skip しないための
         signal。field 単位が無くてもこの marker があれば flow を再生して露出入力を再構成する。
@@ -5538,13 +5536,13 @@ class ScanEngine:
         crawl スナップショットが入力ゼロでも、前回 run で pre-attack flow が露出したフォーム/
         パラメータを検査済みなら **本物の** field 単位が残る。resume の flow skip 判定で
         「入力なし＝page-level のみ」と誤断して flow を捨て、中断された field 検査を取りこぼす
-        のを防ぐ signal（Codex #170 P2）。pending 単位は保存されないため、field 単位が1つでも
+        のを防ぐ signal。pending 単位は保存されないため、field 単位が1つでも
         あれば安全側に倒して flow を再生する（=残作業を再構成できる）。
 
         checkpoint sentinel（``(page)``＝page-level、``(api-template)``＝API テンプレート）は
         field_name が括弧付きの疑似名で、real な form/URL-param ではない。これらを field 単位と
         誤カウントすると、入力ゼロ・page 済みの resume ページで無関係な API 完了記録のせいで skip
-        されず、状態変更 flow（add-to-cart 等）を無駄に再生して target 状態を汚す（Codex #170 P2）。
+        されず、状態変更 flow（add-to-cart 等）を無駄に再生して target 状態を汚す。
         括弧で囲まれた sentinel 名は除外し、実フィールド/パラメータ名だけを数える。
         """
         if not self.enable_checkpoint or self.checkpoint is None:
@@ -5597,15 +5595,15 @@ class ScanEngine:
         except Exception:
             pass
 
-        # ── Pre-attack flow は page-level 検査より前に実行する（F10・Codex #167 P1）──
+        # ── Pre-attack flow は page-level 検査より前に実行する──
         # ログイン/セットアップ flow が失敗したまま page-level（graphql/cache/proto 等）や
         # field を検査すると、未認証ページを "tested" として checkpoint し誤結果を生む。
         # 失敗時は coverage gap を記録し、以降の全検査を skip する。
         # ただし認証前のログインフォーム検査（_scan_login_form_preauth）から呼ばれた場合は、
-        # auto-login 前の pre-auth 検査を汚染しないよう flow を実行しない（#167 P2）。
+        # auto-login 前の pre-auth 検査を汚染しないよう flow を実行しない。
         matched_flows = self._match_pre_attack_flows(page) if run_pre_attack_flows else []
         # 再開時、フォーム/URLパラメータの無いページで page-level 単位が全て checkpoint 済みなら
-        # pre-attack flow を再生しない（Codex #167 P2）。state 変更を伴う前提 flow（add-to-cart 等）を
+        # pre-attack flow を再生しない。state 変更を伴う前提 flow（add-to-cart 等）を
         # 「残 probe 0」で再実行し、アプリ操作を無駄に繰り返す/状態を汚すのを防ぐ。安全側限定：入力の
         # 無いページは page-level 検査だけが走り field/adaptive/multi-param 単位を持たないため「残作業
         # なし」を厳密に判定できる。入力のあるページは従来どおり再生する（field/adaptive 単位の厳密
@@ -5617,8 +5615,8 @@ class ScanEngine:
                 and all(self._checkpoint_flow_ran(page.url, f) for f in matched_flows)):
             # crawl スナップショットが入力ゼロでも、前回 flow が露出した入力を検査した痕跡
             # （field 単位）があれば skip しない：refresh が入力を再露出し、中断された field
-            # 検査を再開できるようにする（Codex #170 P2）。field 単位が無ければ従来どおり
-            # state 変更 flow の無駄な再実行を避ける（#167 P2）。
+            # 検査を再開できるようにする。field 単位が無ければ従来どおり
+            # state 変更 flow の無駄な再実行を避ける。
             console.print(
                 f"  [dim][Flow] Skip pre-attack flow (page fully checkpointed): "
                 f"{escape(matched_flows[0].name)} @ {escape(page.url)}[/dim]"
@@ -5626,11 +5624,11 @@ class ScanEngine:
             matched_flows = []
         if matched_flows:
             # 同一遷移先に一致する flow を **file 順に全て順次再生** する（1つでも失敗したら
-            # そのページの検査を skip）。以前は最初の1つしか再生せず残りを黙って無視していた（#170 P2）。
+            # そのページの検査を skip）。以前は最初の1つしか再生せず残りを黙って無視していた。
             for matched_flow in matched_flows:
                 # scope 外/除外 URL への navigate を含む flow は実行しない。最終遷移が target へ
                 # 戻っても、記録された flow が中間 navigate で scope 設定を迂回して未認可の外部/
-                # 除外アプリを訪問・操作しうる（Codex #170 P2）。access_urls（login 等の訪問許可）は
+                # 除外アプリを訪問・操作しうる。access_urls（login 等の訪問許可）は
                 # _is_access_allowed_url が許すため auth flow は通る。
                 _bad_nav = next(
                     (
@@ -5679,9 +5677,9 @@ class ScanEngine:
                     return
             # flow の最終遷移が login/error ページへ redirect（200）されると navigate は True でも
             # target に居ない。page-level 検査の前に着地先 URL を検証し、復帰できなければ未認証/
-            # 誤ページを "tested" と誤記録しないよう記録して skip する（Codex #167 P1）。
+            # 誤ページを "tested" と誤記録しないよう記録して skip する。
             # 比較は fragment を無視する：`page.url#settings` 等の同一文書内の tab 遷移を
-            # 「target から離脱」と誤判定して flow が用意した状態を破棄しないため（Codex #167 P1）。
+            # 「target から離脱」と誤判定して flow が用意した状態を破棄しないため。
             def _on_target() -> bool:
                 try:
                     cur = self.browser.page.url
@@ -5711,26 +5709,26 @@ class ScanEngine:
                     )
                     return
             # 完走記録は**着地先を検証できた後**にだけ書く。step 成功直後に書くと、login へ redirect
-            # された flow も「完走済み」となり、次の resume で恒久的に skip される（Codex #170 P2）。
+            # された flow も「完走済み」となり、次の resume で恒久的に skip される。
             for _ran_flow in matched_flows:
                 self._checkpoint_mark_flow_ran(page.url, _ran_flow)
             # 成功した flow はセッション Cookie を発行/更新し得る。HTTP scanner は browser jar
             # ではなく engine.cookies（auth_headers）から Cookie ヘッダを得るため、flow 後に
-            # 採り直して乖離を防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く・
-            # Codex #167 P1）。並列(--concurrency>1)でも安全：worker task 内では task-local な
+            # 採り直して乖離を防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く）。
+            # 並列(--concurrency>1)でも安全：worker task 内では task-local な
             # ContextVar に閉じ（_store_synced_cookies）、この worker の HTTP scanner にだけ
-            # flow 発行 Cookie が載る。別 worker は自分の baseline/flow Cookie を保つ（0067）。
+            # flow 発行 Cookie が載る。別 worker は自分の baseline/flow Cookie を保つ。
             try:
                 await self._sync_cookies_from_browser(self.browser, for_url=page.url)
             except Exception:
                 pass
             # 前提 flow が checkout/coupon 等のフォームや URL パラメータを新たに露出し得る。
             # 再生前に採取した CrawledPage のまま攻撃すると新出フォームを検査しないため、
-            # 攻撃対象を決める前に現在のページから form/url_param を採り直す（Codex #170 P1）。
+            # 攻撃対象を決める前に現在のページから form/url_param を採り直す。
             await self._refresh_page_after_flow(page)
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
-        # F06/0059: 入力の無い stored-XSS 観測ページは scan_page 中に alert flood/wedge しうる。
+        # 入力の無い stored-XSS 観測ページは scan_page 中に alert flood/wedge しうる。
         # ここで dialog_total を控え、page-level 区間末で回復して field 攻撃へ劣化を持ち越さない。
         _dlg_pagelevel = getattr(self.browser, "dialog_total", 0)
         for check_name, scanner in self.scanners.items():
@@ -5745,7 +5743,7 @@ class ScanEngine:
             ) or hasattr(scanner, "scan_page_context")
             if not has_page_impl:
                 continue
-            # 既知の制約（Codex #102 P2）: HAS_PAGE_LEVEL=True でも、GET-only spec の
+            # 既知の制約: HAS_PAGE_LEVEL=True でも、GET-only spec の
             # mass_assignment や、host/origin 単位で 1 回だけ走る request_smuggling/graphql の
             # ように、当該ページで実際にはプローブを送らず no-op になる場合がある。その際も
             # "tested" 行を1件記録するため attempts が上振れしうる（page-level 実行を per-page で
@@ -5803,12 +5801,12 @@ class ScanEngine:
                 page_wedged = self._dialog_wedged_since(_dlg_scanner)
                 # 例外前に得ていた partial finding の副作用（通知/監視 emit 等）を回す。
                 # record_finding で all_findings には既登録だが、engine 側の _record_finding を
-                # 通さないと webhook 等が走らない（Codex #157 P2）。dedup 済みなので二重にならない。
+                # 通さないと webhook 等が走らない。dedup 済みなので二重にならない。
                 for _pf in (getattr(e, "findings", None) or []):
                     self._record_finding(_pf, source="page-level")
                 console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
                 # 実行途中で例外（probe timeout 等）＝劣化した実行。field-level と同様に
-                # error 行を残し、coverage の attempts/by_status から消えないようにする（Codex #102 P2）。
+                # error 行を残し、coverage の attempts/by_status から消えないようにする。
                 self._record_scan_matrix(
                     url=page.url,
                     field_name="(page)",
@@ -5831,7 +5829,7 @@ class ScanEngine:
         # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
         self._save_checkpoint()
 
-        # F06/0059(#4): page-level(scan_page) 区間の flood/wedge をここで回復する。入力の無い
+        # page-level(scan_page) 区間の flood/wedge をここで回復する。入力の無い
         # stored-XSS 観測ページは直後に早期 return するため、field 攻撃前の回復には到達しない。
         # 早期 return より前・後続の再認証/flow navigate より前に回復し、wedge を持ち越さない。
         await self._recover_if_dialog_flood(_dlg_pagelevel)
@@ -5844,7 +5842,7 @@ class ScanEngine:
         # 前提 flow は page-level 検査の前に実行・成否判定済み（上参照）。ここでは attack の
         # ため browser が target ページに居ることを確認し、ずれていれば復帰する。
         # matched_flows は常に定義済み（空リスト可）。flow を1本でも再生したときだけ確認する
-        # （単数 matched_flow は _match_pre_attack_flows へのリネームで廃止・Codex #170 P1）。
+        # （単数 matched_flow は _match_pre_attack_flows へのリネームで廃止）。
         # attack-phase の入口 navigate（flow 復帰 / 再認証+goto）が stored-XSS sink を読んで 4+ dialog を
         # 発火し全 dismiss 成功すると dialog_dismiss_failed は立たず、以降の baseline は navigate 後に
         # 取るため delta 0＝flood 未検知になる。入口をここで bracket する（正常時 fired<=3 で不変）。
@@ -6025,7 +6023,7 @@ class ScanEngine:
             # AbortScan propagates up
 
             field_plan = plan.get_field_plan(field_name, fi, is_url_param) if plan else None
-            # F06/0059(#1): 回復判定は field 毎の dialog_total スナップショットで行う。ループ末に
+            # 回復判定は field 毎の dialog_total スナップショットで行う。ループ末に
             # 1 度だけだと、早い field の flood/wedge した page で後続 field の navigate/submit が
             # timeout/未送達になり見逃す。各 field 走査の直後（restore navigate の前）に回復する。
             _dlg_field = getattr(self.browser, "dialog_total", 0)
@@ -6060,7 +6058,7 @@ class ScanEngine:
             # navigate 無しの SQLi baseline を blank page で取って失敗するのを防ぐ）。非 recreate の
             # url_param は従来どおり navigate しない。
             if not is_url_param or getattr(self.browser, "_page_recreated", False):
-                # F06/0059(#1): restore navigate 自体が stored-XSS listing で再 flood/wedge しうる。
+                # restore navigate 自体が stored-XSS listing で再 flood/wedge しうる。
                 # 直前の baseline から回復すると次 field が degraded page で走る（次 field の baseline は
                 # 走査直前ではなく _scan_field 呼び出し前に取るため、restore の劣化を検知できない）。
                 # restore の直前で baseline を取り直し、restore 後にも回復して次 field を健全 page で走らせる。
@@ -6086,7 +6084,7 @@ class ScanEngine:
                     return
 
     async def _recover_if_dialog_flood(self, since: int) -> int:
-        """dialog flood/wedge を検知したら現在の browser の page を作り直す（F06/0059）。
+        """dialog flood/wedge を検知したら現在の browser の page を作り直す。
 
         トリガは (1) この区間で dialog が閾値超え発火（flood）または (2) dismiss 失敗フラグ
         （初回 alert が未解消で wedge＝以降 dialog が開けず件数が伸びないケースを直接捕捉）。
@@ -6135,7 +6133,7 @@ class ScanEngine:
                 return False
             # navigate は login/error への 200 redirect でも True を返す（session 復元失敗時など）。
             # 実際に target へ着地したかを確認し、ずれていれば不健全＝後続 scanner に wrong document を
-            # 検査・checkpoint させない（Codex #181 P1）。
+            # 検査・checkpoint させない。
             if not self._landed_on_target(page):
                 landed = getattr(getattr(self.browser, "page", None), "url", "") or ""
                 self.wave_errors.append(f"page_recreate_failed:{page.url}:landed={landed}")
@@ -6260,7 +6258,7 @@ class ScanEngine:
                 # 停止(abort)/一時停止を尊重し、残りの結合 payload を送り続けないようにする。
                 await self.controller.wait_if_paused_or_abort()
 
-                # F06/0059(R4#3): 各結合送信の直前に dialog baseline を控える。1 回で phase 全体を
+                # 各結合送信の直前に dialog baseline を控える。1 回で phase 全体を
                 # bracket すると、最初の XSS 組合せが flood/wedge した page で後続 SQLi/SSTI 組合せや
                 # 追加フォームが navigate 失敗・skip され偽陰性化する。組合せ毎に回復する。
                 _dlg_combo = getattr(self.browser, "dialog_total", 0)
@@ -6350,7 +6348,7 @@ class ScanEngine:
                         )
                         self._record_finding(f, source="multi-param")
 
-                # F06/0059(R4#3): この結合送信で flood/wedge したら次の組合せ/フォームへ持ち越さず
+                # この結合送信で flood/wedge したら次の組合せ/フォームへ持ち越さず
                 # ここで page を作り直す（外側の 1 回 bracket では後続組合せが wedge page で走る）。
                 await self._recover_if_dialog_flood(_dlg_combo)
                 if not await self._recovered_page_healthy(page):
@@ -6394,14 +6392,14 @@ class ScanEngine:
     ):
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
-        # F06/0059: このフィールドの attack 時間ボックスを task-local に張り直す（フィールド毎に fresh・
+        # このフィールドの attack 時間ボックスを task-local に張り直す（フィールド毎に fresh・
         # 並行ワーカー間で汚染しない）。token は関数末尾で reset（verify 側でも安全ネットで None 化）。
         _budget = getattr(self, "_field_attack_budget_s", 0.0) or 0.0
         _deadline = (time.monotonic() + _budget) if _budget > 0 else None
         _dl_token = _FIELD_ATTACK_DEADLINE.set(_deadline)
         _notes_token = _FIELD_BUDGET_NOTES.set(set())
         _trunc_token = _FIELD_BUDGET_TRUNCATED.set(set())
-        # 第3要素は carrier（scan_matrix の location と同語彙）。form/URL param 同名でも区別する（Codex #181 P2）。
+        # 第3要素は carrier（scan_matrix の location と同語彙）。form/URL param 同名でも区別する。
         _ident_token = _FIELD_BUDGET_IDENT.set(
             (url, field_name, "URL param" if is_url_param else "form field")
         )
@@ -6548,7 +6546,7 @@ class ScanEngine:
                 # ただし例外で終わった単位は「未完了」のまま残し、再開時に再試行する
                 # （一時的なブラウザ/ネットワーク障害で取りこぼした検査を resume が
                 # 飛ばしてしまわないようにする — 再開の網羅性を守る）。
-                # F06/0059: budget 超過で注入を打ち切った check は「完了」にしない（空応答と同じ
+                # budget 超過で注入を打ち切った check は「完了」にしない（空応答と同じ
                 # ('',{}) が返るため放置すると tested 扱い→_checkpoint_mark_done_ip され、resume が
                 # 未送信/一部送信の check を恒久スキップして見逃す）。truncated は resume で再試行する。
                 _truncated = _FIELD_BUDGET_TRUNCATED.get() or set()
@@ -6610,7 +6608,7 @@ class ScanEngine:
                         f"adaptive payloads generated: {len(adaptive_payloads)}件"
                     )
 
-        # F06/0059: このフィールドの task-local 時間ボックス状態を解除（次フィールド/verify へ漏らさない）。
+        # このフィールドの task-local 時間ボックス状態を解除（次フィールド/verify へ漏らさない）。
         _FIELD_ATTACK_DEADLINE.reset(_dl_token)
         _FIELD_BUDGET_NOTES.reset(_notes_token)
         _FIELD_BUDGET_TRUNCATED.reset(_trunc_token)
@@ -6627,7 +6625,7 @@ class ScanEngine:
             )
 
     def _page_js_risks(self, url, crawl_html, external_scripts, check_names) -> list:
-        """G7: クロール時スナップショット（インライン＋外部 script）を静的解析し、
+        """クロール時スナップショット（インライン＋外部 script）を静的解析し、
         DOM source→sink risk を返す（純粋・注入不要・**ページ単位でキャッシュ**）。
 
         観測を消費するのは DOM 系 check（_DOM_OBS_CHECKS）だけなので、それが check_names に
@@ -6670,7 +6668,7 @@ class ScanEngine:
         For each check type, get current page HTML, ask LLM to generate
         context-aware bypass payloads, then run the scanner again with those payloads.
         """
-        # F06/0059(Codex #181 P1): 時間ボックス超過なら LLM 可用性 probe / page.content() の前に戻る。
+        # 時間ボックス超過なら LLM 可用性 probe / page.content() の前に戻る。
         # dialog-wedge 中の page.content() は無有界にブロックしうるため、setup 後のチェックでは
         # 元の stall を防げない。checkpoint は完了化しない（None＝未完・resume で回収）。
         _dl0 = _FIELD_ATTACK_DEADLINE.get()
@@ -6737,9 +6735,9 @@ class ScanEngine:
         except Exception:
             return None
 
-        # G7: DOM source→sink 観測（ページ単位・キャッシュ・注入なし）。反射 probe は
-        # 注入を伴い際限のないエッジ（validation/並行/監査/resume/型）を生むため本 PR では
-        # 導入しない。反射文脈は初回 evolution wave の観測を保持・再利用する別タスクで扱う。
+        # DOM source→sink 観測（ページ単位・キャッシュ・注入なし）。反射 probe は
+        # 注入を伴い際限のないエッジ（validation/並行/監査/resume/型）を生むためここでは
+        # 導入しない。反射文脈は初回 evolution wave の観測を保持・再利用する形で別途扱う。
         det_js_risks: list = []
         try:
             det_js_risks = self._page_js_risks(
@@ -6763,7 +6761,7 @@ class ScanEngine:
             if self._checkpoint_is_done_ip(ip, adaptive_checkpoint_check):
                 continue
 
-            # F06/0059(#5): フィールド時間ボックス超過中は adaptive を実行/完了化しない。
+            # フィールド時間ボックス超過中は adaptive を実行/完了化しない。
             # 同じ期限切れ deadline 下では送信が _field_budget_gate で短絡され空振りするだけで、
             # ここで checkpoint を完了化すると resume が adaptive payload を恒久 skip して見逃す。
             # 未完のまま残し（mark_done しない）resume で回収する。deadline は monotonic 単調増加
@@ -6783,11 +6781,11 @@ class ScanEngine:
             plan_payloads = field_plan.custom_payloads.get(check_name, []) if field_plan else []
             defaults = self.payload_gen.default_payloads.get(check_name, [])
             tried = plan_payloads + [p for p in defaults if p not in plan_payloads]
-            # G3/D5: 再構成した静的 list だけでなく、試行台帳に実際に記録された payload
+            # 再構成した静的 list だけでなく、試行台帳に実際に記録された payload
             # （evolution/mutation wave 由来を含む）を先頭に加える。これで adaptive(LLM) が
             # 「本当に送った変種」を観測でき、既に弾かれた形の再提案を避けられる。壊れても
             # 従来の静的 tried に安全側フォールバック。
-            # G1/G2/G3: 試行台帳の rich metadata（payload→status/len/reflected/timing/
+            # 試行台帳の rich metadata（payload→status/len/reflected/timing/
             # error）を adaptive(LLM) の観測へ実際に供給する。adaptive は「最初の掃射の後」に
             # 走るため、ここが履歴が確実に埋まっている history-aware 生成ステップになる
             # （baseline generate の履歴節は初回パスでは台帳が空で不発になりうるのを補う）。
@@ -6866,7 +6864,7 @@ class ScanEngine:
                 generation_failed = True
                 console.print(f"    [yellow]Adaptive scanner error ({check_name}): {e}[/yellow]")
             else:
-                # F06/0059(#4): pre-check で deadline 有効でも scan 実行中に期限切れになると、
+                # pre-check で deadline 有効でも scan 実行中に期限切れになると、
                 # scanner 側 gate が payload を短絡し _FIELD_BUDGET_TRUNCATED に記録して正常 return する。
                 # ここで truncated を再チェックせず mark_done すると resume が未送信 adaptive payload を
                 # 恒久 skip して見逃す。truncated なら完了化せず未完のまま残す（resume で回収）。
@@ -7174,7 +7172,7 @@ class ScanEngine:
         self._profile(f"verify: {len(to_verify)} findings to verify")
         # verify 1 件あたりの上限。固定 180s だと利用者設定の --timeout（上限なし）を無視し、
         # 遅い対象では正当な検証（navigate+baseline+apply+fire+content の複数リクエスト）が
-        # cancel されて skipped 化し、confirmed からも通知からも漏れる（Codex #171 P2）。
+        # cancel されて skipped 化し、confirmed からも通知からも漏れる。
         # request timeout があれば数ステップ分（×6）を確保しつつ、従来の 180s を下限に保つ。
         _browser = getattr(self, "browser", None)
         _req_to = ((getattr(_browser, "timeout", 0) or 0) / 1000.0) if _browser else 0.0
@@ -7192,7 +7190,7 @@ class ScanEngine:
                 if getattr(self, "_concurrent_attack_ran", False):
                     # 並列 attack 後は global cookie が baseline のままなので、finding URL 宛の
                     # Cookie を browser jar から都度再スコープする（worker-local 値は捨てられている）。
-                    # 再同期失敗時（Codex P2）は前 finding の scoped Cookie が残るため、別ホスト/
+                    # 再同期失敗時は前 finding の scoped Cookie が残るため、別ホスト/
                     # path のセッションで検証（漏えい＋偽陰性）せず下の except で skipped へ倒す。
                     # 再同期自体も wedge しうる（page.context.cookies()）ため verify 1 件と同じ上限で有界化し、
                     # TimeoutError は下の except で skipped へ倒す。
@@ -7206,7 +7204,7 @@ class ScanEngine:
                 # 1 件の finding 検証が wedge しても verify フェーズ全体（＝スキャン）を
                 # 止めないよう有界化する。verify_finding は navigate/baseline/apply/fire を
                 # 重ねるため、特定 finding（例: 反射 XSS の再現）で内部 await が返らないと
-                # 外側 SCAN_TIMEOUT_S まで到達し全 E2E が停止していた（F06/0059 実測）。
+                # 外側 SCAN_TIMEOUT_S まで到達し全 E2E が停止していた。
                 # timeout は下の except（TimeoutError も Exception）で "skipped"＝未検証
                 # （要手動確認）に倒す：finding は消さず、CONFIRMED にも上げない。
                 state = await asyncio.wait_for(
@@ -7338,7 +7336,7 @@ class ScanEngine:
             # （下の _apply_ip 再送）へ落とさず terminal な "assumed"（penalize しない
             # indeterminate）にする。scanner の verify が None を返しても _verify_one は
             # 既定でフォールバックを実行し、401/空応答を脆弱性応答として評価して
-            # unreproduced にしてしまうため（Codex #99 R6）。
+            # unreproduced にしてしまうため。
             self._api_auth_failed = False
             self._json_probe_failed = False
             scanner_result = await verifier(f)
@@ -7346,7 +7344,7 @@ class ScanEngine:
             # 判定を信頼せず terminal な "assumed" にする。scanner の verify は transport 失敗
             # 時に False を返す経路（error-based の空 body・boolean の空 baseline）があり、
             # None だけを見ると「検証リクエストが失敗しただけ」で unreproduced に誤格下げ
-            # してしまうため、結果値より前に flag を確認する（Codex #99 R7）。
+            # してしまうため、結果値より前に flag を確認する。
             if self._api_auth_failed or self._json_probe_failed:
                 return "assumed"
             if scanner_result is not None:
@@ -7433,7 +7431,7 @@ class ScanEngine:
             await asyncio.sleep(self._effective_delay)
 
             # 汎用フォールバックの json 再送でも失効/transport 失敗を拾い、401/空応答を
-            # 脆弱性応答として評価せず terminal な "assumed" へ倒す（Codex #99 R6）。
+            # 脆弱性応答として評価せず terminal な "assumed" へ倒す。
             if ip.location == "json_body" and (
                 self._api_auth_failed or self._json_probe_failed
             ):
@@ -7537,7 +7535,7 @@ class ScanEngine:
 
         # core report/evidence を先に永続化する。AI 分析(_ai_analysis_report)は集約1+finding毎
         # 最大10リクエスト×60s×retries で数十分かかりうるため、先に決定論スキャンの成果物を確実に
-        # 残し、途中中断でも core report を失わない（Codex #172 P2）。
+        # 残し、途中中断でも core report を失わない。
         self._phase_report()
         # A-1: post-scan AI analysis（永続化後に実行）。その report-role 呼び出しは evidence.json の
         # llm_calls 集計後に llm_calls.jsonl へ追記されるため、完了後に集計値だけ refresh して
@@ -7549,7 +7547,7 @@ class ScanEngine:
                 await self.monitor.emit("ai_analysis", {"text": ai_text})
 
     def _refresh_evidence_observability(self) -> None:
-        """AI 分析後に evidence.json と HTML の observability（llm_calls 総数）を実態へ更新する（Codex #172 P2）。
+        """AI 分析後に evidence.json と HTML の observability（llm_calls 総数）を実態へ更新する。
 
         core report/evidence は _phase_report で先に永続化済み。post-scan AI 呼び出しは集計後に
         llm_calls.jsonl へ追記されるため、その分を反映して総数を実態に合わせる。evidence.json は
@@ -7566,7 +7564,7 @@ class ScanEngine:
         try:
             data["observability"] = self._observability_report_data()
             # アトミックに置換する。write_text は書き込み前に既存の有効な evidence.json を
-            # truncate するため、途中中断/ディスク満杯で core evidence を空/破損させ得る（Codex #172 P2）。
+            # truncate するため、途中中断/ディスク満杯で core evidence を空/破損させ得る。
             # 一時ファイルへ書き切ってから os.replace で入れ替える（失敗時も元ファイルは無傷）。
             tmp = path.with_name(path.name + ".tmp")
             tmp.write_text(
@@ -7668,7 +7666,7 @@ class ScanEngine:
                     target_url=self.target_url,
                     output_path=self.output_dir / "report.sarif",
                     lang=getattr(self, "report_lang", "ja"),
-                    coverage=self.coverage_summary(),  # 検査カバレッジを SARIF へ（0016）
+                    coverage=self.coverage_summary(),  # 検査カバレッジを SARIF へ
                 )
                 sarif_out = str(sarif_path)
                 console.print(f"  [dim]SARIF:   [/dim] {sarif_path}")
@@ -7709,7 +7707,7 @@ class ScanEngine:
 
         observability(llm_calls 等) は描画時に live 値を読むため、post-scan AI 分析後に
         再描画すれば HTML の集計値も実態と一致する。ブラウザ起動/monitor 登録は含めない
-        （初回描画・分析後 refresh の双方から呼ぶ・Codex #172 P2）。
+        （初回描画・分析後 refresh の双方から呼ぶ）。
         """
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir, lang=getattr(self, "report_lang", "ja"))
@@ -8135,7 +8133,7 @@ class ScanEngine:
 
         with self.payload_gen.use_role("report"):
             # report 分析も one-shot。固定 60s ではなく設定済みの one-shot timeout を使う
-            # （--llm-timeout / config llm.timeout_seconds を尊重・Codex #173 P2）。
+            # （--llm-timeout / config llm.timeout_seconds を尊重）。
             text = await llm_client.complete_text(
                 self.payload_gen, prompt, max_tokens=1500,
                 timeout=self.payload_gen.llm_timeout_seconds,

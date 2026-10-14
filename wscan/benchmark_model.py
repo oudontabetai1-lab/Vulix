@@ -1,4 +1,4 @@
-"""E2E benchmark の manifest schema と純粋な scorecard 集計（0034-A）。
+"""E2E benchmark の manifest schema と純粋な scorecard 集計。
 
 runner、HTTP、browser、fixture、evidence 読み取りには依存しない。ファイル読み取りは
 ``load_manifest_file`` だけに閉じ込め、集計と Markdown 生成は渡された値だけで決まる。
@@ -415,7 +415,7 @@ def compute_baseline_diff(
     *,
     tier: str = "candidate",
 ) -> dict[str, list[str]]:
-    """current と baseline の scorecard を case 単位で比較し差分を返す（純粋・0034）。
+    """current と baseline の scorecard を case 単位で比較し差分を返す（純粋）。
 
     - ``new``: baseline に無く current にある case_id（追加された case）。
     - ``removed``: current に無く baseline にある case_id（消えた case）。
@@ -932,7 +932,7 @@ def load_manifest_file(
     return load_manifest(data, registry_keys=registry_keys)
 
 
-# ── registry 完全性ゲート（0034-B）───────────────────────────────────────────
+# ── registry 完全性ゲート───────────────────────────────────────────
 # 「registry の全 scanner を benchmark へ列挙し、未登録を gate failure/明示 INCOMPLETE
 # にする」ための純粋な会計。scanner を registry へ足しただけで benchmark から漏れる状態を
 # 回帰テストで検出する forcing function を提供する（受け入れ条件）。
@@ -962,7 +962,7 @@ def checks_covered_by_suites(
 
     ``gate == GateKind.GAP`` の case は実測ではなくプレースホルダ（``overall_status`` も
     GAP suite を PARTIAL 扱い）なので covered/safe に数えない。これを数えると、その check を
-    ``benchmark_gaps.yaml`` から外したとき完全性が誤って COMPLETE になる（Codex P2）。
+    ``benchmark_gaps.yaml`` から外したとき完全性が誤って COMPLETE になる。
     """
     vulnerable: set[str] = set()
     safe: set[str] = set()
@@ -984,7 +984,7 @@ def compute_registry_completeness(
     safe_twin_checks: Iterable[str] = (),
     acknowledged_gaps: Mapping[str, RegistryGap] | None = None,
 ) -> dict[str, Any]:
-    """registry の各 check が benchmark で採点可能かを会計する（純粋・0034-B）。
+    """registry の各 check が benchmark で採点可能かを会計する（純粋）。
 
     - ``registry_checks``: SCANNERS のキー全体。
     - ``covered_checks``: vulnerable ground truth を持つ check（``checks_covered_by_suites``）。

@@ -1,4 +1,4 @@
-"""manifest から分離した fixture 起動 allowlist（0034-R1）。"""
+"""manifest から分離した fixture 起動 allowlist。"""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -25,7 +25,7 @@ FIXTURE_APPS: dict[str, str] = {
 
 # factory が返らない/uvicorn が should_exit を無視すると、bound された cleanup join 後も daemon
 # fixture スレッドが生存放置される。case worker と同じく run_suite ごとに無制限累積してプロセスを
-# 枯渇させうる（Codex #133）。case worker と対称に、spawn 前に atomic に予約し worker 終了時に
+# 枯渇させうる。case worker と対称に、spawn 前に atomic に予約し worker 終了時に
 # 解放する。ハングした serve は解放されず予約が残る＝これが cap の実体。limit はプロセス横断の
 # 単一値（instance ごとに違う値を渡すと bound を回避できるため establish 時に検証）。
 _fixture_lock = threading.Lock()
@@ -34,7 +34,7 @@ _fixture_limit: int | None = None
 
 
 def _establish_fixture_limit(cap: int) -> None:
-    """プロセス横断の単一 fixture limit を確立/検証する。異なる値の混在は拒否（Codex #133）。"""
+    """プロセス横断の単一 fixture limit を確立/検証する。異なる値の混在は拒否。"""
     global _fixture_limit
     with _fixture_lock:
         if _fixture_limit is None:
@@ -79,7 +79,7 @@ class UvicornFixtureLauncher(FixtureLauncher):
         self, startup_timeout: float = 5.0, max_abandoned_fixtures: int = 4,
         cleanup_grace: float = 2.0,
     ) -> None:
-        # NaN/inf だと deadline 比較が永久 False になり timeout が効かない（Codex #133）。
+        # NaN/inf だと deadline 比較が永久 False になり timeout が効かない。
         if not math.isfinite(startup_timeout) or startup_timeout <= 0:
             raise ValueError("startup_timeout must be finite and positive")
         if not math.isfinite(cleanup_grace) or cleanup_grace <= 0:
@@ -89,7 +89,7 @@ class UvicornFixtureLauncher(FixtureLauncher):
         self.startup_timeout = startup_timeout
         # 起動成功後の graceful shutdown を待つ短い猶予。startup_timeout とは別軸にする：
         # 起動が stuck して失敗したとき、cleanup で **もう一度** startup_timeout 待つと報告が
-        # 実質 2×startup_timeout 遅れる（Codex #133）。失敗時は待たず、成功時のみこの猶予で待つ。
+        # 実質 2×startup_timeout 遅れる。失敗時は待たず、成功時のみこの猶予で待つ。
         self.cleanup_grace = cleanup_grace
         self.max_abandoned_fixtures = max_abandoned_fixtures
 
@@ -118,7 +118,7 @@ class UvicornFixtureLauncher(FixtureLauncher):
                 port = sock.getsockname()[1]
                 # factory の import/create_app() と server 構築を **daemon スレッド内**で実行し、
                 # startup_timeout の bound に含める。同期実行だと factory がハングしたとき deadline
-                # が張られる前に無限待ちし、fixture_unavailable を報告できない（Codex #133）。
+                # が張られる前に無限待ちし、fixture_unavailable を報告できない。
                 holder: dict[str, object] = {}
 
                 def serve() -> None:
@@ -139,7 +139,7 @@ class UvicornFixtureLauncher(FixtureLauncher):
                         _release_fixture()
 
                 # daemon 化: 起動が stuck（factory ハング or should_exit で止まらない）場合でも、
-                # この worker がインタプリタ終了をブロックしないようにする（Codex #133）。
+                # この worker がインタプリタ終了をブロックしないようにする。
                 thread = Thread(
                     target=serve, name=f"benchmark-fixture-{fixture_id}", daemon=True
                 )
@@ -164,9 +164,9 @@ class UvicornFixtureLauncher(FixtureLauncher):
                     yield f"http://127.0.0.1:{port}"
                 finally:
                     # cleanup の join は **bound** する。無制限 join すると起動 stuck 時に startup
-                    # timeout 例外が run_suite へ届かず fixture_unavailable を報告できない（#133）。
+                    # timeout 例外が run_suite へ届かず fixture_unavailable を報告できない。
                     # 起動成功時のみ graceful shutdown を cleanup_grace で待ち、起動失敗（stuck）時は
-                    # 待たない（そこで startup_timeout をもう一度待つと報告が 2×遅れる・Codex #133）。
+                    # 待たない（そこで startup_timeout をもう一度待つと報告が 2×遅れる）。
                     # ハング中の worker は放置＝予約が残り cap を効かせる。
                     server = holder.get("server")
                     if server is not None:

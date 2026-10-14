@@ -1,4 +1,4 @@
-"""flow recorder のカスタム操作要素 click 記録と、再生側 actionability skip を実 Chromium で検証する（vault 0078）。
+"""flow recorder のカスタム操作要素 click 記録と、再生側 actionability skip を実 Chromium で検証する（vault）。
 
 Playwright Chromium が使えない環境では skip する（既存 E2E の skip 判定に倣う）。
 """
@@ -18,7 +18,7 @@ class MakeNavigateStepTests(unittest.TestCase):
         self.assertTrue(_make_navigate_step(steps, "http://x/p2", 0.5).get("via_click"))
 
     def test_no_via_click_when_click_is_stale_or_age_unknown(self):
-        """AJAX のみの click 後、時間窓外の遷移（アドレスバー等）は via_click にしない（Codex #179 P1）。"""
+        """AJAX のみの click 後、時間窓外の遷移（アドレスバー等）は via_click にしない。"""
         steps = [{"action": "click", "selector": "#go"}]
         self.assertNotIn("via_click", _make_navigate_step(steps, "http://x/p2", 60.0))
         self.assertNotIn("via_click", _make_navigate_step(steps, "http://x/p2"))
@@ -302,7 +302,7 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         await page.close()
 
     async def test_label_independent_descendant_is_recorded(self):
-        """label 内の独立操作要素（control でない a）への click は記録し、副作用を残す（Codex #179）。"""
+        """label 内の独立操作要素（control でない a）への click は記録し、副作用を残す。"""
         page, steps, _notices = await self._recording_page(
             "data:text/html,<!doctype html><html><body>"
             "<label id='terms'><input id='chk' type='checkbox'>Agree "
@@ -323,7 +323,7 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         await page.close()
 
     async def test_click_position_recorded_and_replayed(self):
-        """座標依存要素（[onclick] div）は相対座標を記録し、replay が同座標で click する（Codex #179）。"""
+        """座標依存要素（[onclick] div）は相対座標を記録し、replay が同座標で click する。"""
         page, steps, _notices = await self._recording_page(
             "data:text/html,<!doctype html><html><body>"
             "<div id='pad' style='width:200px;height:200px' "
@@ -368,7 +368,7 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
             content_type="text/html", body="<div id='go' role='button' onclick='void 0'>go</div>"))
 
     async def test_via_click_navigate_is_not_re_executed_on_replay(self):
-        """via_click navigate は click が遷移させるため replay で再実行せず二重ロードしない（Codex #179）。"""
+        """via_click navigate は click が遷移させるため replay で再実行せず二重ロードしない。"""
         await self._routed_pages()
 
         class _CountingBrowser(_PageBrowser):
@@ -397,7 +397,7 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         await replay_page.close()
 
     async def test_script_generated_click_is_not_recorded(self):
-        """element.click()/dispatchEvent 由来（isTrusted=false）の click は記録しない（Codex #179 P2）。"""
+        """element.click()/dispatchEvent 由来（isTrusted=false）の click は記録しない。"""
         page, steps, _n = await self._recording_page(
             "data:text/html,<!doctype html><html><body>"
             "<div id='d' role='button' onclick='void 0'>d</div></body></html>"
@@ -411,7 +411,7 @@ class FlowRecorderCustomClickTests(unittest.IsolatedAsyncioTestCase):
         await page.close()
 
     async def test_via_click_navigate_falls_back_when_click_did_not_navigate(self):
-        """click が遷移しなかった場合、via_click navigate は skip せず直接 navigate する（Codex #179 P1）。"""
+        """click が遷移しなかった場合、via_click navigate は skip せず直接 navigate する。"""
         await self._routed_pages()
         replay_page = await self._context.new_page()
         flow = ScanFlow.from_dict({

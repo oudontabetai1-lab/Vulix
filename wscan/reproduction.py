@@ -81,7 +81,7 @@ def _finding_to_repro_item(finding: Finding, item_id: int, *, authenticated: boo
         "evidence_details": finding.evidence_details,
         "preconditions": {
             # captured request ヘッダから推定するが、Agent finding は認証後でも request
-            # ヘッダを持たず常に False になる（Codex #154 P2）。run が認証済み（user/pass・
+            # ヘッダを持たず常に False になる。run が認証済み（user/pass・
             # TOTP・storage-state）なら、その run の finding は認証セッション無しでは再現不能な
             # ため authorization_required を立てる。
             "authorization_required": bool(authenticated) or any(

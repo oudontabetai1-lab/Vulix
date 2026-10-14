@@ -75,7 +75,7 @@ class BaselineUnavailableSuppressionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_os_reports_on_empty_body_success_baseline(self):
         # baseline が *成功* して空ボディ（空 200/204）の場合は有効な対照として扱い、
-        # 注入時のみ出力する API を見逃さない（Codex 指摘の偽陰性を防ぐ）。
+        # 注入時のみ出力する API を見逃さない（偽陰性を防ぐ）。
         engine = _DummyEngine()
         scanner = OSInjectionScanner(engine)
         scanner.get_payloads = AsyncMock(return_value=["; id"])

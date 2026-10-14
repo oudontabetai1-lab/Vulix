@@ -1,4 +1,4 @@
-"""benchmark scorecard の baseline 差分（0034）の純粋テスト。
+"""benchmark scorecard の baseline 差分の純粋テスト。
 
 main baseline との差分（追加/消失/回帰/改善）を case 単位で検出できることを固定する。
 精度の回帰（TP→FN 等）と measurement の欠落（分類 None）を混同しないことも確認する。

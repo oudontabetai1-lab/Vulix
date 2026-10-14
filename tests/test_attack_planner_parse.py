@@ -10,7 +10,7 @@ class ParseLlmResponseTests(unittest.TestCase):
         return AttackPlanner(PayloadGenerator(provider="none"), ["xss", "sqli"])
 
     def test_partial_metadata_object_falls_back_to_real_plan(self):
-        # Codex #92 r4: 前置きの page_purpose だけの metadata を plan と誤認しない。
+        # 前置きの page_purpose だけの metadata を plan と誤認しない。
         planner = self._planner()
         raw = ('Metadata: {"page_purpose":"login"}\n'
                '{"page_purpose":"login","fields":[{"name":"user","priority_checks":["xss"]}]}')
@@ -19,7 +19,7 @@ class ParseLlmResponseTests(unittest.TestCase):
         self.assertEqual([f.name for f in plan.fields], ["user"])
 
     def test_empty_fields_draft_falls_back_to_real_plan(self):
-        # Codex #92 r5: {"fields":[]} 下書きを plan と誤認せず、非空の本物を採る。
+        # {"fields":[]} 下書きを plan と誤認せず、非空の本物を採る。
         planner = self._planner()
         raw = ('{"page_purpose":"draft","fields":[]}\n'
                '{"page_purpose":"login","fields":[{"name":"user","priority_checks":["xss"]}]}')
@@ -28,7 +28,7 @@ class ParseLlmResponseTests(unittest.TestCase):
         self.assertEqual([f.name for f in plan.fields], ["user"])
 
     def test_string_field_entries_draft_falls_back_to_real_plan(self):
-        # Codex #92 r6: {"fields":["username"]}（文字列要素）を plan 誤認せず AttributeError も
+        # {"fields":["username"]}（文字列要素）を plan 誤認せず AttributeError も
         # 出さない。本物の dict-field plan を採る。
         planner = self._planner()
         raw = ('{"fields":["username"]}\n'
@@ -46,7 +46,7 @@ class ParseLlmResponseTests(unittest.TestCase):
         self.assertEqual([f.name for f in plan.fields], ["user"])
 
     def test_malformed_collection_values_do_not_crash(self):
-        # Codex #92 r7: null priority_checks / null custom_payloads / 非数値 form_index/risk_score
+        # null priority_checks / null custom_payloads / 非数値 form_index/risk_score
         # でも例外にせず parse し切る（malformed 値耐性）。
         planner = self._planner()
         raw = ('{"page_purpose":"x","fields":[{"name":"user","priority_checks":null,'

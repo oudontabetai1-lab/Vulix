@@ -91,7 +91,7 @@ class _FakeContext:
 class ManualCrawlSeedTests(unittest.TestCase):
     def test_load_honors_persisted_effective_origin_after_redirect(self):
         # target が http だが保存は https（起動時リダイレクト後・同一ホスト）のとき、
-        # 厳密 origin 判定で scheme 差により seed を落とさない（保存 origin を優先・Codex #153）。
+        # 厳密 origin 判定で scheme 差により seed を落とさない（保存 origin を優先）。
         data = {
             "start_url": "https://example.test/",
             "seed_urls": ["https://example.test/", "https://example.test/app"],
@@ -101,7 +101,7 @@ class ManualCrawlSeedTests(unittest.TestCase):
             path.write_text(json.dumps(data), encoding="utf-8")
             seed = load_manual_crawl_seed(str(path), "http://example.test/")
         self.assertIn("https://example.test/app", seed.urls)
-        # 実効 origin（https・同一ホスト）を engine スコープ反映用に返す（Codex #153）。
+        # 実効 origin（https・同一ホスト）を engine スコープ反映用に返す。
         self.assertEqual(seed.effective_origin, "https://example.test/")
 
     def test_load_does_not_promote_cross_host_saved_origin(self):
@@ -121,7 +121,7 @@ class ManualCrawlSeedTests(unittest.TestCase):
 
     def test_load_honors_redirect_of_additional_configured_target(self):
         # primary とは別ホストの「明示設定された追加ターゲット」（allowed_scopes 経由）が
-        # https へリダイレクトした場合、その実効 origin を採用し seed を落とさない（Codex #153）。
+        # https へリダイレクトした場合、その実効 origin を採用し seed を落とさない。
         data = {
             "start_url": "https://secondary.test/",
             "seed_urls": ["https://secondary.test/", "https://secondary.test/app"],
@@ -172,7 +172,7 @@ class ManualCrawlSeedTests(unittest.TestCase):
         self.assertEqual(_redirect_scope_to_add("", "http://example.test/"), "")
 
     def test_redirect_scope_keeps_configured_path(self):
-        # パス限定の設定 scope は昇格後も同じパスに限定し、origin 全体へ広げない（Codex #153 P1）。
+        # パス限定の設定 scope は昇格後も同じパスに限定し、origin 全体へ広げない。
         from wscan.engine import _redirect_scope_to_add
         self.assertEqual(
             _redirect_scope_to_add("https://secondary.test/app/login", "http://secondary.test/app"),
@@ -182,7 +182,7 @@ class ManualCrawlSeedTests(unittest.TestCase):
             "https://secondary.test/app")
 
     def test_primary_with_path_promotes_origin_wide_scope(self):
-        # primary は init で origin に正規化される。パス付き primary の https 昇格も origin 全体（Codex #153 P1）。
+        # primary は init で origin に正規化される。パス付き primary の https 昇格も origin 全体。
         from wscan.engine import _promote_redirect_scope
         self.assertEqual(
             _promote_redirect_scope("https://host.test/app/", "http://host.test/app",
@@ -196,7 +196,7 @@ class ManualCrawlSeedTests(unittest.TestCase):
 
     def test_promotion_keeps_query_and_matches_configured_path(self):
         # query 限定 target は query ごと昇格し、同一ホストの攻撃/access scope は実効 URL のパスを含む
-        # 方の役割を採る。IDN ホストも Punycode と一致させる（Codex #153 P1/P2）。
+        # 方の役割を採る。IDN ホストも Punycode と一致させる。
         from wscan.engine import _promote_redirect_scope, _redirect_scope_to_add
         self.assertEqual(
             _redirect_scope_to_add("https://sec.test/action?op=save", "http://sec.test/action?op=save"),
@@ -212,7 +212,7 @@ class ManualCrawlSeedTests(unittest.TestCase):
 
     def test_promote_redirect_scope_preserves_role(self):
         # 攻撃対象 target のリダイレクトは attack scope、access-only のリダイレクトは
-        # 訪問のみ scope として役割を保つ（Codex #153 P1）。
+        # 訪問のみ scope として役割を保つ。
         from wscan.engine import _promote_redirect_scope
         # target_url の https 昇格 → attack。
         self.assertEqual(
@@ -523,7 +523,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fill_totp_omits_cross_origin_url_from_steps(self):
         # cross-origin SSO ページで TOTP を入力しても、page.url（OAuth の state/code/token 含む）を
-        # steps に残さない（save() がスコープ無しで永続化するため・Codex #153 P2）。
+        # steps に残さない（save() がスコープ無しで永続化するため）。
         page = _FakePage("https://sso.evil.test/authorize?code=SECRET&state=xyz")
         session = self._session(page, _FakeContext([page]))
         session.totp_secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
@@ -541,7 +541,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
 
     def test_adopt_origin_upgrade_same_host_scheme(self):
         # http→https→IdP で start_url が http に固定された後、認証後に同一ホストの https へ
-        # 戻ったらその昇格を採用する（Codex #153 P2）。
+        # 戻ったらその昇格を採用する。
         page = _FakePage("http://example.test/")
         session = self._session(page, _FakeContext([page]))
         session._maybe_adopt_origin_upgrade("https://example.test/dashboard")
@@ -563,7 +563,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_origin_adoption_only_on_original_navigation_page(self):
         # 遅延 origin 昇格は起動時ページだけ。popup が target ホストの別 scheme/port へ遷移しても
-        # start_url を乗っ取らない（Codex #153 P1）。
+        # start_url を乗っ取らない。
         origin_page = _FakePage("http://example.test/")
         popup = _FakePage("http://example.test/")
         session = self._session(origin_page, _FakeContext([origin_page, popup]))
@@ -579,7 +579,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.start_url, "https://example.test/dashboard")
 
     async def test_cleanup_clears_totp_credentials(self):
-        # stop/起動失敗の cleanup で実行時限りの TOTP 資格情報を消去する（Codex #153 P2）。
+        # stop/起動失敗の cleanup で実行時限りの TOTP 資格情報を消去する。
         session = ManualCrawlSession()
         session.totp_uri = "otpauth://totp/x?secret=GEZDGNBV"
         session.totp_secret = "GEZDGNBVGY3TQOJQ"
@@ -597,7 +597,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_activated_popup_is_snapshotted_for_forms(self):
         # popup の初期 document が commit 済みでも、有効化直後の snapshot で forms を取得する
-        # （URL のみ記録では input surface を取り逃す・Codex #153 P1）。
+        # （URL のみ記録では input surface を取り逃す）。
         forms = [{"index": 0, "action": "http://example.test/popup", "method": "post",
                   "inputs": [{"name": "q", "type": "text"}]}]
         old_page = _FakePage()
@@ -612,7 +612,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_record_fill_drops_cross_origin_step_entirely(self):
         # cross-origin の fill step は URL だけでなく selector/name/type も含め丸ごと省略する
-        # （IdP のアカウント選択等が steps に残らない・Codex #153）。
+        # （IdP のアカウント選択等が steps に残らない）。
         page = _FakePage("http://example.test/login")
         session = self._session(page, _FakeContext([page]))
         session._record_fill({"selector": "#u", "name": "user@corp.example", "type": "text",
@@ -636,7 +636,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_background_tab_navigation_is_snapshotted(self):
         # 背景タブ（非アクティブ）の same-origin ナビゲーションでも form を snapshot する
-        # （active のみだと背景タブの新フォームが forms_by_url に残らない・Codex #153 P2）。
+        # （active のみだと背景タブの新フォームが forms_by_url に残らない）。
         active = _FakePage("http://example.test/active")
         background = _FakePage("http://example.test/bg")
         session = self._session(active, _FakeContext([active, background]))
@@ -662,7 +662,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("evil.test" in u for u in session.urls))
 
     async def test_stop_filters_cookies_by_target_host_not_path(self):
-        # 保存 cookie は target ホスト一致で絞る（path に依らず保持・別ホスト IdP は除外・Codex #153）。
+        # 保存 cookie は target ホスト一致で絞る（path に依らず保持・別ホスト IdP は除外）。
         session = self._session(_FakePage("http://example.test/login"), None)
         session.running = True
         session.start_url = "http://example.test/login"
@@ -689,7 +689,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_flushes_bound_background_tab_forms(self):
         # 背景タブの遅延 snapshot が未発火でも、stop() が cleanup 前に bound page を
-        # flush して forms を取りこぼさない（cleanup がタスクを cancel する前・Codex #153 P2）。
+        # flush して forms を取りこぼさない（cleanup がタスクを cancel する前）。
         active = _FakePage("http://example.test/active")
         bg_forms = [{"index": 0, "action": "http://example.test/bg", "method": "post",
                      "inputs": [{"name": "q", "type": "text"}]}]
@@ -724,7 +724,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("https://sso.evil.test/cb", session.forms_by_url)
 
     async def test_start_screencast_failure_does_not_leak_cdp(self):
-        # startScreencast 失敗時に死んだ CDP を self._cdp に残さず detach する（Codex #153 P2）。
+        # startScreencast 失敗時に死んだ CDP を self._cdp に残さず detach する。
         class _FailCdp(_FakeCdp):
             async def send(self, method, params=None):
                 self.sent.append((method, params))
@@ -747,7 +747,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session._context.cdps[-1].detached)  # detach 済み
 
     async def test_popup_screencast_failure_restores_previous_stream(self):
-        # popup の screencast 開始に失敗したら切替を確定せず、直前ページと配信へ戻す（Codex #153 P2）。
+        # popup の screencast 開始に失敗したら切替を確定せず、直前ページと配信へ戻す。
         old_page = _FakePage()
         popup = _FakePage("http://example.test/popup")
 
@@ -777,7 +777,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("page switch failed", session.last_error)
 
     async def test_fallback_screencast_failure_retries_or_stops_streaming(self):
-        # active popup 終了後、fallback の screencast が失敗したら別ページを試し、全滅なら streaming を終える（Codex #153 P2）。
+        # active popup 終了後、fallback の screencast が失敗したら別ページを試し、全滅なら streaming を終える。
         closed = _FakePage("http://example.test/popup")
         bad = _FakePage("http://example.test/bad")
         good = _FakePage("http://example.test/good")
@@ -816,7 +816,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(session2.streaming)
 
     async def test_start_failure_clears_totp_and_allows_restart(self):
-        # ブラウザ生成前の失敗（proxy 正規化の例外等）でも TOTP を消し running を戻す（Codex #153 P2）。
+        # ブラウザ生成前の失敗（proxy 正規化の例外等）でも TOTP を消し running を戻す。
         from unittest.mock import patch
         session = ManualCrawlSession()
         with patch("wscan.manual_crawl.normalize_proxy_server", side_effect=ValueError("bad proxy")):
@@ -828,7 +828,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cross_origin_popup_url_not_recorded(self):
         # 追従した cross-origin popup（SSO/決済等）の URL・forms は artifact に残さない
-        # （same-origin のみ記録・Codex #153 P2）。screencast 追従（切替）自体は行う。
+        # （same-origin のみ記録）。screencast 追従（切替）自体は行う。
         old_page = _FakePage()
         evil = _FakePage("https://sso.evil.test/authorize?token=secret123",
                          forms=[{"index": 0, "inputs": [{"name": "pw"}]}])
@@ -849,7 +849,7 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
 
 class SameOriginTests(unittest.TestCase):
     def test_scheme_must_match(self):
-        # http↔https を同一視しない（cross-origin popup を same-origin と誤判定しない・Codex #153）。
+        # http↔https を同一視しない（cross-origin popup を same-origin と誤判定しない）。
         self.assertFalse(_same_origin("http://app.test/x", "https://app.test/y"))
 
     def test_default_port_normalized(self):
@@ -886,7 +886,7 @@ if __name__ == "__main__":
 
 
 def test_same_origin_normalizes_idn_hosts():
-    # Chromium の Punycode 化した page.url と Unicode の start_url を同一 origin と判定する（Codex #153 P2）。
+    # Chromium の Punycode 化した page.url と Unicode の start_url を同一 origin と判定する。
     from wscan.manual_crawl import _same_origin
     assert _same_origin("https://xn--r8jz45g.jp/a", "https://例え.jp/")
     assert not _same_origin("https://xn--r8jz45g.jp/a", "https://例.jp/")

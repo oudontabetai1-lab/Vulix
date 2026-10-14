@@ -340,7 +340,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
             scanner._verify_injection_point(finding, is_url_param=False)
         )
         # replay 不能を probe 失敗として記録し、_verify_one が terminal な assumed に倒せる
-        # ようにする（None のままだと汎用フォールバックで unreproduced 誤格下げ。Codex #99 R8）。
+        # ようにする（None のままだと汎用フォールバックで unreproduced 誤格下げ。）。
         self.assertTrue(engine._json_probe_failed)
 
     def test_verify_injection_point_form_uses_form_index(self):
@@ -526,7 +526,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         # 残りの finding を検証し続ける（破損 provenance 等の巻き込み防止・no-penalty）。
         class _Engine2:
             _phase_verify = ScanEngine._phase_verify
-            _profile = ScanEngine._profile  # WSCAN_PROFILE 計測（既定 no-op・F06/0059）
+            _profile = ScanEngine._profile  # WSCAN_PROFILE 計測（既定 no-op）
             _VERIFIABLE_CHECKS = {"sqli"}
 
             def __init__(self, findings):

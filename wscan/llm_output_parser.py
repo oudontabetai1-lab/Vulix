@@ -1,4 +1,4 @@
-"""LLM 生テキストから JSON を頑健に取り出す純粋関数群（D7）。
+"""LLM 生テキストから JSON を頑健に取り出す純粋関数群。
 
 背景（2026-08-20 4モデルプローブ）: 良質な攻撃 payload を生成したのに、素朴な正規表現
 （非貪欲 `\\[.*?\\]` / 貪欲 `\\{.*\\}`）が **配列内の `]`／前置き／コードフェンス／
@@ -67,7 +67,7 @@ def _iter_balanced_pos(text: str, opener: str, closer: str) -> Iterator[tuple]:
 
     各 opener を候補の起点として試し、閉じなければ**次の opener から再試行**する
     （prose の未閉じ括弧 `Use [ literally ... ["payload"]` が後続の本物を飲み込んで
-    何も yield しない事故を防ぐ・#92 r5）。opener を見つけるまでの prose 中の `"` は
+    何も yield しない事故を防ぐ）。opener を見つけるまでの prose 中の `"` は
     文字列として追跡しない（候補開始後のみ in_str 追跡）。閉じた候補の後ろから走査を続ける。
     """
     n = len(text)
@@ -104,7 +104,7 @@ def _iter_balanced_pos(text: str, opener: str, closer: str) -> Iterator[tuple]:
             yield i, text[i : end + 1]
         # 閉じた外側チャンクが json.loads で無効でも、内側に有効な入れ子候補
         # （`Use [ ... ["payload"] ... ]` の内側配列）があり得るため、end の先へ
-        # 飛ばさず**次の opener へ +1 前進**して内側も候補に出す（#92 r8）。閉じない
+        # 飛ばさず**次の opener へ +1 前進**して内側も候補に出す。閉じない
         # 場合も同様に次の opener から復帰する。消費側は最初に json.loads 成功した
         # 候補を採るので、外側が有効ならそれが先に採られる（大きい方優先は保たれる）。
         i += 1

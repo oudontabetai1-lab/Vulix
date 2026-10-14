@@ -65,7 +65,7 @@ class _VerifierBrowser:
             (),
             {"content": AsyncMock(return_value=baseline_html)},
         )()
-        # verify baseline は有界版 get_page_source 経由で取得する（F06/0059）。
+        # verify baseline は有界版 get_page_source 経由で取得する。
         self.get_page_source = AsyncMock(return_value=baseline_html)
         self.navigate = AsyncMock(return_value=True)
 
@@ -1809,7 +1809,7 @@ class DetectionEvidenceTests(unittest.TestCase):
 
     def test_security_headers_verifier_rejects_unconsumed_redirect(self):
         """verify 時に _get が未消費の 3xx を返したら（セッション失効→login redirect 等）、
-        欠落ヘッダを再現確認と誤判定せず検証不能(None)にする（Codex #145 P2 round10）。"""
+        欠落ヘッダを再現確認と誤判定せず検証不能(None)にする。"""
         async def run():
             scanner = SecurityHeadersScanner(_DummyEngine())
             scanner._get = AsyncMock(

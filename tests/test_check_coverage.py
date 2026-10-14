@@ -1,4 +1,4 @@
-"""0016: check レベル coverage の純粋集計テスト。"""
+"""check レベル coverage の純粋集計テスト。"""
 from wscan.check_coverage import compute_check_coverage
 
 
@@ -69,7 +69,7 @@ def test_coverage_summary_text_appends_check_coverage_when_present():
 
 
 def test_coverage_summary_text_appends_prerequisite_warnings():
-    """前提不足/state profile skip 数を console 要約へ併記する（--no-monitor/バッチ観測性・0016）。"""
+    """前提不足/state profile skip 数を console 要約へ併記する（--no-monitor/バッチ観測性）。"""
     from wscan.engine import _coverage_summary_text
     base = {"reached_count": 0, "attempts": 0, "http_status": {"blocked": 0}}
     # 前提不足も skip も無ければ従来どおり（noise を出さない）
@@ -157,7 +157,7 @@ def test_prerequisite_coverage_all_available_when_env_satisfies():
 
 
 def test_coverage_summary_flags_prerequisite_missing_for_api_spec():
-    """mass_assignment は api_spec 前提。消費可能な mutation テンプレートが無ければ前提不足（0016）。"""
+    """mass_assignment は api_spec 前提。消費可能な mutation テンプレートが無ければ前提不足。"""
     from types import SimpleNamespace
     from wscan.engine import ScanEngine
     engine = SimpleNamespace(
@@ -177,7 +177,7 @@ def test_coverage_summary_flags_prerequisite_missing_for_api_spec():
 
 
 def test_coverage_summary_api_spec_needs_consumable_mutation_template():
-    """GET/DELETE のみの seed は mass_assignment が消費できず、api_spec は充足しない（Codex P2）。"""
+    """GET/DELETE のみの seed は mass_assignment が消費できず、api_spec は充足しない。"""
     from types import SimpleNamespace
     from wscan.engine import ScanEngine
     engine = SimpleNamespace(
@@ -194,7 +194,7 @@ def test_coverage_summary_api_spec_needs_consumable_mutation_template():
 
 
 def test_prerequisite_coverage_read_only_skips_state_changing():
-    """read-only は state_change=always の scanner を skip として計上する（Codex P1）。"""
+    """read-only は state_change=always の scanner を skip として計上する。"""
     from wscan.check_coverage import compute_prerequisite_coverage
     from types import SimpleNamespace as NS
     contracts = {
@@ -239,7 +239,7 @@ def test_coverage_summary_read_only_profile_flags_state_changing_skip():
 
 
 def test_coverage_summary_browser_prereq_gated_on_init_success():
-    """browser 前提（csrf 等）は _browser.init() 成功時のみ充足とみなす（Codex P2）。
+    """browser 前提（csrf 等）は _browser.init() 成功時のみ充足とみなす。
     init 失敗（Chromium 不在）でも finally で partial report を出すため、実行できていない
     browser scanner を runnable と偽らない。"""
     from types import SimpleNamespace
@@ -285,7 +285,7 @@ def test_coverage_html_renders_prerequisite_missing(tmp_path):
 
 
 def test_coverage_summary_includes_scoped_capability_matrix():
-    """coverage_summary は in-scope の scanner に限定した capability_matrix を出す（0035-E）。
+    """coverage_summary は in-scope の scanner に限定した capability_matrix を出す。
     全 registry(36) を毎回出さず、実際に動かした検査の carrier 射程だけを供給する。"""
     from types import SimpleNamespace
     from wscan.engine import ScanEngine

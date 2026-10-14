@@ -1,4 +1,4 @@
-"""SARIF run properties へ検査カバレッジ補助情報を出すことのテスト（0016）。
+"""SARIF run properties へ検査カバレッジ補助情報を出すことのテスト。
 
 SARIF 消費側（CI/セキュリティダッシュボード）が「0 findings＝安全ではない・未実行や
 前提不足の検査がある」を判別できるよう、run.properties.coverage を検証する。

@@ -32,7 +32,7 @@ jobs:
 
       # PR 毎の高速 E2E スモーク。full E2E（test_end_to_end_scan.py・1スキャン最大 900s）は重く
       # nightly 専用（nightly-recall.yml）だが、crawl→attack→verify の通し停止/クラッシュ回帰
-      # （F06/0059 等）は PR 毎に捕まえたい。最小 vuln_app に対する軽量スモークを **ブロッキング**
+      # は PR 毎に捕まえたい。最小 vuln_app に対する軽量スモークを **ブロッキング**
       # で走らせる。Chromium 導入は ``--with-deps`` が apt ミラーの一時 403 で稀に失敗する
       # （インフラ都合）ため retry + continue-on-error の best-effort。導入できなければスモークは
       # skip に倒れインフラ都合で PR をブロックしない。導入できた通常ケースではスモークが

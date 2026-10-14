@@ -75,7 +75,7 @@
 
 ## 残存確認項目
 
-- CSRFの対象DOM準備と動的フォームは確認済みFN・未修正であり、個別follow-upの起票/紐付けもpending。SessionのCookie観測時点/URL帰属は別の検証候補。単に全page scannerの前へnavigateを追加すると状態変更GET/flow状態を変えるため個別設計と回帰が必要。
+- CSRFの対象DOM準備と動的フォームは確認済みFN・未修正であり、個別対応は未着手。SessionのCookie観測時点/URL帰属は別の検証候補。単に全page scannerの前へnavigateを追加すると状態変更GET/flow状態を変えるため個別設計と回帰が必要。
 - JSONのXSS/DOM-XSS/redirect/stored-XSS/mail-header、および汎用Header/Cookie/Path注入はcontract上の未接続領域。対応済みPositiveのFNと混同しない。
 - healthcareの既知高難度gap（boolean SQLi、二重decode traversal、backslash redirect）と長時間full scan、large_vuln_appの全経路は第一パスで完了したと扱わない。
 - passive scannerのtested/no-op行やfield互換no-opは実probeの証拠にならない。到達台帳・requestログ・ground truthを併せて確認する。

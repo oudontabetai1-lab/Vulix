@@ -103,7 +103,7 @@ class ClickjackingScanner(BaseScanner):
 
         # 対象ページのヘッダは直接 GET で確実に取得する。current_page_pair は latest() フォールバックで
         # 別リクエスト（asset/別ページ）の pair を返し、XFO/CSP が欠落した誤ヘッダで安全ページを
-        # false positive にしうる（0034 passive benchmark で /portal/embed-safe が FP になった原因）。
+        # false positive にしうる（passive benchmark で /portal/embed-safe が FP になった原因）。
         pair = await self._response_pair(url)
         response = pair.get("response") or {}
         if not response or response.get("status") is None:
@@ -112,7 +112,7 @@ class ClickjackingScanner(BaseScanner):
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
             if not response:
                 # 完全な取得失敗（_get 失敗＋capture 無し）は例外で engine に伝え、checkpoint 未完了に
-                # して resume 再試行を可能にする（[] だと tested/完了で恒久 skip・Codex #145 P2 round15）。
+                # して resume 再試行を可能にする（[] だと tested/完了で恒久 skip）。
                 # 3xx 等の legitimate NOT_REACHED（response は非空・status のみ無し）はそのまま [] を返す。
                 raise PageDocumentUnavailable(f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}")
             return []
@@ -120,7 +120,7 @@ class ClickjackingScanner(BaseScanner):
 
         # framing 保護（XFO/CSP frame-ancestors）は **HTML document** にのみ意味を持つ。
         # crawl が拾った raw asset（.js/.css/.json/画像等）を clickjacking 監査すると、XFO/CSP を
-        # 持たない当然の非 document 応答を「未保護」と誤報する FP になる（Codex #147 P2。JS を
+        # 持たない当然の非 document 応答を「未保護」と誤報する FP になる（JS を
         # nav アンカーやサブリソースで拾うと発生）。content-type が **明示的に非 HTML** のときだけ
         # skip し、欠落時は従来どおり監査して FN を作らない。
         ctype = (headers.get("content-type", "") or "").lower()

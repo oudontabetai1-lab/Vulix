@@ -103,7 +103,7 @@ def _cvss_for(check_type: str) -> tuple[str, float]:
     return _CVSS_TABLE.get(check_type) or _CVSS_TABLE.get(base, ("", 0.0))
 
 
-# **2 つの別概念を分ける（#90 R13-2）**:
+# **2 つの別概念を分ける（-2）**:
 #  (1) 資格情報ヘッダ = spec/観測テンプレで上書きしてはいけない認証系（利用者の実値が常に優先）。
 #      merge_template_headers の「上書き禁止」判定に使う **静的な狭い集合**。runtime 登録ヘッダ
 #      （engine が redaction 用に登録する X-API-Version/X-Tenant 等の非認証ヘッダ）は**含めない**
@@ -114,8 +114,8 @@ def _cvss_for(check_type: str) -> tuple[str, float]:
 #      カスタム認証ヘッダの同期漏れ防止）。
 # 上書き禁止の認証情報ヘッダ（well-known・小文字完全一致）。**名前の部分一致はしない** ――
 # "auth"/"token" 部分一致は X-Auth-Mode/X-Token-Bucket 等の routing を誤保護し、逆に
-# Ocp-Apim-Subscription-Key 等の認証を取りこぼす（#90 R14）。カスタム名の認証ヘッダを正確に
-# 扱うには spec の securitySchemes で宣言された名前を明示的に渡す必要がある（→ backlog・b1 スコープ外）。
+# Ocp-Apim-Subscription-Key 等の認証を取りこぼす。カスタム名の認証ヘッダを正確に
+# 扱うには spec の securitySchemes で宣言された名前を明示的に渡す必要がある（現状は対象外）。
 _CREDENTIAL_HEADERS = frozenset({
     "authorization", "x-api-key", "api-key", "apikey", "x-auth-token",
     "x-access-token", "proxy-authorization", "cookie", "authentication",
@@ -127,7 +127,7 @@ def _is_credential_header(name) -> bool:
     """(1) 上書き禁止の認証情報ヘッダか（well-known 集合の case-insensitive 完全一致）。
 
     runtime redaction 集合には委譲しない ―― engine は非認証の --header（X-API-Version 等）も
-    redaction 用に登録するため、それで上書き禁止を判定すると operation 固有ヘッダを潰す（#90 R14）。
+    redaction 用に登録するため、それで上書き禁止を判定すると operation 固有ヘッダを潰す。
     """
     return str(name).lower() in _CREDENTIAL_HEADERS
 
@@ -146,14 +146,14 @@ _IDEMPOTENCY_HEADER_NAMES = frozenset({
 })
 
 # page 観測系の直接 GET(replay) が返した際、「恒久的にこの document ではない」ではなく
-# 一時障害＝resume で再試行すべき status。408/429/5xx を transient として扱う（Codex #145 P2 round18）。
+# 一時障害＝resume で再試行すべき status。408/429/5xx を transient として扱う。
 # 408/429 と 5xx 全域を一時失敗として扱う（501/507/520 等を列挙漏れで「検査成功の空」に
-# しない＝resume で再試行させる・Codex #155）。
+# しない＝resume で再試行させる）。
 _TRANSIENT_REPLAY_STATUSES = frozenset({408, 429} | set(range(500, 600)))
 
 
 def _body_looks_like_html(body: str, headers, *, is_2xx: bool) -> bool:
-    """応答本文が「ブラウザが描画する HTML document」かを判定する（純粋・Codex #147）。
+    """応答本文が「ブラウザが描画する HTML document」かを判定する（純粋）。
 
     Content-Type に html を含めば HTML。Content-Type 欠落時は 2xx crawl document を HTML とみなし、
     非 2xx では `<html`/`<!doctype html` の軽いスニッフィングに留める（error 応答の誤検知回避）。
@@ -200,7 +200,7 @@ def merge_template_headers(base: dict, tmpl_headers: dict) -> dict:
     で上書きしてよい（operation 固有の必須ヘッダを補完する）。
     """
     # base 自体に大小違いの同名キー（Authorization と authorization）があっても単一化する
-    # （後勝ち）。小文字名 -> 実キーの map を作りながら重複を落とす（#90 R14）。
+    # （後勝ち）。小文字名 -> 実キーの map を作りながら重複を落とす。
     out: dict = {}
     lower_to_key: dict = {}
     for k, v in (base or {}).items():
@@ -250,16 +250,16 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
         req["post_data"] = json.dumps(redact_body_except(parsed, injection_pointer))
     # reflected な認証ヘッダ値（Authorization/Cookie/API-token 等）が response body に
     # エコーされても evidence（checkpoint/report/monitor）へ残さないため、機密ヘッダの
-    # **値**も伏字対象に含める（#90 R21b）。ヘッダ dict のマスク前の生値を使う。
+    # **値**も伏字対象に含める。ヘッダ dict のマスク前の生値を使う。
     # request 側（reflect）と response 側（サーバ発行の X-Access-Token 等を body にも repeat）の
-    # 双方を集める（#90 R21e）。ただし body への **無制限 substring 置換**は、broad な evidence
+    # 双方を集める。ただし body への **無制限 substring 置換**は、broad な evidence
     # redaction 集合（X-Tenant/X-API-Version 等の通常設定ヘッダを含む）や短い値を対象にすると
-    # `database payload`→`d***t***b***se...` のように evidence を破壊する（#90 R21f）。そこで
+    # `database payload`→`d***t***b***se...` のように evidence を破壊する。そこで
     # body 伏字に回す値は **実 credential ヘッダ（narrow 集合）**かつ **十分長い値（>=8）**に
     # 限定する。ヘッダ dict 自体の masking は従来どおり broad（表示だけ伏せるのは無害）。
     # 対象は **確実な credential ヘッダ**（narrow）に限定するが、`Set-Cookie`（レスポンス発行の
     # cookie）も確実な credential なので明示的に含める（narrow 集合は request 用の "cookie" のみで
-    # "set-cookie" を欠くため・#90 R21g）。
+    # "set-cookie" を欠くため）。
     _MIN_BODY_SECRET_LEN = 8
 
     def _add_secret(val):
@@ -624,11 +624,11 @@ class PageDocumentUnavailable(RuntimeError):
 
     header 観測系（clickjacking/security_headers）はこれを送出し、engine の page-level except に
     捕捉させて **checkpoint を完了扱いにしない**（[] を返すと tested/完了で恒久 skip となり resume が
-    再試行できない・Codex #145 P2 round15）。3xx 等の legitimate NOT_REACHED では送出しない。
+    再試行できない）。3xx 等の legitimate NOT_REACHED では送出しない。
 
     後続 probe の失敗で送出する前に既に得た finding は ``findings`` に載せ、engine 側の except が
     それらへ ``_record_finding`` の副作用（通知/監視 emit 等）を回せるようにする（raise で partial
-    finding の副作用が失われるのを防ぐ・Codex #157 P2）。
+    finding の副作用が失われるのを防ぐ）。
     """
 
     def __init__(self, *args, findings=None):
@@ -804,7 +804,7 @@ class BaseScanner(ABC):
         )
 
     def _field_budget_gate(self) -> bool:
-        """F06/0059: フィールド単位 attack 時間ボックス超過なら True（呼び出し側は注入せず
+        """フィールド単位 attack 時間ボックス超過なら True（呼び出し側は注入せず
         ``("", {})`` を返す）。超過時は観測ノートを (フィールド×check) 毎に 1 回だけ記録し、当該
         check を truncated 集合へ入れて engine._scan_field の checkpoint 完了化を抑止する（＝resume で
         再試行させ見逃しを防ぐ）。状態は task-local ContextVar（並行ワーカーで汚染しない）。deadline
@@ -835,7 +835,7 @@ class BaseScanner(ABC):
         """time-box 打ち切りノートを ``field_budget_exceeded:<check>[:<path>|<field>]`` で作る。
 
         ident=(url, field) があれば injection point 情報を付し、benchmark が per-IP に degradation を
-        絞れるようにする（同 check の別 field の完全実行行を巻き込まない・0059/F06 R4#2）。ident が
+        絞れるようにする（同 check の別 field の完全実行行を巻き込まない）。ident が
         None/不正なら check だけの旧形式へフォールバック（観測系は先頭 `:` までしか見ないので不変）。"""
         base = f"field_budget_exceeded:{self.CHECK_TYPE}"
         try:
@@ -861,12 +861,12 @@ class BaseScanner(ABC):
         # 注意: ここで transport 例外を握りつぶさない（挙動不変）。以前はここに try/except で
         # `("",{})` を返すラップを置いたが、それだと LDAP 等の baseline `except` へ**伝播すべき
         # 例外**を奪い、空 baseline と成功応答を比較して偽陽性（例: "welcome" を認証バイパス）を
-        # 生む（0007 D1 は「記録を足すだけ・挙動不変」が不変条件。Codex #101）。json transport の
+        # 生む（は「記録を足すだけ・挙動不変」が不変条件。）。json transport の
         # 脱落記録は `_apply_json_payload` の**既存**の swallow 点（transport_error/unexecutable_template）
         # に限る。form/url の例外は従来どおりスキャナ側（baseline_unavailable 等）へ伝播させる。
         if not self.may_scan_injection_point(ip):
             return "", {}
-        # F06/0059: フィールド単位 attack 時間ボックス。超過後は追加注入を止める（SQLi baseline の
+        # フィールド単位 attack 時間ボックス。超過後は追加注入を止める（SQLi baseline の
         # 独自 browser 送信分岐も同じ gate を通すため共通ヘルパに切り出し）。
         if self._field_budget_gate():
             return "", {}
@@ -882,24 +882,24 @@ class BaseScanner(ABC):
                 payload,
                 ip.legacy_is_url_param(),
             )
-            # form/url の沈黙 swallow を観測可能にする（0007 D1）。fill_and_submit_form は例外を
+            # form/url の沈黙 swallow を観測可能にする。fill_and_submit_form は例外を
             # 握りつぶし空 pair を返すが、空 pair だけでは「送達成功だが pair 未捕捉」と区別できない。
             # browser の送達フラグ（transport 例外・応答なしのときだけ False。HTTP 4xx/5xx 応答は
             # 送達済み＝True）を見て、実際に未送達だったときだけ transport_error を刻む（制御フロー
             # 不変・偽記録なし）。
             # これを刻まないと ScanEngine が status="tested" を記録し、未送達の空振りが偽 TN/FN に
-            # 化ける（Codex #134 P1）。json_body の脱落は _apply_json_payload が既に記録する。
+            # 化ける。json_body の脱落は _apply_json_payload が既に記録する。
             if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
                 self._record_scan_note(
                     f"transport_error:{self.CHECK_TYPE}:probe_not_delivered"
                 )
-        # D5/G2: 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
+        # 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
         # 記録のみ（例外は絶対に scan を止めない＝加算的・安全側）。
         self._record_attempt(ip, payload, source, pair)
         return source, pair
 
     async def dispatch(self, ip: "InjectionPoint", payload) -> "DispatchResult":
-        """既存 _apply_ip をラップし typed DispatchResult を返す facade（0035-C・加算）。
+        """既存 _apply_ip をラップし typed DispatchResult を返す facade（加算）。
 
         挙動は _apply_ip と同一（送信・例外伝播・attempt 記録は _apply_ip に委譲）。
         ここでは追加で結果を DispatchState へ分類し、carrier/transport/legacy pair を
@@ -926,7 +926,7 @@ class BaseScanner(ABC):
         # driver を持つとは限らない（例: race_condition/stored_xss は FORM supported だが
         # 標準 _apply_payload を持たず _apply_ip が AttributeError／nosql は JSON supported だが
         # SUPPORTS_JSON_BODY=False で base json 経路が無い）。crash させず UNEXECUTABLE で
-        # 明示する（各 scanner の _dispatch_send adapter 追加＝driver 化は 0035-D）。
+        # 明示する（各 scanner の _dispatch_send adapter 追加＝driver 化は）。
         if not self._dispatch_driver_available(ip):
             return DispatchResult(
                 state=DispatchState.UNEXECUTABLE,
@@ -966,7 +966,7 @@ class BaseScanner(ABC):
         return await self._apply_ip(ip, payload)
 
     def _finalize_dispatch(self, carrier, source: str, pair: dict) -> "DispatchResult":
-        """(source, pair) を DispatchResult へ分類する共通ヘルパ（純粋・0035-C）。
+        """(source, pair) を DispatchResult へ分類する共通ヘルパ（純粋）。
 
         独自 transport を持つ scanner（DOMXSSScanner 等）の dispatch override も、送信後は
         これを使って分類を統一する。
@@ -1055,7 +1055,7 @@ class BaseScanner(ABC):
                 # 登録テンプレ不在＝replay 不能（resume で nonce 変化/cap 到達により
                 # 再生成されなかった等）。呼び出し側(_verify_one)が「検証リクエスト失敗」と
                 # 同じく terminal な assumed へ倒せるよう probe 失敗を記録する（None のままだと
-                # 汎用フォールバックへ落ち unreproduced に誤格下げされる。Codex #99 R8）。
+                # 汎用フォールバックへ落ち unreproduced に誤格下げされる。）。
                 try:
                     self.engine._json_probe_failed = True
                 except Exception:
@@ -1152,7 +1152,7 @@ class BaseScanner(ABC):
         """Get payloads for this scanner's check type, sorted by learning data.
 
         ``ip`` を渡すと、その (注入点, check) の試行台帳（過去 payload→応答メタ）を
-        baseline 生成プロンプトへ供給する（0006 G1）。未指定なら従来どおり履歴なし。
+        baseline 生成プロンプトへ供給する。未指定なら従来どおり履歴なし。
         """
         # Check per-task ContextVar override first (set by engine for parallel isolation),
         # fall back to the engine-level custom_payloads dict.
@@ -1163,7 +1163,7 @@ class BaseScanner(ABC):
             if _overrides
             else self.engine.custom_payloads.get(self.CHECK_TYPE)
         )
-        # G1: 試行台帳から当該注入点の履歴を取り出し、生成へ戻す（evaluator-optimizer）。
+        # 試行台帳から当該注入点の履歴を取り出し、生成へ戻す（evaluator-optimizer）。
         attempt_history = None
         if ip is not None:
             ledger = getattr(getattr(self, "engine", None), "attempt_ledger", None)
@@ -1173,7 +1173,7 @@ class BaseScanner(ABC):
                 except Exception:
                     attempt_history = None
 
-        # G4: 学習済み成功率サマリを生成プロンプトへ供給（既存 learning データの再利用）。
+        # 学習済み成功率サマリを生成プロンプトへ供給（既存 learning データの再利用）。
         # learner/domain は下の並べ替えでも使うため先に解決する。
         learner = getattr(self.engine, "payload_learner", None)
         _learning_on = bool(learner) and getattr(self.engine, "enable_payload_learning", True)
@@ -1198,7 +1198,7 @@ class BaseScanner(ABC):
                 # このターゲット（_dom）の学習だけを使う（include_global=False）。理由は2つ:
                 # (1) global 集計は「別ターゲットの成功 payload」も注入してしまう。target A の
                 #     コールバック URL/トークンを含む payload が global に記録され、target B の
-                #     プロンプト＝クラウド LLM 送信へ混入する情報漏洩になる（G4 以前は学習は
+                #     プロンプト＝クラウド LLM 送信へ混入する情報漏洩になる（従来、学習は
                 #     並べ替えのみで注入しなかった）。ドメイン限定なら他ターゲットへ漏れない。
                 # (2) domain バケツ単体は record が各観測を書くので正確な per-target カウント
                 #     （二重計上なし）。global を混ぜると加算で二重計上になる。
@@ -1262,7 +1262,7 @@ class BaseScanner(ABC):
         if not isinstance(template, dict):
             # テンプレ不在＝送信不能。呼び出し側が「送れなかった」を陰性(完了/unreproduced)と
             # 誤記録しないよう probe 失敗を記録する（scan は既に template 実在も別途確認・
-            # 冪等。verify の汎用フォールバックはこの flag で assumed に倒す。Codex #99 R8）。
+            # 冪等。verify の汎用フォールバックはこの flag で assumed に倒す。）。
             try:
                 self.engine._json_probe_failed = True
             except Exception:
@@ -1367,7 +1367,7 @@ class BaseScanner(ABC):
         except Exception as exc:
             # 通信失敗（timeout/TLS/DNS/proxy 等）。baseline が通った後に個々の攻撃
             # payload が落ちたケースでも、呼び出し側が「済み」記録して attack 未実行の
-            # 点を resume 恒久スキップしないよう、失敗を engine に記録する（Codex #99 R4）。
+            # 点を resume 恒久スキップしないよう、失敗を engine に記録する。
             try:
                 self.engine._json_probe_failed = True
             except Exception:
@@ -1396,7 +1396,7 @@ class BaseScanner(ABC):
         SQLi / XSS の両スキャナから再利用する共通ロジック。投入は各スキャナの
         ``_apply_payload`` に委譲するため、フォーム/URLパラメータ双方に対応する。
         """
-        # F06/0059: 等価性 probe は _apply_ip を通らず _apply_payload へ直送するため、
+        # 等価性 probe は _apply_ip を通らず _apply_payload へ直送するため、
         # フィールド時間ボックス超過後もそのままだと 6 発送信してしまう。gate で短絡し
         # 送信しない（truncated 記録は _field_budget_gate 内で行い当該 check の checkpoint
         # 完了化を抑止＝resume で再試行させる）。
@@ -1418,7 +1418,7 @@ class BaseScanner(ABC):
         responses: dict[str, str] = {}
         pairs: dict[str, dict] = {}
         for probe in probe_set.probes:
-            # F06/0059(#2): 入口 1 回だけの gate では、最初の遅い probe 送信中に期限切れになっても
+            # 入口 1 回だけの gate では、最初の遅い probe 送信中に期限切れになっても
             # 残り最大 6 発を送ってしまう。各 request 送信前に再チェックし、超過後は残りを送らない
             # （送った分だけで evaluate する。判定ロジックは不変）。
             if self._field_budget_gate():
@@ -1442,7 +1442,7 @@ class BaseScanner(ABC):
             body = (pair.get("response", {}) or {}).get("body") or source or ""
             responses[probe.name] = body
 
-        # F06/0059(R4#5): broken-quote 対照 probe は probe 群の末尾にあり、時間ボックスで打ち切ると
+        # broken-quote 対照 probe は probe 群の末尾にあり、時間ボックスで打ち切ると
         # 送信前に break しうる。対照応答が欠けたまま evaluate すると broken_collapsed=False と誤解して
         # 「対照でも弾かれる入力正規化」を脆弱と誤報（FP）する。対照が揃わなければ evaluate せず None
         # を返す（部分結果で判定しない＝当該 probe は truncated 扱いで finding を出さない）。
@@ -1472,7 +1472,7 @@ class BaseScanner(ABC):
         個別 scanner の検知判定は呼ばず、marker 付き文字列の反射状態だけを
         観測する。失敗時は呼び出し側が従来挙動へ戻れるよう空値を返す。
         """
-        # F06/0059: 生存 probe も browser を直叩きして _apply_ip の gate を通らないため、
+        # 生存 probe も browser を直叩きして _apply_ip の gate を通らないため、
         # フィールド時間ボックス超過後は送らず空観測を返す（従来の失敗時と同じ空値）。
         if self._field_budget_gate():
             return "", set(), {}
@@ -1606,7 +1606,7 @@ class BaseScanner(ABC):
 
         ``--concurrency>1`` では各 worker が私的 ``NetworkCapture`` を持つため、__init__ 捕捉の
         メイン ``self.browser`` ではなく **呼び出し時の worker-aware** ``self.engine.browser`` から
-        network を解決する（Codex #145 round9）。serial 時は engine.browser がメインを返すため挙動不変。
+        network を解決する。serial 時は engine.browser がメインを返すため挙動不変。
         """
         browser = getattr(self.engine, "browser", None) or getattr(self, "browser", None)
         network = getattr(browser, "network", None)
@@ -1622,13 +1622,13 @@ class BaseScanner(ABC):
         """redirect を追従してよいか（same-host のみ・http→https の canonical upgrade は許可）。
 
         別ホストへの redirect は追従しない（初期 URL にしかスコープされない認証ヘッダ/Cookie が
-        別 origin へ漏れる・Codex #145 P1）。同一ホストなら:
+        別 origin へ漏れる）。同一ホストなら:
           - 同一スキーム: 既定ポート（80/443）と明示ポートを同一視して追従（P2d：http://h →
             http://h:80 の canonical redirect を cross-origin 誤判定しない）。
           - スキーム差: http→https の **canonical upgrade（既定ポート 80→443）のみ**許可（攻撃対象が
             canonical HTTPS へ 301 する通常ケース）。非既定ポート（http://h:8080 → https://h:8443）は
-            同一ホストでも別サービスの可能性があり、scoped auth を別 origin へ晒しうるため追従しない
-            （Codex #145 P1 round5）。https→http のダウングレードも追従しない。
+            同一ホストでも別サービスの可能性があり、scoped auth を別 origin へ晒しうるため追従しない。
+            https→http のダウングレードも追従しない。
         """
         from urllib.parse import urlparse
         s, d = urlparse(src_url), urlparse(dst_url)
@@ -1663,7 +1663,7 @@ class BaseScanner(ABC):
         の反映（session rotation・削除・httpOnly/sameSite 保持）を native に処理する。そのため httpx
         の別クライアントで Cookie を再現していた処理（jar 構築・scoping・単一ラベル/IPv6・書き戻し）が
         一切不要になり、監査 GET が session を rotation させても browser と desync しない
-        （Codex #145 round12。従来の httpx 実装は round2〜11 で Cookie 忠実性の指摘が続いていた）。
+        （従来の httpx 実装では Cookie 忠実性の問題が続いていた）。
 
         redirect は ``max_redirects=0`` で自動追従を無効化し、**same-host のみ手動追従**する（別ホスト/
         ダウングレードへ認証ヘッダを漏らさない）。認証ヘッダは in-scope の元 url から一度だけ算出して
@@ -1710,10 +1710,10 @@ class BaseScanner(ABC):
 
         def _headers_for(hop_url: str) -> dict:
             # 認証ヘッダは same-host hop（承認 upgrade 含む）では in-scope 元 url の scoped auth を
-            # 再利用（round4: upgrade 先が header-scope 外でも同一 host なら落とさない）。scope 承認の
+            # 再利用（upgrade 先が header-scope 外でも同一 host なら落とさない）。scope 承認の
             # **別ホスト** hop（bare→www 双方 target 等）では、その host の scoped headers を再計算する
-            # （元 host のヘッダを別 host へ送らない・Codex #145 round13）。生成ヘッダは case-insensitive
-            # に auth で置換する（Codex #145 round11）。
+            # （元 host のヘッダを別 host へ送らない）。生成ヘッダは case-insensitive
+            # に auth で置換する。
             headers = dict(browser_headers)
             if not _has_auth:
                 return headers
@@ -1729,7 +1729,7 @@ class BaseScanner(ABC):
 
         # --timeout（秒）を Playwright の ms へ渡す。未設定/0 は Playwright 既定に委ねる。
         # 従来は set_default_timeout が page にしか効かず context.request は 30s 固定だった
-        # （低 timeout でも page 毎に 2 回 stall、30s 超では正当な遅延応答が失敗）（Codex #145 round13）。
+        # （低 timeout でも page 毎に 2 回 stall、30s 超では正当な遅延応答が失敗）。
         get_kwargs: dict = {"max_redirects": 0}
         try:
             _t = float(getattr(self.engine, "timeout", 0) or 0)
@@ -1766,7 +1766,7 @@ class BaseScanner(ABC):
             except Exception:
                 # 非 UTF-8 の HTML/JS 本文で response.text() が失敗しても本文を捨てない
                 # （SRI/secret_leak が非 UTF-8 バンドルの秘密/外部 script を見逃す FN になる）。
-                # network-capture 経路（browser.py）と同じく body() バイト列を safe_decode する（Codex #147 P2）。
+                # network-capture 経路（browser.py）と同じく body() バイト列を safe_decode する。
                 text = ""
                 try:
                     from wscan.textio import safe_decode
@@ -1777,7 +1777,7 @@ class BaseScanner(ABC):
                     # ここでは note を刻まない: この共有 GET は header 監査(clickjacking/security_headers)が
                     # 先に呼ぶことがあり、本文失敗を header-only check の degradation として誤計上すると
                     # _degraded_checks がその check の tested(TN)行まで NOT_REACHED 化する。note は本文を
-                    # 実際に要求する _document_body 側で content scanner 名義で刻む（Codex #147）。
+                    # 実際に要求する _document_body 側で content scanner 名義で刻む。
                     text = ""
                     body_unavailable = True
             direct = _DirectResponse(
@@ -1793,13 +1793,13 @@ class BaseScanner(ABC):
             # 監査 GET が Playwright context の Cookie を rotation/削除させた可能性があるため、
             # engine.cookies を browser context（source of truth）から再同期する。後続の httpx ベース
             # 直接呼び出し（CORSScanner._get_with_origin 等が使う engine.cookies）が stale セッションを
-            # 送らないようにする（Codex #145 P1 round14）。**成功・失敗どちらでも** finally で行うのが要点で、
+            # 送らないようにする。**成功・失敗どちらでも** finally で行うのが要点で、
             # 中間 redirect hop が cookie を変異させた後に次 hop が例外（timeout 等）を投げると、成功パス
-            # だけの同期では engine.cookies に無効トークンが残り CORS 等が未認証応答に走る（Codex #145 P2 round16）。
+            # だけの同期では engine.cookies に無効トークンが残り CORS 等が未認証応答に走る。
             # engine の既存同期機構を使う（自作しない）。並列(--concurrency>1)でも安全：
             # engine 側の _sync_cookies_from_browser は worker task 内では task-local な
             # ContextVar へ書き（共有 engine.cookies を汚染しない）、直列時は従来どおり
-            # engine.cookies を更新する（0067。旧: 直列時のみ実行の round15 制限を解除）。
+            # engine.cookies を更新する（旧: 直列時のみ実行の制限を解除）。
             _sync = getattr(self.engine, "_sync_cookies_from_browser", None)
             if callable(_sync):
                 try:
@@ -1807,7 +1807,7 @@ class BaseScanner(ABC):
                 except Exception:
                     pass
             # APIResponse は dispose するまで body を保持する。証拠を _DirectResponse へ複写後に
-            # 最終 response を必ず解放し、多ページ/大 document でのメモリ蓄積を防ぐ（Codex #145 round13）。
+            # 最終 response を必ず解放し、多ページ/大 document でのメモリ蓄積を防ぐ。
             if response is not None:
                 await self._dispose_response(response)
 
@@ -1824,7 +1824,7 @@ class BaseScanner(ABC):
 
     @staticmethod
     async def _dispose_response(response) -> None:
-        """APIResponse の body を解放する（メモリ蓄積防止・Codex #145 round13）。例外は無視。"""
+        """APIResponse の body を解放する（メモリ蓄積防止）。例外は無視。"""
         try:
             disp = getattr(response, "dispose", None)
             if callable(disp):
@@ -1838,7 +1838,7 @@ class BaseScanner(ABC):
 
         直接 GET が例外を投げ network fallback（current_page_pair）へ倒れたとき、captured pair が
         3xx（別リクエストの redirect 等）だと観測系が「document のヘッダ欠落」と誤監査して FP を
-        出す。直接 GET 経路と同じ 3xx ガードを fallback にも適用する（Codex #145 P2 round6）。
+        出す。直接 GET 経路と同じ 3xx ガードを fallback にも適用する。
         """
         resp = (pair or {}).get("response") or {}
         status = resp.get("status")
@@ -1859,7 +1859,7 @@ class BaseScanner(ABC):
         clickjacking / security_headers / sri / secret_leak は同一ページのヘッダを各自監査するため、
         素朴には 1 ページに複数回 GET(replay) してしまう。副作用のある GET（logout/action リンク・
         token 消費など 2xx を返すもの）を read-only のはずのヘッダ検査で二重に叩かないよう、engine 単位の
-        per-URL キャッシュで **1 ページ 1 replay** を共有する（Codex #145 P2 round18）。同一ページを続けて
+        per-URL キャッシュで **1 ページ 1 replay** を共有する。同一ページを続けて
         走る page 観測系スキャナ群がこのキャッシュを共有する。cookie 再同期も 1 回に減る。
         （replay を完全に無くす＝ブラウザ navigation 応答の per-URL 保存は別タスク＝verify 側の共有も含む。）
         """
@@ -1870,7 +1870,7 @@ class BaseScanner(ABC):
         # header 監査は「2xx の描画された document」だけを対象にする。直接 GET は replay であり、
         # one-time link / nonce 消費 URL では 2 回目の GET が 3xx や 401/404/410 等を返し得る。その
         # 非 2xx 応答の欠落ヘッダ（XFO/CSP 等）を監査すると FP になるため status を落として NOT_REACHED。
-        # transient（408/429/5xx）は {} で PageDocumentUnavailable→resume 再試行（round17/18/19）。
+        # transient（408/429/5xx）は {} で PageDocumentUnavailable→resume 再試行。
         if status is None or not (200 <= int(status) < 300):
             try:
                 if status is not None and int(status) in _TRANSIENT_REPLAY_STATUSES:
@@ -1901,7 +1901,7 @@ class BaseScanner(ABC):
         error テンプレート本文（integrity 無しの外部 script を含み得る）を監査すると元 URL に対する
         FP になる。そこで `allow_non_2xx=False` のときは恒久非 2xx を NOT_REACHED（本文 ""）にする。
         transient（408/429/5xx）は、**本文があり allow_non_2xx=True（secret_leak）なら本文を返して
-        走査する**（500 のスタックトレース等に漏れた秘密を取りこぼさない・Codex #147）。本文が空なら
+        走査する**（500 のスタックトレース等に漏れた秘密を取りこぼさない）。本文が空なら
         走査対象が無いので `PageDocumentUnavailable` を送出して resume 再試行へ回す。本文の取得自体に
         失敗した（body_unavailable）場合も空本文と取り違えず必ず送出する。取得は header 監査と同じ
         per-URL raw キャッシュを共有し 1 ページ 1 replay を保つ。
@@ -1927,8 +1927,8 @@ class BaseScanner(ABC):
                     return body
                 # SRI 等(html_only): ブラウザは 5xx/429 でも HTML を描画し integrity 無しの外部 script を
                 # 読み込むため、監査可能な HTML 本文があれば 2xx 同様に監査する。これを resume 用に
-                # 投げ続けると、恒久的に失敗する endpoint は毎回再試行されるだけで一度も監査されない
-                # （Codex #147）。body が無い/非 HTML のときだけ resume へ回す。
+                # 投げ続けると、恒久的に失敗する endpoint は毎回再試行されるだけで一度も監査されない。
+                # body が無い/非 HTML のときだけ resume へ回す。
                 if html_only and body and _body_looks_like_html(
                         body, raw.get("headers"), is_2xx=False):
                     return body
@@ -1941,7 +1941,7 @@ class BaseScanner(ABC):
         if html_only:
             # SRI 等: ステータスではなく「ブラウザが描画する HTML document か」で判定する。
             # 2xx に限ると、ブラウザが描画し外部 script を読み込む custom 401/404 HTML を見逃す
-            # （status だけでは本文が描画されないとは限らない・Codex #147）。HTML 以外（JSON API の
+            # （status だけでは本文が描画されないとは限らない）。HTML 以外（JSON API の
             # error・生 asset 等）は NOT_REACHED（本文なし）として誤検知を避ける。
             is_2xx = False
             try:
@@ -1957,7 +1957,7 @@ class BaseScanner(ABC):
 
         header 観測系（clickjacking/security_headers）と content 観測系（sri/secret_leak）が
         **同一ページの取得を 1 回だけ共有**するためのチョークポイント（副作用 GET を read-only ヘッダ
-        検査で二重に叩かない・Codex #145 P2 round18）。ポリシー（2xx 限定/本文保持）は各呼び出し側が
+        検査で二重に叩かない）。ポリシー（2xx 限定/本文保持）は各呼び出し側が
         被せる。完全な取得失敗は ``None``。（replay 完全廃止＝ブラウザ navigation 応答の保存は別タスク。）
         """
         cache = getattr(self.engine, "_page_obs_raw_cache", None)
@@ -1972,7 +1972,7 @@ class BaseScanner(ABC):
         if url in cache:
             entry = cache[url]
             # in-flight（別コルーチンが取得中）なら同じ Future を待って GET を共有する
-            # （並列 page 観測系スキャナが同一 URL を二重 GET しない・Codex #147）。値なら即返す。
+            # （並列 page 観測系スキャナが同一 URL を二重 GET しない）。値なら即返す。
             if isinstance(entry, asyncio.Future):
                 return await entry
             return entry
@@ -2071,7 +2071,7 @@ class BaseScanner(ABC):
             resp = pair["response"]
             # capture 側（NetworkCapture.enrich_response）は本文を読めなかったとき body キー自体を
             # 欠落させる。これを空本文と取り違えず body_unavailable として伝播し、content 観測系に
-            # PageDocumentUnavailable を投げさせる（direct GET 失敗と同じ扱い・Codex #147）。
+            # PageDocumentUnavailable を投げさせる（direct GET 失敗と同じ扱い）。
             body_missing = "body" not in resp
             return {
                 "status": resp.get("status"),
@@ -2083,7 +2083,7 @@ class BaseScanner(ABC):
 
     @staticmethod
     def _apply_capture_status_policy(pair: dict, url: str) -> dict:
-        """captured pair の status に direct-GET と同じ document 判定を適用する（Codex #145 P2 round19）。
+        """captured pair の status に direct-GET と同じ document 判定を適用する。
 
         2xx=そのまま監査、transient(408/429/5xx)=空 ``{}``（→ scanner が PageDocumentUnavailable→
         resume 再試行）、その他の非 2xx（3xx・恒久 4xx）=status なし pair（NOT_REACHED）、status 無し=

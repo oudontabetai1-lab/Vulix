@@ -1,4 +1,4 @@
-"""check レベルの coverage 集計（0016）。純粋・副作用なし。
+"""check レベルの coverage 集計。純粋・副作用なし。
 
 registry の全 scanner のうちどれが scan 対象（selected）で、どれが未実行かを可視化する。
 既定 scan は少数の check だけ動く（例: sqli/xss/os）ため、残りの scanner が「実行されて
@@ -116,7 +116,7 @@ def compute_prerequisite_coverage(
     *,
     state_profile: str = "unrestricted",
 ) -> dict:
-    """in-scope の各 scanner の実行条件充足を会計する（純粋・0016）。
+    """in-scope の各 scanner の実行条件充足を会計する（純粋）。
 
     選択されていても (a) 前提（OOB シンク・API 仕様・認証・複数アカウント等）が無い、
     (b) state profile が状態変更 check を skip する、のいずれかなら実質検査できない。

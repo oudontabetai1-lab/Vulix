@@ -36,7 +36,7 @@ class NotificationManagerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_promotion_to_reproduced_notifies_once(self):
         # 検出時 assumed で弾かれた finding が検証で reproduced に昇格したら通知される。
-        # 再送（dedup 済）は起きない＝#107 P1 の回帰ガード。
+        # 再送（dedup 済）は起きない＝回帰ガード。
         manager = NotificationManager(
             webhook_url="https://webhook.invalid/test",
             min_severity="high",
@@ -58,7 +58,7 @@ class NotificationManagerTests(unittest.IsolatedAsyncioTestCase):
         manager._send.assert_awaited_once()
 
     async def test_completion_payload_shows_hypothesis_when_no_confirmed(self):
-        # 確証0・未確証ありの完了通知は緑にならず未確証を明示する（#107 P2）。
+        # 確証0・未確証ありの完了通知は緑にならず未確証を明示する。
         payload = NotificationManager._build_complete_payload(
             {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "hypothesis": 2},
             "http://fixture.test/", "", "",

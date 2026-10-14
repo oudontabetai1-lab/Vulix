@@ -1,4 +1,4 @@
-"""F09: record→scan --flows の往復が実際に効くことを検証する。
+"""record→scan --flows の往復が実際に効くことを検証する。
 
 record は steps の**リスト**を保存し、fill step は CSS selector を持つ。
 - main._load_flow_files がリスト/｛name,steps｝の両形式を flow dict へ読み込むこと。
@@ -51,7 +51,7 @@ def test_load_flow_files_skips_broken_file_keeps_rest(tmp_path):
 
 def test_load_flow_files_rejects_navigate_without_url(tmp_path):
     # navigate に nonempty string url が無い flow は skip（_match_pre_attack_flows が
-    # 一致させられず前提が黙って無視される＝偽陰性を防ぐ・Codex #170 P2）。
+    # 一致させられず前提が黙って無視される＝偽陰性を防ぐ）。
     bad_nav = tmp_path / "bad_nav.json"
     bad_nav.write_text(json.dumps([{"action": "navigate"}]), encoding="utf-8")
     bad_nav2 = tmp_path / "bad_nav2.json"
@@ -65,7 +65,7 @@ def test_load_flow_files_rejects_navigate_without_url(tmp_path):
 
 def test_load_flow_files_rejects_flow_without_navigate(tmp_path):
     # navigate step の無い flow（fill/click のみ・空）は _match_pre_attack_flows が一致させられず
-    # 黙って無視されるため、読み込み時に skip する（Codex #170 P2）。
+    # 黙って無視されるため、読み込み時に skip する。
     nonav = tmp_path / "nonav.json"
     nonav.write_text(json.dumps([
         {"action": "fill", "selector": "#u", "value": "x"},
@@ -80,7 +80,7 @@ def test_load_flow_files_rejects_flow_without_navigate(tmp_path):
 
 
 def test_flow_navigate_landing_out_of_scope_fails():
-    # navigate が redirect 追従後に scope 外へ着地したら flow 失敗（後続 fill/click を走らせない・#170 P2）。
+    # navigate が redirect 追従後に scope 外へ着地したら flow 失敗（後続 fill/click を走らせない）。
     class _P:
         url = "http://evil.test/steal"
 
@@ -115,7 +115,7 @@ def test_none_returns_empty():
 
 def test_skips_structurally_broken_steps(tmp_path):
     # JSON 妥当でも step が非 dict（[1]）や timeout 非数値だと後段の FlowStep.from_dict が
-    # 落ちてスキャン全体を止める。_load_flow_files で検証して skip すること（#170 P2）。
+    # 落ちてスキャン全体を止める。_load_flow_files で検証して skip すること。
     nondict = tmp_path / "nondict.json"
     nondict.write_text(json.dumps([1, 2]), encoding="utf-8")
     badtimeout = tmp_path / "badtimeout.json"
@@ -130,7 +130,7 @@ def test_skips_structurally_broken_steps(tmp_path):
 def test_roundtrip_recorded_fill_uses_selector(tmp_path):
     """読み込んだ recording を ScanFlow 化し、fill が selector で解決されることを確認。"""
     rec = tmp_path / "rec.json"
-    # 実録画は必ず先頭に navigate（start_url）を持つ（#170 P2 の no-navigate 拒否と整合）。
+    # 実録画は必ず先頭に navigate（start_url）を持つ（no-navigate 拒否と整合）。
     rec.write_text(json.dumps([
         {"action": "navigate", "url": "http://t/login"},
         {"action": "fill", "selector": "#user", "value": "secret"},
@@ -162,7 +162,7 @@ def test_roundtrip_recorded_fill_uses_selector(tmp_path):
 
 
 def test_load_flow_files_skips_unknown_action(tmp_path, capsys):
-    # action 綴り誤り（navigat）を含む flow は読み込み時に skip される（Codex #170 P2）。
+    # action 綴り誤り（navigat）を含む flow は読み込み時に skip される。
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps([{"action": "navigat", "url": "http://t.test/cart"}]))
     good = tmp_path / "good.json"
@@ -174,7 +174,7 @@ def test_load_flow_files_skips_unknown_action(tmp_path, capsys):
 
 
 def test_load_flow_files_keeps_same_destination_flows_intact(tmp_path):
-    # 同一遷移先の 2 flow は統合せず両方そのまま保持する（engine が順次再生する・Codex #170 P2）。
+    # 同一遷移先の 2 flow は統合せず両方そのまま保持する（engine が順次再生する）。
     # 以前の連結統合は等価先の取りこぼし/最終 navigate 以外の前寄せによる順序破壊を招いた。
     a = tmp_path / "cart.json"
     a.write_text(json.dumps([
