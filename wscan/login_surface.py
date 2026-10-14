@@ -59,6 +59,7 @@ _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input",
 _ROUTE_KEYS = {"action", "route", "op", "operation", "cmd", "command", "do", "mode", "task", "r"}
 # 汎用語（クーポン code・API token・PIN 等）だけでは OTP 欄とみなさない
 _STRONG_OTP = tuple(h for h in _OTP_HINTS if h not in {"code", "token", "pin"})
+_MFA_ROUTE_WORDS = ("mfa", "otp", "2fa", "verify", "verification", "two factor", "two step")
 
 
 def _path_words(path: str) -> str:
@@ -393,13 +394,15 @@ def classify_surface(html: str, *, visible_only: bool = False) -> SurfaceResult:
     # 弱い OTP 名はフォーム自身の MFA 文脈が必要（footer/nav の案内は使わない）。
     if (looks_like_mfa_page(" ".join(doc.visible_text))
             or _has_word(" ".join(doc.visible_text), ("2-step verification", "two-step verification"))):
-        prompt = _has_word(" ".join(doc.visible_text), ("enter", "provide", "verify", "入力"))
         for s, (f, inputs) in zip(forms, groups):
             context = f.context + (" " + doc.last_heading if f.index == -1 else "")
             form_mfa = (looks_like_mfa_page(context)
-                        or _has_word(context, ("2-step verification", "two-step verification")))
-            visible_otp = form_mfa and any(_is_otp(a) for a in _usable(f, True))
+                        or _has_word(context, ("2-step verification", "two-step verification"))
+                        or _has_word(_route_words(f.action), _MFA_ROUTE_WORDS))
+            prompt = _has_word(context, ("enter", "provide", "verify", "入力"))
+            visible_otp = any(_is_otp(a) for a in _usable(f, True))
             if (s.kind == OTHER and not any(map(_is_pw, inputs))
+                    and form_mfa
                     and (visible_otp or (sum(map(_is_text, inputs)) == 1 and prompt))):
                 s.kind, s.step = LOGIN, "otp"
                 s.reasons.append("mfa_page_context")
@@ -627,8 +630,7 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
         obs.mfa_field in (a.get("name"), a.get("id"))
         for f in doc.forms + [doc.loose] for a in _usable(f, True))
     # 設定画面の弱い code 欄は、認証途中の MFA 経路と区別する。
-    mfa_route = _has_word(_route_words(obs.post_url),
-                          ("mfa", "otp", "2fa", "verify", "verification", "two factor", "two step"))
+    mfa_route = _has_word(_route_words(obs.post_url), _MFA_ROUTE_WORDS)
     settings_route = _has_word(_route_words(obs.post_url), ("settings", "preferences", "profile", "security"))
     if (login_step == "otp" and not mfa_route
             and (settings_route or (_has_word(_route_words(obs.post_url), ("home", "dashboard", "account"))

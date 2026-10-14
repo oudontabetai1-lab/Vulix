@@ -374,11 +374,14 @@ def test_inoperable_only_submit_falls_back_to_enter(blocked):
     assert not plan.submit and plan.submit_strategy == "enter" and not plan.incomplete_reason
 
 
-@pytest.mark.parametrize("name", ["coupon_code", "api_token", "zip_code", "invite_code", "q"])
+@pytest.mark.parametrize("name", ["coupon_code", "api_token", "zip_code", "invite_code", "code", "q"])
 @pytest.mark.parametrize("url", ["http://t/cart", "http://t/dashboard", "http://t/orders", "http://t/"])
 @pytest.mark.parametrize("ambient", [
     '<footer>Protect your account with two-factor authentication.</footer>',
     '<nav><a href="/settings/2fa">Two-factor authentication</a></nav>',
+    '<footer>Enter our newsletter. Secure your account with two-factor authentication.</footer>',
+    '<footer>Verify your email. Two-factor authentication available.</footer>',
+    '<footer>二段階認証 メールアドレスを入力</footer>',
 ])
 def test_ambient_mfa_text_does_not_promote_unrelated_form(name, url, ambient):
     body = ('<a href="/logout">Log out</a><h1>Your cart</h1>'
@@ -388,6 +391,23 @@ def test_ambient_mfa_text_does_not_promote_unrelated_form(name, url, ambient):
     search = body.replace('<form ', '<form role="search" ')
     assert ls.assess_login_state(_obs(body=search + ambient, post_url=url,
                                      auth_cookie_set=True)).state == ls.SUCCESS
+
+
+@pytest.mark.parametrize("prompt", ["Enter", "Provide", "Verify", "入力"])
+@pytest.mark.parametrize("action", ["/cart/coupon", "/settings/api"])
+def test_mfa_prompt_requires_its_own_form_context(prompt, action):
+    field = '<input name="response"><button>Next</button>'
+    ambient = '<footer>Two-factor authentication available.</footer>'
+    unrelated = f'<form action="{action}"><label>{prompt}</label>{field}</form>'
+    body = '<a href="/logout">Log out</a><h1>Your cart</h1>' + unrelated + ambient
+    assert ls.assess_login_state(_obs(body=body, post_url="http://t/cart",
+                                     auth_cookie_set=True)).state == ls.SUCCESS
+    for context in ('<form><legend>Two-factor authentication</legend>{}</form>',
+                    '<form action="/mfa">{}</form>' + ambient,
+                    '<form action="/verify">{}</form>' + ambient):
+        mfa = context.format(f'<label>{prompt}</label>{field}')
+        assert ls.assess_login_state(_obs(body=mfa, post_url="http://t/",
+                                         auth_cookie_set=True)).state == ls.CHALLENGE
 
 
 @pytest.mark.parametrize("context", [
