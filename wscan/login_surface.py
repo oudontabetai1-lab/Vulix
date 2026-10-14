@@ -390,12 +390,15 @@ def classify_surface(html: str, *, visible_only: bool = False) -> SurfaceResult:
     groups = [(f, _usable(f, visible_only)) for f in doc.forms + [doc.loose]]
     groups = [(f, inputs) for f, inputs in groups if inputs]
     forms = [_classify_form(f, inputs) for f, inputs in groups]
-    # MFA 画面は見出しに OTP 語が無い素っ気ない欄でも、ページ文脈で OTP 段とみなす。
+    # 弱い OTP 名はフォーム自身の MFA 文脈が必要（footer/nav の案内は使わない）。
     if (looks_like_mfa_page(" ".join(doc.visible_text))
             or _has_word(" ".join(doc.visible_text), ("2-step verification", "two-step verification"))):
         prompt = _has_word(" ".join(doc.visible_text), ("enter", "provide", "verify", "入力"))
         for s, (f, inputs) in zip(forms, groups):
-            visible_otp = any(_is_otp(a) for a in _usable(f, True))
+            context = f.context + (" " + doc.last_heading if f.index == -1 else "")
+            form_mfa = (looks_like_mfa_page(context)
+                        or _has_word(context, ("2-step verification", "two-step verification")))
+            visible_otp = form_mfa and any(_is_otp(a) for a in _usable(f, True))
             if (s.kind == OTHER and not any(map(_is_pw, inputs))
                     and (visible_otp or (sum(map(_is_text, inputs)) == 1 and prompt))):
                 s.kind, s.step = LOGIN, "otp"

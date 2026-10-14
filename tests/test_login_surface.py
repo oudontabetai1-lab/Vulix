@@ -372,3 +372,32 @@ def test_inoperable_only_submit_falls_back_to_enter(blocked):
             f'<button name="bad" {blocked}>Log in</button></form>')
     plan = ls.locate_auth_fields(body)
     assert not plan.submit and plan.submit_strategy == "enter" and not plan.incomplete_reason
+
+
+@pytest.mark.parametrize("name", ["coupon_code", "api_token", "zip_code", "invite_code", "q"])
+@pytest.mark.parametrize("url", ["http://t/cart", "http://t/dashboard", "http://t/orders", "http://t/"])
+@pytest.mark.parametrize("ambient", [
+    '<footer>Protect your account with two-factor authentication.</footer>',
+    '<nav><a href="/settings/2fa">Two-factor authentication</a></nav>',
+])
+def test_ambient_mfa_text_does_not_promote_unrelated_form(name, url, ambient):
+    body = ('<a href="/logout">Log out</a><h1>Your cart</h1>'
+            f'<form action="/cart/coupon"><input name="{name}"><button>Apply</button></form>')
+    for html in (ambient + body, body + ambient):
+        assert ls.assess_login_state(_obs(body=html, post_url=url, auth_cookie_set=True)).state == ls.SUCCESS
+    search = body.replace('<form ', '<form role="search" ')
+    assert ls.assess_login_state(_obs(body=search + ambient, post_url=url,
+                                     auth_cookie_set=True)).state == ls.SUCCESS
+
+
+@pytest.mark.parametrize("context", [
+    '<h2>Two-factor authentication</h2>{}',
+    '<form><legend>2-Step Verification</legend>{}</form>',
+    '<form><label>Security code</label>{}</form>',
+])
+@pytest.mark.parametrize("name", ["code", "pin", "token"])
+def test_weak_otp_requires_its_own_mfa_context(context, name):
+    field = f'<input name="{name}"><button>Next</button>'
+    body = context.format('<form>' + field + '</form>' if context.startswith('<h2>') else field)
+    assert ls.assess_login_state(_obs(body=body, post_url="http://t/",
+                                     auth_cookie_set=True)).state == ls.CHALLENGE
