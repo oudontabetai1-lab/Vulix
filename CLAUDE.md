@@ -156,6 +156,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `url_extraction.py` | **LLM不要**の純粋関数。JS/JSON 資産から抽出した URL 候補のゴミ判定（0009 C1）。minified JS の regex リテラル/式片（`/(?:` `/16*(...` 等）を `/…` ルートと誤抽出したものを path 部のコードメタ文字で除去（`is_plausible_route_candidate`/`filter_route_candidates`）。`browser._collect_urls_from_loaded_assets` が使用。**保守側判定＝実ルートは落とさない**（到達性維持） |
 | `url_normalize.py` / `checkpoint.py` | `checkpoint.unit_key` は resume キーの単一チョークポイントとして `normalize_url_for_key` を適用し、明白な揮発クエリだけを除く（実攻撃 URL は不変、未知キー・意味値は保持） |
 | `auth_detect.py` | ログイン成否判定の純粋関数（フォーム残存/失敗文言/ログインページ離脱/MFA を統合）。`browser.auto_login` の判定を集約 |
+| `login_surface.py` | **LLM不要**の純粋関数。form 単位で login/registration/reset/search を判定（`<a>` 文言は使わない）、単一/username→password 多段/modal/SPA/OTP の対象欄と submit 経路（明示 selector 最優先）、API ログインのキー名特定、送信後状態 success/failure/challenge/incomplete（自動成功は独立証拠2つ以上、曖昧・transport error は理由付き incomplete）。戻り値は selector/キー名/理由コードのみで秘密値を保持しない。`browser.auto_login` への配線は未実施 |
 | `payload_importer.py` | 公開ペイロード集(PaTT/SecLists)の取込ツール（`import-payloads` サブコマンドの実体） |
 | `equivalence_probe.py` | 文字列結合の等価性プローブ（SQLi/XSS 共通の純粋判定ロジック） |
 | `waf_detector.py` / `triage.py` | WAF 判定 / ペイロード未投入の高速分析 |
