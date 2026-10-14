@@ -33,7 +33,9 @@ if TYPE_CHECKING:
 # engine が「全 adaptive check 完了」として尊重するため、旧 checkpoint も読める。
 # v4: JSON body 注入点用の6部品キーを加算。従来キーは5部品のまま保持する。
 # v6: checkpoint キーの URL を揮発クエリ正規化。旧版キーは from_dict で移行。
-CHECKPOINT_VERSION = 6
+# v7: budget 打切り単位の再試行回数と、上限到達後も未完である印を永続化。
+# v8: 初回の打切り後に設定回数ぶん再試行できるよう exhausted 閾値を補正。
+CHECKPOINT_VERSION = 8
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -84,6 +86,12 @@ class CheckpointState:
     http_status_counts: dict = field(default_factory=dict)
     # 試行台帳のシリアライズ（resume 時に adaptive の実履歴を失わないため）。
     attempt_ledger: dict = field(default_factory=dict)
+    # field budget で途中打切りとなった unit の回数。completed_units と別管理にして、
+    # 「送達したから完了」ではない unit を完了扱いにしない。
+    truncation_counts: dict[str, int] = field(default_factory=dict)
+    # 再試行上限に達した未完 unit。resume 時には明示的に到達不能として飛ばし、後続 check を
+    # 前進させる。completed_units には絶対に入れない。
+    exhausted_truncations: set[str] = field(default_factory=set)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     # 読み込んだデータのスキーマ版（新規作成は現行版）。情報用。v1→v2 の差分
@@ -132,6 +140,34 @@ class CheckpointState:
         ))
         self.updated_at = time.time()
 
+    def record_truncation_ip(
+        self, ip: "InjectionPoint", check_type: str, retry_limit: int,
+    ) -> tuple[int, bool]:
+        """budget 打切りを記録し、上限到達なら未完のまま前進対象にする。"""
+        url, field_name, form_index, location_token, pointer = ip.stable_key_parts()
+        key = unit_key(
+            url, field_name, int(form_index), check_type,
+            location_token=location_token, pointer=pointer,
+        )
+        count = self.truncation_counts.get(key, 0) + 1
+        self.truncation_counts[key] = count
+        exhausted = count > max(0, int(retry_limit))
+        if exhausted:
+            self.exhausted_truncations.add(key)
+        self.updated_at = time.time()
+        return count, exhausted
+
+    def is_truncation_exhausted_ip(
+        self, ip: "InjectionPoint", check_type: str,
+    ) -> bool:
+        """再試行上限に達した未完 unit かを返す。"""
+        url, field_name, form_index, location_token, pointer = ip.stable_key_parts()
+        key = unit_key(
+            url, field_name, int(form_index), check_type,
+            location_token=location_token, pointer=pointer,
+        )
+        return key in self.exhausted_truncations
+
     def add_finding(self, finding_dict: dict) -> None:
         self.findings.append(finding_dict)
 
@@ -152,6 +188,8 @@ class CheckpointState:
             "reached_urls": self.reached_urls,
             "http_status_counts": self.http_status_counts,
             "attempt_ledger": self.attempt_ledger,
+            "truncation_counts": self.truncation_counts,
+            "exhausted_truncations": sorted(self.exhausted_truncations),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -173,10 +211,33 @@ class CheckpointState:
             reached_urls=list(data.get("reached_urls", []) or []),
             http_status_counts=data.get("http_status_counts", {}) or {},
             attempt_ledger=data.get("attempt_ledger", {}) or {},
+            # 不正な retry metadata で再開を落とさず、未完 unit は再試行可能な既定へ戻す。
+            truncation_counts={
+                key: count for key, count in (
+                    data.get("truncation_counts", {}).items()
+                    if isinstance(data.get("truncation_counts"), dict) else []
+                )
+                if isinstance(key, str) and type(count) is int and count >= 0
+            },
+            exhausted_truncations=set(),
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
             source_version=source_version,
         )
+        # exhausted は record_truncation_ip() が同じ保存単位で記録する派生状態。
+        # 壊れた/手編集された checkpoint の孤立 key を尊重すると、未送信 check を
+        # retry 上限到達として永久 skip してしまうため、正の試行回数があるものだけ戻す。
+        raw_exhausted = data.get("exhausted_truncations", [])
+        if isinstance(raw_exhausted, list):
+            state.exhausted_truncations = {
+                key for key in raw_exhausted
+                if isinstance(key, str) and state.truncation_counts.get(key, 0) > 0
+            }
+        if state.source_version < 8:
+            state.exhausted_truncations = {
+                key for key in state.exhausted_truncations
+                if state.truncation_counts.get(key, 0) > 2
+            }
         if state.source_version < 2:
             state._migrate_v1_adaptive_units()
         if state.source_version < 6:

@@ -57,6 +57,7 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
                 _check_llm_available=check_llm_available,
             ),
             all_findings=[],
+            wave_errors=[],
             flag_finder=None,
             adaptive_enabled=True,
             _adaptive_llm_available=None,
@@ -85,6 +86,8 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             _record_scan_matrix=MagicMock(),
             _record_finding=MagicMock(),
             _save_checkpoint=MagicMock(),
+            # F06/0059: _scan_field の check 毎 dialog flood 判定の最小スタブ（flood なし）。
+            _dialog_wedged_since=lambda since: False,
         )
         engine._adaptive_attack_field = types.MethodType(
             ScanEngine._adaptive_attack_field, engine
@@ -105,6 +108,39 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             call("https://example.test", "q", 0, "(adaptive:xss)", False),
             engine._checkpoint_mark_done.call_args_list,
         )
+
+    async def test_exhausted_deterministic_check_still_unlocks_adaptive(self):
+        engine = self._engine([])
+        engine.wave_errors = []
+        engine._checkpoint_truncation_exhausted_ip = MagicMock(return_value=True)
+        engine._adaptive_attack_field = AsyncMock(return_value=[])
+
+        await ScanEngine._scan_field(
+            engine, "https://example.test", 0, {"name": "q"}
+        )
+
+        engine.scanners["xss"].scan_injection_point.assert_not_awaited()
+        engine._adaptive_attack_field.assert_awaited_once()
+
+    async def test_unavailable_ssti_control_stays_incomplete(self):
+        engine = self._engine([])
+        engine.wave_errors = []
+
+        async def unavailable(_ip, _field):
+            engine.wave_errors.append("baseline_unavailable:ssti")
+            return []
+
+        engine.scanners = {"ssti": types.SimpleNamespace(
+            scan_injection_point=AsyncMock(side_effect=unavailable)
+        )}
+        engine.adaptive_enabled = False
+
+        await ScanEngine._scan_field(
+            engine, "https://example.test", 0, {"name": "q"}
+        )
+
+        engine._checkpoint_mark_done.assert_not_called()
+        self.assertEqual(engine._record_scan_matrix.call_args.kwargs["status"], "error")
 
     async def test_successful_empty_result_marks_adaptive_done(self):
         engine = self._engine([])
@@ -373,6 +409,7 @@ class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
                 _check_llm_available=AsyncMock(return_value=True),
             ),
             all_findings=[],
+            wave_errors=[],
             flag_finder=None,
             adaptive_enabled=True,
             _adaptive_llm_available=None,
@@ -393,6 +430,8 @@ class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
             _record_scan_matrix=MagicMock(),
             _record_finding=MagicMock(),
             _save_checkpoint=MagicMock(),
+            # F06/0059: _scan_field の check 毎 dialog flood 判定の最小スタブ（flood なし）。
+            _dialog_wedged_since=lambda since: False,
         )
         engine._adaptive_attack_field = types.MethodType(
             ScanEngine._adaptive_attack_field, engine

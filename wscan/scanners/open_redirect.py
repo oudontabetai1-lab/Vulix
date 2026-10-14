@@ -202,16 +202,20 @@ class OpenRedirectScanner(BaseScanner):
 
             source, pair = await self._apply_ip(ip, payload)
             await asyncio.sleep(0.3 * self.sleep_factor)
+            # transport/待機中に deadline を跨ぐと page.url は前 probe の canary のまま
+            # ありうる。打切り後は stale browser 状態を evidence に使わない。
+            deadline_expired = self._field_budget_gate()
 
             # Check 1: browser actually navigated to the canary host
-            try:
-                current_url = self.browser.page.url
-            except Exception as exc:
-                if self.monitor:
-                    await self.monitor.emit_status(
-                        f"[warn] open_redirect: current_url read failed on {ip.url}: {exc}"
-                    )
-                current_url = ""
+            current_url = ""
+            if not deadline_expired:
+                try:
+                    current_url = self.browser.page.url
+                except Exception as exc:
+                    if self.monitor:
+                        await self.monitor.emit_status(
+                            f"[warn] open_redirect: current_url read failed on {ip.url}: {exc}"
+                        )
 
             if _redirected_to_canary(current_url, ip.url):
                 finding = await self.record_finding(
@@ -245,6 +249,9 @@ class OpenRedirectScanner(BaseScanner):
                     injection_point=ip,
                 )
                 findings.append(finding)
+                break
+
+            if deadline_expired:
                 break
 
         return findings

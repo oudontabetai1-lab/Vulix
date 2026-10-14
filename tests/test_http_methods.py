@@ -204,6 +204,10 @@ class _FakeEngine:
     def _dialog_wedged_since(self, since):
         return False
 
+    async def _recovered_page_healthy(self, page):
+        # F06/0059: 準備区間（失効チェック/flow）回復後の健全性確認の最小スタブ。
+        return True
+
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
     def _scanner(self):

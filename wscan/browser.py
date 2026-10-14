@@ -573,9 +573,9 @@ class BrowserManager:
         self.dialog_total: int = 0
         # dismiss 失敗（未解消で wedge した可能性）の直接フラグ（recreate 判定に使用）。
         self.dialog_dismiss_failed: bool = False
-        # navigate 成功時に best-effort で控える直近の sessionStorage（origin, JSON文字列）。
-        # recreate_page が wedge した old page 読取に依存せずこれを init script で seed する。
-        self._last_session_storage = None
+        # navigate 成功時に best-effort で控える origin 別 sessionStorage。
+        # recreate_page が wedge した old page 読取に依存せずこれを init script で seed する（F06/0059#3）。
+        self._last_session_storage: dict[str, str] = {}
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
         # 初回セットアップの scoped-header 方針（_wire_current_page が参照）。
@@ -1317,7 +1317,7 @@ class BrowserManager:
             )
             origin, snap = res
             if origin and snap and snap not in ("{}", "null"):
-                self._last_session_storage = (origin, snap)
+                self._last_session_storage[origin] = snap
         except Exception:
             pass
 
@@ -1378,16 +1378,19 @@ class BrowserManager:
             # ponytail: app が sessionStorage.clear() すると sentinel も消え 1 度だけ再 seed しうる
             # （個別 removeItem では蘇らない）。全消し logout での再 seed が問題化するなら CDP の
             # removeScriptToEvaluateOnNewDocument で init script 自体を外す方式へ上げる。
-            _pend = getattr(self, "_last_session_storage", None)
-            if _pend:
+            _snapshots = getattr(self, "_last_session_storage", {})
+            if isinstance(_snapshots, tuple):  # 旧 in-memory 利用者との互換
+                _snapshots = {_snapshots[0]: _snapshots[1]}
+            if _snapshots:
                 try:
-                    _p_origin, _p_snap = _pend
                     await self.page.add_init_script(
                         "(() => { try {"
-                        f" if (location.origin !== {json.dumps(_p_origin)}) return;"
                         ' const S = "__wscan_seeded__";'
                         " if (sessionStorage.getItem(S) !== null) return;"
-                        f" const d = JSON.parse({json.dumps(_p_snap)});"
+                        f" const snapshots = {json.dumps(_snapshots)};"
+                        " const raw = snapshots[location.origin];"
+                        " if (!raw) return;"
+                        " const d = JSON.parse(raw);"
                         " for (const k in d) { try {"
                         " if (sessionStorage.getItem(k) === null)"
                         " sessionStorage.setItem(k, d[k]);"
@@ -1396,7 +1399,16 @@ class BrowserManager:
                         " } catch (e) {} })()"
                     )
                 except Exception:
-                    pass
+                    bad, self.page = self.page, old
+                    try:
+                        await bad.close()
+                    except Exception:
+                        pass
+                    try:
+                        await (_real or self)._forget_header_page(bad)
+                    except Exception:
+                        pass
+                    return False
             if old is not None:
                 try:
                     await old.close()
@@ -1758,6 +1770,25 @@ class BrowserManager:
             return params
         except Exception:
             return []
+
+    async def has_form_field(self, form_index: int, field_name: str) -> bool:
+        """Return whether the recovered document still exposes the target form field."""
+        try:
+            return await asyncio.wait_for(
+                self.page.evaluate(
+                    """([formIndex, fieldName]) => {
+                        const form = document.querySelectorAll('form')[formIndex];
+                        if (!form) return false;
+                        return Array.from(form.querySelectorAll(
+                            'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), textarea, select'
+                        )).some(el => (el.name || el.id) === fieldName);
+                    }""",
+                    [form_index, field_name],
+                ),
+                timeout=1.0,
+            )
+        except Exception:
+            return False
 
     async def fill_and_submit_form(
         self,
@@ -3153,6 +3184,9 @@ class WorkerBrowser(BrowserManager):
 
         # Worker-private state
         self.page = page
+        # sessionStorage is page-local, unlike the shared context's cookies.
+        # Recovery must seed only this worker's own per-origin snapshots.
+        self._last_session_storage: dict[str, str] = {}
         # Inherit the audit logger so concurrent workers also persist traffic.
         self.request_logger = getattr(real_browser, "request_logger", None)
         self.network = NetworkCapture(logger=self.request_logger)

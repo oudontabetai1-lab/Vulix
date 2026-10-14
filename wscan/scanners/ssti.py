@@ -21,17 +21,27 @@ if TYPE_CHECKING:
 
 # Probe tuples: (payload, expected_substring, template_engine_name)
 # Use product of two large primes — astronomically unlikely to appear naturally in page HTML.
-# 2654435761 * 2654435761 = 7045744422742119121
+# 2654435761 * 2654435761 = 7046029209275649121
 SSTI_PROBES = [
-    ("{{2654435761*2654435761}}", "7045744422742119121", "Jinja2/Twig"),
-    ("${2654435761*2654435761}", "7045744422742119121", "Mako/Freemarker"),
-    ("<%= 2654435761*2654435761 %>", "7045744422742119121", "ERB"),
-    ("#{2654435761*2654435761}", "7045744422742119121", "Ruby/Pebble"),
+    ("{{2654435761*2654435761}}", "7046029209275649121", "Jinja2/Twig"),
+    ("${2654435761*2654435761}", "7046029209275649121", "Mako/Freemarker"),
+    ("<%= 2654435761*2654435761 %>", "7046029209275649121", "ERB"),
+    ("#{2654435761*2654435761}", "7046029209275649121", "Ruby/Pebble"),
     ("{{3*'wscan99991'}}", "wscan99991wscan99991wscan99991", "Jinja2-str"),
-    ("*{2654435761*2654435761}", "7045744422742119121", "SpEL"),
-    ("%{2654435761*2654435761}", "7045744422742119121", "OGNL"),
-    ("[[${2654435761*2654435761}]]", "7045744422742119121", "Thymeleaf"),
+    ("*{2654435761*2654435761}", "7046029209275649121", "SpEL"),
+    ("%{2654435761*2654435761}", "7046029209275649121", "OGNL"),
+    ("[[${2654435761*2654435761}]]", "7046029209275649121", "Thymeleaf"),
 ]
+
+
+def _retrieved_source(source: str, pair: dict) -> str | None:
+    # A delivered empty body is a valid control; missing retrieval is not.
+    if source:
+        return source
+    response = pair.get("response")
+    if isinstance(response, dict) and isinstance(response.get("body"), str):
+        return response["body"]
+    return None
 
 
 class SSTIScanner(BaseScanner):
@@ -123,7 +133,11 @@ class SSTIScanner(BaseScanner):
         )
         # typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
         # source が非空のことがある。state で分岐して捨てず判定は従来どおり source/pair のみ）。
-        baseline_source = (await self.dispatch(ip, "wscan_ssti_baseline")).source
+        baseline = await self.dispatch(ip, "wscan_ssti_baseline")
+        baseline_source = _retrieved_source(baseline.source, baseline.pair)
+        if baseline_source is None:
+            self._record_scan_note("baseline_unavailable:ssti")
+            return findings
 
         async def _test_payload(
             payload: str,
@@ -135,18 +149,21 @@ class SSTIScanner(BaseScanner):
             await self.log_payload_test(field_name, payload, check_label, ip.url)
 
             result = await self.dispatch(ip, payload)
-            source, pair = result.source, result.pair
+            source, pair = _retrieved_source(result.source, result.pair), result.pair
 
             await asyncio.sleep(0.2 * self.sleep_factor)
 
-            if not source or expected not in source:
+            if not source:
+                return False
+            count = source.count(expected)
+            if not count:
                 return False
 
             # Reduce false positives: only skip if baseline already contained the
             # expected value at least as many times. When baseline has 0 occurrences,
             # any appearance after injection is evidence of SSTI.
-            base_count = baseline_source.count(expected) if baseline_source else 0
-            if base_count > 0 and source.count(expected) <= base_count:
+            base_count = baseline_source.count(expected)
+            if count <= base_count:
                 return False
 
             finding = await self.record_finding(
@@ -186,6 +203,17 @@ class SSTIScanner(BaseScanner):
                 ip.legacy_is_url_param(),
                 dom_index=ip.submit_index,
             )
+            # Evolution submits character probes which can persist in stored forms.
+            # Refresh the control after that state change, including markers containing 49.
+            if extra_payloads:
+                await self.log_payload_test(
+                    field_name, "wscan_ssti_baseline", "ssti_evolved_baseline", ip.url
+                )
+                baseline = await self.dispatch(ip, "wscan_ssti_baseline")
+                baseline_source = _retrieved_source(baseline.source, baseline.pair)
+                if baseline_source is None:
+                    self._record_scan_note("baseline_unavailable:ssti:evolved")
+                    return findings
             for payload in extra_payloads:
                 if await _test_payload(
                     payload, "49", "evolved", "ssti_evolved", confidence="likely"
@@ -261,11 +289,19 @@ class SSTIScanner(BaseScanner):
             return None
         # verify 時の再投入（baseline + payload）も監査ログに残す。
         await self.log_payload_test(field_name, "wscan_ssti_baseline", "ssti_verify_baseline", finding.url)
-        baseline_source, _ = await self._apply_ip(ip, "wscan_ssti_baseline")
+        baseline_source, baseline_pair = await self._apply_ip(ip, "wscan_ssti_baseline")
+        baseline_source = _retrieved_source(baseline_source, baseline_pair)
+        if baseline_source is None:
+            self._record_scan_note("baseline_unavailable:ssti:verify")
+            return None
         await self.log_payload_test(field_name, payload, "ssti_verify", finding.url)
-        source, _ = await self._apply_ip(ip, payload)
-        if not source or expected not in source:
+        source, pair = await self._apply_ip(ip, payload)
+        source = _retrieved_source(source, pair)
+        if source is None:
+            self._record_scan_note("transport_error:ssti:verify_no_response")
+            return None
+        count = source.count(expected)
+        if not count:
             return False
 
-        base_count = baseline_source.count(expected) if baseline_source else 0
-        return base_count == 0 or source.count(expected) > base_count
+        return count > baseline_source.count(expected)
