@@ -64,7 +64,7 @@ def test_unresolvable_fields_are_incomplete(path, reason):
 
 def test_modal_and_spa_submit_paths():
     modal = ls.locate_auth_fields(_get("/login-modal"))
-    assert modal.requires_reveal and modal.submit == 'button[id="m-submit"]'
+    assert modal.requires_reveal and modal.submit_strategy == "enter"
     spa = ls.locate_auth_fields(_get("/spa-login"))
     # form 外の type=button は submit ボタンにしない＝Enter 送信へ
     assert spa.submit_strategy == "enter" and not spa.requires_reveal
@@ -297,3 +297,78 @@ def test_mfa_settings_with_unrelated_field_is_not_a_challenge():
             + '<form action="/preferences"><input name="displayName"></form>')
     assert ls.assess_login_state(_obs(body=body, post_url="http://t/home", auth_cookie_set=True)).state == ls.SUCCESS
     assert ls.assess_login_state(_obs(body=_get("/mfa"))).state == ls.CHALLENGE
+
+
+@pytest.mark.parametrize("group", [
+    '<input name="code"><button>Continue</button>',
+    '<form><input name="code"><button>Continue</button></form>',
+])
+def test_visible_weak_otp_with_mfa_context_is_challenge(group):
+    body = '<h1>Two-factor authentication</h1>' + group
+    assert ls.classify_surface(body, visible_only=True).reasons == ["login_step:otp"]
+    assert ls.assess_login_state(_obs(body=body, post_url="http://t/verify",
+                                     auth_cookie_set=True)).state == ls.CHALLENGE
+    for safe in (group, '<h1>Two-factor authentication</h1><input name="displayName">',
+                 '<h1>Two-factor authentication</h1><input name="code" hidden>'):
+        assert ls.assess_login_state(_obs(body=safe, post_url="http://t/home",
+                                         auth_cookie_set=True)).state == ls.SUCCESS
+
+
+@pytest.mark.parametrize("wrapper", [
+    '<div class="modal" hidden>{}</div>', '<template>{}</template>',
+    '<dialog>{}</dialog>', '<fieldset disabled>{}</fieldset>',
+    '<script>var field="{}"</script>', '<div hidden>{}</div>', '{}',
+])
+def test_configured_mfa_requires_operable_input(wrapper):
+    field = '<input name="x1">'
+    body = wrapper.format(field)
+    kw = dict(post_url="http://t/home", auth_cookie_set=True, mfa_field="x1")
+    expected = ls.CHALLENGE if wrapper == '{}' else ls.SUCCESS
+    assert ls.assess_login_state(_obs(body=body, **kw)).state == expected
+    if wrapper == '{}':
+        for attr in ('hidden', 'disabled', 'readonly', 'type="hidden"'):
+            assert ls.assess_login_state(_obs(body=f'<input name="x1" {attr}>', **kw)).state == ls.SUCCESS
+    assert ls.assess_login_state(_obs(body='<input name="x10">', **kw)).state == ls.SUCCESS
+
+
+
+@pytest.mark.parametrize("tag", ['button', 'input'])
+@pytest.mark.parametrize("blocked", ['hidden', 'disabled', 'style="display:none"'])
+def test_submit_ranking_prefers_operable_control(tag, blocked):
+    inactive = (f'<button id="bad" {blocked}>Sign in</button>' if tag == 'button'
+                else f'<input type="submit" id="bad" value="Sign in" {blocked}>')
+    html = ('<form action="/login"><input name="user"><input name="pw" type="password">'
+            + inactive + '<button id="go">Continue</button></form>')
+    plan = ls.locate_auth_fields(html)
+    assert plan.submit == 'button[id="go"]' and not plan.incomplete_reason
+    assert ls.locate_auth_fields(html.replace(f' {blocked}', '')).submit == f'{tag}[id="bad"]'
+
+
+
+
+@pytest.mark.parametrize("heading,button", [
+    ("2-Step Verification", "Next"), ("Two-factor authentication", "Continue"),
+])
+@pytest.mark.parametrize("url", ["http://t/mfa", "http://t/verify", "http://t/login"])
+def test_mfa_flow_and_settings_safe_twin(heading, button, url):
+    body = (f'<h2>{heading}</h2><form><label>Code</label>'
+            f'<input name="code" inputmode="numeric"><button>{button}</button></form>')
+    assert ls.assess_login_state(_obs(body=body, post_url=url, auth_cookie_set=True)).state == ls.CHALLENGE
+    settings = body.replace('</h2>', '</h2><p>Enter the code from your authenticator app to enable 2FA</p>')
+    for settings_url in ("http://t/settings", "http://t/home"):
+        assert ls.assess_login_state(_obs(body=settings, post_url=settings_url,
+                                         auth_cookie_set=True)).state == ls.SUCCESS
+    assert ls.assess_login_state(_obs(body=body, post_url="http://t/settings",
+                                     auth_cookie_set=True)).state == ls.SUCCESS
+    assert ls.assess_login_state(_obs(body=settings, post_url="http://t/mfa",
+                                     auth_cookie_set=True)).state == ls.CHALLENGE
+    assert ls.assess_login_state(_obs(body=settings, post_url="http://t/challenge",
+                                     auth_cookie_set=True)).state == ls.CHALLENGE
+
+
+@pytest.mark.parametrize("blocked", ['hidden', 'disabled', 'style="display:none"'])
+def test_inoperable_only_submit_falls_back_to_enter(blocked):
+    body = ('<form action="/login"><input name="user"><input name="pw" type="password">'
+            f'<button name="bad" {blocked}>Log in</button></form>')
+    plan = ls.locate_auth_fields(body)
+    assert not plan.submit and plan.submit_strategy == "enter" and not plan.incomplete_reason

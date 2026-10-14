@@ -27,7 +27,7 @@ from urllib.parse import parse_qsl, urlparse
 
 from . import auth_detect
 from .auth_fields import _OTP_HINTS, _SAFE_VALUE, _USER_HINTS, _hinted
-from .mfa import looks_like_mfa_page, mfa_field_present
+from .mfa import looks_like_mfa_page
 
 LOGIN = "login"
 REGISTRATION = "registration"
@@ -86,7 +86,7 @@ class _Form:
     role: str = ""
     context: str = ""          # 直前の見出し＋ legend/label/送信ボタン文言
     inputs: list = field(default_factory=list)   # (attrs, blocked)
-    submits: list = field(default_factory=list)  # (attrs, text)
+    submits: list = field(default_factory=list)  # (attrs, text, operable)
     in_modal: bool = False
     visible: bool = True       # form 自体が可視か（logout form の操作可能性判定用）
     can_submit: bool = False   # 有効かつ可視の submit 手段を持つか
@@ -143,7 +143,7 @@ class _Doc(HTMLParser):
 
     def _record_submit(self, form: _Form, attrs: dict, label: str, operable: bool):
         form.can_submit |= operable
-        form.submits.append((attrs, label or "submit"))
+        form.submits.append((attrs, label or "submit", operable))
         form.context += " " + label
 
     def _submit(self, attrs: dict, label: str, operable: bool):
@@ -391,10 +391,13 @@ def classify_surface(html: str, *, visible_only: bool = False) -> SurfaceResult:
     groups = [(f, inputs) for f, inputs in groups if inputs]
     forms = [_classify_form(f, inputs) for f, inputs in groups]
     # MFA 画面は見出しに OTP 語が無い素っ気ない欄でも、ページ文脈で OTP 段とみなす。
-    if (looks_like_mfa_page(html or "")
-            and _has_word(" ".join(doc.visible_text), ("enter", "provide", "verify", "入力"))):
-        for s, (_, inputs) in zip(forms, groups):
-            if s.kind == OTHER and sum(map(_is_text, inputs)) == 1 and not any(map(_is_pw, inputs)):
+    if (looks_like_mfa_page(" ".join(doc.visible_text))
+            or _has_word(" ".join(doc.visible_text), ("2-step verification", "two-step verification"))):
+        prompt = _has_word(" ".join(doc.visible_text), ("enter", "provide", "verify", "入力"))
+        for s, (f, inputs) in zip(forms, groups):
+            visible_otp = any(_is_otp(a) for a in _usable(f, True))
+            if (s.kind == OTHER and not any(map(_is_pw, inputs))
+                    and (visible_otp or (sum(map(_is_text, inputs)) == 1 and prompt))):
                 s.kind, s.step = LOGIN, "otp"
                 s.reasons.append("mfa_page_context")
     logins = [s for s in forms if s.kind == LOGIN]
@@ -485,14 +488,15 @@ def locate_auth_fields(
             plan.pass_selector = uniq(pw[0])
         if s.step == "otp" and len(texts) == 1:
             plan.otp_selector = uniq(texts[0])
-        ranked = sorted(form.submits, key=lambda b: _submit_rank(*b))
-        all_buttons = [a for g in groups.values() for a, _ in g.submits]
+        ranked = sorted(((a, text) for a, text, operable in form.submits if operable),
+                        key=lambda b: _submit_rank(*b))
+        all_buttons = [a for g in groups.values() for a, _, _ in g.submits]
         if ranked and _submit_rank(*ranked[0]) < 2:
             button = ranked[0][0]
             plan.submit = _unique_selector(all_buttons, button, button.get("_tag", "button"))
             plan.submit_strategy = "button" if plan.submit else ("form_submit" if form.index >= 0 else "enter")
         else:
-            plan.submit_strategy = "form_submit" if form.index >= 0 else "enter"
+            plan.submit_strategy = "enter"
     for key, attr in (("user", "user_selector"), ("pass", "pass_selector"), ("otp", "otp_selector")):
         if explicit[key]:
             setattr(plan, attr, explicit[key])
@@ -616,7 +620,20 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
     # 非表示/操作不能な form（閉じた login modal の残骸等）は残存の根拠にしない。
     surface = classify_surface(body, visible_only=True)
     login_step = next((s.step for s in surface.forms if s.kind == LOGIN), "")
-    if login_step == "otp" or mfa_field_present(body, obs.mfa_field):
+    configured_mfa = bool(obs.mfa_field) and any(
+        obs.mfa_field in (a.get("name"), a.get("id"))
+        for f in doc.forms + [doc.loose] for a in _usable(f, True))
+    # 設定画面の弱い code 欄は、認証途中の MFA 経路と区別する。
+    mfa_route = _has_word(_route_words(obs.post_url),
+                          ("mfa", "otp", "2fa", "verify", "verification", "two factor", "two step"))
+    settings_route = _has_word(_route_words(obs.post_url), ("settings", "preferences", "profile", "security"))
+    if (login_step == "otp" and not mfa_route
+            and (settings_route or (_has_word(_route_words(obs.post_url), ("home", "dashboard", "account"))
+                                   and _has_word(" ".join(doc.visible_text), ("enable", "有効化"))))
+            and not auth_detect.on_login_page(obs.post_url, obs.login_url)
+            and any("mfa_page_context" in s.reasons for s in surface.forms if s.step == "otp")):
+        login_step = ""
+    if login_step == "otp" or configured_mfa:
         return LoginAssessment(CHALLENGE, reasons=["mfa"])
     if login_step == "password_only":
         return LoginAssessment(CHALLENGE, reasons=["password_step"])
