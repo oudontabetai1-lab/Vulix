@@ -338,12 +338,12 @@ def create_app(page_count: int = 48) -> FastAPI:
     async def template(name: str = Query("")):
         evaluated = name
         if "{{2654435761*2654435761}}" in name:
-            evaluated = name.replace("{{2654435761*2654435761}}", "7045744422742119121")
+            evaluated = name.replace("{{2654435761*2654435761}}", "7046029209275649121")
         elif "${2654435761*2654435761}" in name:
-            evaluated = name.replace("${2654435761*2654435761}", "7045744422742119121")
+            evaluated = name.replace("${2654435761*2654435761}", "7046029209275649121")
         elif "{{3*'wscan99991'}}" in name:
             evaluated = name.replace("{{3*'wscan99991'}}", "wscan99991wscan99991wscan99991")
-        if "7045744422742119121" in evaluated:
+        if "7046029209275649121" in evaluated:
             evaluated += f" {FLAG_SSTI}"
         return _layout("Template Preview", f"<p>Hello {evaluated}</p>")
 

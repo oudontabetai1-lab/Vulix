@@ -58,7 +58,7 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
             params={"name": "{{2654435761*2654435761}}"},
         )
 
-        self.assertIn("7045744422742119121", resp.text)
+        self.assertIn("7046029209275649121", resp.text)
         self.assertIn(FLAG_SSTI, resp.text)
 
     async def test_path_traversal_target_returns_passwd_and_flag_files(self):

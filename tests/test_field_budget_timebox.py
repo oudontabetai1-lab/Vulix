@@ -11,8 +11,10 @@ task-local な ContextVar（_FIELD_ATTACK_DEADLINE 等）に締切を張り、ba
   （resume で再試行＝見逃し防止）。
 - deadline 未設定（None）／未超過では従来どおり注入する（挙動不変・FP 非増加）。
 """
+import asyncio
 import time
 import unittest
+from unittest.mock import AsyncMock
 
 import wscan.engine as eng
 from wscan.scanners.base import BaseScanner
@@ -251,7 +253,7 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         """#3: recreate_page は navigate 成功時に控えた最新スナップショットを init script として仕込む。
         wedge した old page（evaluate が返らない）からの読取に依存しない。"""
         bm = self._bm()
-        bm._last_session_storage = ("http://t", '{"token":"abc123"}')
+        bm._last_session_storage = {"http://t": '{"token":"abc123"}'}
         old = _WedgedPage()  # evaluate が例外＝旧 page から読めない状況
         bm.page = old
 
@@ -268,7 +270,7 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         """R4#4: init script は sentinel key で「一度 seed 済み」を記録し、以後の document では
         復元しない。無条件復元だと app が消した auth/one-time key が次 navigation で stale 蘇生する。"""
         bm = self._bm()
-        bm._last_session_storage = ("http://t", '{"token":"abc123"}')
+        bm._last_session_storage = {"http://t": '{"token":"abc123"}'}
         bm.page = _WedgedPage()
         ok = await bm.recreate_page()
         self.assertTrue(ok)
@@ -290,15 +292,15 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         bm = self._bm()
         bm.page = _FakePage(session_json='{"token":"abc"}', origin="http://t")
         await bm._snapshot_session_storage()
-        self.assertEqual(bm._last_session_storage, ("http://t", '{"token":"abc"}'))
+        self.assertEqual(bm._last_session_storage, {"http://t": '{"token":"abc"}'})
 
     async def test_snapshot_keeps_last_nonempty_on_empty_page(self):
         """#3: login redirect 等で空になったページでは直近の非空スナップショットを上書きしない。"""
         bm = self._bm()
-        bm._last_session_storage = ("http://t", '{"token":"old"}')
+        bm._last_session_storage = {"http://t": '{"token":"old"}'}
         bm.page = _FakePage(session_json="{}", origin="http://t")
         await bm._snapshot_session_storage()
-        self.assertEqual(bm._last_session_storage, ("http://t", '{"token":"old"}'))
+        self.assertEqual(bm._last_session_storage, {"http://t": '{"token":"old"}'})
 
     async def test_worker_recreate_reattaches_scoped_headers(self):
         """#5: worker の recreate_page は create_worker と同じ経路で CDP scoped header interception を
@@ -353,7 +355,40 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         bm.page = _P()
         await bm._snapshot_session_storage()
         self.assertEqual(len(calls), 1)
-        self.assertEqual(bm._last_session_storage, ("http://t", '{"k":"v"}'))
+        self.assertEqual(bm._last_session_storage, {"http://t": '{"k":"v"}'})
+
+    async def test_snapshot_keeps_each_origin(self):
+        """複数 origin を経ても先に保存した sessionStorage を失わない。"""
+        bm = self._bm()
+        bm.page = _FakePage(session_json='{"a":"1"}', origin="http://one")
+        await bm._snapshot_session_storage()
+        bm.page = _FakePage(session_json='{"b":"2"}', origin="http://two")
+        await bm._snapshot_session_storage()
+        self.assertEqual(
+            bm._last_session_storage,
+            {"http://one": '{"a":"1"}', "http://two": '{"b":"2"}'},
+        )
+
+    async def test_recreate_fails_when_session_seed_script_fails(self):
+        """sessionStorage 復元を仕込めなければ、置換 page を成功扱いにしない。"""
+        class _FailingPage(_FakePage):
+            async def add_init_script(self, script):
+                raise RuntimeError("init script rejected")
+
+        class _FailingContext(_FakeContext):
+            async def new_page(self):
+                page = _FailingPage()
+                self.created.append(page)
+                return page
+
+        bm = self._bm()
+        bm._context = _FailingContext()
+        old = _FakePage()
+        bm.page = old
+        bm._last_session_storage = {"http://t": '{"token":"abc"}'}
+        self.assertFalse(await bm.recreate_page())
+        self.assertIs(bm.page, old)
+        self.assertTrue(bm._context.created[0].closed)
 
 
 class AdaptiveEntryGateTests(unittest.IsolatedAsyncioTestCase):
@@ -561,6 +596,34 @@ class OpenRedirectBudgetGateTests(unittest.IsolatedAsyncioTestCase):
         with _Budget(time.monotonic() - 1.0):
             self.assertEqual(await sc.scan_injection_point(ip, {"name": "next"}), [])
 
+    async def test_expired_deadline_checks_captured_location_but_not_stale_url(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import wscan.scanners.open_redirect as module
+        from wscan.scanners.open_redirect import OpenRedirectScanner
+
+        for location, expected in (
+            ("https://evil.wscan-test.example.com/", 1),
+            ("https://safe.example.test/", 0),
+        ):
+            engine = _Engine()
+            engine.browser = SimpleNamespace(page=SimpleNamespace(
+                url="https://evil.wscan-test.example.com/stale"
+            ))
+            scanner = OpenRedirectScanner(engine)
+            scanner._apply_ip = AsyncMock(return_value=("", {
+                "response": {"headers": {"Location": location}}
+            }))
+            scanner.record_finding = AsyncMock(return_value=object())
+
+            async def expire(_delay):
+                eng._FIELD_ATTACK_DEADLINE.set(time.monotonic() - 1)
+
+            ip = InjectionPoint.for_url_param("http://h/r?next=1", "next")
+            with _Budget(time.monotonic() + 5), patch.object(module.asyncio, "sleep", expire):
+                findings = await scanner.scan_injection_point(ip, {"name": "next"})
+            self.assertEqual(len(findings), expected, location)
+
 
 class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):
     def _engine(self, recreated, landed_url, params):
@@ -615,6 +678,73 @@ class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_budget_retry_limit_advances_to_later_check_without_marking_done(self):
+        """同じ先頭 check の決定論的 time-box が resume を永久停止させない。
+
+        最初の run は xss が deadline を消費して sqli も gate で未送信になる。retry 上限に
+        達した xss は completed にせず次 run で明示的に除外し、fresh budget の sqli が実行される。
+        """
+        from wscan.checkpoint import CheckpointState
+        from wscan.engine import ScanEngine
+
+        class _Slow(BaseScanner):
+            CHECK_TYPE = "xss"
+
+            async def scan_field(self, *args, **kwargs):
+                return []
+
+            async def scan_injection_point(self, ip, field):
+                await asyncio.sleep(0.01)
+                self._field_budget_gate()
+                return []
+
+        class _Later(BaseScanner):
+            CHECK_TYPE = "sqli"
+
+            def __init__(self, engine):
+                super().__init__(engine)
+                self.calls = 0
+
+            async def scan_field(self, *args, **kwargs):
+                return []
+
+            async def scan_injection_point(self, ip, field):
+                self.calls += 1
+                return []
+
+        state = CheckpointState(target_url="http://t", checks=["xss", "sqli"])
+        first = ScanEngine("http://t", checks=["xss"], llm_provider="none", open_report=False)
+        first.scanners = {"xss": _Slow(first), "sqli": _Later(first)}
+        first.checkpoint = state
+        first._field_attack_budget_s = 0.001
+        first._field_budget_retry_limit = 0
+        first.adaptive_enabled = False
+        first._save_checkpoint = lambda: None
+        await first._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+
+        ip = first._injection_point_for("http://t/p", "q", 0, False, -1, {"name": "q"})
+        self.assertTrue(state.is_truncation_exhausted_ip(ip, "xss"))
+        self.assertFalse(state.is_done_ip(ip, "xss"))
+        self.assertFalse(state.is_done_ip(ip, "sqli"))
+
+        resumed = ScanEngine("http://t", checks=["xss"], llm_provider="none", open_report=False)
+        later = _Later(resumed)
+        resumed.scanners = {"xss": _Slow(resumed), "sqli": later}
+        resumed.checkpoint = state
+        resumed._field_attack_budget_s = 1.0
+        resumed._field_budget_retry_limit = 0
+        resumed.adaptive_enabled = False
+        resumed._save_checkpoint = lambda: None
+        await resumed._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+
+        self.assertEqual(later.calls, 1)
+        self.assertFalse(state.is_done_ip(ip, "xss"))
+        self.assertTrue(state.is_done_ip(ip, "sqli"))
+        self.assertTrue(any(
+            note.startswith("field_budget_retry_exhausted:xss:")
+            for note in resumed.wave_errors
+        ))
+
     async def test_budget_exceeded_skips_legacy_scanner_and_not_checkpointed(self):
         """round-10: 予算超過後は scan_injection_point を持つ legacy 直送 scanner も呼ばず、error 記録・未完。"""
         class _Legacy(BaseScanner):
@@ -1134,3 +1264,167 @@ class EntryNavigateFloodTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DialogFloodPredicateTests(unittest.TestCase):
+    """flood/wedge 判定と field×check の checkpoint 可否（純粋関数）。"""
+
+    def test_dialog_flooded(self):
+        self.assertFalse(eng._dialog_flooded(3, False))   # 閾値以下は正常
+        self.assertTrue(eng._dialog_flooded(4, False))    # 閾値超え＝flood
+        self.assertTrue(eng._dialog_flooded(0, True))     # dismiss 失敗＝wedge
+
+    def test_field_check_checkpointable(self):
+        self.assertTrue(eng._field_check_checkpointable(False, False, False))
+        for args in ((True, False, False), (False, True, False), (False, False, True)):
+            self.assertFalse(eng._field_check_checkpointable(*args), args)
+
+
+class FieldCheckWedgeTests(unittest.IsolatedAsyncioTestCase):
+    """_scan_field 内で check 毎に flood/wedge を回復し、劣化した check を完了化しない。"""
+
+    URL = "http://127.0.0.1:1/list"
+
+    def _engine(self, recreate_ok, wedge_mode="dismiss"):
+        from types import SimpleNamespace
+        from wscan.engine import ScanEngine
+
+        br = SimpleNamespace(dialog_total=0, dialog_dismiss_failed=False, recreated=0,
+                             navigated=[], page=SimpleNamespace(url=self.URL))
+
+        async def _nav(url, retries=0):
+            br.navigated.append(url)
+            br.page.url = url
+            return True
+        br.navigate = _nav
+        br.has_form_field = AsyncMock(return_value=True)
+
+        async def recreate():
+            br.recreated += 1
+            if recreate_ok:
+                br.dialog_dismiss_failed = False
+            return recreate_ok
+        br.recreate_page = recreate
+
+        class _S(BaseScanner):
+            def __init__(self, engine, check, wedge):
+                super().__init__(engine)
+                self.CHECK_TYPE, self.wedge, self.ran = check, wedge, 0
+
+            async def scan_field(self, *a, **k):
+                return []
+
+            async def scan_injection_point(self_, ip, field):
+                self_.ran += 1
+                if self_.wedge:
+                    if wedge_mode == "dismiss":
+                        br.dialog_dismiss_failed = True
+                    else:
+                        br.dialog_total += 5   # 全 dismiss 成功の flood
+                return []
+
+        e = ScanEngine(self.URL, checks=["xss"], llm_provider="none", open_report=False)
+        e._browser = br
+        e.navigation_retries = 0
+        e.scanners = {"xss": _S(e, "xss", True), "sqli": _S(e, "sqli", False)}
+        e.adaptive_enabled = False
+        e._marked = []
+        e._checkpoint_mark_done_ip = lambda ip, check: e._marked.append(check)
+        return e
+
+    def _done(self, e, check):
+        return check in e._marked
+
+    async def _run(self, e):
+        await e._scan_field(self.URL, 0, {"name": "q", "type": "text"})
+
+    async def test_wedge_recovered_and_later_check_runs_on_healthy_page(self):
+        for mode in ("dismiss", "flood"):
+            e = self._engine(recreate_ok=True, wedge_mode=mode)
+            await self._run(e)
+            self.assertEqual(e.scanners["sqli"].ran, 1, mode)
+            self.assertEqual(e.browser.recreated, 1, mode)
+            self.assertEqual(e.browser.navigated, [self.URL], mode)   # recreate 後 target へ復帰
+            self.assertFalse(self._done(e, "xss"), mode)              # 劣化 check は resume 回収
+            self.assertTrue(self._done(e, "sqli"), mode)
+            xss_rows = [r for r in e.scan_matrix if r["check"] == "xss"]
+            self.assertEqual([r["status"] for r in xss_rows], ["error"], mode)
+            self.assertTrue(any(n.startswith("dialog_wedged_check_deferred:xss:")
+                                for n in e.wave_errors), mode)
+
+    async def test_recovered_filtered_form_uses_dom_submit_index(self):
+        from wscan.browser import BrowserManager
+
+        for present in (True, False):
+            with self.subTest(present=present):
+                e = self._engine(recreate_ok=True)
+                # Discovery skips the first two DOM forms; the scan-list index is zero.
+                forms = [{"ignored"}, {"ignored"}, {"q"} if present else set()]
+                evaluated = []
+
+                async def evaluate(script, args):
+                    evaluated.append(args)
+                    index, name = args
+                    return name in forms[index]
+
+                e.browser.page.evaluate = evaluate
+                e.browser.has_form_field = BrowserManager.has_form_field.__get__(e.browser)
+                await e._scan_field(self.URL, 0, {"name": "q", "type": "text"}, dom_index=2)
+                self.assertEqual(evaluated, [[2, "q"]])
+                self.assertEqual(e.browser.recreated, 1)
+                self.assertEqual(e.scanners["sqli"].ran, int(present))
+                self.assertEqual(self._done(e, "sqli"), present)
+                self.assertFalse(self._done(e, "xss"))
+
+    async def test_recovery_failure_stops_remaining_checks_uncheckpointed(self):
+        e = self._engine(recreate_ok=False)
+        await self._run(e)
+        self.assertEqual(e.scanners["sqli"].ran, 0)
+        self.assertFalse(self._done(e, "xss"))
+        self.assertFalse(self._done(e, "sqli"))
+        self.assertTrue(e.browser._recovery_failed)   # 外側（_attack_page）へ伝播
+
+    async def test_recreated_page_without_target_form_stops_remaining_checks(self):
+        e = self._engine(recreate_ok=True)
+        e.browser.has_form_field = AsyncMock(return_value=False)
+        await self._run(e)
+        self.assertEqual(e.scanners["sqli"].ran, 0)
+        self.assertFalse(self._done(e, "xss"))
+        self.assertFalse(self._done(e, "sqli"))
+        self.assertTrue(any(n.startswith("page_recreate_form_state_unavailable:")
+                            for n in e.wave_errors))
+
+    async def test_no_flood_is_unchanged(self):
+        e = self._engine(recreate_ok=True)
+        e.scanners["xss"].wedge = False
+        await self._run(e)
+        self.assertEqual(e.browser.recreated, 0)
+        self.assertTrue(self._done(e, "xss"))
+        self.assertTrue(self._done(e, "sqli"))
+
+
+class PrepFloodBaselineTests(PageLevelWedgeTests):
+    """準備区間（失効チェック/flow）の flood を page-level 検査の前に回復する。"""
+
+    def _prep_flood(self, e):
+        async def _relogin(url):
+            e.browser.dialog_total += 5   # stored-XSS listing を読み全 dismiss 成功（wedge flag なし）
+        e._maybe_relogin_for_page = _relogin
+        for s in e.scanners.values():
+            s.wedge = False
+
+    async def test_prep_flood_recovered_before_page_level(self):
+        e = self._engine(recreate_ok=True)
+        self._prep_flood(e)
+        await self._run(e)
+        self.assertEqual(e.browser.recreated, 1)
+        self.assertEqual(e.browser.navigated, ["http://t/p"])
+        self.assertEqual(e.scanners["a"].ran, 1)
+        self.assertEqual(e._checkpoint_mark_done.call_count, 2)
+
+    async def test_prep_flood_recovery_failure_runs_no_scanner(self):
+        e = self._engine(recreate_ok=False)
+        self._prep_flood(e)
+        await self._run(e)
+        self.assertEqual(e.scanners["a"].ran, 0)
+        e._checkpoint_mark_done.assert_not_called()
