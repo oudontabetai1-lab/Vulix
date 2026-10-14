@@ -6674,7 +6674,7 @@ class ScanEngine:
                 if (
                     getattr(self.browser, "_page_recreated", False)
                     and ip.location == "form"
-                    and not await self.browser.has_form_field(ip.form_index, ip.parameter_id)
+                    and not await self.browser.has_form_field(ip.submit_index, ip.parameter_id)
                 ):
                     self.wave_errors.append(
                         f"page_recreate_form_state_unavailable:{url}:{field_name}"

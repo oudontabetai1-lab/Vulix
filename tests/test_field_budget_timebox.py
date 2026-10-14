@@ -1352,6 +1352,30 @@ class FieldCheckWedgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(n.startswith("dialog_wedged_check_deferred:xss:")
                                 for n in e.wave_errors), mode)
 
+    async def test_recovered_filtered_form_uses_dom_submit_index(self):
+        from wscan.browser import BrowserManager
+
+        for present in (True, False):
+            with self.subTest(present=present):
+                e = self._engine(recreate_ok=True)
+                # Discovery skips the first two DOM forms; the scan-list index is zero.
+                forms = [{"ignored"}, {"ignored"}, {"q"} if present else set()]
+                evaluated = []
+
+                async def evaluate(script, args):
+                    evaluated.append(args)
+                    index, name = args
+                    return name in forms[index]
+
+                e.browser.page.evaluate = evaluate
+                e.browser.has_form_field = BrowserManager.has_form_field.__get__(e.browser)
+                await e._scan_field(self.URL, 0, {"name": "q", "type": "text"}, dom_index=2)
+                self.assertEqual(evaluated, [[2, "q"]])
+                self.assertEqual(e.browser.recreated, 1)
+                self.assertEqual(e.scanners["sqli"].ran, int(present))
+                self.assertEqual(self._done(e, "sqli"), present)
+                self.assertFalse(self._done(e, "xss"))
+
     async def test_recovery_failure_stops_remaining_checks_uncheckpointed(self):
         e = self._engine(recreate_ok=False)
         await self._run(e)
