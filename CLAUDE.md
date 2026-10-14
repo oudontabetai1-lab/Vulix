@@ -153,7 +153,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `payload_mutator.py` | **LLM不要**の決定論的ペイロード変異（シード→バイパス変種：二重エンコード/NULLバイト/バックスラッシュ/コメント挿入、純粋関数）。LLM版は `adaptive_payload.AdaptivePayloadEngine.mutate_payload` |
 | `waf_bypass.py` | **LLM不要**の純粋関数。WAF/入力フィルタ回避の種を生成。`crlf_bypass_variants`（メールヘッダ用の多様な改行表現：生CR/LF・%エンコード・二重エンコード・Unicode行区切り・オーバーロングUTF-8）と `upload_bypass_probes`（ファイルアップロード用：代替拡張子/大小混在/末尾ドット・空白/画像マジックバイトpolyglot/Content-Type偽装）。`mail_header`・`file_upload` スキャナが共有 |
 | `js_analysis.py` | **LLM不要**の純粋関数。JS ソースを静的解析し危険シンク×汚染ソースの source→sink を抽出（`js_static` スキャナの実体）。HTMLからのインラインscript抽出も提供 |
-| `url_extraction.py` | **LLM不要**の純粋関数。JS/JSON 資産から抽出した URL 候補のゴミ判定（0009 C1）。minified JS の regex リテラル/式片（`/(?:` `/16*(...` 等）を `/…` ルートと誤抽出したものを path 部のコードメタ文字で除去（`is_plausible_route_candidate`/`filter_route_candidates`）。`browser._collect_urls_from_loaded_assets` が使用。**保守側判定＝実ルートは落とさない**（到達性維持） |
+| `url_extraction.py` | **LLM不要**の純粋関数。JS/JSON 資産から抽出した URL 候補のゴミ判定。minified JS の regex リテラル/式片（`/(?:` `/16*(...` 等）を `/…` ルートと誤抽出したものを path 部のコードメタ文字で除去（`is_plausible_route_candidate`/`filter_route_candidates`）。`browser._collect_urls_from_loaded_assets` が使用。**保守側判定＝実ルートは落とさない**（到達性維持） |
 | `url_normalize.py` / `checkpoint.py` | `checkpoint.unit_key` は resume キーの単一チョークポイントとして `normalize_url_for_key` を適用し、明白な揮発クエリだけを除く（実攻撃 URL は不変、未知キー・意味値は保持） |
 | `auth_detect.py` | ログイン成否判定の純粋関数（フォーム残存/失敗文言/ログインページ離脱/MFA を統合）。`browser.auto_login` の判定を集約 |
 | `payload_importer.py` | 公開ペイロード集(PaTT/SecLists)の取込ツール（`import-payloads` サブコマンドの実体） |
@@ -413,8 +413,8 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
   `oob_email.parse_email`）。HTTP/ブラウザ依存と判定ロジックを混ぜない。
 - **秘匿情報は env で渡す**（コード/コミットに埋めない）。例: `WSCAN_OOB_*`、各種 `*_API_KEY`。
 - `monitor` は任意。スキャナ内で参照するときは `if self.monitor:` ガードを忘れない。
-- **サイレント偽陰性の可視化（0007 D1・通常層）**: 「エラーした攻撃」と「何も無い攻撃」を区別できないと見逃しに気づけない。probe/wave の脱落は `BaseScanner._record_scan_note(f"<category>:<detail>")` で `engine.wave_errors` に**記録だけ**残す（挙動不変・加算的）。共有 transport（`_apply_payload`/`_apply_json_payload`）の swallow は `transport_error:<check>:<ExcType>`、template 不在は `unexecutable_template:<check>` を刻む。`engine.observability_summary()`（純粋・カテゴリ別集計）が scan 末尾の console 警告とレポートの observability セクションへ供給する（monitor 非依存＝`--no-monitor`/バッチでも出す）。「0 findings＝安全」の誤解を防ぐデータ源で、0009 C3 と同一。**新しく probe を握りつぶす except を足すときは記録を1行入れる**（過剰配線はしない＝見逃しに直結する所だけ）。
-- **Agent の誠実性（0007 D8・Agent 層）**: 初期化/実行のハードエラーや**非成功の空振り**を「0 findings の正常完了」に見せない。browser-use は失敗を (1) 例外（→`result.error`）(2) `history.is_successful()`（→`result.success`）の2経路で報告するため、両方を扱う。`AgentBrowserScanner.run` は `result.error` で FAILED、`not success and not findings` で **INCOMPLETE** を表示（findings があれば不完全でも表示＝検出結果は有効）。`agent_engine`/`main.run_agent` はその条件で成功レポート/完了イベントを出さず result を返し、CLI は `main._agent_exit_code(result)`（`error` または `not success and not findings` → 1）で**非0 exit**する。設定ディレクトリ書込み不可（`check_agent_config_directory`）は起動前に**警告（案内）**するが**中断はしない**（`os.access` は sandbox 等で誤判定しうる／browser-use が XDG・遅延生成で回避しうるため。実失敗は上記経路で誠実に表面化する）。案内は `XDG_CONFIG_HOME` を書込み可へ、を含む。
+- **サイレント偽陰性の可視化（通常層）**: 「エラーした攻撃」と「何も無い攻撃」を区別できないと見逃しに気づけない。probe/wave の脱落は `BaseScanner._record_scan_note(f"<category>:<detail>")` で `engine.wave_errors` に**記録だけ**残す（挙動不変・加算的）。共有 transport（`_apply_payload`/`_apply_json_payload`）の swallow は `transport_error:<check>:<ExcType>`、template 不在は `unexecutable_template:<check>` を刻む。`engine.observability_summary()`（純粋・カテゴリ別集計）が scan 末尾の console 警告とレポートの observability セクションへ供給する（monitor 非依存＝`--no-monitor`/バッチでも出す）。「0 findings＝安全」の誤解を防ぐデータ源（coverage/observability 集計と共通）。**新しく probe を握りつぶす except を足すときは記録を1行入れる**（過剰配線はしない＝見逃しに直結する所だけ）。
+- **Agent の誠実性（Agent 層）**: 初期化/実行のハードエラーや**非成功の空振り**を「0 findings の正常完了」に見せない。browser-use は失敗を (1) 例外（→`result.error`）(2) `history.is_successful()`（→`result.success`）の2経路で報告するため、両方を扱う。`AgentBrowserScanner.run` は `result.error` で FAILED、`not success and not findings` で **INCOMPLETE** を表示（findings があれば不完全でも表示＝検出結果は有効）。`agent_engine`/`main.run_agent` はその条件で成功レポート/完了イベントを出さず result を返し、CLI は `main._agent_exit_code(result)`（`error` または `not success and not findings` → 1）で**非0 exit**する。設定ディレクトリ書込み不可（`check_agent_config_directory`）は起動前に**警告（案内）**するが**中断はしない**（`os.access` は sandbox 等で誤判定しうる／browser-use が XDG・遅延生成で回避しうるため。実失敗は上記経路で誠実に表面化する）。案内は `XDG_CONFIG_HOME` を書込み可へ、を含む。
 
 ## 設定の場所
 
@@ -426,7 +426,7 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
 - `config/wscan.yaml` … 既定設定と機能フラグ（`ai_analysis` / `waf_detection` /
   `payload_learning` / 適応ペイロード / `sitemap_crawl` / `spa_crawl` 等）。`checks` 既定は `["sqli","xss","os"]`。
 - `config/default_payloads.yaml` … 手キュレーションのフォールバックペイロード。
-- `config/benchmark_gaps.yaml` … E2E benchmark（0034）の **registry 完全性ゲート**用。まだ
+- `config/benchmark_gaps.yaml` … E2E benchmark の **registry 完全性ゲート**用。まだ
   ground truth case を持たない scanner を owner_task/deadline 付きの「明示 gap」として承認する。
   covered は `benchmark_model.discover_benchmark_suites(benchmarks/manifests/)`＋
   `checks_covered_by_suites` で **実 manifest から導出**し、`compute_registry_completeness` が SCANNERS と
