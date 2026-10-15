@@ -2678,7 +2678,12 @@ class ScanEngine:
                 user_field=self.login_user_field,
                 pass_field=self.login_pass_field,
                 success_indicator=self.login_success_indicator,
+                logged_in_marker=self.logged_in_marker,
             )
+            if not success:
+                assessment = getattr(browser, "last_login_assessment", None)
+                self.wave_errors.append("authentication_incomplete:" +
+                                        (",".join(assessment.reasons) if assessment else "unknown"))
         except Exception as exc:
             console.print(f"  [yellow][Auth] 再ログイン失敗: {exc}[/yellow]")
             return False
@@ -2820,7 +2825,12 @@ class ScanEngine:
                 user_field=self.login_user_field,
                 pass_field=self.login_pass_field,
                 success_indicator=self.login_success_indicator,
+                logged_in_marker=self.logged_in_marker,
             )
+            if not success:
+                assessment = getattr(browser, "last_login_assessment", None)
+                self.wave_errors.append("authentication_incomplete:" +
+                                        (",".join(assessment.reasons) if assessment else "unknown"))
         except Exception as exc:
             console.print(f"  [yellow][Auth] 再ログイン失敗: {exc}[/yellow]")
             return False
@@ -2950,7 +2960,12 @@ class ScanEngine:
                         user_field=self.login_user_field,
                         pass_field=self.login_pass_field,
                         success_indicator=self.login_success_indicator,
+                        logged_in_marker=self.logged_in_marker,
                     )
+                    if not success:
+                        assessment = getattr(self._browser, "last_login_assessment", None)
+                        self.wave_errors.append("authentication_incomplete:" +
+                                                (",".join(assessment.reasons) if assessment else "unknown"))
                     if success:
                         self.auth_landing_url = getattr(self._browser, "last_login_url", "") or self._browser.page.url
                         console.print("  [green][Auth] Login successful — session cookies captured.[/green]")
@@ -3573,7 +3588,12 @@ class ScanEngine:
                     user_field=self.login_user_field,
                     pass_field=self.login_pass_field,
                     success_indicator=self.login_success_indicator,
+                    logged_in_marker=self.logged_in_marker,
                 )
+                if not ok:
+                    assessment = getattr(self._browser, "last_login_assessment", None)
+                    self.wave_errors.append("authentication_incomplete:" +
+                                            (",".join(assessment.reasons) if assessment else "unknown"))
                 if ok:
                     console.print("  [green][Auth] Re-login successful — resuming crawl.[/green]")
                     await self._sync_cookies_from_browser(self._browser)
@@ -5094,7 +5114,12 @@ class ScanEngine:
                     user_field=self.login_user_field,
                     pass_field=self.login_pass_field,
                     success_indicator=self.login_success_indicator,
+                    logged_in_marker=self.logged_in_marker,
                 )
+                if not ok:
+                    assessment = getattr(self._browser, "last_login_assessment", None)
+                    self.wave_errors.append("authentication_incomplete:" +
+                                            (",".join(assessment.reasons) if assessment else "unknown"))
                 if not ok:
                     console.print(
                         "  [red][Post-Auth] Re-authentication failed — cannot crawl authenticated surface.[/red]"
@@ -5297,7 +5322,12 @@ class ScanEngine:
                 user_field=self.login_user_field,
                 pass_field=self.login_pass_field,
                 success_indicator=self.login_success_indicator,
+                logged_in_marker=self.logged_in_marker,
             )
+            if not success:
+                assessment = getattr(br, "last_login_assessment", None)
+                self.wave_errors.append("authentication_incomplete:" +
+                                        (",".join(assessment.reasons) if assessment else "unknown"))
             if success:
                 console.print("  [green][Auth] Re-login successful.[/green]")
                 await self._sync_cookies_from_browser(br)
@@ -8041,6 +8071,7 @@ class ScanEngine:
                 user_field=self.login_user_field,
                 pass_field=self.login_pass_field,
                 success_indicator=self.login_success_indicator,
+                logged_in_marker=self.logged_in_marker,
             )
             if cookie_str:
                 self.account_sessions.append({
@@ -8155,6 +8186,7 @@ class ScanEngine:
                 user_field=self.login_user_field,
                 pass_field=self.login_pass_field,
                 success_indicator=self.login_success_indicator,
+                logged_in_marker=self.logged_in_marker,
             )
             if cookie_str:
                 self.account_sessions.append({
