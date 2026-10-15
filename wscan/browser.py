@@ -3030,6 +3030,7 @@ class BrowserManager:
         user_field: str = "username",
         pass_field: str = "password",
         success_indicator: str = "",
+        logged_in_marker: str = "",
     ) -> Optional[str]:
         """
         Open an isolated browser context, log in with the given credentials,
@@ -3096,6 +3097,10 @@ class BrowserManager:
             else:
                 if post_url.rstrip("/") == login_url.rstrip("/"):
                     return None
+
+            # ログイン後にだけ現れる印が無ければ失敗（auto_login と同じ肯定的証拠）
+            if logged_in_marker and logged_in_marker not in post_url and logged_in_marker not in post_body:
+                return None
 
             # Extract cookies
             cookies = await ctx.cookies()
