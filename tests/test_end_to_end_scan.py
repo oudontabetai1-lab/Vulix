@@ -390,6 +390,25 @@ class LoginSurfaceBrowserTests(unittest.TestCase):
             self.assertNotIn(fx.USERNAME, persisted)
             self.assertNotIn("fixture-session", persisted)
 
+    def test_mixed_registration_and_login_preserves_registration_fields(self):
+        from tests.fixtures import login_surface_app as fx
+        from tests.test_totp_login_e2e import serving
+        from wscan.browser import BrowserManager
+        with serving(fx.create_app()) as url:
+            async def exercise():
+                for fields in ({}, {"user_field": "user", "pass_field": "pw"},
+                               {"user_field": 'input[name="user"]', "pass_field": 'input[name="pw"]'}):
+                    browser = BrowserManager(headless=True, auth_user=fx.USERNAME, auth_pass=fx.PASSWORD)
+                    await browser.init()
+                    try:
+                        self.assertTrue(await browser.auto_login(url + "/mixed-default-login", **fields),
+                                        browser.last_login_assessment)
+                        self.assertEqual(await browser.page.evaluate(
+                            'JSON.parse(sessionStorage.getItem("registration-values"))'), ["", ""])
+                    finally:
+                        await browser.close()
+            asyncio.run(exercise())
+
     def test_nonlogin_and_ambiguous_surfaces_are_not_filled(self):
         from tests.fixtures import login_surface_app as fx
         from tests.test_totp_login_e2e import serving

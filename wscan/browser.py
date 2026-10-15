@@ -2524,10 +2524,13 @@ class BrowserManager:
                         ls.INCOMPLETE, reasons=["non_login_surface:" + surface.kind])
                     return False
                 # 設定欄が実在・編集可能なときだけ優先し、その他は純粋検出へ委譲する。
-                user = (await self._editable_auth_selector(user_field) or
-                        await self._editable_auth_selector(name_or_id_selector(user_field)))
-                password = (await self._editable_auth_selector(pass_field) or
-                            await self._editable_auth_selector(name_or_id_selector(pass_field)))
+                user = password = ""
+                if (user_field != "username" or pass_field != "password"
+                        or surface.login_form is None):
+                    user = (await self._editable_auth_selector(user_field) or
+                            await self._editable_auth_selector(name_or_id_selector(user_field)))
+                    password = (await self._editable_auth_selector(pass_field) or
+                                await self._editable_auth_selector(name_or_id_selector(pass_field)))
                 plan = ls.locate_auth_fields(body, user_selector=user, pass_selector=password)
                 if plan.requires_reveal:
                     opener = self.page.get_by_role("button", name=re.compile("^(?:" + "|".join(map(re.escape, ls._LOGIN_WORDS)) + ")$", re.I))
@@ -3099,7 +3102,7 @@ class BrowserManager:
                     return None
 
             # ログイン後にだけ現れる印が無ければ失敗（auto_login と同じ肯定的証拠）
-            if logged_in_marker and logged_in_marker not in post_url and logged_in_marker not in post_body:
+            if logged_in_marker and logged_in_marker not in post_body:
                 return None
 
             # Extract cookies
