@@ -15,10 +15,13 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 # 本スクリプト自身が検出されないよう、語は分割して組み立てる。
+# 直前は ASCII 英数字だけを除外する（\b だと日本語に直結した課題番号を見逃す）。
+_NOT_AFTER_ASCII = r"(?<![A-Za-z0-9])"
 _PATTERNS = [
-    r"\b" + "OUD" + r"-\d+",
-    r"\b" + "ADR" + r"-\d+",
-    r"\b(?:" + "|".join(["PRIN" + "CIPLE", "PL" + "AN", "MOD" + "EL", "DECI" + "SION"]) + r")-[A-Za-z0-9]",
+    _NOT_AFTER_ASCII + "OUD" + r"-\d+",
+    _NOT_AFTER_ASCII + "ADR" + r"-\d+",
+    # 後続は問わない（「-日本語」・記号・行末も検出）。MODEL_NAME 等の _ 連結は対象外。
+    _NOT_AFTER_ASCII + "(?:" + "|".join(["PRIN" + "CIPLE", "PL" + "AN", "MOD" + "EL", "DECI" + "SION"]) + ")-",
     "連携" + "プレイブック",
     r"\[\[" + "Designs" + "/",
     "obsi" + r"dian://",

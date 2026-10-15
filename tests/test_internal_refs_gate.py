@@ -20,6 +20,14 @@ def test_detects_strong_identifiers():
         assert _hits(s), s
 
 
+def test_detects_japanese_adjacent_and_non_ascii_suffix():
+    # \b 依存だと見逃していたグルー形（日本語直結・非 ASCII 後続・末尾記号/行末）。
+    samples = ["対応課題" + "OUD" + "-73", "設計" + "ADR" + "-4 参照", "MODEL" + "-日本語",
+               "（" + "PLAN" + "-）", "PLAN" + "-", "原則" + "PRINCIPLE" + "-#1", "DECISION" + "-「a」"]
+    for s in samples:
+        assert _hits(s), s
+
+
 def test_allows_functional_values_and_product_terms():
     allowed = [
         'task="0035-D"',
@@ -29,6 +37,9 @@ def test_allows_functional_values_and_product_terms():
         "matrix = [[1, 2], [3, 4]]",
         "MODEL_NAME = 'x'",
         "DECISION: 単一 source-of-truth",
+        'task="00NN"',
+        "XOUD" + "-1 と MYPLAN" + "-x は別語",
+        "MODEL" + "_NAME と PLAN" + "S-x",
     ]
     for s in allowed:
         assert not _hits(s), s
