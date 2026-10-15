@@ -106,6 +106,7 @@ class _Doc(HTMLParser):
         self.buf: list[str] = []
         self.button: Optional[dict] = None
         self.last_heading = ""
+        self.control_counts = {"button": 0, "input": 0}
         self.all_inputs: list[dict] = []              # selector 一意性の母集団（hidden 含む全 input）
         self.external_submits: list[tuple[str, dict, str, bool]] = []
         self.external_inputs: list[tuple[str, dict, bool]] = []
@@ -157,6 +158,9 @@ class _Doc(HTMLParser):
         a: dict[str, str] = {}
         for k, v in attrs:
             a.setdefault(k, v or "")
+        if tag in self.control_counts:
+            self.control_counts[tag] += 1
+            a["_control_index"] = self.control_counts[tag]
         style = re.sub(r"\s+", "", a.get("style", "").lower())
         hidden = ("hidden" in a or "inert" in a or a.get("aria-hidden", "").lower() == "true"
                   or "display:none" in style or "visibility:hidden" in style
@@ -191,6 +195,8 @@ class _Doc(HTMLParser):
             if t in {"submit", "image"}:
                 label = a.get("value", "") or a.get("alt", "")
                 self._submit({**a, "_tag": "input"}, label, operable)
+            elif t == "button":
+                self._form().context += " " + a.get("value", "")
             elif t != "hidden":
                 a = {**a, "_uneditable": disabled or "disabled" in a or "readonly" in a}
                 if a.get("form"):
@@ -198,9 +204,9 @@ class _Doc(HTMLParser):
                 else:
                     self._form().inputs.append((a, not operable or a["_uneditable"]))
         elif tag == "button":
-            # type=button も logout control の文言源として集める（submit 扱いは submit 型のみ）
+            # type=button も form 文脈へ取り込む（login 文言の SPA ボタンだけ送信候補）。
             is_submit = a.get("type", "").lower() in {"", "submit"}
-            self.button = {**a, "_tag": "button"} if is_submit else None
+            self.button = {**a, "_tag": "button", "_submit": is_submit}
             self.button_operable = operable
             self.text_target, self.buf = "button", []
             self.ctl_buf, self.ctl_op, self.ctl_path = [], operable, ""
@@ -220,7 +226,12 @@ class _Doc(HTMLParser):
             text = " ".join("".join(self.buf).split())
             self._end_control()
             if self.button is not None:
-                self._submit(self.button, text, self.button_operable)
+                if self.button["_submit"]:
+                    self._submit(self.button, text, self.button_operable)
+                else:
+                    self._form().context += " " + text
+                    if _has_word(text, _LOGIN_WORDS):
+                        self._submit(self.button, text, self.button_operable)
             self.text_target, self.button = None, None
         elif tag == "a" and self.ctl_buf is not None:
             self._end_control()
@@ -285,7 +296,7 @@ def _is_pw(a: dict) -> bool:
 
 def _is_user(a: dict) -> bool:
     return _type(a) in _TEXTUAL and (_ac(a) in {"username", "email"} or _type(a) == "email"
-                                     or _hinted(a, _USER_HINTS))
+                                     or _hinted(a, _USER_HINTS) or "identifier" in _name_words(a))
 
 
 def _is_otp(a: dict) -> bool:
@@ -357,6 +368,8 @@ def _classify_form(f: _Form, inputs: list) -> FormSurface:
             r.kind = RESET
         elif reg_w and login_w and not cur_pw:
             r.kind, r.reasons = AMBIGUOUS, r.reasons + ["login_and_registration_words"]
+        elif cur_pw and not login_w:
+            r.kind, r.reasons = AMBIGUOUS, r.reasons + ["current_password_without_login_context"]
         elif user or texts:
             r.kind, r.step = LOGIN, "single"
         elif login_w:
@@ -390,6 +403,7 @@ def classify_surface(html: str, *, visible_only: bool = False) -> SurfaceResult:
     doc = _Doc(html)
     groups = [(f, _usable(f, visible_only)) for f in doc.forms + [doc.loose]]
     groups = [(f, inputs) for f, inputs in groups if inputs]
+    doc.loose.context += " " + doc.last_heading
     forms = [_classify_form(f, inputs) for f, inputs in groups]
     # 弱い OTP 名はフォーム自身の MFA 文脈が必要（footer/nav の案内は使わない）。
     if (looks_like_mfa_page(" ".join(doc.visible_text))
@@ -500,7 +514,10 @@ def locate_auth_fields(
         if ranked and _submit_rank(*ranked[0]) < 2:
             button = ranked[0][0]
             plan.submit = _unique_selector(all_buttons, button, button.get("_tag", "button"))
-            plan.submit_strategy = "button" if plan.submit else ("form_submit" if form.index >= 0 else "enter")
+            if not plan.submit:
+                # 名前の無いボタンも選んだ要素そのものを押す（既定 submit への迂回を防ぐ）。
+                plan.submit = f':nth-match({button["_tag"]}, {button["_control_index"]})'
+            plan.submit_strategy = "button"
         else:
             plan.submit_strategy = "enter"
     for key, attr in (("user", "user_selector"), ("pass", "pass_selector"), ("otp", "otp_selector")):
@@ -665,7 +682,7 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
             reasons.append("logged_in_marker_missing")
     if login_form_present and not explicit:
         return LoginAssessment(INCOMPLETE, reasons=["login_form_still_present"])
-    if obs.post_url and not auth_detect.on_login_page(obs.post_url, obs.login_url) \
+    if obs.login_url and obs.post_url and not auth_detect.on_login_page(obs.post_url, obs.login_url) \
             and auth_detect._norm(obs.post_url) != auth_detect._norm(obs.login_url):
         evidence.append("left_login_page")
     if obs.auth_cookie_set:
@@ -675,8 +692,10 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
     # 本文の説明文ではなく、可視の操作要素（リンク/ボタン/ログアウト form）に限る。
     if _has_word(" ".join(doc.controls), _LOGOUT_WORDS):
         evidence.append("logout_control")
+    if explicit:
+        return LoginAssessment(SUCCESS, evidence)
     if reasons:
         return LoginAssessment(INCOMPLETE, evidence, reasons)
-    if explicit or len(evidence) >= 2:
+    if len(evidence) >= 2:
         return LoginAssessment(SUCCESS, evidence)
     return LoginAssessment(INCOMPLETE, evidence, ["insufficient_success_evidence"])

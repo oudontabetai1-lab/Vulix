@@ -309,6 +309,7 @@ class NetworkCapture:
         # JSONL audit log. clear() wipes the in-memory list per page, so the
         # log is the only place a complete request history survives.
         self.logger = logger
+        self.authentication_active = False
 
     def on_request(self, request: Request):
         key = (request.url, id(request))
@@ -326,6 +327,10 @@ class NetworkCapture:
                 if getattr(request, "redirected_from", None) is not None else None
             ),
         }
+        if self.authentication_active:
+            # 認証欄の名前に依存せず、秘密値を捕捉・永続化しない。
+            self._pending[key].update(url="[authentication]", headers={}, post_data="[REDACTED]",
+                                      _authentication=True)
         self._requests_since_clear += 1
 
     def on_response(self, response: Response):
@@ -352,6 +357,8 @@ class NetworkCapture:
                 "timestamp": time.time(),
             },
         }
+        if req.get("_authentication"):
+            pair["response"].update(url="[authentication]", headers={})
         self.pairs.append(pair)
         try:
             try:
@@ -382,6 +389,11 @@ class NetworkCapture:
         the raw bytes so we still capture (and can scan) such responses.
         """
         try:
+            if self.authentication_active or any(
+                p["request"].get("_authentication")
+                and p["response"].get("_req_id") == id(response.request) for p in self.pairs
+            ):
+                return
             try:
                 body = await response.text()
             except UnicodeDecodeError:
@@ -2454,154 +2466,154 @@ class BrowserManager:
         user_field: str = "username",
         pass_field: str = "password",
         success_indicator: str = "",
+        logged_in_marker: str = "",
     ) -> bool:
-        """
-        Navigate to *login_url*, fill *user_field* / *pass_field* with
-        self.auth_user / self.auth_pass, submit the form, and return True
-        if login appears successful.
+        """明示欄を優先し、form 単位の計画と独立証拠で自動ログインする。"""
+        from . import login_surface as ls
+        from .auth_fields import name_or_id_selector
 
-        *success_indicator*: substring expected in the post-login URL or
-        page body to confirm success (e.g. '/dashboard').  If empty, the
-        method returns True as long as the URL changed after submission.
-        """
+        self.last_login_url = ""
+        self.last_login_success = False
+        self.last_login_assessment = ls.LoginAssessment(ls.INCOMPLETE, reasons=["credentials_missing"])
         if not self.auth_user or not self.auth_pass:
             return False
-        try:
-            self.last_login_url = ""
-            self.last_login_success = False
-            await self.navigate(login_url)
+        observation = {"status": None, "token": None, "error": ""}
 
-            from .auth_fields import find_password_field, find_username_field, name_or_id_selector
-            body = await self.get_page_source()
-            user_selector = await self._editable_auth_selector(name_or_id_selector(user_field))
-            pass_selector = await self._editable_auth_selector(name_or_id_selector(pass_field))
-            if not user_selector:
-                user_selector = await self._editable_auth_selector(find_username_field(body) or "")
-            if not pass_selector:
-                pass_selector = await self._editable_auth_selector(find_password_field(body) or "")
-            if not user_selector or not pass_selector:
-                return False
-            if not await self.page.locator(user_selector).evaluate(
-                "(el, selector) => { const pw = document.querySelector(selector); "
-                "return pw && el !== pw && el.form === pw.form && el.type !== 'password'; }",
-                pass_selector,
-            ):
-                return False
-            await self.page.fill(user_selector, self.auth_user, timeout=5000)
-            await self.page.fill(pass_selector, self.auth_pass, timeout=5000)
-
-            # MFA（メール）の baseline をパスワード送信前に確保する。送信で OTP メールが
-            # 飛ぶため、ここで「送信前から受信箱にある古いメール」を記録しておくと、
-            # 送信後に届く新着のみを solve() で対象にできる（古いコードの誤投入防止）。
-            mfa_solver = getattr(self, "mfa_solver", None)
-            if mfa_solver is not None and mfa_solver.enabled:
-                try:
-                    await mfa_solver.prime()
-                except Exception:
-                    pass
-
-            submitted = False
+        def is_api_login(request):
             try:
-                submit_btn = self.page.locator(user_selector).locator("xpath=ancestor::form").locator(
-                    'button[type="submit"],input[type="submit"],[type="submit"],button:not([type="button"])'
-                ).first
-                await submit_btn.click(timeout=5000, no_wait_after=True)
-                submitted = True
-            except Exception:
-                pass
+                data = json.loads(request.post_data or "{}")
+                return isinstance(data, dict) and ls.locate_api_login(request.url, request.method, data.keys()) is not None
+            except (ValueError, TypeError):
+                return False
 
-            if not submitted:
-                submit_script = """([userField]) => {
-                    function _find(sel) {
-                        try {
-                            const direct = document.querySelector(sel);
-                            if (direct) return direct;
-                        } catch (e) {}
-                        return document.querySelector(
-                            `[name="${CSS.escape(sel)}"],[id="${CSS.escape(sel)}"]`
-                        );
-                    }
-                    const el = _find(userField);
-                    if (!el) return;
-                    const form = el.closest('form');
-                    if (!form) return;
-                    const btn = form.querySelector(
-                        'button[type="submit"],input[type="submit"],[type="submit"]'
-                    ) || form.querySelector('button:not([type="button"])');
-                    if (btn) { btn.click(); }
-                    else { form.submit(); }
-                }"""
+        async def observe_response(response):
+            request = response.request
+            is_api = is_api_login(request)
+            if (request.resource_type == "document" and request.frame == self.page.main_frame) or is_api:
+                observation["status"] = response.status
+            if is_api and 200 <= response.status < 300:
                 try:
-                    async with self.page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-                        await self.page.evaluate(submit_script, [user_selector])
+                    data = await response.json()
+                    observation["token"] = isinstance(data, dict) and any(
+                        data.get(k) for k in ("token", "access_token", "session"))
                 except Exception:
-                    # AJAX logins or same-document updates may not navigate. The
-                    # polling loop below still evaluates the resulting body and URL.
                     pass
 
-            # MFA（2FA）チャレンジ: パスワード送信後にワンタイムコード入力が
-            # 要求される場合、外部 MCP 経由でコードを取得して投入する。未設定・
-            # 非該当時は何もしない（従来挙動を維持）。
-            mfa_field = ""
-            mfa_status = "not_present"
-            self._submitted_mfa_input = None
-            mfa_solver = getattr(self, "mfa_solver", None)
-            if mfa_solver is not None and mfa_solver.enabled:
-                from . import mfa as _mfa
-                mfa_field = mfa_solver.field or "otp"
-                mfa_status = await self._handle_mfa_challenge(success_indicator)
-                if mfa_status == "failed":
-                    # MFA 画面を検出したがコード取得/投入に失敗。未認証のまま
-                    # 「login_url から移動した」だけで成功と誤判定しないよう、
-                    # ここで失敗を確定する。
-                    self.last_login_url = self.page.url
-                    self.last_login_success = False
+        def observe_failure(request):
+            if (request.resource_type == "document" and request.frame == self.page.main_frame) or is_api_login(request):
+                observation["error"] = "ConnectionError"
+
+        self.page.on("response", observe_response)
+        self.page.on("requestfailed", observe_failure)
+        self.network.authentication_active = True
+        try:
+            if not await self.navigate(login_url):
+                self.last_login_assessment = ls.assess_login_state(ls.LoginObservation(
+                    status=self.last_navigation_status,
+                    transport_error="" if self.last_navigation_status else "ConnectionError"))
+                self.last_navigation_error = "authentication_navigation_failed"
+                return False
+            for _ in range(2):
+                body = await self.get_page_source()
+                surface = ls.classify_surface(body)
+                if (user_field == "username" and pass_field == "password"
+                        and surface.kind != ls.LOGIN
+                        and not any(form.kind == ls.LOGIN for form in surface.forms)):
+                    # 既定欄名の一致を明示設定とみなして登録・設定画面へ入力しない。
+                    self.last_login_assessment = ls.LoginAssessment(
+                        ls.INCOMPLETE, reasons=["non_login_surface:" + surface.kind])
+                    return False
+                # 設定欄が実在・編集可能なときだけ優先し、その他は純粋検出へ委譲する。
+                user = (await self._editable_auth_selector(user_field) or
+                        await self._editable_auth_selector(name_or_id_selector(user_field)))
+                password = (await self._editable_auth_selector(pass_field) or
+                            await self._editable_auth_selector(name_or_id_selector(pass_field)))
+                plan = ls.locate_auth_fields(body, user_selector=user, pass_selector=password)
+                if plan.requires_reveal:
+                    opener = self.page.get_by_role("button", name=re.compile("^(?:" + "|".join(map(re.escape, ls._LOGIN_WORDS)) + ")$", re.I))
+                    visible = [opener.nth(i) for i in range(await opener.count())
+                               if await opener.nth(i).is_visible()]
+                    if len(visible) == 1:
+                        await visible[0].click(timeout=3000)
+                        plan = ls.locate_auth_fields(await self.get_page_source(),
+                                                     user_selector=user, pass_selector=password)
+                if plan.incomplete_reason or plan.step not in {"single", "username_first", "password_only"}:
+                    self.last_login_assessment = ls.LoginAssessment(
+                        ls.INCOMPLETE, reasons=[plan.incomplete_reason or "unsupported_login_step"])
+                    return False
+                selectors = [x for x in (plan.user_selector, plan.pass_selector) if x]
+                if not all([await self._editable_auth_selector(x) for x in selectors]):
+                    self.last_login_assessment = ls.LoginAssessment(ls.INCOMPLETE, reasons=["field_not_editable"])
+                    return False
+                if plan.user_selector and plan.pass_selector and not await self.page.locator(plan.user_selector).evaluate(
+                    "(el, pw) => pw && el !== pw && el.form === pw.form && el.type !== 'password'",
+                    await self.page.locator(plan.pass_selector).element_handle(),
+                ):
+                    self.last_login_assessment = ls.LoginAssessment(ls.INCOMPLETE, reasons=["fields_in_different_forms"])
+                    return False
+                if plan.user_selector:
+                    await self.page.fill(plan.user_selector, self.auth_user, timeout=5000)
+                if plan.pass_selector:
+                    await self.page.fill(plan.pass_selector, self.auth_pass, timeout=5000)
+                    solver = getattr(self, "mfa_solver", None)
+                    if solver is not None and solver.enabled:
+                        await solver.prime()
+                if plan.submit:
+                    await self.page.locator(plan.submit).click(timeout=5000, no_wait_after=True)
+                else:
+                    await self.page.locator(selectors[-1]).press("Enter", timeout=5000)
+                if plan.step != "username_first":
+                    break
+                # username 段が残っている間は再送しない。最大 5 秒、次の password 段を待つ。
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    next_plan = ls.locate_auth_fields(await self.get_page_source())
+                    if next_plan.step in {"password_only", "single"}:
+                        break
+                    await asyncio.sleep(.1)
+                else:
+                    self.last_login_assessment = ls.LoginAssessment(ls.INCOMPLETE, reasons=["password_step_missing"])
                     return False
 
-            from . import auth_detect as _auth
-            deadline = time.monotonic() + 15.0
-            post_url = self.page.url
-            post_body = ""
+            solver = getattr(self, "mfa_solver", None)
+            self._submitted_mfa_input = None
+            mfa_status = "not_present"
+            if solver is not None and solver.enabled:
+                mfa_status = await self._handle_mfa_challenge(success_indicator)
+                if mfa_status == "failed":
+                    self.last_login_assessment = ls.LoginAssessment(ls.CHALLENGE, reasons=["mfa_unsolved"])
+                    return False
+            deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
-                try:
-                    await self.page.wait_for_load_state("domcontentloaded", timeout=1000)
-                except Exception:
-                    pass
-                post_url = self.page.url
-                post_body = await self.get_page_source()
-                # MFA 画面に留まっている間は成功と判定しない（/mfa への遷移を誤認しない）。
-                # 送信前の実要素を追跡し、遷移先の同じ selector を別のOTP欄と誤認しない。
-                same_challenge_input = False
-                if mfa_status == "solved":
+                body = await self.get_page_source()
+                self.last_login_assessment = ls.assess_login_state(ls.LoginObservation(
+                    post_url=self.page.url, login_url=login_url, body=body,
+                    success_indicator=success_indicator, logged_in_marker=logged_in_marker,
+                    status=observation["status"], api_token_issued=observation["token"],
+                    transport_error=observation["error"] or ("ReadError" if not body else ""),
+                ))
+                # 解決した OTP の実要素が残っている場合は明示 marker よりも challenge を優先。
+                if mfa_status == "solved" and self._submitted_mfa_input is not None:
                     try:
-                        same_challenge_input = await self._submitted_mfa_input.evaluate(
-                            "el => el.isConnected && !!el.getClientRects().length")
+                        if await self._submitted_mfa_input.evaluate("el => el.isConnected && !!el.getClientRects().length"):
+                            self.last_login_assessment = ls.LoginAssessment(ls.CHALLENGE, reasons=["mfa_still_present"])
                     except Exception:
-                        pass  # ナビゲーションで破棄された要素はチャレンジの残存ではない。
-                else:
-                    same_challenge_input = bool(await self._mfa_input_selector(post_body)) if mfa_field else False
-                on_mfa = bool(mfa_field) and (
-                    same_challenge_input
-                    or (await self._visible_mfa_context() or _mfa.mfa_field_present(post_body, mfa_field))
-                )
-                # 判定は純粋関数へ集約。URL の変化だけでなく「ログインフォームが
-                # 残っていないか」「失敗文言が無いか」「ログインページから離脱したか」
-                # を併せて評価し、/login?error= のような「移動はしたが失敗」を弾く。
-                if _auth.login_succeeded(
-                    post_url=post_url,
-                    login_url=login_url,
-                    body=post_body,
-                    mfa_present=on_mfa,
-                    success_indicator=success_indicator,
-                ):
-                    self.last_login_url = post_url
+                        pass
+                self.last_login_url = self.page.url
+                if self.last_login_assessment.authenticated:
                     self.last_login_success = True
                     return True
-                await asyncio.sleep(0.25)
-            self.last_login_url = post_url
+                if self.last_login_assessment.state == ls.FAILURE:
+                    return False
+                await asyncio.sleep(.25)
             return False
-        except Exception:
+        except Exception as exc:
+            self.last_login_assessment = ls.assess_login_state(ls.LoginObservation(transport_error=type(exc).__name__))
             return False
+        finally:
+            self.network.authentication_active = False
+            self.page.remove_listener("response", observe_response)
+            self.page.remove_listener("requestfailed", observe_failure)
 
     async def _handle_mfa_challenge(self, success_indicator: str = "") -> str:
         """パスワード送信後に MFA コード入力画面が出たら自動で突破する。

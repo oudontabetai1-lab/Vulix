@@ -66,8 +66,8 @@ def test_modal_and_spa_submit_paths():
     modal = ls.locate_auth_fields(_get("/login-modal"))
     assert modal.requires_reveal and modal.submit_strategy == "enter"
     spa = ls.locate_auth_fields(_get("/spa-login"))
-    # form 外の type=button は submit ボタンにしない＝Enter 送信へ
-    assert spa.submit_strategy == "enter" and not spa.requires_reveal
+    # login 文脈の明示された SPA ボタンを使う
+    assert spa.submit_strategy == "button" and not spa.requires_reveal
     single = ls.locate_auth_fields(_get("/login"))
     assert single.submit == 'button[id="go"]' and single.submit_strategy == "button"
     assert ls.locate_auth_fields(_get("/mfa")).otp_selector == 'input[name="x1"]'
@@ -120,7 +120,7 @@ def test_api_fixture_routes_match_classification():
     async def go(path):
         transport = httpx.ASGITransport(app=fx.create_app())
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-            return (await c.post(path, json={"email": "a", "password": "b"})).json()
+            return (await c.post(path, json={"email": fx.USERNAME, "password": fx.PASSWORD})).json()
     for path in fx.API_LOGIN_ENDPOINTS:
         assert "token" in asyncio.run(go(path))
     for path in fx.API_SAFE_ENDPOINTS:
@@ -266,7 +266,7 @@ def test_explicit_success_resolves_persistent_form_without_overriding_challenges
     assert ls.assess_login_state(_obs(body=_get("/home-open-modal"), status=403, **kw)).state == ls.INCOMPLETE
     assert ls.assess_login_state(_obs(body=_get("/home-visible-captcha"), **kw)).state == ls.CHALLENGE
     no_cookie = {**kw, "auth_cookie_set": False}
-    assert ls.assess_login_state(_obs(body=_get("/home-open-modal"), **no_cookie)).state == ls.INCOMPLETE
+    assert ls.assess_login_state(_obs(body=_get("/home-open-modal"), **no_cookie)).state == ls.SUCCESS
 
 
 def test_transport_error_retains_only_known_type_names():
@@ -421,3 +421,62 @@ def test_weak_otp_requires_its_own_mfa_context(context, name):
     body = context.format('<form>' + field + '</form>' if context.startswith('<h2>') else field)
     assert ls.assess_login_state(_obs(body=body, post_url="http://t/",
                                      auth_cookie_set=True)).state == ls.CHALLENGE
+
+
+def test_empty_baseline_does_not_invent_departure():
+    result = ls.assess_login_state(ls.LoginObservation(post_url="http://t/home", api_token_issued=True))
+    assert result.state == ls.INCOMPLETE
+    assert result.evidence == ["api_token_issued"]
+
+
+@pytest.mark.parametrize("indicator,marker", [("Dashboard", "absent"), ("absent", "Dashboard")])
+def test_explicit_markers_use_or_and_override_cookie_absence(indicator, marker):
+    result = ls.assess_login_state(ls.LoginObservation(body="<h1>Dashboard</h1>",
+        success_indicator=indicator, logged_in_marker=marker, auth_cookie_set=False))
+    assert result.state == ls.SUCCESS
+    assert ls.assess_login_state(ls.LoginObservation(body="<h1>Public help</h1>",
+        success_indicator=indicator, logged_in_marker=marker)).state == ls.INCOMPLETE
+
+
+@pytest.mark.parametrize("context", ["Search", "Create account", "Reset password", "Update profile"])
+def test_identifier_without_login_context_is_not_selected(context):
+    html = f'<h1>{context}</h1><input name="identifier"><button>Next</button>'
+    assert ls.classify_surface(html).kind != ls.LOGIN
+    assert ls.locate_auth_fields(html).incomplete_reason
+
+
+def test_unnamed_submit_keeps_selected_login_control():
+    html = '<button type="button">Help</button><h1>Sign in</h1><form>' + \
+        '<input name="user"><input type="password" name="pw" autocomplete="current-password">' + \
+        '<button formaction="/register">Register</button><button>Log in</button></form>'
+    plan = ls.locate_auth_fields(html)
+    assert plan.submit == ':nth-match(button, 3)'
+    assert plan.submit_strategy == "button"
+
+
+def test_registration_input_button_is_context():
+    html = '<form><input type="email"><input type="password">' + \
+           '<input type="button" value="Sign up"></form>'
+    assert ls.classify_surface(html).kind == ls.REGISTRATION
+    assert ls.locate_auth_fields(html).incomplete_reason
+
+
+def test_authentication_capture_redacts_late_response(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from wscan.browser import NetworkCapture
+    from wscan.request_logger import RequestLogger
+    request = SimpleNamespace(url="http://t/session?opaque=private-value", method="POST",
+        headers={"Cookie": "private-cookie"}, post_data='{"f9":"private-password"}',
+        resource_type="fetch", redirected_from=None)
+    response = SimpleNamespace(request=request, url=request.url, status=200,
+        headers={"set-cookie": "private-session"}, text=AsyncMock(return_value="private-token"))
+    capture = NetworkCapture(RequestLogger(tmp_path))
+    capture.authentication_active = True
+    capture.on_request(request)
+    capture.authentication_active = False
+    capture.on_response(response)
+    asyncio.run(capture.enrich_response(response))
+    response.text.assert_not_called()
+    captured = repr(capture.pairs) + (tmp_path / "http_requests.jsonl").read_text()
+    assert "private-" not in captured

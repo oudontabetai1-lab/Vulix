@@ -7,11 +7,11 @@
 """
 from __future__ import annotations
 
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 # ローカルテスト専用の公開資格情報。
-USERNAME = "fixture-user"
+USERNAME = "fixture-user@example.test"
 PASSWORD = "fixture-password"
 
 PAGES = {
@@ -85,6 +85,34 @@ PAGES = {
 <button>Save</button></form>''',
 }
 
+# 実ブラウザ用の動作する対象と非ログインのツイン。
+PAGES.update({
+    "/signup-default-names": '<form><input name="username"><input name="password" type="password">'
+                             '<button type="button">Sign up</button></form>',
+    "/profile-default-names": '<h1>Update profile</h1><form><input name="username">'
+                              '<input name="password" type="password" autocomplete="current-password"><button>Save</button></form>',
+    "/signup-button": '<form><input type="email" name="email"><input type="password" name="pw">'
+                      '<button type="button">Sign up</button></form>',
+    "/profile": '<h1>Update profile</h1><form><input type="email" name="email">'
+                '<input type="password" name="pw" autocomplete="current-password"><button>Save</button></form>',
+    "/spa-first": '<h1>Sign in</h1><input name="identifier"><button id="next">Next</button>'
+                  '<script>next.onclick=()=>{document.body.innerHTML=`<h1>Sign in</h1>'
+                  '<form action="/do-login" method="post"><input name="user" type="hidden" value="fixture-user@example.test">'
+                  '<input name="pw" type="password"><button id="finish">Sign in</button></form>`};</script>',
+})
+PAGES["/spa-first"] += '<script>document.querySelector("input").onkeydown=e=>{if(e.key==="Enter")next.click()}</script>'
+PAGES["/login-modal"] += '<script>document.querySelector("#open").onclick=()=>document.querySelector(".modal").hidden=false</script>'
+# modal の username 名も既存 endpoint に送る。
+PAGES["/login-modal"] = PAGES["/login-modal"].replace('name="login_id"', 'name="user"')
+PAGES["/spa-login"] += '''<script>b.onclick=async()=>{
+ const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({email:u.value,password:p.value})});
+ if(r.ok){history.pushState({},'', '/home');document.body.innerHTML='<h1>Dashboard</h1><a href="/logout">Log out</a>'}
+};</script>'''
+
+PAGES["/spa-same-url"] = PAGES["/spa-login"].replace("history.pushState({},'', '/home');", "")
+PAGES["/spa-token-only"] = PAGES["/spa-same-url"].replace('<h1>Dashboard</h1><a href="/logout">Log out</a>', '<h1>API reply</h1>')
+
 # 操作できない logout 要素（logout_control の根拠にしない）と、操作可能な安全ツイン
 NON_OPERABLE_LOGOUT = {
     "disabled_button": '<h1>Dashboard</h1><button type="button" disabled>Log out</button>',
@@ -107,12 +135,13 @@ EXPECTED_SURFACES = {
     "/login": {"step": "single", "user": 'input[name="user"]', "pass": 'input[name="pw"]'},
     "/login-step1": {"step": "username_first", "user": 'input[id="email"]', "pass": ""},
     "/login-step2": {"step": "password_only", "user": "", "pass": 'input[name="pw"]'},
-    "/login-modal": {"step": "single", "user": 'input[name="login_id"]', "pass": 'input[name="pw"]'},
+    "/login-modal": {"step": "single", "user": 'input[name="user"]', "pass": 'input[name="pw"]'},
     "/spa-login": {"step": "single", "user": 'input[id="u"]', "pass": 'input[id="p"]'},
     "/mfa": {"step": "otp", "user": "", "pass": ""},
     "/login-unnamed-pw": {"step": "single", "user": 'input[name="user"]', "pass": 'input[type="password"]'},
 }
-SAFE_ENDPOINTS = {"/signup": "registration", "/forgot": "reset", "/reset-new": "reset", "/search": "search"}
+EXPECTED_SURFACES["/spa-first"] = {"step": "username_first", "user": 'input[name="identifier"]', "pass": ""}
+SAFE_ENDPOINTS = {"/signup-default-names": "registration", "/profile-default-names": "ambiguous", "/signup-button": "registration", "/profile": "ambiguous", "/signup": "registration", "/forgot": "reset", "/reset-new": "reset", "/search": "search"}
 AMBIGUOUS_ENDPOINTS = ("/two-logins", "/new-password-only")
 # login と判定できても対象欄が一意に決まらず INCOMPLETE（incomplete_reason）を返すべきページ
 UNRESOLVED_FIELD_ENDPOINTS = {"/signup-then-login": "field_not_unique:pass_selector"}
@@ -128,6 +157,12 @@ def create_app() -> FastAPI:
 
     for path, html in PAGES.items():
         app.add_api_route(path, (lambda h=html: HTMLResponse(h)), methods=["GET"])
+
+    @app.post("/identify")
+    async def identify(email: str = Form("")):
+        from html import escape
+        return HTMLResponse(PAGES["/login-step2"].replace(
+            '<input type="password"', '<input type="hidden" name="user" value="' + escape(email, quote=True) + '"><input type="password"'))
 
     @app.post("/do-login")
     async def do_login(user: str = Form(""), pw: str = Form("")):
@@ -152,8 +187,15 @@ def create_app() -> FastAPI:
     async def api_action(action: str = ""):
         return JSONResponse({"token": "fixture-token"} if action == "login" else {"ok": True})
 
+    @app.post("/api/login")
+    async def api_login(request: Request):
+        data = await request.json()
+        if data.get("email") != USERNAME or data.get("password") != PASSWORD:
+            return JSONResponse({"error": "invalid credentials"}, status_code=401)
+        return JSONResponse({"token": "fixture-token"})
+
     for path in API_LOGIN_ENDPOINTS:
-        if "?" not in path:
+        if "?" not in path and path != "/api/login":
             app.add_api_route(path, lambda: JSONResponse({"token": "fixture-token"}), methods=["POST"])
     for path in API_SAFE_ENDPOINTS:
         if "?" not in path:

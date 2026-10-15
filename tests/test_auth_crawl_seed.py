@@ -19,11 +19,11 @@ class AuthCrawlSeedTests(unittest.TestCase):
     def test_browser_waits_for_login_navigation_before_polling(self):
         text = Path("wscan/browser.py").read_text(encoding="utf-8")
         expected = (
-            "expect_navigation",
+            "deadline = time.monotonic() + 15",
             "last_login_url",
-            # 成否判定は auth_detect.login_succeeded に集約した。
+            # 成否判定は login_surface の純粋関数に集約する。
             "auth_detect",
-            "login_succeeded(",
+            "assess_login_state(",
         )
 
         for marker in expected:

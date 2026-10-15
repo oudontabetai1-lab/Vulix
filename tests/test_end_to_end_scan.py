@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+from pathlib import Path
 import os
 import socket
 import tempfile
@@ -353,3 +355,94 @@ class EndToEndSpaJsonSqlInjectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(_e2e_enabled(), "WSCAN_E2E=1 で認証の実ブラウザ検証")
+class LoginSurfaceBrowserTests(unittest.TestCase):
+    def test_single_multistep_modal_and_spa(self):
+        from tests.fixtures import login_surface_app as fx
+        from tests.test_totp_login_e2e import serving
+        from wscan.browser import BrowserManager
+        from wscan.request_logger import RequestLogger
+
+        with serving(fx.create_app()) as url, tempfile.TemporaryDirectory() as output:
+            async def exercise():
+                for path in ("/login", "/login-step1", "/login-modal", "/spa-login", "/spa-first", "/spa-same-url", "/login-explicit"):
+                    browser = BrowserManager(headless=True, auth_user=fx.USERNAME, auth_pass=fx.PASSWORD,
+                                             request_logger=RequestLogger(output))
+                    await browser.init()
+                    try:
+                        fields = {"user_field": 'input[name="user"]', "pass_field": 'input[name="pw"]'} if path == "/login-explicit" else {}
+                        self.assertTrue(await browser.auto_login(url + ("/login" if fields else path), **fields),
+                                        (path, browser.last_login_assessment))
+                        self.assertTrue(browser.last_login_success)
+                        self.assertEqual(urlparse(browser.last_login_url).path,
+                                         "/spa-same-url" if path == "/spa-same-url" else "/home")
+                        captured = json.dumps(browser.network.pairs)
+                        self.assertNotIn(fx.PASSWORD, captured)
+                        self.assertNotIn(fx.USERNAME, captured)
+                        self.assertNotIn("fixture-token", captured)
+                    finally:
+                        await browser.close()
+            asyncio.run(exercise())
+            persisted = "".join(p.read_text() for p in Path(output).glob("*.jsonl"))
+            self.assertNotIn(fx.PASSWORD, persisted)
+            self.assertNotIn(fx.USERNAME, persisted)
+            self.assertNotIn("fixture-session", persisted)
+
+    def test_nonlogin_and_ambiguous_surfaces_are_not_filled(self):
+        from tests.fixtures import login_surface_app as fx
+        from tests.test_totp_login_e2e import serving
+        from wscan.browser import BrowserManager
+        with serving(fx.create_app()) as url:
+            async def exercise():
+                browser = BrowserManager(headless=True, auth_user=fx.USERNAME, auth_pass=fx.PASSWORD)
+                await browser.init()
+                try:
+                    for path in (*fx.SAFE_ENDPOINTS, *fx.AMBIGUOUS_ENDPOINTS, "/signup-then-login"):
+                        self.assertFalse(await browser.auto_login(url + path), path)
+                        self.assertTrue(browser.last_login_assessment.reasons, path)
+                        self.assertTrue(await browser.page.locator("input").evaluate_all(
+                            "els => els.every(el => !el.value)"), path)
+                finally:
+                    await browser.close()
+            asyncio.run(exercise())
+
+    def test_mfa_challenge_is_not_success_without_solver(self):
+        from tests.fixtures import totp_login_app as fx
+        from tests.test_totp_login_e2e import serving
+        from wscan.browser import BrowserManager
+        with serving(fx.create_app()) as url:
+            async def exercise():
+                browser = BrowserManager(headless=True, auth_user=fx.USERNAME, auth_pass=fx.PASSWORD)
+                await browser.init()
+                try:
+                    self.assertFalse(await browser.auto_login(url + "/login", success_indicator="/dashboard"))
+                    self.assertEqual(browser.last_login_assessment.state, "challenge")
+                    from wscan.login_surface import locate_auth_fields
+                    plan = locate_auth_fields(await browser.get_page_source())
+                    self.assertEqual(plan.otp_selector, 'input[name="x1"]')
+                    self.assertFalse(plan.incomplete_reason)
+                finally:
+                    await browser.close()
+            asyncio.run(exercise())
+
+    def test_api_token_only_and_transport_error_are_incomplete(self):
+        from tests.fixtures import login_surface_app as fx
+        from tests.test_totp_login_e2e import serving
+        from wscan.browser import BrowserManager
+        with serving(fx.create_app()) as url:
+            async def exercise():
+                browser = BrowserManager(headless=True, auth_user=fx.USERNAME, auth_pass=fx.PASSWORD)
+                await browser.init()
+                try:
+                    self.assertFalse(await browser.auto_login(url + "/spa-token-only"))
+                    self.assertEqual(browser.last_login_assessment.state, "incomplete")
+                    self.assertEqual(browser.last_login_assessment.evidence, ["api_token_issued"])
+                    await browser.page.route("**/api/login", lambda route: route.abort())
+                    self.assertFalse(await browser.auto_login(url + "/spa-login"))
+                    self.assertEqual(browser.last_login_assessment.state, "incomplete")
+                    self.assertIn("transport_error:ConnectionError", browser.last_login_assessment.reasons)
+                finally:
+                    await browser.close()
+            asyncio.run(exercise())
