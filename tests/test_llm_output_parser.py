@@ -1,4 +1,4 @@
-"""LLM 出力パーサ（D7）のフォールバック連鎖テスト。
+"""LLM 出力パーサのフォールバック連鎖テスト。
 
 2026-08-20 の4モデルプローブで抽出失敗した形（配列内 `]`／前置き／コードフェンス／
 `<think>`）を回帰として固定する。壊れた入力は None（安全側）を守る。
@@ -66,7 +66,7 @@ class ArrayExtractionTests(unittest.TestCase):
         self.assertIsNone(extract_json_array_of_strings("[1, 2, 3]"))
 
     def test_think_inside_payload_preserved_with_prose_prefix(self):
-        # Codex #92 指摘1: prose前置き付きで payload 文字列内に <think> を含む攻撃を
+        # prose前置き付きで payload 文字列内に <think> を含む攻撃を
         # reasoning とみなして [" "] に破壊しない。
         text = 'Here are payloads:\n["<think onmouseover=alert(1)>x</think>"]'
         self.assertEqual(
@@ -75,7 +75,7 @@ class ArrayExtractionTests(unittest.TestCase):
         )
 
     def test_recovers_after_unmatched_prose_opener(self):
-        # Codex #92 r5: prose の未閉じ `[` が後続の本物を飲み込まず、次の opener から復帰。
+        # prose の未閉じ `[` が後続の本物を飲み込まず、次の opener から復帰。
         text = 'Use [ literally, then return:\n["payload"]'
         self.assertEqual(extract_json_array_of_strings(text), ["payload"])
 
@@ -84,7 +84,7 @@ class ArrayExtractionTests(unittest.TestCase):
         self.assertEqual(extract_json_object(text), {"fields": ["x"]})
 
     def test_recovers_inner_array_when_outer_chunk_invalid(self):
-        # Codex #92 r8: 閉じるが無効な外側チャンクが内側の有効配列を隠さない。
+        # 閉じるが無効な外側チャンクが内側の有効配列を隠さない。
         text = 'Use [ literally, then return ["payload"] and close ]'
         self.assertEqual(extract_json_array_of_strings(text), ["payload"])
 
@@ -93,12 +93,12 @@ class ArrayExtractionTests(unittest.TestCase):
         self.assertEqual(extract_json_array_of_strings('["a", "b"]'), ["a", "b"])
 
     def test_stray_prose_quote_before_array(self):
-        # Codex #92 指摘2: prose 中の孤立クオートで有効な配列を取り逃さない。
+        # prose 中の孤立クオートで有効な配列を取り逃さない。
         text = 'Use a literal " here:\n["a", "b"]'
         self.assertEqual(extract_json_array_of_strings(text), ["a", "b"])
 
     def test_triple_backticks_inside_payload_preserved(self):
-        # Codex #92 r3 指摘2(P2): JSON文字列内の ``` を消さない（Markdown-injection payload）。
+        # JSON文字列内の ``` を消さない（Markdown-injection payload）。
         # 改行は有効 JSON では \\n（エスケープ）である点に注意。
         text = 'Payloads: ["```\\n<script>alert(1)</script>"]'
         self.assertEqual(
@@ -114,7 +114,7 @@ class ArrayExtractionTests(unittest.TestCase):
         )
 
     def test_single_line_fence_preserved(self):
-        # Codex #92 r2 指摘2(P2): 1行フェンスの中身を空にしない。
+        # 1行フェンスの中身を空にしない。
         self.assertEqual(extract_json_array_of_strings('```json["a", "b"]```'), ["a", "b"])
         self.assertEqual(extract_json_array_of_strings('```["x"]```'), ["x"])
 
@@ -150,12 +150,12 @@ class ObjectExtractionTests(unittest.TestCase):
         self.assertEqual(extract_json_object(text), {"a": {"b": 1}})
 
     def test_stray_prose_quote_before_object(self):
-        # 指摘2 の object 版: 前置き prose の孤立クオートに影響されない。
+        # object 版でも前置き prose の孤立クオートに影響されない。
         text = 'Say " to me:\n{"page_purpose": "login"}'
         self.assertEqual(extract_json_object(text), {"page_purpose": "login"})
 
     def test_predicate_skips_unrelated_leading_object(self):
-        # Codex #92 r3 指摘1(P2): 前置きの無関係 object を飛ばし、述語に合う本命を採る。
+        # 前置きの無関係 object を飛ばし、述語に合う本命を採る。
         text = 'Metadata: {"note":"draft"}\n{"page_purpose":"login","fields":[{"name":"u"}]}'
         got = extract_json_object(text, predicate=lambda d: "fields" in d or "page_purpose" in d)
         self.assertEqual(got, {"page_purpose": "login", "fields": [{"name": "u"}]})
@@ -165,14 +165,14 @@ class ObjectExtractionTests(unittest.TestCase):
         self.assertEqual(extract_json_object(text), {"a": 1})
 
     def test_predicate_rejects_empty_fields_draft(self):
-        # Codex #92 r5: {"fields":[]} 下書きを飛ばし、非空 fields の本物を採る。
+        # {"fields":[]} 下書きを飛ばし、非空 fields の本物を採る。
         text = ('{"page_purpose":"draft","fields":[]}\n'
                 '{"page_purpose":"login","fields":[{"name":"u"}]}')
         got = extract_json_object(text, predicate=lambda d: isinstance(d.get("fields"), list) and len(d["fields"]) > 0)
         self.assertEqual(got, {"page_purpose": "login", "fields": [{"name": "u"}]})
 
     def test_predicate_requires_complete_plan_skips_partial(self):
-        # Codex #92 r4: page_purpose だけの前置き object を飛ばし、list 値 fields を持つ
+        # page_purpose だけの前置き object を飛ばし、list 値 fields を持つ
         # 完全な plan まで探索する（attack_planner の述語 semantics）。
         text = ('Metadata: {"page_purpose":"login"}\n'
                 '{"page_purpose":"login","fields":[{"name":"u"}]}')
@@ -180,7 +180,7 @@ class ObjectExtractionTests(unittest.TestCase):
         self.assertEqual(got, {"page_purpose": "login", "fields": [{"name": "u"}]})
 
     def test_ignores_draft_object_inside_think(self):
-        # Codex #92 r2 指摘1(P1): <think> 内の下書きJSONを拾わず、最終回答を採る。
+        # <think> 内の下書きJSONを拾わず、最終回答を採る。
         text = ('<think>{"page_purpose":"draft","fields":[]}</think> '
                 '{"page_purpose":"login","fields":[{"name":"user"}]}')
         self.assertEqual(

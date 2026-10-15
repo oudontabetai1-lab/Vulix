@@ -13,7 +13,7 @@ source_kind: first_party
 # 収録 check:
 #   - jwt: HS256 JWT を弱い秘密鍵 "secret" で署名して body に露出（jwt scanner が httpx で URL を直接取得し
 #          weak secret を確証。finding check_type=jwt_weak_secret は jwt ファミリに属する）。safe twin は十分長い秘密鍵。
-# 除外（gap 維持・Codex #183 P1）: csrf / info_disclosure(_check_error_page) は browser.page の DOM を読むが、
+# 除外（gap 維持）: csrf / info_disclosure(_check_error_page) は browser.page の DOM を読むが、
 #   ScanEngine._attack_one_page は scan_page(page.url) を navigation 前に呼び、入力の無いページは navigate せず
 #   return するため、宣言ページの DOM を見ない（csrf は直前ページの form を誤読して FN/FP、debug-error は FN）。
 #   engine の page-level 順序修正（scan_page 前に navigate）が入るまで benchmark_gaps.yaml に残す。

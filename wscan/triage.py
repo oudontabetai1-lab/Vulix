@@ -524,7 +524,7 @@ class TriageEngine:
                 claude_model=self.claude_model,
                 openai_base_url=self.openai_base_url,
                 role_models=self.role_models,
-                # triage の LLM 呼び出しにも設定済み timeout を効かせる（Codex #173 P2）。
+                # triage の LLM 呼び出しにも設定済み timeout を効かせる。
                 llm_timeout_seconds=getattr(self, "llm_timeout_seconds", 30.0),
             )
             if not await pg._check_llm_available():
@@ -556,7 +556,7 @@ class TriageEngine:
 
             with pg.use_role("triage"):
                 # triage の分析は散文。payload 配列パーサ（pg._call_llm→_extract_json_list）へ
-                # 通すと散文が失われ、結果欄に文字列 "None" を出していた（F08）。text 完了で
+                # 通すと散文が失われ、結果欄に文字列 "None" を出していた。text 完了で
                 # 生の分析文をそのまま得る。空応答・失敗は空欄として区別（"None" を出さない）。
                 text = await complete_text(pg, prompt, max_tokens=500, temperature=0.7)
             return text.strip() if text and text.strip() else ""

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 console = Console()
 
 # wait/click timeout の上限（秒）。無限大（1e309/"Infinity"）や巨大値で asyncio.sleep が返らず
-# スキャン全体が停止するのを防ぐ（Codex #170 P2）。
+# スキャン全体が停止するのを防ぐ。
 MAX_STEP_TIMEOUT_S = 600.0
 
 
@@ -45,7 +45,7 @@ def _parse_timeout(value) -> float:
 
 
 class FlowStepError(Exception):
-    """前提 step の失敗（対象欄・送信先の欠落等）。run() が失敗として扱う（F10）。"""
+    """前提 step の失敗（対象欄・送信先の欠落等）。run() が失敗として扱う。"""
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ class FlowStepError(Exception):
 def _click_was_dispatched(exc: Exception) -> bool:
     """Playwright の click timeout が dispatch 後（遷移待ち）で起きたかを call log から判定する純粋関数。
     actionability 段階の timeout は "performing click action" 前に発生し "click action done" /
-    "waiting for scheduled navigations" を含まない（Codex #179 P1）。"""
+    "waiting for scheduled navigations" を含まない。"""
     msg = str(exc)
     return "click action done" in msg or "scheduled navigations" in msg
 
@@ -71,10 +71,10 @@ class FlowStep:
     timeout: float = 5.0 # wait duration (s) or click timeout (s)
     # record 時の初期 redirect の実着地 URL（照合用メタデータ・実行はしない）。
     landed_url: str = ""
-    # click の相対クリック座標（座標依存要素の replay 用）。両方 None のとき要素中心 click（Codex #179）。
+    # click の相対クリック座標（座標依存要素の replay 用）。両方 None のとき要素中心 click。
     pos_x: Optional[float] = None
     pos_y: Optional[float] = None
-    # この navigate は直前の click が起こした遷移。照合用に残すが replay では実行を skip する（Codex #179）。
+    # この navigate は直前の click が起こした遷移。照合用に残すが replay では実行を skip する。
     via_click: bool = False
 
     def to_dict(self) -> dict:
@@ -97,7 +97,7 @@ class FlowStep:
         action = d.get("action", "navigate")
         timeout = _parse_timeout(d.get("timeout", 5.0))
         # Playwright は click の timeout=0 を「無制限」と解釈し、欠落/非 actionable な selector で
-        # スキャン全体が停止する。click の 0 は既定の有界値に置き換える（wait の 0 秒は許可・Codex #170 P2）。
+        # スキャン全体が停止する。click の 0 は既定の有界値に置き換える（wait の 0 秒は許可）。
         if action == "click" and timeout == 0:
             timeout = 5.0
         x, y = d.get("x"), d.get("y")
@@ -160,11 +160,11 @@ class FlowRunner:
         self.browser = browser
         # navigate 後の実着地 URL を検証するコールバック（url->bool、in-scope なら True）。
         # browser.navigate は redirect を追従し最終応答で成功を返すため、静的な step-URL 検査だけ
-        # では scope 外へ redirect した先で fill/click が走るのを防げない（Codex #170 P2）。
+        # では scope 外へ redirect した先で fill/click が走るのを防げない。
         self._scope_check = scope_check
 
     def _assert_landing_in_scope(self) -> None:
-        """直近の action 後の実着地 URL を scope 検証する（navigate/submit/click 共通・#170 P2）。
+        """直近の action 後の実着地 URL を scope 検証する（navigate/submit/click 共通）。
 
         submit/click も redirect や JS 遷移で scope 外/除外へ着地し得るため、静的 step 検査では
         検知できない runtime landing をここで弾き、その先で後続の fill/click を走らせない。
@@ -210,21 +210,21 @@ class FlowRunner:
 
         # 直前の action が非同期遷移を起こし、その後の wait 中に scope 外/除外へ着地した状態で
         # fill/click/submit を実行しないよう、対話 step の**着手前**に現在 URL を再検証する
-        # （click 直後だけの検査では遅延遷移＋wait を取りこぼす・Codex #170 P2）。
+        # （click 直後だけの検査では遅延遷移＋wait を取りこぼす）。
         if step.action in ("fill", "click", "submit"):
             self._assert_landing_in_scope()
 
         if step.action == "navigate":
             from wscan import url_scope
             if step.via_click and url_scope.same_page(getattr(self.browser.page, "url", ""), step.url):
-                # 直前 click が記録先へ既に遷移済みなので再ロードしない（二重ロード防止・Codex #179）。
-                # 未到達（click が skip/非遷移）なら下で通常 navigate する（fallback・Codex #179 P1）。
+                # 直前 click が記録先へ既に遷移済みなので再ロードしない（二重ロード防止）。
+                # 未到達（click が skip/非遷移）なら下で通常 navigate する（fallback）。
                 # 照合には last navigate step の URL を使うので step 自体は残す。
                 console.print(f"  [dim]{label} navigate (click 起因・skip) → {escape(step.url)}[/dim]")
                 return
             console.print(f"  [dim]{label} navigate → {escape(step.url)}[/dim]")
             # navigate は 4xx/timeout で False を返す（例外は投げない）。破棄すると失敗した
-            # 遷移を成功扱いし、前提未達のまま後続/攻撃へ進む（F10・Codex #167 P1）。
+            # 遷移を成功扱いし、前提未達のまま後続/攻撃へ進む。
             if not await self.browser.navigate(step.url):
                 raise FlowStepError(f"navigate failed (non-OK response/timeout): {step.url}")
             self._assert_landing_in_scope()
@@ -232,7 +232,7 @@ class FlowRunner:
         elif step.action == "fill":
             # record が保存する fill step は CSS selector（`#id` / `[name="x"]`）を持つ。
             # selector があればそれを優先し、無ければ field(name/id)から組み立てる。これで
-            # record→scan --flows の再生が実際に効く（click と対称・F09）。
+            # record→scan --flows の再生が実際に効く（click と対称）。
             ident = step.selector or step.field
             filled = await self.browser.page.evaluate(
                 """([sel, f, v]) => {
@@ -249,7 +249,7 @@ class FlowRunner:
                         el = find(sel);
                         // 未エスケープの id セレクタ（`#user:name` 等）は querySelector が
                         // pseudo-class と誤解釈して throw/null になる。`#id` を属性セレクタで
-                        // 再試行して既存の記録でも解決する（#170 P2）。
+                        // 再試行して既存の記録でも解決する。
                         if (!el && sel[0] === '#')
                             el = find('[id="' + sel.slice(1).replace(/"/g, '\\\\"') + '"]');
                     } else {
@@ -260,7 +260,7 @@ class FlowRunner:
                     // 旧記録は checkbox/radio も fill(value) で保存する。value は checked を符号化
                     // しない（未チェックでも value は "on"/value属性のまま）ため、明示的な真偽トークン
                     // だけを信頼し、それ以外は checked と仮定しつつ ambiguous を返して呼び出し側で
-                    // 警告する（黙ってチェック状態を反転させない・Codex #170 P2）。現行 record は
+                    // 警告する（黙ってチェック状態を反転させない）。現行 record は
                     // checkbox/radio を click で記録するのでこの曖昧さは生じない。
                     let ambiguous = false;
                     if (el.type === 'checkbox' || el.type === 'radio') {
@@ -271,7 +271,7 @@ class FlowRunner:
                                                 || low === 'checked' || low === 'yes');
                         // React 等の controlled input は value tracker を持ち、el.checked/el.value の
                         // 直接代入だと onChange が「変化なし」と判断して state を更新しない。prototype の
-                        // native setter 経由で設定してから event を送る（Codex #170 P2）。
+                        // native setter 経由で設定してから event を送る。
                         setNative(el, 'checked', !falsy);
                         ambiguous = !falsy && !truthyExplicit;
                     } else {
@@ -289,18 +289,18 @@ class FlowRunner:
             ambiguous = filled.get("ambiguous") if isinstance(filled, dict) else False
             sensitive = filled.get("sensitive") if isinstance(filled, dict) else False
             if not ok:
-                # 存在しない欄への fill を成功扱いにすると前提の欠落を見逃す（F10）。
+                # 存在しない欄への fill を成功扱いにすると前提の欠落を見逃す。
                 raise FlowStepError(f"fill target not found: {ident!r}")
             # 平文パスワードを console/CI ログへ出さない。recorder は input type を保存しないため、
             # replay 時に実要素の type=password（sensitive）で判定し、加えて secret 系識別子も伏せる
-            # （selector 文字列だけの判定では type=password で id が中立な欄を漏らす・Codex #170 P2）。
+            # （selector 文字列だけの判定では type=password で id が中立な欄を漏らす）。
             masked = sensitive or any(
                 p in ident.lower()
                 for p in ("password", "passwd", "pass", "pwd", "secret")
             )
             display_val = "***" if masked else step.value
             # 記録値/selector に Rich markup（`[/admin]` 等）が含まれても MarkupError で fill 成功後に
-            # 前提失敗扱いにならないよう escape する（Codex #170 P2）。
+            # 前提失敗扱いにならないよう escape する。
             console.print(f"  [dim]{label} fill \\[{escape(ident)}] = {escape(display_val[:40])}[/dim]")
             if ambiguous:
                 # 旧記録の checkbox/radio は真の checked を値から復元できない。checked と仮定した
@@ -316,7 +316,7 @@ class FlowRunner:
             clicked = await self.browser.page.evaluate(
                 """(sel) => {
                     // record が Enter 送信等で保存した form selector があればその form を送信する。
-                    // requestSubmit は submit event を発火するので SPA の submit handler も動く（Codex #170 P2）。
+                    // requestSubmit は submit event を発火するので SPA の submit handler も動く。
                     if (sel) {
                         let form = null;
                         try { form = document.querySelector(sel); } catch (e) { form = null; }
@@ -337,7 +337,7 @@ class FlowRunner:
                 step.selector,
             )
             if not clicked:
-                # 送信ボタン/フォームが無いのに成功扱いすると後続を誤って進める（F10 同型）。
+                # 送信ボタン/フォームが無いのに成功扱いすると後続を誤って進める。
                 raise FlowStepError("submit target not found (no submit button or form)")
             try:
                 await self.browser.page.wait_for_load_state(
@@ -351,7 +351,7 @@ class FlowRunner:
             sel = step.selector or step.field
             console.print(f"  [dim]{label} click \\[{escape(sel)}][/dim]")
             # 座標依存要素（canvas・offsetX/offsetY を使う div 等）は記録した相対座標で click する。
-            # 無記録なら要素中心（従来動作）。ceiling: 記録後に要素が大きく変形すると座標が外れ得る（Codex #179）。
+            # 無記録なら要素中心（従来動作）。ceiling: 記録後に要素が大きく変形すると座標が外れ得る。
             click_kw = (
                 {"position": {"x": step.pos_x, "y": step.pos_y}}
                 if step.pos_x is not None and step.pos_y is not None
@@ -364,15 +364,15 @@ class FlowRunner:
                 # Playwright の actionability 検査を通らない場合（非表示の実体・overlay に隠れる・
                 # 遷移で消えた等）は、file input skip-notify や非表示 label→input の方針とそろえ、
                 # notify した上で当該ステップを skip する。前提操作が1つ抜けても flow 全体は落とさず
-                # 後続手順とページ検査を継続する（vault 0078）。
+                # 後続手順とページ検査を継続する（vault）。
                 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
                 if not isinstance(exc, PlaywrightTimeoutError):
                     # selector 構文不正、page/browser close、transport failure 等まで成功扱いすると、
-                    # 必須の前提操作を欠いた状態で scan/checkpoint を進めてしまう（Codex #179 P1）。
+                    # 必須の前提操作を欠いた状態で scan/checkpoint を進めてしまう。
                     raise FlowStepError(f"click failed for {sel!r}: {exc}") from exc
                 if _click_was_dispatched(exc):
                     # click 自体は発火済みで、後続の遷移待ちが timeout しただけ。actionability skip
-                    # ではないので握り潰さず、下の load-state / scope 検査へ進める（Codex #179 P1）。
+                    # ではないので握り潰さず、下の load-state / scope 検査へ進める。
                     console.print(f"  [yellow]{label} click 後の遷移待ち timeout（続行）[/yellow]")
                 else:
                     try:
@@ -381,7 +381,7 @@ class FlowRunner:
                         raise FlowStepError(f"click target inspection failed for {sel!r}: {inspect_exc}") from inspect_exc
                     if target_count == 0:
                         # 「存在するが overlay/非表示で actionability を満たさない」場合だけ skip 可。
-                        # 対象自体の欠落は必須前提の欠落なので F10 と同様に flow を失敗させる。
+                        # 対象自体の欠落は必須前提の欠落なので と同様に flow を失敗させる。
                         raise FlowStepError(f"click target not found: {sel!r}") from exc
                     console.print(
                         f"  [yellow]{label} click \\[{escape(sel)}] skip"
@@ -399,10 +399,10 @@ class FlowRunner:
         elif step.action == "wait":
             console.print(f"  [dim]{label} wait {step.timeout}s[/dim]")
             await asyncio.sleep(step.timeout)
-            # wait 中に遅延遷移で scope 外へ着地していないか検証する（Codex #170 P2）。
+            # wait 中に遅延遷移で scope 外へ着地していないか検証する。
             self._assert_landing_in_scope()
 
         else:
             # 不明アクション（タイプミス等）を skip して flow を成功扱いにすると、前提未達のまま
-            # 誤った状態で検査してしまう。失敗として扱い run() を False にする（F10 と同型・#170 P2）。
+            # 誤った状態で検査してしまう。失敗として扱い run() を False にする。
             raise FlowStepError(f"unknown flow action: {step.action!r}")

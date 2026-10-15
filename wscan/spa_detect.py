@@ -21,8 +21,8 @@ class SpaInfo:
 
 
 # アプリバンドルらしい script src の痕跡（ハッシュ付きファイル名 / 既知の SPA アセット
-# ディレクトリ / 既知のバンドル語）。analytics.js 等の無関係 script を bundle 扱いしない
-# （Codex #104 P2）。_scan_markup が実 <script> の src 値に対して用いる。
+# ディレクトリ / 既知のバンドル語）。analytics.js 等の無関係 script を bundle 扱いしない。
+# _scan_markup が実 <script> の src 値に対して用いる。
 _BUNDLE_HINT_RE = re.compile(
     r"(?:/_next/|/_nuxt/|/assets/|/static/js/|/build/|/dist/"
     r"|[.-][0-9a-f]{6,}\.m?js(?:$|[?#])"
@@ -34,7 +34,7 @@ _BUNDLE_HINT_RE = re.compile(
 # 実行される インライン <script> の本文だけを連結する。JS 式マーカー
 # （self.__next_f / window.__NUXT__ / React.createElement 等）を HTML 全体で探すと、
 # <code>/<pre> の表示テキストや、type="text/plain"/"application/json" のデータブロックで
-# 誤検出する。ブラウザが実行する type だけに限定する（Codex #104 P2）。外部 script
+# 誤検出する。ブラウザが実行する type だけに限定する。外部 script
 # （<script src=…></script>）は本文が空なので寄与しない。
 # 実行可能な script type（未指定は JS 扱い）。text/plain・application/json・importmap・
 # speculationrules・application/ld+json 等の非実行データブロックは除外する。
@@ -48,7 +48,7 @@ _EXECUTABLE_SCRIPT_TYPES = frozenset({
 # これらは式を終えられないトークンなので後続の `/` は除算ではない。識別子/`)`/`]`/数字/
 # 文字列の後の `/` は除算として扱う（誤って regex 認定して実コードを飲み込まない）。
 _REGEX_PRECEDERS = frozenset("([{,;:=!&|?+-*%^~<>")
-# 直前トークンがこれらのキーワードなら次の `/` は正規表現（return /re/ 等・Codex #104 P2）。
+# 直前トークンがこれらのキーワードなら次の `/` は正規表現（return /re/ 等）。
 _REGEX_KEYWORDS = frozenset({
     "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
     "throw", "yield", "await", "case", "do", "else",
@@ -60,8 +60,8 @@ def _strip_js_strings_comments(js: str) -> str:
 
     実行 script の文字列/コメント/正規表現内に置かれた framework 構文
     （const x = "self.__next_f.push([])" / // self.__next_f… / const m = /self.__next_f/）を
-    実行式と誤認しない（Codex #104 P2）。regex と除算は直前の有意トークン（記号 or キーワード）で
-    区別する（return /re/ 等のキーワード後も regex 認定・Codex #104 P2）。
+    実行式と誤認しない。regex と除算は直前の有意トークン（記号 or キーワード）で
+    区別する（return /re/ 等のキーワード後も regex 認定）。
     """
     out: list[str] = []
     i, n = 0, len(js)
@@ -131,7 +131,7 @@ def _script_bodies(source: str) -> str:
     """実行される（コメント/inert コンテナの外の）top-level script 本文を連結する。
 
     ``<!-- <script>…</script> -->`` や ``<template><script>…</script></template>`` の
-    script はブラウザが実行しないので除外する（Codex #104 P2）。コメントは飛ばし、inert
+    script はブラウザが実行しないので除外する。コメントは飛ばし、inert
     コンテナ（template/noscript 等）は ``_find_inert_end`` でサブツリー丸ごと飛ばして、その中の
     script は収集しない。top-level の実行可能 type の script のみ本文を集める。
     """
@@ -150,10 +150,10 @@ def _script_bodies(source: str) -> str:
             close_start, close_end = _find_inert_end(source, name, e)
             if name == "script":
                 # 外部 script（src あり）は本文が実行されず外部リソースが走るので、
-                # 本文の JS 式マーカーは収集しない（Codex #104 P2）。
+                # 本文の JS 式マーカーは収集しない。
                 # type は属性を引用を尊重してパースし、MIME の essence（; 以降の
                 # パラメータを除いた本体）で比較する。text/javascript; charset=utf-8 の
-                # ような実行可能 type を除外しない（Codex #104 P2）。
+                # ような実行可能 type を除外しない。
                 stype = (_get_attr(text, "type") or "").split(";", 1)[0].strip().lower()
                 # src 属性が「存在」すれば（src="" や bare src も含む）本文は実行されない。
                 if not _has_attr(text, "src") and stype in _EXECUTABLE_SCRIPT_TYPES:
@@ -167,12 +167,12 @@ def _script_bodies(source: str) -> str:
 # markup マーカー（<app-root> / data-reactroot / id="…" / 空マウント / script src 等）を
 # 判定する前に、実際にはレンダリングされない inert 領域を無害化する。コメントや
 # <template>・<script>・<style> の本文に置かれた例（<!-- <app-root> --> や
-# var x="<app-root>"）で SPA 誤判定しないため（Codex #104 P2）。タグ自体は残す（script の
+# var x="<app-root>"）で SPA 誤判定しないため。タグ自体は残す（script の
 # src/id 属性は markup マーカーとして使うため）。React SSR コメント <!--$--> は別途 raw source で
 # 判定するのでここでコメントを消しても影響しない。
 # iframe の fallback body や xmp/noembed/noframes の本文はブラウザが実行/レンダリング
 # せず、中の <script> も実行しない。これらを inert に含めないと _script_bodies が中の
-# マーカーを拾い、inert 領域の早期 close にもなる（Codex #104 P2）。
+# マーカーを拾い、inert 領域の早期 close にもなる。
 _INERT_TAGS = (
     "template", "script", "style", "noscript", "textarea", "title",
     "iframe", "xmp", "noembed", "noframes",
@@ -182,7 +182,7 @@ _RAWTEXT_TAGS = (
     "script", "style", "textarea", "title", "iframe", "xmp", "noembed", "noframes",
 )
 # HTML コメント。終端 --> が欠落（truncated/malformed 応答）した場合、コメントは
-# EOF まで継続する。未終端でも残り全体を「コメント内容」として扱う（Codex #104 P2）。
+# EOF まで継続する。未終端でも残り全体を「コメント内容」として扱う。
 _COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", flags=re.S)
 
 _TAG_NAME_RE = re.compile(r"/?([a-zA-Z][\w:-]*)")
@@ -196,7 +196,7 @@ def _next_tag(source: str, pos: int):
 
     ``(kind, name, tag_text, start, end)``。kind は "starttag"/"endtag"/"comment"。
     開始タグの終端 ``>`` を探すとき引用属性値内の ``>`` や ``<`` を跨がないので、
-    ``<div title="<script>…">`` の属性値内 ``<script>`` を実タグと誤認しない（Codex #104 P2）。
+    ``<div title="<script>…">`` の属性値内 ``<script>`` を実タグと誤認しない。
     未終端コメントは EOF まで。タグでない ``<`` は読み飛ばす。見つからなければ None。
     """
     n = len(source)
@@ -245,8 +245,8 @@ def _has_attr(tag_text: str, name: str) -> bool:
     """開始タグに属性 ``name`` が**存在**するか（値の有無に関わらず）。
 
     ``_get_attr`` は欠落と ``src=""``/bare ``src`` を同じ falsy で返すが、ブラウザは
-    ``src`` 属性があれば外部 script として本文を無視する。presence を値と別に判定する
-    （Codex #104 P2）。引用属性値を先に除去し、値の中の ``src=`` を誤検出しない。
+    ``src`` 属性があれば外部 script として本文を無視する。presence を値と別に判定する。
+    引用属性値を先に除去し、値の中の ``src=`` を誤検出しない。
     """
     stripped = re.sub(r"\"[^\"]*\"|'[^']*'", "", tag_text)
     return re.search(
@@ -260,7 +260,7 @@ _MOUNT_IDS = ("root", "app", "__next", "__nuxt")
 def _scan_markup(markup: str) -> dict:
     """markup（inert 除去済み）を実開始タグ単位で走査し、タグ/属性ベースの SPA マーカーを
     集める。引用属性値内のタグ形テキスト（<div title='<script id="__NEXT_DATA__">'> 等）を
-    実タグ/実属性と誤認しない（Codex #104 P2）。"""
+    実タグ/実属性と誤認しない。"""
     sig = {
         "app_root": False, "ids": set(), "empty_mount_ids": set(),
         "ng_app": False, "ng_version": False, "nghost": False, "ngcontent": False,
@@ -300,7 +300,7 @@ def _scan_markup(markup: str) -> dict:
         if name in _INERT_TAGS:
             # <template>/<noscript>/<style>/<textarea>/<title> の開始タグは
             # レンダリングされる framework 要素ではないので、その id/属性を mount /
-            # framework マーカーにしない（<template id="__next"> 等・Codex #104 P2）。
+            # framework マーカーにしない（<template id="__next"> 等）。
             continue
         # 属性「名」だけを見るため引用属性値を除去（値内の擬似属性を無視）。
         names_only = re.sub(r"\"[^\"]*\"|'[^']*'", "", text)
@@ -338,7 +338,7 @@ def _find_inert_end(source: str, tag: str, start: int) -> tuple[int, int]:
 
     template/noscript のような**parsed-content**要素では、コメント（``<!-- </template> -->``）や
     入れ子の raw-text 要素（``<script>"</template>"</script>``）の中に現れる ``</tag>`` テキストを
-    実 close と誤認しないよう、それらのサブツリーを飛ばして同名タグの深さを数える（Codex #104 P2）。
+    実 close と誤認しないよう、それらのサブツリーを飛ばして同名タグの深さを数える。
     raw-text 要素（script/style/textarea/title）自身の本文はリテラルなので、最初の ``</tag>`` が close。
     見つからなければ ``(len, len)``（末尾まで inert 扱い）。
     """
@@ -350,7 +350,7 @@ def _find_inert_end(source: str, tag: str, start: int) -> tuple[int, int]:
         m = re.compile(rf"</{re.escape(tag)}\s*>", flags=re.I).search(source, start)
         return (m.start(), m.end()) if m else (n, n)
     # parsed-content（template/noscript）: 引用尊重の _next_tag で実タグだけを歩き、
-    # 引用属性値内の </template> 等を実 close と誤認しない（Codex #104 P2）。コメントは
+    # 引用属性値内の </template> 等を実 close と誤認しない。コメントは
     # 飛ばし、入れ子 raw-text サブツリーは丸ごと飛ばし、同名タグの深さを数える。
     depth = 1
     pos = start
@@ -382,7 +382,7 @@ def _strip_inert_elements(source: str) -> str:
 
     <template> や script 文字列の中にある markup 例（<app-root> や <!--$-->）は
     レンダリングされないので、それらの本文を無害化した版で markup / React SSR マーカーを
-    探す（Codex #104 P2）。**ネスト対応**: 同名 inert 要素の深さを数え、外側の閉じタグ
+    探す。**ネスト対応**: 同名 inert 要素の深さを数え、外側の閉じタグ
     まで（内側の inert サブツリー丸ごと）を空にする。非貪欲 regex では
     ``<template><template></template><app-root></app-root></template>`` の内側 close で
     止まり <app-root> が残るため、手続き的に走査する（別々の inert ブロック間の実コンテンツは
@@ -400,13 +400,13 @@ def _strip_inert_elements(source: str) -> str:
         kind, name, text, s, e = tk
         result.append(source[pos:s])  # タグ前のテキストは残す
         # コメントはそのまま残す（コメント内の <template> 等を live opener と誤認して
-        # 以降を破棄すると後続の実 SPA マーカーを見逃す・Codex #104 P2）。
+        # 以降を破棄すると後続の実 SPA マーカーを見逃す）。
         if kind == "comment":
             result.append(text)
             pos = e
             continue
         # 非 inert タグ（開始/終了）は属性値ごと丸ごと残す。属性値内の擬似 <template>
-        # 等を見ないので、_next_tag が引用を尊重して跨いでいる（Codex #104 P2）。
+        # 等を見ないので、_next_tag が引用を尊重して跨いでいる。
         if kind != "starttag" or name not in _INERT_TAGS:
             result.append(text)
             pos = e
@@ -461,16 +461,16 @@ def detect_spa(html: str) -> SpaInfo:
     source = html or ""
     # JS 式マーカーは表示テキスト誤検出を避けるため script 本文だけで探す。さらに JS の
     # 文字列/コメントを除去し、"self.__next_f…" のような文字列/コメント内の構文を
-    # 実行式と誤認しない（Codex #104 P2）。
+    # 実行式と誤認しない。
     scripts = _strip_js_strings_comments(_script_bodies(source))
     # inert 要素（template/script/style 等）の本文を空にした版（コメントは残す）。
-    # React SSR コメント <!--$--> は inert 内では無効なのでこの版で探す（Codex #104 P2）。
+    # React SSR コメント <!--$--> は inert 内では無効なのでこの版で探す。
     noninert = _strip_inert_elements(source)
     # markup マーカーは inert 領域（コメント/<template>/<script>本文等）を無害化した
-    # 版で探す。<!-- <app-root> --> や var x="<app-root>" で誤判定しない（Codex #104 P2）。
+    # 版で探す。<!-- <app-root> --> や var x="<app-root>" で誤判定しない。
     markup = _COMMENT_RE.sub(" ", noninert)
     # markup のタグ/属性マーカーは実開始タグ単位で評価し、引用属性値内のタグ形テキストを
-    # 実タグと誤認しない（Codex #104 P2）。
+    # 実タグと誤認しない。
     tags = _scan_markup(markup)
 
     angular_signals: list[str] = []
@@ -484,7 +484,7 @@ def detect_spa(html: str) -> SpaInfo:
         angular_signals.append("_nghost")
     if tags["ngcontent"]:
         angular_signals.append("_ngcontent")
-    # window.ng は JS 式なので script 本文に限定する（Codex #104 P2）。
+    # window.ng は JS 式なので script 本文に限定する。
     if re.search(r"\bwindow\s*\.\s*ng\b", scripts):
         angular_signals.append("window.ng")
     if angular_signals:
@@ -493,7 +493,7 @@ def detect_spa(html: str) -> SpaInfo:
     next_signals: list[str] = []
     # __NEXT_DATA__ は <script id="__NEXT_DATA__" type="application/json"> として
     # 出力される。実 <script> の id 属性として照合する（表示テキストや属性値内の
-    # タグ形テキストで誤検出しない・Codex #104 P2）。
+    # タグ形テキストで誤検出しない）。
     if tags["next_data_script"]:
         next_signals.append("__NEXT_DATA__")
     if "__next" in tags["ids"]:
@@ -501,7 +501,7 @@ def detect_spa(html: str) -> SpaInfo:
     # App Router（RSC）は __NEXT_DATA__ も id="__next" も出さず、
     # self.__next_f.push(...) のブートストラップだけを吐くことがある。裸の
     # __next_f トークンや <code>self.__next_f.push(...)</code> の表示テキストで誤検出
-    # しないよう、script 本文中の実行式（.push / 代入 / ||）に限定する（Codex #104 P2）。
+    # しないよう、script 本文中の実行式（.push / 代入 / ||）に限定する。
     if re.search(
         r"\bself\s*\.\s*__next_f\s*(?:\.\s*push\b|=|\|\|)", scripts
     ):
@@ -515,7 +515,7 @@ def detect_spa(html: str) -> SpaInfo:
     # SSR / RSC / Suspense の React 固有コメントマーカー（<!--$-->, <!--/$-->,
     # <!--$?-->, <!--$!-->）。hydration 済みで id="root" に内容がある本番 React
     # （空マウント fallback に載らない）でも、これらは React 特有で誤検出しにくい
-    # （Codex #104 P1・SSR/Next の本番 React を拾う）。
+    # （SSR/Next の本番 React を拾う）。
     if re.search(r"<!--/?\$[?!]?-->", noninert):
         react_signals.append("react-ssr-marker")
     react_root = "root" in tags["ids"] or "app" in tags["ids"]
@@ -532,12 +532,12 @@ def detect_spa(html: str) -> SpaInfo:
     vue_signals: list[str] = []
     nuxt_marker = False
     # Nuxt 2 は window.__NUXT__={...} を吐く。裸トークン一致だと解説記事等の表示
-    # テキストで誤検出するため、window.__NUXT__ の実行式に限定する（Codex #104 P2）。
+    # テキストで誤検出するため、window.__NUXT__ の実行式に限定する。
     if re.search(r"\bwindow\s*\.\s*__NUXT__\b", scripts):
         vue_signals.append("window.__NUXT__")
         nuxt_marker = True
     # Nuxt 3 は <script id="__NUXT_DATA__" type="application/json"> / id="__nuxt" /
-    # data-nuxt-data を吐く。実 <script> の id 属性/実タグで照合する（Codex #104 P2）。
+    # data-nuxt-data を吐く。実 <script> の id 属性/実タグで照合する。
     if tags["nuxt_data_script"]:
         vue_signals.append("__NUXT_DATA__")
         nuxt_marker = True

@@ -32,7 +32,7 @@ class _VerifyOneEngine:
 
 class _PhaseVerifyEngine:
     _phase_verify = ScanEngine._phase_verify
-    _profile = ScanEngine._profile  # WSCAN_PROFILE 計測（既定 no-op・F06/0059）
+    _profile = ScanEngine._profile  # WSCAN_PROFILE 計測（既定 no-op）
     _VERIFIABLE_CHECKS = {"sqli"}
 
     def __init__(self, findings, states):
@@ -67,7 +67,7 @@ class VerificationStateTests(unittest.IsolatedAsyncioTestCase):
     async def _run_fallback_engine(self, mode):
         # scanner verify が失効/transport 失敗で None を返しても、_verify_one は既定で
         # フォールバック再送し 401/空応答を評価して "unreproduced" にしてしまう。json の
-        # 失効/transport 失敗時は terminal な "assumed"（penalize しない）にする（Codex #99 R6）。
+        # 失効/transport 失敗時は terminal な "assumed"（penalize しない）にする。
         # ハーネスは**フォールバックが実際に走る**よう browser 等を備え、fix 無しなら
         # unreproduced を返す（＝有効な回帰テスト）。
         import re as _re
@@ -125,7 +125,7 @@ class VerificationStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_verify_one_false_result_with_transport_failure_is_assumed(self):
         # scanner verify が transport 失敗時に False を返す経路（error-based の空 body・
         # boolean の空 baseline 等）でも、flag が立っていれば結果値より前に assumed にする
-        # （「検証リクエストが失敗しただけ」で unreproduced に誤格下げしない。Codex #99 R7）。
+        # （「検証リクエストが失敗しただけ」で unreproduced に誤格下げしない。）。
         class _FalseWithFailScanner:
             def __init__(self, engine):
                 self.engine = engine
@@ -184,7 +184,7 @@ class VerificationStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_phase_verify_bounds_hanging_verify_one(self):
         # 1 件の _verify_one が返らなくても verify フェーズは有界時間で完了し、その finding は
-        # "skipped"（未検証・要手動確認）として保持される（reproduced に上げない・削除しない）。F06/0059。
+        # "skipped"（未検証・要手動確認）として保持される（reproduced に上げない・削除しない）。
         import asyncio
         from unittest.mock import patch
         import wscan.engine as engine_mod
@@ -218,7 +218,7 @@ class VerifyBudgetTests(unittest.IsolatedAsyncioTestCase):
     async def test_verify_budget_derives_from_request_timeout(self):
         # verify 上限は固定 180s ではなく request timeout×6 を確保するので、小さく patch した
         # _VERIFY_ONE_TIMEOUT_S を超える所要でも browser.timeout 由来の budget 内なら
-        # 完了して skipped にならない（#171 P2）。
+        # 完了して skipped にならない。
         import asyncio
         from unittest.mock import patch
         import wscan.engine as engine_mod

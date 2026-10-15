@@ -835,7 +835,7 @@ class MonitorServer:
                     openai_base_url=_ac_base,
                     role_models=cfg.get("role_models", {}) or {},
                     # 選択/設定済み one-shot timeout を尊重する。空・不正値は PayloadGenerator の
-                    # 正規化で既定に落ちる（Codex #173 P2）。
+                    # 正規化で既定に落ちる。
                     llm_timeout_seconds=cfg.get("llm_timeout_seconds"),
                 )
                 result = await generate_from_description(gen, description)
@@ -862,7 +862,7 @@ class MonitorServer:
             except Exception:
                 return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
-            # 入力型を開始前に検証する（F07）。body/config が dict でない（`[]` 等）、url が
+            # 入力型を開始前に検証する。body/config が dict でない（`[]` 等）、url が
             # 非文字列（数値等）だと、以前は `.get` の AttributeError で 500、または受理後に
             # 非同期例外になっていた。型不正は 4xx で明示的に拒否する。
             if not isinstance(body, dict):
@@ -953,7 +953,7 @@ class MonitorServer:
         async def api_scan_results():
             """findings + metadata をまとめて返す (CI/CD パイプライン用)。
 
-            件数は confirmed(verified) のみを脆弱性として数える（ADR-0015 D3）。
+            件数は confirmed(verified) のみを脆弱性として数える。
             findings 配列は未確証も含めて全件返し、verification_state で区別する。
             """
             from wscan.scanners.base import finding_dict_confirmed
@@ -1530,7 +1530,7 @@ class MonitorServer:
                 min_severity=cfg["min_severity"],
                 notify_complete=cfg["notify_complete"],
             )
-            # 完了サマリーは confirmed(verified) のみを脆弱性として数える（ADR-0015 D3）。
+            # 完了サマリーは confirmed(verified) のみを脆弱性として数える。
             from wscan.scanners.base import finding_dict_confirmed
             confirmed = [f for f in self.api_findings if finding_dict_confirmed(f)]
             sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}

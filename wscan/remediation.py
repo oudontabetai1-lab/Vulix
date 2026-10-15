@@ -284,7 +284,7 @@ async def _call_llm_raw(payload_gen: "PayloadGenerator", prompt: str) -> str | N
 
     # remediation は report フェーズの生成呼び出し。role を付けないと llm_calls.jsonl で role が
     # 空・caller が汎用 complete_text になり、report 由来の多数の呼び出しを他と区別できず
-    # role 別レイテンシ内訳が崩れる。report role で囲んで属性付けする（Codex #172 P2）。
+    # role 別レイテンシ内訳が崩れる。report role で囲んで属性付けする。
     use_role = getattr(payload_gen, "use_role", None)
     ctx = use_role("report") if callable(use_role) else nullcontext()
     with ctx:

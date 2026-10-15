@@ -1,8 +1,8 @@
-"""試行台帳（D5）と G1/G2/G3 配線のテスト。
+"""試行台帳と、その記録・履歴受け渡し配線のテスト。
 
 - 純粋関数（attempt_from_pair / format_history_for_prompt / AttemptLedger）は
   ブラウザ非依存で高速検証。
-- _apply_ip 経由の記録（G2）と get_payloads→generate への履歴受け渡し（G1）は
+- _apply_ip 経由の記録と get_payloads→generate への履歴受け渡しは
   MockTransport / スタックで配線を確認。
 """
 import json
@@ -63,7 +63,7 @@ class AttemptFromPairTests(unittest.TestCase):
 
 
 class ResponseBodyPreferenceTests(unittest.TestCase):
-    """Codex #91 指摘2: 反射/長さは DOM(source) でなく HTTP 応答本文を優先。"""
+    """反射/長さは DOM(source) でなく HTTP 応答本文を優先。"""
 
     def test_prefers_response_body_over_dom_source(self):
         # DOM(source) は payload を正規化して反射しているが、実 HTTP 本文には無い場合、
@@ -89,7 +89,7 @@ class ResponseBodyPreferenceTests(unittest.TestCase):
 
 
 class UniquePayloadsTests(unittest.TestCase):
-    """Codex #91 指摘3: 台帳 payload を順序保持で重複除去（truncation前）。"""
+    """台帳 payload を順序保持で重複除去（truncation前）。"""
 
     def test_order_preserving_dedup_and_excludes_already(self):
         attempts = [
@@ -189,7 +189,7 @@ class FormatHistoryTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# G2: _apply_ip 経由で台帳へ記録される
+# _apply_ip 経由で台帳へ記録される
 # ---------------------------------------------------------------------------
 class _Engine:
     def __init__(self, transport):
@@ -262,7 +262,7 @@ class ApplyIpRecordsTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# G1: get_payloads が台帳履歴を generate へ渡す
+# get_payloads が台帳履歴を generate へ渡す
 # ---------------------------------------------------------------------------
 class _CapturingPayloadGen:
     def __init__(self):
@@ -371,7 +371,7 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Codex #91 r3: checkpoint 永続化（resume で adaptive 履歴を失わない）
+# checkpoint 永続化（resume で adaptive 履歴を失わない）
 # ---------------------------------------------------------------------------
 class LedgerSerializationTests(unittest.TestCase):
     def test_roundtrip_preserves_entries(self):
@@ -400,7 +400,7 @@ class LedgerSerializationTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Codex #91 r2: _apply_ip を通らない直送(form/URL)でも記録される
+# _apply_ip を通らない直送(form/URL)でも記録される
 # ---------------------------------------------------------------------------
 class DirectPathRecordingTests(unittest.IsolatedAsyncioTestCase):
     async def test_record_form_url_attempt_builds_key_and_records(self):
@@ -424,7 +424,7 @@ class DirectPathRecordingTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# 指摘1: adaptive generate が rich metadata 履歴(extra_observations)をプロンプトへ載せる
+# adaptive generate が rich metadata 履歴(extra_observations)をプロンプトへ載せる
 # ---------------------------------------------------------------------------
 class AdaptiveExtraObservationsTests(unittest.IsolatedAsyncioTestCase):
     async def test_extra_observations_reaches_prompt(self):

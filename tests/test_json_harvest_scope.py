@@ -29,7 +29,7 @@ class JsonHarvestScopeTests(unittest.TestCase):
     def test_path_scoped_target_needs_query_stripped_for_json(self):
         s = _ScopeStub(["https://api.example/v1/users"])
         observed = "https://api.example/v1/users?dry_run=1"
-        # full 文字列照合は query 付き observed を弾く（これが Codex #90 R4 のバグ）。
+        # full 文字列照合は query 付き observed を弾く（これが バグ）。
         self.assertFalse(s._url_matches_scope(observed, s.target_urls))
         # query/fragment を落とせば path-scoped target と一致する（_json_in_scope の対処）。
         clean = urlparse(observed)._replace(query="", fragment="").geturl()
@@ -49,7 +49,7 @@ class JsonHarvestScopeTests(unittest.TestCase):
 
     def test_json_predicate_matches_query_bearing_scope(self):
         # query 付きで設定された attack scope（例 .../action?op=save）は observed 原文一致で拾う。
-        # query 除去を先に掛けると scope の query が残って一致しないため、原文→除去の順で試す（#90 R6）。
+        # query 除去を先に掛けると scope の query が残って一致しないため、原文→除去の順で試す。
         p = _PredicateStub(["https://api.example/action?op=save"], [])
         self.assertTrue(p._json_target_in_scope("https://api.example/action?op=save"))
         # 別 op は scope 外（原文一致せず、除去版 .../action も scope .../action?op=save と不一致）。

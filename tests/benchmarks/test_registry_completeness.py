@@ -1,4 +1,4 @@
-"""registry 完全性ゲート（0034-B）のテスト。
+"""registry 完全性ゲートのテスト。
 
 registry の全 scanner が benchmark で採点可能（covered）か、明示 gap として承認されているかを
 検証する。新しい scanner を registry へ足しただけで benchmark から漏れる状態を回帰で検出する
@@ -37,7 +37,7 @@ def test_completeness_complete_only_when_all_covered_and_no_gaps():
 
 
 def test_completeness_partial_when_all_accounted_but_gaps_remain():
-    # covered か gap で全て説明できるが gap が残る → PARTIAL（COMPLETE にしない・Codex P1）
+    # covered か gap で全て説明できるが gap が残る → PARTIAL（COMPLETE にしない）
     gaps = {"b": RegistryGap("b", "未整備", "0034", "2026-12-31")}
     out = compute_registry_completeness(["a", "b"], ["a"], acknowledged_gaps=gaps)
     assert out["completeness_status"] == "PARTIAL"
@@ -47,7 +47,7 @@ def test_completeness_partial_when_all_accounted_but_gaps_remain():
 
 
 def test_completeness_all_gaps_is_partial_not_complete():
-    # 全 scanner が gap（covered_count==0）でも COMPLETE にしない（Codex P1 の核）
+    # 全 scanner が gap（covered_count==0）でも COMPLETE にしない
     gaps = {"a": RegistryGap("a", "r", "0034", "d"), "b": RegistryGap("b", "r", "0034", "d")}
     out = compute_registry_completeness(["a", "b"], [], acknowledged_gaps=gaps)
     assert out["completeness_status"] == "PARTIAL"
@@ -104,7 +104,7 @@ def test_checks_covered_by_suites_splits_vulnerable_and_safe():
 
 
 def test_checks_covered_by_suites_excludes_gap_gated_cases():
-    """gate=GAP のプレースホルダ case は covered/safe に数えない（Codex P2）。"""
+    """gate=GAP のプレースホルダ case は covered/safe に数えない。"""
     from wscan.benchmark_model import GateKind, GapInfo
 
     def _case(cid, expected, check, gate):
@@ -146,7 +146,7 @@ def _shipped_completeness():
     """canonical manifest から covered/safe を導き、gaps と併せて完全性を会計する（正本経路）。
 
     covered を空固定にせず manifest から導出することで、後日 manifest を足して gaps から
-    外すワークフローが実際に機能する（Codex P2）。
+    外すワークフローが実際に機能する。
     """
     suites = discover_benchmark_suites(_MANIFESTS_DIR, registry_keys=frozenset(SCANNERS))
     covered, safe = checks_covered_by_suites(suites)

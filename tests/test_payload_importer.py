@@ -164,7 +164,7 @@ def test_merge_community_payloads_can_be_enabled_or_skipped_by_caller():
 
 def test_merge_interleaves_so_community_survives_generator_cap():
     # curated だけで no-LLM の件数 cap(40) を使い切る規模でも、community が
-    # cap 内（先頭40件）に現れること（Codex P2 指摘の回帰）。
+    # cap 内（先頭40件）に現れること（回帰）。
     curated = {"sqli": [f"curated{i}" for i in range(60)]}
     community = {"sqli": [f"community{i}" for i in range(60)]}
 

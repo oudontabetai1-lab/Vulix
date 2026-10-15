@@ -55,7 +55,7 @@ def test_observability_summary_groups_categories_and_other():
             "baseline_unavailable": 1,
             "other": 1,
         },
-        "llm_calls": 0,   # request_logger 未設定なら 0（0065）
+        "llm_calls": 0,   # request_logger 未設定なら 0
     }
     # request_logger の LLM 呼び出し件数を反映する。
     engine.request_logger = SimpleNamespace(llm_call_count=7)
@@ -65,8 +65,8 @@ def test_observability_summary_groups_categories_and_other():
 @pytest.mark.asyncio
 async def test_form_transport_exception_propagates_for_baseline_guards():
     # form/url transport の例外は `_apply_ip` で握りつぶさず**伝播**させる（挙動不変）。
-    # 握りつぶすと LDAP 等の baseline `except` が発火せず、空 baseline との比較で偽陽性を生む
-    # （Codex #101）。json transport の脱落記録は `_apply_json_payload` 側に限る。
+    # 握りつぶすと LDAP 等の baseline `except` が発火せず、空 baseline との比較で偽陽性を生む。
+    # json transport の脱落記録は `_apply_json_payload` 側に限る。
     engine = _engine()
     scanner = _Scanner(engine)
     ip = InjectionPoint.for_url_param("http://fixture.test/?q=x", "q")
@@ -141,7 +141,7 @@ def test_report_contains_observability_total_categories_and_samples():
 
 def test_refresh_evidence_observability_rerenders_html_and_evidence():
     # post-scan AI 分析後の refresh が evidence.json だけでなく HTML も再描画し、llm_calls の
-    # 表示値を分析後の実数へ更新する（初回描画は分析前の値だったため・Codex #172 P2）。
+    # 表示値を分析後の実数へ更新する（初回描画は分析前の値だったため）。
     import json
     with tempfile.TemporaryDirectory() as d:
         engine = ScanEngine.__new__(ScanEngine)
@@ -165,7 +165,7 @@ def test_refresh_evidence_observability_rerenders_html_and_evidence():
 
 
 def test_report_write_is_atomic_on_failure(monkeypatch):
-    # 再描画中の書き込み失敗で既存の有効な report.html を truncate しない（Codex #172 P2）。
+    # 再描画中の書き込み失敗で既存の有効な report.html を truncate しない。
     with tempfile.TemporaryDirectory() as tmp:
         gen = ReportGenerator(Path(tmp))
         kw = dict(target="http://fixture.test", findings=[], visited_urls=[], checks=["xss"])

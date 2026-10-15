@@ -24,14 +24,14 @@ _MAX_POST_DATA = 20000
 
 
 def _count_existing_records(path: Path) -> int:
-    """既存 JSONL の有効レコード行数を数える（純粋・ベストエフォート・Codex #172 P2）。
+    """既存 JSONL の有効レコード行数を数える（純粋・ベストエフォート）。
 
     append 再利用時にカウンタを既存行数から始めるため。壊れた行/欠損ファイルは 0 側に倒す
     （空・非 JSON 行は数えない）。
     """
     try:
         # errors="replace": 中断で末尾に不完全な UTF-8 が残っても UnicodeDecodeError で
-        # 初期化を落とさず、その行を非 JSON として数えないだけにする（Codex #172 P2）。
+        # 初期化を落とさず、その行を非 JSON として数えないだけにする。
         with open(path, "r", encoding="utf-8", errors="replace") as fp:
             count = 0
             for line in fp:
@@ -54,7 +54,7 @@ _REDACTED = url_scope.REDACTED
 
 # 値をマスクするヘッダ名（小文字・完全一致）。
 # ここが機密ヘッダの**単一の正典**。scanners/base（merge_template_headers / evidence redaction）も
-# この集合＋runtime 登録を `is_sensitive_header` 経由で共有する（#90 R13・二重管理の同期漏れ防止）。
+# この集合＋runtime 登録を `is_sensitive_header` 経由で共有する（二重管理の同期漏れ防止）。
 _SENSITIVE_HEADERS = frozenset({
     "authorization", "proxy-authorization", "authentication",
     "cookie", "set-cookie", "x-api-key", "api-key", "apikey",
@@ -89,7 +89,7 @@ def is_sensitive_header(name) -> bool:
     """ヘッダ名が機密（静的集合 or runtime 登録）かを返す（正典の公開 API）。
 
     scanners/base の資格情報判定（テンプレ上書き禁止・evidence redaction）が独自集合を
-    持たずにここへ委譲するための単一の正典（#90 R13）。runtime 登録ヘッダも拾う。
+    持たずにここへ委譲するための単一の正典。runtime 登録ヘッダも拾う。
     """
     return _is_sensitive_header(name)
 
@@ -123,7 +123,7 @@ def _redact_url(url):
 
 
 def redact_text(text):
-    """機微ボディ値（urlencoded / JSON）をマスクする正典の公開 API（#90 R13 の共有点）。
+    """機微ボディ値（urlencoded / JSON）をマスクする正典の公開 API（共有点）。
 
     probe 証跡台帳など他モジュールが独自 redaction を持たずにここへ委譲するための公開入口。"""
     return _redact_text(text)
@@ -150,13 +150,13 @@ class RequestLogger:
         self._tail_checked: set = set()
         # 既存 output dir（resume で --output=--resume 同一等）を append で再利用すると、
         # ファイルには前回行が残るのにカウンタを 0 開始すると evidence/HTML が今回分しか数えず
-        # JSONL 実数と食い違う。既存 JSONL の有効行数からカウンタを初期化する（Codex #172 P2）。
+        # JSONL 実数と食い違う。既存 JSONL の有効行数からカウンタを初期化する。
         self.http_count = _count_existing_records(self.http_path)
         self.payload_count = _count_existing_records(self.payload_path)
         self.llm_call_count = _count_existing_records(self.llm_path)
 
     def _append(self, path: Path, record: dict) -> bool:
-        """1 行追記する。実際に永続化できたら True（カウンタ整合の判定に使う・Codex #172 P2）。"""
+        """1 行追記する。実際に永続化できたら True（カウンタ整合の判定に使う）。"""
         if not self.enabled:
             return False
         try:
@@ -168,7 +168,7 @@ class RequestLogger:
                 prefix = ""
                 if path not in self._tail_checked:
                     # 再利用ファイルが改行無しで終わる（中断で途切れた行・完全な JSON でも改行欠落）と
-                    # 追記行が `}{...}` と連結され無効行になる。最初の追記前に区切りを入れる（Codex #172 P2）。
+                    # 追記行が `}{...}` と連結され無効行になる。最初の追記前に区切りを入れる。
                     try:
                         with open(path, "rb") as rf:
                             rf.seek(0, 2)
@@ -229,7 +229,7 @@ class RequestLogger:
         retries=None, prompt_chars=None, response_chars=None,
         input_tokens=None, output_tokens=None, exception_type=None, caller: str = "",
     ) -> None:
-        """LLM 呼び出し1回のメタデータを記録する（0065 観測性）。
+        """LLM 呼び出し1回のメタデータを記録する（観測性）。
 
         **本文（prompt/response）は保存しない**（文字数のみ）。例外は種別名のみ記録し
         `str(exc)` は保存しない：Gemini の URL には APIキーが平文で入り、httpx 例外文字列に
@@ -254,6 +254,6 @@ class RequestLogger:
             "caller": caller,
         }
         # 実際に永続化できた行だけ数える。失敗時に加算すると evidence.json の総数が
-        # llm_calls.jsonl の実行数と食い違う（Codex #172 P2）。
+        # llm_calls.jsonl の実行数と食い違う。
         if self._append(self.llm_path, record):
             self.llm_call_count += 1

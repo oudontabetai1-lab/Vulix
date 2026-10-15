@@ -42,7 +42,7 @@ _DESER_ERROR_PATTERNS = [
     r"unserialize\(\)",
     # NOTE: `O:\d+:"...` は PHP シリアライズ済みオブジェクトの**構造**マーカーであり
     # エラー signature ではない。probe payload 自身がこの形なので、単に入力を反射する
-    # ページ（例 vuln_app /search）を critical・reproduced と誤確証していた（F04）。
+    # ページ（例 vuln_app /search）を critical・reproduced と誤確証していた。
     # error パターンから除外し、確証は実エラー文言に限定する。
     r"unserialization.*failed",
     r"could not be unserialized",

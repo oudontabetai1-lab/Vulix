@@ -42,7 +42,7 @@ class ReportGeneratorTests(unittest.TestCase):
 
     def test_report_is_self_contained_no_external_requests(self):
         # レポートは self-contained（オフライン/エアギャップ前提）。外部フォント等の
-        # 第三者リクエストを発生させない（Codex #159）。
+        # 第三者リクエストを発生させない。
         findings = [Finding(check_type="sqli", severity="high",
                             url="http://fixture.test/x", field_name="q", payload="'",
                             evidence="e", verification_state="reproduced")]

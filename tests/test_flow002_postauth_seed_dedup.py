@@ -29,7 +29,7 @@ def test_seed_handles_empty_landing():
 
 
 def test_excluded_candidate_does_not_consume_key():
-    # target /app/ が除外・landing /app が許可の同一 key で、許可 landing を取りこぼさない（#110 P2）。
+    # target /app/ が除外・landing /app が許可の同一 key で、許可 landing を取りこぼさない。
     f = ScanEngine._postauth_seed_urls
     excl = lambda u: u == "http://site/app/"
     assert f("http://site/app", "http://site/app/", is_excluded=excl) == ["http://site/app"]

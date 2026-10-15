@@ -1,22 +1,22 @@
-"""全 probe 証跡台帳の schema と純粋ヘルパ（0032-A・純粋・加算的）。
+"""全 probe 証跡台帳の schema と純粋ヘルパ（純粋・加算的）。
 
-Task 0032「全 probe 証跡台帳と LLM grounding を検査の正本にする」の第一増分。
+全 probe 証跡台帳（LLM grounding を含む検査の正本）のデータ契約。
 `discover → baseline/control → attack → observe → verify` の全実行経路を**一つの試行 ID で
 結ぶ append-only な正本**（`probe_attempts.jsonl`）の**データ契約**を定義する。本モジュールは
 **まだ scanner/engine へ配線しない**（schema＋直列化＋redaction＋hash の純粋部分のみ）。
 
-最上位契約（Task 0032）のうち本増分が担う土台:
+本モジュールが担う土台:
 - role/outcome を正規化した語彙（`ProbeRole`/`ProbeOutcome`）＝比較対象と結果を後から監査可能に。
 - request/response は **redact 済み excerpt＋body hash＋length** を持つ（Privacy is part of evidence
   integrity：token/Cookie/secret を無制限保存しない）。
 - 相関 ID（scan/attempt/parent/hypothesis、baseline/control attempt ids）で因果を結ぶ。
 - JSONL 1 行へ決定論的に直列化（正本 `probe_attempts.jsonl`）。
 
-`wscan/verification_model.py`（MODEL-001a）との関係: あちらの軽量な in-flow 型に対し、本モジュールの
+`wscan/verification_model.py`との関係: あちらの軽量な in-flow 型に対し、本モジュールの
 `ProbeAttemptRecord` は**永続・相関付きの台帳レコード**。Hypothesis/VerificationResult は将来
 この attempt ID を参照して confirmed へ昇格する（No correlation, no confirmed）。
 
-I/O（ファイル追記・実際の redaction ポリシー拡張・recorder 配線）は後続増分。ここは純粋関数のみ。
+I/O（ファイル追記・実際の redaction ポリシー拡張・recorder 配線）は別モジュールが担う。ここは純粋関数のみ。
 """
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ def redact_excerpt(text: Optional[str], cap: int = 512) -> str:
     """機微値を伏せ、長さを cap で切詰めた excerpt を返す（純粋・保守的）。
 
     Privacy is part of evidence integrity: token/Cookie/secret を素で残さない。redaction は
-    **`request_logger` の正典**（#90 R13）へ委譲する＝独自の機微集合/正規表現を持たない:
+    **`request_logger` の正典** へ委譲する＝独自の機微集合/正規表現を持たない:
       - ヘッダ行（`Name: value`）は `is_sensitive_header`（静的＋runtime 登録＝カスタム認証ヘッダも）で
         名前判定し値を伏せる。
       - それ以外の行は `redact_text`（urlencoded の `key=value` と **JSON の `"key":"value"`** 両対応）

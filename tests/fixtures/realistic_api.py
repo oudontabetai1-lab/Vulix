@@ -436,7 +436,7 @@ def create_app() -> FastAPI:
     async def env_file_safe():
         return _text("Not found.", status_code=404)
 
-    # 0017: 忘れ物 artifact（.git/config）とディレクトリリスティング（autoindex）＋安全ツイン。
+    # 忘れ物 artifact（.git/config）とディレクトリリスティング（autoindex）＋安全ツイン。
     @app.get("/.git/config", response_class=PlainTextResponse)
     async def git_config():
         return _text(

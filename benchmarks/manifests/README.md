@@ -1,4 +1,4 @@
-# benchmark manifests（0034）
+# benchmark manifests
 
 E2E benchmark の ground truth 正本（version 付き YAML）を置くディレクトリ。
 
@@ -8,7 +8,7 @@ E2E benchmark の ground truth 正本（version 付き YAML）を置くディレ
   持つ check（covered）」と「safe twin を持つ check」を導く。
 - ある check の vulnerable/safe twin case をここに追加したら、`config/benchmark_gaps.yaml`
   からその check の gap を外す（外し忘れは registry 完全性テストが `redundant_gaps` で検出）。
-- fixture 起動コードは manifest に埋めず、別の allowlist で管理する（設計 0034）。
+- fixture 起動コードは manifest に埋めず、別の allowlist で管理する。
 
 `gate: gap` の case は covered に数えない。採点可能な twin が別 suite にある check は covered、
 残る check は `config/benchmark_gaps.yaml` に明示し、未承認の未計測を

@@ -68,7 +68,7 @@ def origin_key(url: str) -> Optional[str]:
         return None
     # scheme のデフォルトポート（http=80 / https=443 / ws=80 / wss=443）は省く。
     # https://h:443 と https://h はブラウザ的に同一 origin なのに別キーになると、片方で記録した
-    # 学習がもう片方のスキャンで引けず domain 別重み付けも失われる（R12）。
+    # 学習がもう片方のスキャンで引けず domain 別重み付けも失われる。
     _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
     if port is not None and _DEFAULT_PORTS.get(scheme.lower()) == port:
         port = None
@@ -241,7 +241,7 @@ class PayloadLearner:
         """domain の per-check バケツを返す。origin キー（scheme://netloc）かつ
         *include_legacy* のときは、後方互換で**旧 hostname キー**のバケツも取り込む（純粋な読み取り）。
 
-        学習キーは 0006 G4 で hostname→origin へ移行したが、既存の学習ファイルは
+        学習キーは hostname→origin へ移行したが、既存の学習ファイルは
         hostname（例 ``example.com``）で記録されている。origin（``https://example.com``）
         で引くと旧データが丸ごと迷子になり、アップグレード直後に並べ替えの重み付けが失われる。
         そこで origin ルックアップ時は hostname 由来の旧バケツも合算する（同一 observation を
@@ -250,7 +250,7 @@ class PayloadLearner:
         **プロンプト経路（stats→format→クラウド LLM 送信）は include_legacy=False で呼ぶこと。**
         旧 hostname データは同一ホストの全 scheme/port に現れるため、legacy をプロンプトへ混ぜると
         ある origin で記録した origin 固有トークン/コールバックを含む payload が別 origin の
-        プロンプト＝外部送信へ漏れる（R4〜R7 のクロスオリジン漏洩が R8 経路で再燃）。
+        プロンプト＝外部送信へ漏れる（過去に塞いだクロスオリジン漏洩が別経路で再燃する）。
         一方 **並べ替え（sort_payloads・ローカル）は include_legacy=True** でよい：既存候補の順序を
         変えるだけで新 payload を注入も外部送信もしないため、legacy 由来の継続性を安全に活かせる。
         """
@@ -350,7 +350,7 @@ class PayloadLearner:
             global_ct = self._data["global"].get(check_type, {})
         # stats はプロンプト経路（get_payloads→format→クラウド LLM 送信）専用のため、
         # legacy hostname バケツは混ぜない（strict origin-only）。旧データを全 scheme/port へ
-        # 広げると別 origin のプロンプトへ payload が漏れる（R13）。並べ替えは sort_payloads が
+        # 広げると別 origin のプロンプトへ payload が漏れる。並べ替えは sort_payloads が
         # include_legacy=True で別途 legacy を活かす。
         domain_ct: dict = self._resolve_domain_ct(check_type, domain, include_legacy=False)
 

@@ -28,7 +28,7 @@ def _clean_lingering_workers():
     yield
     # 旧 worker が finally で _release_worker() を呼び終えるまで待ってから reset する。待たずに
     # reset すると、release 済み worker の遅れた _release_worker() が次テストの予約を減らし、
-    # プロセス横断 cap テストを flaky にする（Codex #133）。テストは自身の finally で release 済み。
+    # プロセス横断 cap テストを flaky にする。テストは自身の finally で release 済み。
     for t in list(threading.enumerate()):
         if t.name.startswith("benchmark-case-"):
             t.join(3.0)
@@ -142,7 +142,7 @@ def test_timeout_does_not_wait_or_block_next_case(suite):
 
 
 def test_worker_exhaustion_aborts_loudly(suite):
-    """滞留 worker が上限に達したら新規 case を起動せず run_error=worker_exhaustion で中断（Codex #133）。"""
+    """滞留 worker が上限に達したら新規 case を起動せず run_error=worker_exhaustion で中断。"""
     release = Event()
 
     def executor(case, base_url):
@@ -162,7 +162,7 @@ def test_worker_exhaustion_aborts_loudly(suite):
 
 
 def test_lingering_worker_cap_is_process_wide(suite):
-    """滞留 worker の上限は run_suite を跨いで効く（per-call でなくプロセス横断・Codex #133）。"""
+    """滞留 worker の上限は run_suite を跨いで効く（per-call でなくプロセス横断）。"""
     release = Event()
 
     def executor(case, base_url):
@@ -193,7 +193,7 @@ def test_max_lingering_workers_must_be_positive(suite):
 
 
 def test_inconsistent_worker_limit_is_rejected(suite):
-    """異なる max_lingering_workers の混在は拒否し、単一のプロセス横断 limit を強制（Codex #133）。"""
+    """異なる max_lingering_workers の混在は拒否し、単一のプロセス横断 limit を強制。"""
     import pytest as _pytest
     run_suite(suite, executor=good_executor(suite), launcher=FakeLauncher(),
               max_lingering_workers=2, **METADATA)
@@ -203,7 +203,7 @@ def test_inconsistent_worker_limit_is_rejected(suite):
 
 
 def test_none_executor_result_is_rejected(suite):
-    """executor が None を返したら TRANSPORT_ERROR で隠さず TypeError で弾く（Codex #133）。"""
+    """executor が None を返したら TRANSPORT_ERROR で隠さず TypeError で弾く。"""
     import pytest as _pytest
     with _pytest.raises(TypeError):
         run_suite(suite, executor=lambda c, b: None, launcher=FakeLauncher(), **METADATA)
@@ -228,7 +228,7 @@ def test_reservation_released_when_thread_start_fails(suite, monkeypatch):
 
 
 def test_timed_out_worker_is_daemon(suite):
-    """ハングした executor の worker は daemon＝インタプリタ終了をブロックしない（Codex #133 P2）。"""
+    """ハングした executor の worker は daemon＝インタプリタ終了をブロックしない。"""
     release = Event()
 
     def executor(case, base_url):
@@ -299,7 +299,7 @@ def test_httpx_unsupported_carrier(suite, monkeypatch, carrier):
     "auth_session", "multi_account", "second_request", "oob_sink", "api_spec",  # 非 browser
 ])
 def test_httpx_any_prerequisite_is_unsupported(suite, monkeypatch, prerequisite):
-    """オラクルは前提を一切セットアップしない。前提を持つ case は全て UNSUPPORTED（Codex #133 P2）。"""
+    """オラクルは前提を一切セットアップしない。前提を持つ case は全て UNSUPPORTED。"""
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: pytest.fail("prereq case sent HTTP"))
     case = replace(suite.cases[0], prerequisites=(prerequisite,))
     assert HttpxCaseExecutor()(case, "http://fixture.invalid").state == State.UNSUPPORTED
@@ -307,7 +307,7 @@ def test_httpx_any_prerequisite_is_unsupported(suite, monkeypatch, prerequisite)
 
 @pytest.mark.parametrize("check", ["sqli", "os", "ssti", "nosql"])
 def test_httpx_non_xss_case_is_unsupported(suite, monkeypatch, check):
-    """XSS 参照オラクルは他 check の query/form case に XSS probe を撃たない（Codex #133 P2）。"""
+    """XSS 参照オラクルは他 check の query/form case に XSS probe を撃たない。"""
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: pytest.fail("non-xss case sent HTTP"))
     case = replace(suite.cases[0], check=check)  # carrier=query のまま check だけ差し替え
     assert HttpxCaseExecutor()(case, "http://fixture.invalid").state == State.UNSUPPORTED
@@ -354,7 +354,7 @@ def test_http_error_is_not_safe(suite, monkeypatch):
 
 @pytest.mark.parametrize("carrier,method", [(Carrier.QUERY, "PUT"), (Carrier.FORM, "PATCH")])
 def test_httpx_honors_declared_method(suite, monkeypatch, carrier, method):
-    """executor は carrier 既定(GET/POST)でなく manifest の宣言メソッドで送る（Codex #133 P2）。"""
+    """executor は carrier 既定(GET/POST)でなく manifest の宣言メソッドで送る。"""
     seen = {}
 
     def handler(request):

@@ -1,4 +1,4 @@
-"""Laya 確率の校正ハーネス（OUD-82）。
+"""Laya 確率の校正ハーネス。
 
 Laya の公式制約「確率は閾値で使う前に自タスクで校正する」「confidence ≠ accuracy」に対応する。
 fixture の正解データ（`EXPECTED_FINDINGS`＝脆弱 / `SAFE_ENDPOINTS`＝安全ツイン）を校正データセットに

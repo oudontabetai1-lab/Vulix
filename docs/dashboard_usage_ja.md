@@ -302,7 +302,7 @@ HTML レポートと Evidence を確認し、必要なら再現物で人手検�
 
 Coverage セクション内には「検査カバレッジ（in-scope の scanner）」に続けて、**実行条件が満たされない検査**の一覧が出ることがあります。選択されていても (a) 認証セッション・OOB 受信シンク・API 仕様シード・複数アカウントなどの前提が未設定、(b) `--state-profile read-only` で状態変更を伴う検査（mass_assignment・graphql・xxe 等）が送信 skip、のいずれかに該当する検査は実質的に検査できていない可能性があるため、検査名・種別（前提不足／state profile）・理由を表示します。ここに検査が挙がっている場合、Findings が 0 でも「安全」とは限りません。`--no-monitor` やバッチ実行で HTML を開かない場合も、スキャン終了時の console 要約行に前提不足（`unmet-prereq N`）と state profile skip（`profile-skipped N`）の件数が併記されるため、CI ログからも未検査範囲を把握できます。
 
-続けて折りたたみ式の **Scanner capability matrix**（今回実行対象の scanner × 入力経路 carrier）を表示します。各セルの記号（`s`=supported（宣言のみ・E2E 未接続）/`P`=planned/`U`=unsupported/`?`=未分類）で「その検査がどの経路を突けるか」が分かり、未実装セルは色分けされます。`s` は capability を宣言していることを示すだけで、その carrier を実際に突いた（E2E 検証済み）という意味ではない点に注意してください。セルにマウスを重ねると value kind・transport・未対応理由が表示され、「なぜこの経路を検査できなかったか」を確認できます。全 scanner 分の一覧が必要なときは CLI の `capability-matrix` サブコマンドを使ってください（0035）。
+続けて折りたたみ式の **Scanner capability matrix**（今回実行対象の scanner × 入力経路 carrier）を表示します。各セルの記号（`s`=supported（宣言のみ・E2E 未接続）/`P`=planned/`U`=unsupported/`?`=未分類）で「その検査がどの経路を突けるか」が分かり、未実装セルは色分けされます。`s` は capability を宣言していることを示すだけで、その carrier を実際に突いた（E2E 検証済み）という意味ではない点に注意してください。セルにマウスを重ねると value kind・transport・未対応理由が表示され、「なぜこの経路を検査できなかったか」を確認できます。全 scanner 分の一覧が必要なときは CLI の `capability-matrix` サブコマンドを使ってください。
 
 ## 11. 長時間スキャンと再開
 

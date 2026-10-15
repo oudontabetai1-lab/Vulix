@@ -151,23 +151,23 @@ class SecurityHeadersScanner(BaseScanner):
         # 観測失敗は「レスポンス証拠（status）の欠如」で判定する（_response_pair が fetch 例外を
         # 握りつぶし fallback の network pair も無いと {} が返る）。空ヘッダ*ではなく*空レスポンスが
         # 失敗のシグナル。失敗時は transport_error を刻み、degraded_checks が page-level tested 行を
-        # 除外して passive case を誤 TN/FN でなく NOT_REACHED にする（Codex #142 P2）。
+        # 除外して passive case を誤 TN/FN でなく NOT_REACHED にする。
         if not response or response.get("status") is None:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
             if not response:
                 # 完全な取得失敗（_get 失敗＋capture 無し）は例外で engine に伝え、checkpoint 未完了に
-                # して resume 再試行を可能にする（[] だと tested/完了で恒久 skip・Codex #145 P2 round15）。
+                # して resume 再試行を可能にする（[] だと tested/完了で恒久 skip）。
                 # 3xx 等の legitimate NOT_REACHED（response は非空・status のみ無し）はそのまま [] を返す。
                 raise PageDocumentUnavailable(f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}")
             return []
         # レスポンスは受信済み。ヘッダが空でも監査する（セキュリティヘッダ皆無＝全欠落＝最大級の
-        # 脆弱ケースで、まさに本 scanner が報告すべき対象・Codex #142 P1）。
+        # 脆弱ケースで、まさに本 scanner が報告すべき対象）。
         headers = {k.lower(): v for k, v in response.get("headers", {}).items()}
 
         # CSP/HSTS/XFO 等の document セキュリティヘッダは **HTML document** に対して意味を持つ。
         # crawl が nav アンカー等で拾った raw asset（.js/.css/.json/画像）を監査すると、これらを
-        # 持たない当然の非 document 応答を「未設定」と誤報する FP になる（clickjacking と同じガード・
-        # Codex #147 P2）。content-type が **明示的に非 HTML** のときだけ skip し、欠落時は従来どおり
+        # 持たない当然の非 document 応答を「未設定」と誤報する FP になる（clickjacking と同じガード）。
+        # content-type が **明示的に非 HTML** のときだけ skip し、欠落時は従来どおり
         # 監査して FN を作らない。
         ctype = (headers.get("content-type", "") or "").lower()
         if ctype and "html" not in ctype:
@@ -281,7 +281,7 @@ class SecurityHeadersScanner(BaseScanner):
         # URL で 2 回目の GET が返す 401/404/410 等は、ブラウザが描画した document ではない。その
         # 欠落ヘッダを「再現確認」と誤判定して既報 finding を誤って reproduced にしないよう倒す
         # （初回スキャンは _response_pair の 2xx ガードで保護されるが verify は _get 直呼び。
-        # Codex #145 P2 round10 で 3xx、round17 で 4xx/5xx へ一般化して _response_pair と揃える）。
+        # 3xx・4xx/5xx も非 2xx として一般化して _response_pair と揃える）。
         if not (200 <= response.status_code < 300):
             return None
 

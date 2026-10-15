@@ -1,10 +1,10 @@
-"""Scanner capability contract（0035-A）。
+"""Scanner capability contract。
 
 各 scanner が「どの carrier を、どの value kind/transport/payload shape で検査できるか」を
 機械可読に宣言するための純粋モジュール。scan/verify のロジックは持たない（宣言と検証のみ）。
 
-0035-A の段階では *挙動を変えない*。ここで宣言した contract は capability matrix の生成と
-contract test に使うだけで、dispatch 実装への配線は 0035-C 以降で行う。
+本モジュールは *挙動を変えない*。ここで宣言した contract は capability matrix の生成と
+contract test に使うだけで、dispatch 実装への配線は別途行う。
 """
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ class CarrierCapability:
     browser_required: bool = False
     structured_payload: bool = False
     reason: str = ""
-    task: str = ""   # planned のとき必須（例: "0035-D"）
+    task: str = ""   # planned のとき必須（例: ""）
 
 
 @dataclass(frozen=True)
@@ -197,18 +197,18 @@ def validate_scanner_contract(check: str, contract: ScannerContract) -> list[str
 
 
 def _cell(cap: CarrierCapability | None) -> str:
-    """matrix セル記号。0035-A では E2E 未接続なので supported は 's'。"""
+    """matrix セル記号。 では E2E 未接続なので supported は 's'。"""
     if cap is None:
         return "?"
     if cap.state == CapabilityState.SUPPORTED:
-        return "s"      # 宣言 supported・E2E 未接続（0034 で 'S' へ昇格）
+        return "s"      # 宣言 supported・E2E 未接続（で 'S' へ昇格）
     if cap.state == CapabilityState.PLANNED:
         return "P"
     return "U"          # unsupported
 
 
 def build_capability_matrix(contracts: dict[str, ScannerContract]) -> dict:
-    """capability matrix の JSON 正本（純粋・0034 scorecard へ供給する形）。"""
+    """capability matrix の JSON 正本（純粋・ scorecard へ供給する形）。"""
     carriers = [c.value for c in Carrier]
     rows = {}
     for check in sorted(contracts):
@@ -221,7 +221,7 @@ def build_capability_matrix(contracts: dict[str, ScannerContract]) -> dict:
                 "state": cap.state.value if cap else "unclassified",
                 "reason": cap.reason if cap else "",
                 "task": cap.task if cap else "",
-                # 宣言された capability を下流（0034 scorecard/dispatcher）が完全再構成できるよう
+                # 宣言された capability を下流（scorecard/dispatcher）が完全再構成できるよう
                 # value_kinds だけでなく transports/payload_shapes/browser_required/structured_payload も出す。
                 "value_kinds": sorted(vk.value for vk in (cap.value_kinds if cap else frozenset())),
                 "transports": sorted(t.value for t in (cap.transports if cap else frozenset())),
@@ -313,7 +313,7 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-# HTML セル記号→(ラベル, 背景色)。未実装セル（U/P/?）を色で可視化する（0035-E）。
+# HTML セル記号→(ラベル, 背景色)。未実装セル（U/P/?）を色で可視化する。
 # `s` は _cell()/Markdown renderer と同義で「宣言された capability（E2E 未接続）」であり、
 # 「実際にその carrier を突いた」ことは意味しない。誤認防止のため凡例・集計にこの但し書きを保持する。
 _CELL_STYLE = {

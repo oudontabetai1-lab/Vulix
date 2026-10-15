@@ -3,12 +3,12 @@
 `browser._collect_urls_from_loaded_assets` の `url_re` は `()*+?;=` 等を許容文字に
 含むため、minified JS の**正規表現リテラルや式**を `/…` ルートとして誤抽出する
 （例: `/(?:` `/16*(a.flipX?-1:1` `/()?;=`）。これらのゴミ URL は (1) 無駄クロール
-(2) 高価なプランナー LLM の浪費 (3) 実ルート到達の阻害 を招く（0009 C1）。
+(2) 高価なプランナー LLM の浪費 (3) 実ルート到達の阻害 を招く。
 
 ここでは「実在ルートらしさ」を**path 部のコード由来メタ文字**で判定し、誤抽出を
 除去する。ブラウザ非依存の純粋関数として分離し、フィクスチャ無しでテスト可能に保つ
 （本リポの「検出/判定ロジックは純粋関数へ分離」規約）。除去は保守側に倒し、判断に
-迷う候補は**残す**（実ルートの取りこぼし＝到達性低下は C1 の目的に反するため）。
+迷う候補は**残す**（実ルートの取りこぼし＝到達性低下はこの除去の目的に反するため）。
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 # URL の path として **RFC 上そもそも不正**な文字（gen-delim/式メタ文字）。実ルートには
 # 生では現れず、minified JS の regex リテラルや式片を強く示唆する。
-# 除外理由: `* + ( )` は path の sub-delim として**正当**（`/languages/C++`・OData `/Products(1)`・
+# 除外理由: `* + ()` は path の sub-delim として**正当**（`/languages/C++`・OData `/Products(1)`・
 #   parameterless `/GetDefault()`）なのでここには入れない。regex らしい括弧だけ `_parens_look_like_regex`
 #   で別途弾く。`?;=&` はクエリで正当（path から除かれる）。`~ . - _ % @ , ! $ ' :` 等も path で正当。
 _STRONG_METACHARS = re.compile(r"[\\|^{}<>`\[\]]")
@@ -34,7 +34,7 @@ def _parens_look_like_regex(path: str) -> bool:
         return True
     # **空**括弧 `()` は関数呼び出し様（識別子・数字・`)` の直後）のみ許容。区切り直後の bare
     # `()` は regex/式片。非空の均衡括弧（`/Products(1)`・`/docs/(archived)/index`）は前置文字を
-    # 問わず実ルートとして残す（Codex #100 R13）。
+    # 問わず実ルートとして残す。
     for m in re.finditer(r"\(\)", path):
         prev = path[m.start() - 1] if m.start() > 0 else ""
         if not (prev.isalnum() or prev in "_)"):
@@ -85,7 +85,7 @@ def is_plausible_route_candidate(resolved_url: str) -> bool:
 # url_re が URL 候補として許容しない一方、正規表現リテラルでは**継続**に使われる文字。
 # 抽出器はこれらの手前で match を打ち切るため、切り詰め後の候補（`/foo|bar/`→`/foo`、
 # `/abc[0-9]/`→`/abc`）は一見正常な path に見えて post-filter を通過してしまう。match の
-# **直後の文字**がこれらなら、regex リテラルの途中で切れた証拠として抽出時に弾く（0009 C1）。
+# **直後の文字**がこれらなら、regex リテラルの途中で切れた証拠として抽出時に弾く。
 _REGEX_CONTINUATION_CHARS = frozenset("|[]\\^{}")
 
 
@@ -205,7 +205,7 @@ def preceding_is_regex_context(preceding_text: str, in_string: bool = False) -> 
     （空）なら True。``in_string`` True（文字列/テンプレートリテラル内）や直前が引用符/通常の
     識別子は False。``in_string`` は呼び出し側が `advance_string_state` で持ち越した状態。
     """
-    # 文字列/テンプレートリテラル内は regex 文脈ではない（Codex #100 R13）。
+    # 文字列/テンプレートリテラル内は regex 文脈ではない。
     if in_string:
         return False
     stripped = preceding_text.rstrip(" \t\r\n")
@@ -275,7 +275,7 @@ def strip_trailing_noise(candidate: str) -> str:
     空白・引用符・`<>`・`,`・`;` は常に剥がす。末尾の閉じ括弧 `)]}` は、**釣り合わない
     余分な閉じ**（`(/api/x)`→`/api/x)` のような外側の閉じを取り込んだ場合）だけ剥がし、
     釣り合っている閉じ（OData `/Products(1)`・関数 `/GetDefault()`）は**残す**。旧実装は
-    `)]}` を無条件 rstrip して OData/関数ルートを不均衡化し誤除去していた（0009 C1・Codex #100）。
+    `)]}` を無条件 rstrip して OData/関数ルートを不均衡化し誤除去していた。
     """
     candidate = candidate.rstrip(" \t\r\n\"'`<>,;")
     while candidate and candidate[-1] in ")]}":

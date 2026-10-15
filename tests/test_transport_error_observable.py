@@ -3,7 +3,7 @@
 `_apply_payload` は browser のナビゲーション/送信失敗を握りつぶして ``("", {})`` を返す
 （ループ挙動は不変＝偽陽性を作らない設計）。だが失敗を記録しないと
 ``engine.observability_summary()`` が ``total: 0`` と報告し、SQLi/OS の全攻撃要求が
-落ちても「完全なスキャン」と誤表示してしまう（Codex #101 P1）。修正後は XSS と同様に
+落ちても「完全なスキャン」と誤表示してしまう。修正後は XSS と同様に
 ``transport_error:<check>`` を ``wave_errors`` へ記録する（挙動は不変）。
 """
 import asyncio
@@ -91,7 +91,7 @@ class _FormScanner:
 
 class SilentSwallowObservableTests(unittest.IsolatedAsyncioTestCase):
     """fill_and_submit_form の **沈黙 swallow**（空 pair・例外なし）でも送達失敗を
-    transport_error として observability に残す（Codex #134 P1）。従来の
+    transport_error として observability に残す。従来の
     test_apply_payload_records_transport_error は browser が *raise* する経路のみをカバーし、
     実 browser の内部 swallow は素通りしていた。
     """
@@ -244,7 +244,7 @@ class _FakeFormBrowser:
 
 
 class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
-    """fill_and_submit_form の送達フラグ（Codex #137 P1/P2）。
+    """fill_and_submit_form の送達フラグ。
 
     P1: フォーム不在は直前 navigate が応答を得ていれば speculative（True）、応答なし
         （status None＝失敗ロード）なら未送達（False）。
@@ -285,7 +285,7 @@ class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_click_raises_but_request_sent_is_delivered(self):
         # click() が post-dispatch の navigation 待ちで raise しても、submit がリクエストを
-        # 送っていれば（差分 +1）送達成功（Codex #137 P2）。
+        # 送っていれば（差分 +1）送達成功。
         self.assertTrue(
             await self._run(
                 result={"success": True, "action": "http://x/"},
@@ -304,8 +304,7 @@ class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_prior_noise_not_mistaken_for_submission(self):
         # fill 由来 XHR/背景 polling が clear() 後に残っていても（net_base=3）、submit が
-        # リクエストを送らず raise した場合は差分 0＝未送達。ノイズを submit と取り違えない
-        # （Codex #137 P2 再々指摘）。
+        # リクエストを送らず raise した場合は差分 0＝未送達。ノイズを submit と取り違えない。
         self.assertFalse(
             await self._run(
                 result={"success": True, "action": "http://x/"},
@@ -357,7 +356,7 @@ class _FakeUrlParamBrowser:
 class UrlParamDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
     """`test_url_param` は送達フラグを常に True にリセットする（url param は本フラグで観測しない）。
 
-    送達フラグは form 経路（fill_and_submit_form）の沈黙 swallow 観測専用（#134 の対象）。URL param
+    送達フラグは form 経路（fill_and_submit_form）の沈黙 swallow 観測専用。URL param
     経路は navigate 結果から未送達を導かない: ssti/open_redirect 等は payload 次第で goto が正常に
     例外/応答なしになり（payload 単位の通常挙動）、これを未送達として刻むと check 粒度の
     degraded_checks が当該 check の tested を全除外し無関係な url_param safe twin まで NOT_REACHED 化して
@@ -388,7 +387,7 @@ class UrlParamDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ClickjackingHeaderEvidenceTests(unittest.IsolatedAsyncioTestCase):
-    """clickjacking は対象ページの実ヘッダ（直接 GET）で framing 保護を判定する（0034 FP 修正）。
+    """clickjacking は対象ページの実ヘッダ（直接 GET）で framing 保護を判定する（FP 修正）。
 
     XFO: DENY または CSP frame-ancestors があれば安全（finding なし）。current_page_pair の
     latest() フォールバックで別リクエストの誤ヘッダを掴んで安全ページを FP にしない。
@@ -447,7 +446,7 @@ class ClickjackingHeaderEvidenceTests(unittest.IsolatedAsyncioTestCase):
         scanner._response_pair = _empty
         # 完全な取得失敗（response 証拠なし）は transport_error を刻んだ上で
         # PageDocumentUnavailable を送出し、engine の error 経路（checkpoint 未完了→
-        # resume 再試行）へ載せる（Codex #145 P2 round15）。[] 返しだと tested 完了で恒久 skip。
+        # resume 再試行）へ載せる。[] 返しだと tested 完了で恒久 skip。
         with self.assertRaises(PageDocumentUnavailable):
             await scanner.scan_page("http://x/portal/embed")
         self.assertTrue(
@@ -458,7 +457,7 @@ class ClickjackingHeaderEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_statusless_pair_returns_empty_without_raising(self):
         # response は非空だが status 欠落（未消費の 3xx 等 legitimate NOT_REACHED）は
         # transport_error を刻みつつ [] を返す（例外にしない）。完全失敗（raise）と
-        # 区別し続けることを固定する（Codex #145 P2 round15）。
+        # 区別し続けることを固定する。
         engine, scanner = self._scanner()
 
         async def _statusless(url):
@@ -474,8 +473,8 @@ class ClickjackingHeaderEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
-    """security_headers は「レスポンス証拠の欠如」で観測失敗を判定し、空ヘッダは監査する
-    （Codex #142 P1/P2）。空レスポンス→transport_error、valid だが空ヘッダ→監査（note なし）。
+    """security_headers は「レスポンス証拠の欠如」で観測失敗を判定し、空ヘッダは監査する。
+    空レスポンス→transport_error、valid だが空ヘッダ→監査（note なし）。
     """
 
     def _scanner(self):
@@ -492,7 +491,7 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
         scanner._response_pair = _empty
         # 完全な取得失敗は transport_error を刻んだ上で PageDocumentUnavailable を送出する
-        # （Codex #145 P2 round15。[] 返しだと checkpoint tested 完了で resume 再試行されない）。
+        # （[] 返しだと checkpoint tested 完了で resume 再試行されない）。
         with self.assertRaises(PageDocumentUnavailable):
             await scanner.scan_page("http://x/legacy/status")
         self.assertTrue(
@@ -525,7 +524,7 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_html_asset_is_skipped(self):
         # 明示的な非 HTML（JS バンドル等）は document セキュリティヘッダ監査の対象外＝FP を出さない
-        # （clickjacking と同じガード・Codex #147）。
+        # （clickjacking と同じガード）。
         engine, scanner = self._scanner()
 
         async def _js(url):
@@ -547,7 +546,7 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
-    """_get の redirect 追従判定（Codex #145 P1）。same-host のみ・http→https upgrade は許可。"""
+    """_get の redirect 追従判定。same-host のみ・http→https upgrade は許可。"""
 
     def _cls(self):
         return SCANNERS["clickjacking"]
@@ -570,7 +569,7 @@ class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(f("http://h:80/page", "https://h:443/page"))
 
     def test_non_default_port_upgrade_blocked(self):
-        # http://h:8080 → https://h:8443 は別サービスの可能性があり追従しない（P1 round5）。
+        # http://h:8080 → https://h:8443 は別サービスの可能性があり追従しない。
         f = self._cls()._followable_redirect
         self.assertFalse(f("http://h:8080/page", "https://h:8443/page"))
         self.assertFalse(f("http://h:8080/page", "https://h/page"))
@@ -592,7 +591,7 @@ class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RejectRedirectPairTests(unittest.TestCase):
-    """_response_pair の fallback（current_page_pair）が返す 3xx を document 扱いしない（P2 round6）。"""
+    """_response_pair の fallback（current_page_pair）が返す 3xx を document 扱いしない。"""
 
     def _cls(self):
         return SCANNERS["clickjacking"]
@@ -624,7 +623,7 @@ class RejectRedirectPairTests(unittest.TestCase):
 
 class CaptureStatusPolicyTests(unittest.TestCase):
     """_apply_capture_status_policy は fallback の captured pair にも direct-GET と同じ
-    document status 方針を適用する（2xx=監査/transient=空/その他非2xx=NOT_REACHED・Codex #145 P2 round19）。"""
+    document status 方針を適用する（2xx=監査/transient=空/その他非2xx=NOT_REACHED）。"""
 
     def _f(self):
         return SCANNERS["clickjacking"]._apply_capture_status_policy
@@ -659,7 +658,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
     """_response_pair は直接 GET(replay)が **2xx（描画された document）** のときだけ status/headers を
     載せる。恒久的な非 2xx（3xx・401/404/410 等の「この document ではない」）は status を落として
     NOT_REACHED（[] 返し）。ただし transient（408/429/5xx）は空 pair を返して scanner に
-    PageDocumentUnavailable を投げさせ resume 再試行可能にする（Codex #145 P2 round17/18）。"""
+    PageDocumentUnavailable を投げさせ resume 再試行可能にする。"""
 
     def _scanner(self, response):
         engine = _FakeEngine()
@@ -712,7 +711,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_header_scanners_share_one_replay_per_url(self):
         """clickjacking と security_headers が同一 engine・同一 URL で GET を 1 回だけ共有する
-        （副作用のある GET を read-only ヘッダ検査で二重に叩かない・Codex #145 P2 round18）。"""
+        （副作用のある GET を read-only ヘッダ検査で二重に叩かない）。"""
         engine = _FakeEngine()
         ctx = _FakeRequestCtx(_FakeAPIResponse(200, {"X-Frame-Options": "DENY"}))
         engine.browser = _APIBrowser(ctx)
@@ -731,7 +730,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_recovers_body_via_safe_decode_on_non_utf8(self):
         # response.text() が非 UTF-8 で失敗しても body() バイト列を safe_decode して本文を保つ
-        # （SRI/secret_leak が非 UTF-8 バンドルを見逃す FN 防止・Codex #147 P2）。
+        # （SRI/secret_leak が非 UTF-8 バンドルを見逃す FN 防止）。
         leaked = "AKIA3SVBQ4XZ7KLMN2PQ"
         raw = ('<script>var k="' + leaked + '";</script>').encode("utf-8") + b"\xff\xfe"
         resp = _FakeAPIResponse(200, {"Content-Type": "text/html"}, text_raises=True, body_bytes=raw)
@@ -754,7 +753,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_clickjacking_skips_non_html_content_type(self):
         # framing 保護は HTML document のみ対象。raw asset（.js 等・非 HTML content-type）は監査せず
-        # []（XFO/CSP 欠落を「未保護」と誤報しない・Codex #147 P2）。
+        # []（XFO/CSP 欠落を「未保護」と誤報しない）。
         engine, scanner = self._scanner(
             _FakeAPIResponse(200, {"Content-Type": "text/plain; charset=utf-8"})
         )
@@ -787,7 +786,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(out), 1)
 
     async def test_js_content_scanners_no_body_returns_empty(self):
-        # 本文が無ければ [] を返し live DOM へフォールバックしない（wrong-page FP/FN 防止・Codex #147 P2）。
+        # 本文が無ければ [] を返し live DOM へフォールバックしない（wrong-page FP/FN 防止）。
         for check in ("sri", "secret_leak"):
             with self.subTest(check=check):
                 engine = _FakeEngine()
@@ -808,7 +807,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_sri_audits_transient_html_body(self):
         # 5xx/429 でもブラウザは HTML を描画し integrity 無しの外部 script を読み込むため、
         # 監査可能な HTML 本文があれば監査する（恒久失敗 endpoint を毎回 resume で再試行する
-        # だけで一度も監査しない問題を解消・Codex #147）。
+        # だけで一度も監査しない問題を解消）。
         html = ('<html><head><script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/x.js">'
                 '</script></head></html>')
         engine = _FakeEngine()
@@ -833,7 +832,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_secret_leak_scans_non_2xx_error_body(self):
         # 400/401/403/404（恒久）に加え 500（transient）の error 本文に漏れた秘密も走査する
-        # （500 スタックトレース等の漏えいを取りこぼさない・Codex #147 Comment）。
+        # （500 スタックトレース等の漏えいを取りこぼさない）。
         leaked = "AKIA3SVBQ4XZ7KLMN2PQ"  # AWS Access Key ID 形式（AKIA+16、EXAMPLE 等を含まない）
         for status in (400, 401, 403, 404, 500):
             with self.subTest(status=status):
@@ -866,7 +865,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_capture_fallback_missing_body_raises(self):
         # direct GET 失敗→capture fallback で、captured response に body キーが無い（本文読取失敗）とき、
-        # 空本文と取り違えず body_unavailable を伝播して PageDocumentUnavailable を投げる（Codex #147）。
+        # 空本文と取り違えず body_unavailable を伝播して PageDocumentUnavailable を投げる。
         for check in ("sri", "secret_leak"):
             with self.subTest(check=check):
                 engine = _FakeEngine()
@@ -891,7 +890,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_header_only_scanner_not_degraded_by_body_failure(self):
         # 本文読取失敗(body_unavailable)でも、header 監査(clickjacking)はヘッダで完了できる。
-        # body 失敗を clickjacking 名義の transport_error にして degraded 扱いしない（Codex #147 4巡目）。
+        # body 失敗を clickjacking 名義の transport_error にして degraded 扱いしない。
         engine = _FakeEngine()
         resp = _FakeAPIResponse(200, {"content-type": "text/html"}, text_raises=True, body_bytes=None)
 
@@ -914,7 +913,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_permanent_non_2xx_does_not_record_transport_error(self):
         # 恒久非 2xx（404 等）は content scanner が本文走査するため transport_error を刻まない
-        # （degraded_checks が無関係な safe case を NOT_REACHED 化しない・Codex #147 P2 Comment3）。
+        # （degraded_checks が無関係な safe case を NOT_REACHED 化しない）。
         for check in ("sri", "secret_leak"):
             with self.subTest(check=check):
                 engine = _FakeEngine()
@@ -929,7 +928,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sri_audits_non_2xx_html_document(self):
         # ブラウザが描画する custom 401/404 HTML（外部 script を読み込む）は SRI 監査対象
-        # （status だけでは本文が描画されないとは限らない・Codex #147 4巡目）。
+        # （status だけでは本文が描画されないとは限らない）。
         html = '<html><head><script src="https://cdn.example.com/lib.js"></script></head></html>'
         for status in (401, 404):
             with self.subTest(status=status):
@@ -949,7 +948,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sri_audits_2xx_without_content_type_or_html_tag(self):
         # Content-Type 欠落の 2xx document は <html> タグが無く（前置き先行でも）HTML とみなし監査する
-        # （省略/遅延した <html> で実在の未保護 script を取りこぼさない・Codex #147）。
+        # （省略/遅延した <html> で実在の未保護 script を取りこぼさない）。
         body = ('\n\n<!-- long preamble ... -->\n'
                 '<script src="https://cdn.example.com/lib.js"></script>')
         engine = _FakeEngine()
@@ -1012,7 +1011,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(out), 1)
 
     async def test_raw_document_shared_in_flight_single_get(self):
-        # 並列に同一 URL を要求しても直接 GET(_compute)は 1 回だけ（in-flight 共有・Codex #147）。
+        # 並列に同一 URL を要求しても直接 GET(_compute)は 1 回だけ（in-flight 共有）。
         engine = _FakeEngine()
         engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {"X-Frame-Options": "DENY"})))
         cj = SCANNERS["clickjacking"](engine)
@@ -1035,7 +1034,7 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
 class CurrentPagePairWorkerAwareTests(unittest.TestCase):
     """current_page_pair は __init__ 捕捉の self.browser でなく worker-aware な
-    self.engine.browser の network から pair を読む（Codex #145 round9 の fallback 経路）。"""
+    self.engine.browser の network から pair を読む（fallback 経路）。"""
 
     class _Net:
         def __init__(self, pair):
@@ -1113,8 +1112,8 @@ class _APIBrowser:
 
 
 class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
-    """_get は Playwright browser context の APIRequestContext（context.request）で取得する
-    （Codex #145 round12）。Cookie は Playwright が native 管理するため httpx jar 自作を撤去。"""
+    """_get は Playwright browser context の APIRequestContext（context.request）で取得する。
+    Cookie は Playwright が native 管理するため httpx jar 自作を撤去。"""
 
     def _scanner(self, responses, *, auth=None):
         engine = _FakeEngine()
@@ -1145,7 +1144,7 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kw.get("max_redirects"), 0)  # 自動追従は無効
 
     async def test_honors_configured_timeout_in_ms(self):
-        """engine.timeout（秒）を Playwright の ms として毎 hop 渡す（Codex #145 round13）。"""
+        """engine.timeout（秒）を Playwright の ms として毎 hop 渡す。"""
         engine, scanner = self._scanner(_FakeAPIResponse(200))
         engine.timeout = 5  # 秒
         await scanner._get("http://app.test/p")
@@ -1154,7 +1153,7 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resyncs_engine_cookies_after_get(self):
         """監査 GET 後に engine._sync_cookies_from_browser で engine.cookies を再同期する
-        （httpx ベースの CORS 等が stale セッションを送らない・Codex #145 P1 round14）。"""
+        （httpx ベースの CORS 等が stale セッションを送らない）。"""
         engine, scanner = self._scanner(_FakeAPIResponse(200))
         called = {}
 
@@ -1170,7 +1169,7 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_resyncs_engine_cookies_even_when_redirect_hop_raises(self):
         """中間 redirect hop が cookie を rotation/削除した後に次 hop が例外を投げても、
         engine.cookies を再同期する（finally 経路）。成功パスだけの同期では無効トークンが
-        残り CORS 等が未認証応答に走る（Codex #145 P2 round16）。"""
+        残り CORS 等が未認証応答に走る。"""
 
         class _RaiseOnSecondGet:
             def __init__(self):
@@ -1199,10 +1198,9 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called.get("url"), "http://app.test/start")
 
     async def test_cookie_resync_runs_under_concurrency(self):
-        """並列(--concurrency>1)でも監査 GET 後の Cookie 再同期を実行する（0067）。
+        """並列(--concurrency>1)でも監査 GET 後の Cookie 再同期を実行する。
         engine 側の _sync_cookies_from_browser が worker task 内では task-local な
-        ContextVar に閉じるため、共有 engine.cookies を汚染せず安全（旧 round15 の
-        直列限定スキップを解除）。"""
+        ContextVar に閉じるため、共有 engine.cookies を汚染せず安全（従来の直列限定スキップを解除）。"""
         engine, scanner = self._scanner(_FakeAPIResponse(200))
         engine.concurrency = 2
         called = {"n": 0}
@@ -1215,7 +1213,7 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called["n"], 1)
 
     async def test_disposes_responses(self):
-        """最終 response を dispose して body を解放する（Codex #145 round13）。"""
+        """最終 response を dispose して body を解放する。"""
         resp = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})
         engine, scanner = self._scanner(resp)
         await scanner._get("http://app.test/p")
@@ -1231,7 +1229,7 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scope_approved_cross_host_redirect_followed(self):
         """engine の明示 scope（_header_scope_origins）に含まれる別ホストへの redirect は追従し、
-        その host の scoped auth を再計算する（Codex #145 round13）。"""
+        その host の scoped auth を再計算する。"""
         r1 = _FakeAPIResponse(302, {"location": "https://www.app.test/"})
         r2 = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})
         engine, scanner = self._scanner([r1, r2])
@@ -1320,7 +1318,7 @@ class _XxeFakeEngine:
 
 class XxeTransportObservableTests(unittest.IsolatedAsyncioTestCase):
     """XXE は独自の direct-HTTP 経路（_post_xml）を持つ。baseline/attack 失敗を
-    握りつぶすと --checks xxe が丸ごと落ちても total:0 と誤表示する（Codex #101 P1）。
+    握りつぶすと --checks xxe が丸ごと落ちても total:0 と誤表示する。
     _post_xml を失敗させ、baseline 失敗が transport_error として記録されることを検証。
     """
 

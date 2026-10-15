@@ -4,7 +4,7 @@
 製品スキャナ（XSSScanner/ScanEngine）ではない。したがって本テストは runner の配管と
 fixture の健全性（脆弱は反射・安全は非反射）を確認するもので、**製品スキャナの recall を
 測るものではない**。実スキャナを走らせて findings から採点する scanner-backed executor は
-0034-R2（既存 E2E 移植）で追加する。manifest も出荷 canonical（benchmarks/manifests/）では
+既存 E2E の移植として追加する。manifest も出荷 canonical（benchmarks/manifests/）では
 なくテストローカル（tests/benchmarks/data/）に置き、registry 完全性の covered を実スキャナ
 未計測のまま偽らない。"""
 import hashlib

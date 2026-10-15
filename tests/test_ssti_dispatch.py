@@ -1,4 +1,4 @@
-"""0035-D1: ssti が typed dispatch() 経由でも従来判定と同一であることを守る。"""
+"""ssti が typed dispatch() 経由でも従来判定と同一であることを守る。"""
 import unittest
 from unittest.mock import AsyncMock
 

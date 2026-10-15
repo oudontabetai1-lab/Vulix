@@ -253,7 +253,7 @@ class JWTScanner(BaseScanner):
         req_headers = dict(_HEADERS)
         # cookies_str は auth_headers の有無に関わらず後段（session cookie からの JWT 抽出）で
         # 参照するため、必ず先に束縛する。以前は else 節でのみ代入しており、auth_headers を
-        # 持つ通常 ScanEngine 経路で NameError となり JWT 検査が丸ごと脱落していた（F03）。
+        # 持つ通常 ScanEngine 経路で NameError となり JWT 検査が丸ごと脱落していた。
         cookies_str = getattr(self.engine, "cookies", "") or ""
         if hasattr(self.engine, "auth_headers"):
             req_headers.update(self.auth_headers_for_url(url))

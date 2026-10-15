@@ -93,7 +93,7 @@ class ParseJsLibrariesTests(unittest.TestCase):
 
     def test_version_in_query_not_matched(self):
         # 版付きファイル名がクエリ/フラグメントにあるだけの URL を誤って当該ライブラリと判定しない。
-        # filename 照合は path のみに適用する（Codex #155）。
+        # filename 照合は path のみに適用する。
         libs = ci.parse_js_libraries_from_urls([
             "https://example.test/app.js?fallback=/jquery-3.4.1.js",
             "https://example.test/bundle.js#/lodash-4.17.10.min.js",
@@ -106,14 +106,14 @@ class ParseJsLibrariesTests(unittest.TestCase):
 
 class ActiveScriptTests(unittest.TestCase):
     def test_base_href_is_used_for_relative_src(self):
-        # <base href> を文書 base URI として相対 src を解決する（Codex #155 P2）。
+        # <base href> を文書 base URI として相対 src を解決する。
         html = ('<base href="https://cdn.jsdelivr.net/npm/">'
                 '<script src="jquery@3.4.1/dist/jquery.js"></script>')
         libs = ci.parse_js_libraries(html, "https://app.test/page")
         self.assertEqual([(l.name, l.version) for l in libs], [("jquery", "3.4.1")])
 
     def test_inert_script_markup_is_ignored(self):
-        # コメント/template/noscript/非 JS type の <script src> は実行時に読み込まれない（Codex #155 P2）。
+        # コメント/template/noscript/非 JS type の <script src> は実行時に読み込まれない。
         src = "https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.js"
         for html in (f'<!-- <script src="{src}"></script> -->',
                      f'<template><script src="{src}"></script></template>',
@@ -126,13 +126,13 @@ class ActiveScriptTests(unittest.TestCase):
 
 class Review155Round3Tests(unittest.TestCase):
     def test_base_inside_template_is_ignored(self):
-        # template 内の <base> はブラウザが無視する（Codex #155 P2）。
+        # template 内の <base> はブラウザが無視する。
         html = ('<template><base href="https://cdn.jsdelivr.net/npm/jquery@3.4.1/"></template>'
                 '<script src="dist/jquery.js"></script>')
         self.assertEqual(ci.parse_js_libraries(html, "https://app.test/"), [])
 
     def test_js_mime_types_with_params_and_legacy(self):
-        # parameter 付き・レガシー JS MIME も実行される script として扱う（Codex #155 P2）。
+        # parameter 付き・レガシー JS MIME も実行される script として扱う。
         src = "https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.js"
         for t in ("text/javascript; charset=utf-8", "application/ecmascript", "MODULE"):
             with self.subTest(t=t):
@@ -259,7 +259,7 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_eol_auth_error_raises_not_none(self):
         # EOL は 404 のみ無データ。401/403 等（自己ホスト EOL の認証拒否）は照会失敗＝raise
-        # （None キャッシュ→checkpoint 完了で恒久 FN になるのを防ぐ・Codex #155）。
+        # （None キャッシュ→checkpoint 完了で恒久 FN になるのを防ぐ）。
         url = f"{ci.DEFAULT_EOL_BASE_URL.rstrip('/')}/api/php.json"
         for code in (401, 403, 400):
             with self.assertRaises(ci.ComponentIntelUnavailable):
@@ -270,7 +270,7 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_eol_non_list_200_raises(self):
-        # 200 だが cycle リストでない（誤設定/proxy の JSON エラー）は照会失敗＝raise（Codex #155）。
+        # 200 だが cycle リストでない（誤設定/proxy の JSON エラー）は照会失敗＝raise。
         url = f"{ci.DEFAULT_EOL_BASE_URL.rstrip('/')}/api/php.json"
         with self.assertRaises(ci.ComponentIntelUnavailable):
             await ci.fetch_product_cycles("php", client=_FakeClient({url: (200, {"error": "nope"})}))
@@ -299,7 +299,7 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
                 await ci.lookup_osv("npm", "jquery", "3.4.1",
                                     client=_FakeClient(post_result=(code, None)))
         # OSV の /v1/query は固定エンドポイント。脆弱性なしは 200+空 vulns で返るため、
-        # 404/401/403 は「無データ」ではなく照会失敗（base URL 誤設定/権限）＝raise（Codex #155）。
+        # 404/401/403 は「無データ」ではなく照会失敗（base URL 誤設定/権限）＝raise。
         for code in (404, 401, 403):
             with self.assertRaises(ci.ComponentIntelUnavailable):
                 await ci.lookup_osv("npm", "jquery", "3.4.1",
@@ -329,7 +329,7 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lookup_nvd_non_200_raises(self):
         # NVD の /cves も固定エンドポイント。CVE 無しは 200+totalResults:0。404/401/403 は
-        # 照会失敗＝raise（恒久 FN を防ぐ・Codex #155）。
+        # 照会失敗＝raise（恒久 FN を防ぐ）。
         url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
         for code in (404, 401, 403):
             with self.assertRaises(ci.ComponentIntelUnavailable):
@@ -353,7 +353,7 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cached_lookup_serializes_in_flight(self):
         # --concurrency>1 相当：engine を共有する2 worker が同一 key を同時照会しても
-        # 外部 lookup は1回に直列化され、両者が同じ結果を得る（#155 P2）。
+        # 外部 lookup は1回に直列化され、両者が同じ結果を得る。
         engine = _FakeEngine(component_intel={"enabled": True})
         s1 = SCANNERS["outdated_components"](engine)
         s2 = SCANNERS["outdated_components"](engine)
@@ -443,7 +443,7 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_script_url_credentials_redacted(self):
         # 署名/トークン付き script URL の資格情報は evidence_details/reproduction で伏字化する
-        # （Finding.to_dict の request URL 伏字化を迂回して artifact へ漏れない・Codex #155）。
+        # （Finding.to_dict の request URL 伏字化を迂回して artifact へ漏れない）。
         engine, scanner = self._scanner(enabled=True)
         src = "https://cdn.test/vendor/jquery-3.4.1.min.js?token=SECRETTOKENVALUE"
         html = f'<script src="{src}"></script>'
@@ -478,7 +478,7 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded[0]["evidence_details"]["library"], "jquery")
 
     async def test_eol_lookups_capped_and_reference_redacted(self):
-        # 大量バナーでも per-page 上限で照会を抑え、self-hosted base URL の資格情報を残さない（Codex #155 P2）。
+        # 大量バナーでも per-page 上限で照会を抑え、self-hosted base URL の資格情報を残さない。
         from wscan.scanners import outdated_components as oc
         engine, scanner = self._scanner(enabled=True)
         engine.component_intel["eol_base_url"] = "https://user:pass@eol.internal"
@@ -555,7 +555,7 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
             _ci.check_component_eol = orig
         self.assertEqual(len(out), 1)
         self.assertEqual(recorded[0]["evidence_details"]["source"], "cms")
-        # 存在しない 'cms' レスポンスヘッダではなく CMS 検出根拠を案内する（Codex #155 P3）。
+        # 存在しない 'cms' レスポンスヘッダではなく CMS 検出根拠を案内する。
         steps = " ".join(recorded[0]["reproduction_steps"])
         self.assertNotIn("'cms' response header", steps)
         self.assertIn("CMS detection evidence", steps)
@@ -681,7 +681,7 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_transient_pair_raises_for_resume(self):
         # 空 pair（transient）は [] を返さず PageDocumentUnavailable を投げて resume 対象にする
-        # （[] だと page-level が tested 完了→恒久 skip・Codex #155）。checked にもしない。
+        # （[] だと page-level が tested 完了→恒久 skip）。checked にもしない。
         from wscan.scanners.base import PageDocumentUnavailable
         engine, scanner = self._scanner(enabled=True)
 
@@ -719,7 +719,7 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_transient_after_finding_does_not_record(self):
         # EOL で finding が出た後に OSV が transient 失敗しても、record_finding は一切呼ばれない
-        # （dedup 汚染・webhook 発火・配信漏れを防ぐ＝resume でクリーンに再配信・Codex #155）。
+        # （dedup 汚染・webhook 発火・配信漏れを防ぐ＝resume でクリーンに再配信）。
         from wscan.scanners.base import PageDocumentUnavailable
         engine, scanner = self._scanner(enabled=True)
         html = '<script src="https://cdn.jsdelivr.net/npm/jquery@3.4.1/jquery.min.js"></script>'
@@ -753,7 +753,7 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded, [])  # EOL finding も含め record されない（遅延記録）
 
     async def test_nvd_sample_max_label(self):
-        # total > 取得件数 のとき「取得N件中の最大」と明示する（Codex #155）。
+        # total > 取得件数 のとき「取得N件中の最大」と明示する。
         cfg = {"enabled": True, "eol_base_url": "https://endoflife.date",
                "osv_base_url": "https://api.osv.dev", "nvd_enabled": True,
                "nvd_base_url": "https://services.nvd.nist.gov", "timeout": 8}
@@ -868,7 +868,7 @@ class CdnReliabilityTests(unittest.TestCase):
         self.assertEqual(libs[0].reliability, "filename")
 
     def test_layout_in_query_string_not_cdn(self):
-        # path でなく query に /npm/... があっても cdn 認定しない（Codex #155）。
+        # path でなく query に /npm/... があっても cdn 認定しない。
         libs = ci.parse_js_libraries_from_urls(
             ["https://cdn.jsdelivr.net/app.js?fallback=/npm/jquery@3.4.1"])
         self.assertEqual(libs, [])
@@ -891,7 +891,7 @@ class CdnReliabilityTests(unittest.TestCase):
 
 class ScanPageContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_external_scripts_beyond_truncation_detected(self):
-        # 50KB 打ち切り本文には無いが external_scripts に捕捉された lib を検出する（Codex #155）。
+        # 50KB 打ち切り本文には無いが external_scripts に捕捉された lib を検出する。
         cfg = {"enabled": True, "eol_base_url": "https://endoflife.date",
                "osv_base_url": "https://api.osv.dev", "timeout": 8}
         engine = _FakeEngine(component_intel=cfg)
@@ -932,7 +932,7 @@ class ScanPageContextTests(unittest.IsolatedAsyncioTestCase):
 class EngineEnableTests(unittest.TestCase):
     def test_explicit_check_enables_component_intel(self):
         # checks に outdated_components を明示すると、enable 未指定でも有効化（config off でも no-op に
-        # しない・BatchRunner 直接構築でも効く・Codex #155）。
+        # しない・BatchRunner 直接構築でも効く）。
         from wscan.engine import ScanEngine
         e = ScanEngine("https://x.test", checks=["outdated_components"],
                        llm_provider="none", monitor=None)
@@ -1035,7 +1035,7 @@ class Review155NetworkTests(unittest.IsolatedAsyncioTestCase):
             "nginx", "1.18.0", client=_FakeClient({url: (200, {"totalResults": 0})})))["total"], 0)
 
     async def test_malformed_nested_payloads_are_unavailable(self):
-        # 200 でも入れ子フィールドの型が不正なら照会失敗扱い（キャッシュ・checkpoint 完了で恒久 FN にしない・Codex #155 P2）。
+        # 200 でも入れ子フィールドの型が不正なら照会失敗扱い（キャッシュ・checkpoint 完了で恒久 FN にしない）。
         url = f"{ci.DEFAULT_NVD_BASE_URL}/rest/json/cves/2.0"
         with self.assertRaisesRegex(ci.ComponentIntelUnavailable, "malformed_vulns"):
             await ci.lookup_osv("npm", "jquery", "3.4.1",
@@ -1046,7 +1046,7 @@ class Review155NetworkTests(unittest.IsolatedAsyncioTestCase):
                     await ci.lookup_nvd("nginx", "1.18.0", client=_FakeClient({url: (200, payload)}))
 
     async def test_osv_non_object_entries_are_unavailable(self):
-        # `{"vulns": ["upstream error"]}` を advisory 0 件の finding にしない（Codex #155 P2）。
+        # `{"vulns": ["upstream error"]}` を advisory 0 件の finding にしない。
         with self.assertRaisesRegex(ci.ComponentIntelUnavailable, "malformed_vulns"):
             await ci.lookup_osv("npm", "jquery", "3.4.1",
                                 client=_FakeClient(post_result=(200, {"vulns": ["upstream error"]})))

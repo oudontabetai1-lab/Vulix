@@ -131,7 +131,7 @@ class SSTIScanner(BaseScanner):
         await self.log_payload_test(
             field_name, "wscan_ssti_baseline", "ssti_baseline", ip.url
         )
-        # 0035-D1: typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
+        # typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
         # source が非空のことがある。state で分岐して捨てず判定は従来どおり source/pair のみ）。
         baseline = await self.dispatch(ip, "wscan_ssti_baseline")
         baseline_source = _retrieved_source(baseline.source, baseline.pair)

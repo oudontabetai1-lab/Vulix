@@ -245,7 +245,7 @@ class AgentEngine:
             # 既存 run の拒否・**新たな finding を1件も得られなかった** resume 失敗時は、
             # 既存 evidence/reproduction を保全する。resume 中に新規 probe を実行して checkpoint
             # 済みの finding を回収した後で verifier/reviewer が落ちたケースは、回収した finding を
-            # 書き出すため保全せず下へ流す（さもないと stale な pre-resume 成果物が残る・Codex #154 P1）。
+            # 書き出すため保全せず下へ流す（さもないと stale な pre-resume 成果物が残る）。
             console.print(
                 f"[bold red]Agent scan FAILED: {result.error}[/bold red]"
             )
@@ -300,12 +300,12 @@ class AgentEngine:
         # verification_state で明確に区別され、秘密値は exporter 側で伏せる。
         from wscan.reproduction import write_reproduction_package
         # 認証（user/pass・TOTP・storage-state）を使った run の finding は認証セッション無しでは
-        # 再現不能なので、reproduction に authorization_required を立てる（Codex #154 P2）。
+        # 再現不能なので、reproduction に authorization_required を立てる。
         # bearer/カスタム認証ヘッダは extra_headers として渡る。Agent path は
         # register_sensitive_headers を呼ばないため `_is_sensitive_header` は `X-Company-Auth` 等の
         # カスタム名を認識できない。operator が明示指定した extra_headers は認証/コンテキスト付与と
         # みなし、**存在するだけで** authenticated 扱いにする（authorization_required=true が安全側。
-        # 良性ヘッダでも注記が付くだけで無害・Codex #154 P2）。
+        # 良性ヘッダでも注記が付くだけで無害）。
         authenticated_run = bool(
             (self.auth_user and self.auth_pass)
             or self.totp_secret
@@ -317,7 +317,7 @@ class AgentEngine:
         )
 
         # 初期化・実行のハードエラー、または history 上の非成功で 0 findings を「正常完了」に
-        # 見せない。evidence は残すが、成功レポートと完了イベントは生成しない（D8）。findings が
+        # 見せない。evidence は残すが、成功レポートと完了イベントは生成しない。findings が
         # あれば不完全でも検出結果は有効なのでレポートは生成する。
         incomplete_empty = (
             not result.error and not result.success and not result.findings
@@ -423,7 +423,7 @@ class AgentEngine:
         # 初期化・実行のハードエラー（browser-use 未導入=ImportError／provider 不在等）を
         # 「偵察完了」と誤表示しない。呼び出し側の Hybrid 失敗ブランチ（seed 無しで Phase 2 を
         # 続行＋警告）へ委ねるため送出する。`_run_with_time_window_monitor` は
-        # `operation_task.result()` で再送出し、caller の except へ伝播する（D8・Codex #101）。
+        # `operation_task.result()` で再送出し、caller の except へ伝播する。
         if result.error:
             if self.monitor:
                 await self.monitor.emit_status(
@@ -443,7 +443,7 @@ class AgentEngine:
         # かつ新規 URL も得られなかった場合は INCOMPLETE。AgentBrowserScanner はこの状態を
         # 明示的に INCOMPLETE と分類するため、target-only handoff を「偵察完了」と誤表示せず
         # 送出し、呼び出し側の Hybrid 失敗ブランチ（seed 無しで Phase 2 続行＋警告）へ委ねる
-        # （Codex #101 P1・run() の incomplete_empty と同型）。ただし URL を1つでも発見していれば
+        # （run() の incomplete_empty と同型）。ただし URL を1つでも発見していれば
         # partial recon として有効なので、到達性の価値を捨てず handoff を返す。
         if not result.success and not findings and len(all_urls) <= 1:
             if self.monitor:

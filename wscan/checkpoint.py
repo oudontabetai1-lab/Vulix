@@ -84,7 +84,7 @@ class CheckpointState:
     scan_matrix: list = field(default_factory=list)
     reached_urls: list = field(default_factory=list)
     http_status_counts: dict = field(default_factory=dict)
-    # D5: 試行台帳のシリアライズ（resume 時に adaptive の実履歴を失わないため）。
+    # 試行台帳のシリアライズ（resume 時に adaptive の実履歴を失わないため）。
     attempt_ledger: dict = field(default_factory=dict)
     # field budget で途中打切りとなった unit の回数。completed_units と別管理にして、
     # 「送達したから完了」ではない unit を完了扱いにしない。
@@ -181,7 +181,7 @@ class CheckpointState:
             "checks": list(self.checks),
             "completed_units": sorted(self.completed_units),
             # v5 legacy fallback 用エイリアス。保存を跨いでも fallback を維持するため
-            # 永続する（Codex #103 P1）。読み込んだ v5 単位のスナップショットで、
+            # 永続する。読み込んだ v5 単位のスナップショットで、
             # 新規 mark で増えない。
             "findings": self.findings,
             "scan_matrix": self.scan_matrix,
@@ -284,7 +284,7 @@ class CheckpointState:
             parts[0] = normalize_url_for_key(parts[0])
             migrated.add("\x1f".join(parts))
         self.completed_units = migrated
-        # 既知の制約（Codex #103 P1）: v5 は whole-url rstrip で URL 末尾の / を落とすため、
+        # 既知の制約: v5 は whole-url rstrip で URL 末尾の / を落とすため、
         # query 値末尾スラッシュ URL（例 https://h/p?z=/admin/）は ?z=/admin として保存され、
         # 正規化しても失われた / を復元できない。かつて whole-rstrip alias で救おうとしたが、
         # genuine な ?z=/admin と truncated された ?z=/admin/ を stored key から区別する証拠が
@@ -299,7 +299,7 @@ class CheckpointState:
             records = self.attempt_ledger.get("records", [])
         except Exception:
             records = []
-        # 既知の制約（Codex #103 P2）: v5 の ledger record が query 値末尾スラッシュ URL
+        # 既知の制約: v5 の ledger record が query 値末尾スラッシュ URL
         # （例 https://h/p?z=/admin/）を持つ場合、旧 stable_key_parts は URL 全体を rstrip して
         # `...?z=/admin` で serialize しており、正規化では失われたスラッシュを復元できない。
         # 現行キーはスラッシュを保持するため、そのごく稀な未完了ユニットの adaptive 履歴は

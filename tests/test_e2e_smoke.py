@@ -2,7 +2,7 @@
 
 full E2E（``test_end_to_end_scan.py``・1スキャン最大 900s）は重く nightly 専用だが、
 crawl→plan→attack→verify の実ブラウザ経路が「通しで完走し基本脆弱性を1件検出する」ことは
-**PR 毎に**確かめたい（F06/0059 のような通し停止・クラッシュ回帰を検知するため）。
+**PR 毎に**確かめたい（ような通し停止・クラッシュ回帰を検知するため）。
 
 最小フィクスチャ ``vuln_app`` の反射 XSS（``/search?q=``）に対して XSS スキャンを1本走らせ、
 tight な上限内に完走し XSS を検出することだけを確認する軽量スモーク。
@@ -32,7 +32,7 @@ from wscan.engine import ScanEngine
 # 真の hang（返らない verifier 等）はこの上限超過で **失敗** になり、CI が赤くなる。
 SMOKE_TIMEOUT_S = 180
 # 上限超過時、engine.run() の finally（verify/browser cleanup）が停止すると wait_for の
-# cancel 待ちが返らず、テストが workflow の 20 分 timeout まで走り得る（Codex #175 P2）。
+# cancel 待ちが返らず、テストが workflow の 20 分 timeout まで走り得る。
 # scan をデーモンスレッドで走らせ join に **cleanup も含めた** hard deadline を与える：
 # 内側 wait_for が SMOKE_TIMEOUT_S で graceful cancel を試み、cleanup が停止しても外側 join が
 # この猶予後に必ず返って **失敗** させる（leak した daemon スレッドは interpreter 終了で消える）。
@@ -44,7 +44,7 @@ def _e2e_enabled() -> bool:
 
 
 # Chromium 可用性 probe の上限。probe の launch/close/teardown は同期 API で timeout を持たないため、
-# 停止すると collection が worker の hard deadline に到達せず workflow timeout まで走る（Codex #175 P2）。
+# 停止すると collection が worker の hard deadline に到達せず workflow timeout まで走る。
 CHROMIUM_PROBE_TIMEOUT_S = 60
 
 
@@ -141,13 +141,13 @@ class E2ESmokeTests(unittest.TestCase):
                 max_payloads=6,
                 request_delay=0,
                 # llm_provider="none" でも AttackPlanner は決定的ヒューリスティックで plan を作る。
-                # plan フェーズを実際に通す（Codex #175 P2）。
+                # plan フェーズを実際に通す。
                 use_planner=True,
                 sarif=False,
                 timeout=8,
                 navigation_retries=0,
             )
-            # verify フェーズを実際に通す（Codex #175 P2）。fixture の反射 XSS は dialog で確定するため
+            # verify フェーズを実際に通す。fixture の反射 XSS は dialog で確定するため
             # _phase_verify が除外し verifier が一度も走らない。狙った finding(field=q) だけ dialog 確定を
             # 一時的に外して本物の _phase_verify → _verify_one（ブラウザ再注入）を通し、終了後に戻す。
             orig_phase_verify = engine._phase_verify
@@ -210,7 +210,7 @@ class E2ESmokeTests(unittest.TestCase):
         # 完走（setUpClass が hang せず到達）＋ **狙った** 反射 XSS を検出。fixture には別 XSS シンク
         # （/dom の field=next・/feedback の field=message）もあるため、check_type=="xss" だけで通すと
         # /search?q= の crawl/scan が退行しても緑のままになる。search フローの field=q に限定する
-        # （field q はこの反射 XSS 固有。finding.url はフォーム掲載ページ / か反射先 /search）（Codex #175 P1）。
+        # （field q はこの反射 XSS 固有。finding.url はフォーム掲載ページ / か反射先 /search）。
         from urllib.parse import urlparse
         self.assertTrue(self._findings, "E2E smoke: スキャンが 0 findings（通し経路の回帰の疑い）")
         target = [

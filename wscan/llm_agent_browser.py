@@ -202,7 +202,7 @@ def _url_is_excluded(url: str, exclude_urls: list[str]) -> bool:
 def _strip_query_fragment(u: str) -> str:
     """URL/パスから query と fragment を落として scheme+netloc+path へ正規化する（純粋）。
 
-    access-only 照合を候補・設定 scope の両側で対称に行うため（Codex #154 P1）。path 指定
+    access-only 照合を候補・設定 scope の両側で対称に行うため。path 指定
     （scheme 無し）はそのまま path を返す。
     """
     p = urlparse(str(u or "").strip())
@@ -224,11 +224,11 @@ def security_probe_allowed(
     if _url_is_excluded(url, exclude_urls):
         return False
     # access-only URL（/login 等）は primary target origin を共有しても security probe 禁止。
-    # target scope より access scope を優先する（訪問/認証のみの契約を守る・Codex #154 P1）。
+    # target scope より access scope を優先する（訪問/認証のみの契約を守る）。
     # full-URL scope は exact/`scope+"/"` 一致のみのため、query/fragment 付きの login 変種
     # （`/login?next=/home`・`/login#step2`）が access scope に一致せず probe 許可されてしまう。
     # **候補・設定 scope の両側**を scheme+netloc+path へ正規化してから照合する。片側だけだと
-    # 設定 scope 自体が `/login?tenant=a` のとき正規化候補 `/login` と一致しない（Codex #154 P1）。
+    # 設定 scope 自体が `/login?tenant=a` のとき正規化候補 `/login` と一致しない。
     if access_urls:
         _access_probe = _strip_query_fragment(url)
         _norm_access = [_strip_query_fragment(a) for a in _normalize_scope_urls(access_urls)]
@@ -1153,7 +1153,7 @@ class AgentBrowserScanner:
             # うえ、browser-use が XDG や遅延生成で回避することもある。ここで早期 return
             # すると、そうした環境で FakeBrowser を使うテスト/ライブラリ呼び出しまで含め
             # 全 agent 実行を誤ってブロックする。実際に初期化が失敗すれば下流で
-            # result.error → FAILED＋非0 exit として誠実に表面化する（D8 の核）。
+            # result.error → FAILED＋非0 exit として誠実に表面化する（核）。
             console.print(f"[yellow]⚠ {config_error}[/yellow]")
 
         try:
@@ -1162,7 +1162,7 @@ class AgentBrowserScanner:
         except (RuntimeError, ImportError) as e:
             # ImportError(ModuleNotFoundError 含む)= browser-use 未導入。`_build_llm` は
             # `from browser_use.llm import ...` を実行するため、後段の except ImportError より
-            # 前にここへ来る。traceback で漏らさず FAILED＋非0 exit へ倒す（D8。Codex #101）。
+            # 前にここへ来る。traceback で漏らさず FAILED＋非0 exit へ倒す。
             result.error = str(e) or type(e).__name__
             console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
             if self.monitor:
@@ -1460,7 +1460,7 @@ class AgentBrowserScanner:
                         candidate = self._candidate_for_work(work)
                         # payload も一致条件に含める：同一 field で verifier が別 payload を
                         # 報告しても元候補を dynamic_verified にすると「その payload が独立再現
-                        # された」と誤主張する（Codex #154 P2）。不一致なら未確証側（安全）に倒す。
+                        # された」と誤主張する。不一致なら未確証側（安全）に倒す。
                         is_reproduced = bool(candidate) and any(
                             (finding.check_type, finding.url, finding.field_name, finding.payload)
                             == (
@@ -1477,8 +1477,8 @@ class AgentBrowserScanner:
                     if work.role == AgentRole.ADVERSARIAL_REVIEWER:
                         # gap 制御指令は reviewer の final result からのみ解析する。episode_text は
                         # 未信頼な target ページの extracted_content() を含み、``COVERAGE GAP: bogus``
-                        # で偽 gap を作られたり ``GAP RESOLVED:`` で実 gap を消される（prompt injection・
-                        # Codex #154 P1）。完了マーカーが final を見るのと経路を揃える。
+                        # で偽 gap を作られたり ``GAP RESOLVED:`` で実 gap を消される（prompt injection）。
+                        # 完了マーカーが final を見るのと経路を揃える。
                         reported, resolved = parse_reviewer_gap_lines(final)
                         self._harness.record_reviewer_gaps(reported)
                         self._harness.resolve_reviewer_gaps(resolved)
@@ -1521,8 +1521,8 @@ class AgentBrowserScanner:
                     # in-scope page として強制検査対象へ昇格する。
                     newly_enqueued = self._enqueue_observed_probe_work()
                     # 新しい probe work が増えたら、完了済みの adversarial reviewer を再キューして
-                    # 拡張された ledger を必ずレビューさせる（新 evidence の未レビュー完了を防ぐ・
-                    # Codex #154 P2）。reviewer 自身の episode が新ページを踏んだ場合も同様。
+                    # 拡張された ledger を必ずレビューさせる（新 evidence の未レビュー完了を防ぐ）。
+                    # reviewer 自身の episode が新ページを踏んだ場合も同様。
                     if newly_enqueued and any(
                         item.role == AgentRole.ADVERSARIAL_REVIEWER
                         and item.status == WorkStatus.COMPLETE
@@ -1531,7 +1531,7 @@ class AgentBrowserScanner:
                         self._harness.requeue_role(AgentRole.ADVERSARIAL_REVIEWER)
                 # resume では新 process の _memory が空。checkpoint の visited_urls を取り込み、
                 # 完了済み explorer の発見 URL を失わない。これをしないと result.memory が空で
-                # 返り、run_recon が Phase 2 へ primary target しか渡せない（Codex #154 P1）。
+                # 返り、run_recon が Phase 2 へ primary target しか渡せない。
                 _known_visited = set(self._memory.visited_urls)
                 for _u in self._harness.state.visited_urls:
                     if _u not in _known_visited:
@@ -1621,7 +1621,7 @@ class AgentBrowserScanner:
             if self._harness:
                 # probe/verifier/reviewer/action が遅延 ImportError を投げると generic except より
                 # 先にこの handler へ来る。probe が既に checkpoint した仮説を失わないよう、汎用経路と
-                # 同じく checkpoint から finding/coverage を回収してから finalize する（Codex #154 P1）。
+                # 同じく checkpoint から finding/coverage を回収してから finalize する。
                 result.findings = [
                     _finding_from_checkpoint(item)
                     for item in self._harness.state.hypotheses
@@ -1671,7 +1671,7 @@ class AgentBrowserScanner:
                     console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
 
         # 実行失敗（例外）または history 上の非成功で 0 findings なら、「成功・0 findings」と
-        # 誤表示しない（D8）。findings があれば不完全でも検出結果は有効なので表示する。
+        # 誤表示しない。findings があれば不完全でも検出結果は有効なので表示する。
         incomplete_empty = (
             not result.error and not result.success and not result.findings
         )
@@ -1735,7 +1735,7 @@ class AgentBrowserScanner:
 
     def _work_target(self, work) -> str:
         target = self._runtime_work_targets.get(work.work_id, work.target)
-        # redaction・truncation いずれも「実行不能＝要再発見」シグナル（Codex #154 P1）。
+        # redaction・truncation いずれも「実行不能＝要再発見」シグナル。
         if "<redacted>" in target or TRUNCATION_MARKER in target:
             return ""
         return target
@@ -1753,11 +1753,11 @@ class AgentBrowserScanner:
         )
         # url だけでなく実行に効く全フィールド（payload/field_name）の redaction を検出する。
         # _sanitize_value は payload/field_name も伏せるため（例: user "admin" → SQLi payload
-        # "admin'--" が "<redacted>'--"）、url が無傷でも改変済み payload で検証してしまう
-        # （Codex #154 P1）。いずれかが redacted なら候補無し扱いにし、_prepare_resume_work が
+        # "admin'--" が "<redacted>'--"）、url が無傷でも改変済み payload で検証してしまう。
+        # いずれかが redacted なら候補無し扱いにし、_prepare_resume_work が
         # originating probe を再キューして原候補を復元する。
         # redaction に加え truncation（>1000字で切り詰め）も実行不能扱いにする。切り詰めた
-        # prefix で検証すると原候補と異なる payload を試し finding が別物になる（Codex #154 P1）。
+        # prefix で検証すると原候補と異なる payload を試し finding が別物になる。
         unusable = any(
             "<redacted>" in str(candidate.get(key, "")) or TRUNCATION_MARKER in str(candidate.get(key, ""))
             for key in ("url", "payload", "field_name")
@@ -1768,7 +1768,7 @@ class AgentBrowserScanner:
         """episode 予算の分母。next_work() と同じ基準（planned / 試行上限未満の inconclusive）で数える。
 
         試行上限(2)に達した inconclusive は二度と実行されないので、分母に含めると後続 probe の
-        予算が恒久的に目減りする（Codex #154 P2）。
+        予算が恒久的に目減りする。
         """
         return sum(
             item.status == WorkStatus.PLANNED
@@ -1808,7 +1808,7 @@ class AgentBrowserScanner:
                     continue
                 # hypothesis の url は harness の sanitize（redaction＋1000字切り詰め＋番兵）を経ている。
                 # probe target も同じ sanitize を通して比較しないと、長 URL の候補が元 probe に紐付かず
-                # 再キューされない（Codex #154 P1）。
+                # 再キューされない。
                 target_keys = {item.target, self._harness._sanitize_value(item.target)}
                 related = any(
                     hypothesis.get("candidate_id") in verifier_candidates
@@ -1841,7 +1841,7 @@ class AgentBrowserScanner:
         """秘密値を含めずに resume の非秘密な実行文脈の同一性を固定する。
 
         パスワード・TOTP・ヘッダ値は無塩 SHA-256 で spec_hash（checkpoint/manifest に永続化）へ入れると
-        オフライン辞書攻撃が可能になるため、ここには入れず _auth_secret_material 経由で照合する（Codex #154 P2）。
+        オフライン辞書攻撃が可能になるため、ここには入れず _auth_secret_material 経由で照合する。
         """
         from . import llm_endpoint
 
@@ -1860,10 +1860,10 @@ class AgentBrowserScanner:
                 "storage_state": storage_digest,
                 # LLM エンドポイントも resume 同一性に含める。provider/model 名だけだと、同じ
                 # model ラベルで別 OpenAI 互換/Ollama サーバへ resume され、無関係なモデルの成果を
-                # 結合しうる（--resume は元条件の一致を約束する・Codex #154 P2）。末尾スラッシュを
+                # 結合しうる（--resume は元条件の一致を約束する）。末尾スラッシュを
                 # 正規化して安定化する。
                 # _build_llm と同じ解決（明示＞[互換のみ]env＞公式既定）で実効エンドポイントを hash する。
-                # 明示値だけだと env 設定の openai_compatible で別サーバへ resume し得る（Codex #154 P2）。
+                # 明示値だけだと env 設定の openai_compatible で別サーバへ resume し得る。
                 "llm_base_url": (
                     llm_endpoint.resolve_instance_base(self.llm_provider, self.llm_base_url)
                     if self.llm_provider in ("openai", "openai_compatible")
@@ -1935,12 +1935,12 @@ class AgentBrowserScanner:
             return False
         # 完了マーカーは **肯定的な独立指令** として解釈する。単純な部分一致だと
         # "I cannot output PROBE COMPLETE because inputs remain" のような否定文でも完了扱いに
-        # なり未完了なのに coverage 完了と誤報告する（Codex #154 P1）。マーカーが行の先頭または
+        # なり未完了なのに coverage 完了と誤報告する。マーカーが行の先頭または
         # 末尾に立ち（"No coverage gaps found. REVIEW COMPLETE" のような肯定末尾も可）、かつ同一行の
         # マーカーより前に行為否定語（cannot/unable 等）が無い行だけを肯定完了とみなす。
         # 否定/留保語は marker の **前後どちらでも** 拒否する。marker 前だけを見ると
         # "PROBE COMPLETE was not reached" / "PROBE COMPLETE but several inputs remain" が
-        # before 空で通ってしまう（Codex #154 P1）。exact 一致は無条件肯定、start/end 一致は
+        # before 空で通ってしまう。exact 一致は無条件肯定、start/end 一致は
         # 行全体に否定/留保語が無い場合のみ肯定完了とみなす。
         _NEG = (
             "CANNOT", "CAN'T", "UNABLE", "WON'T", "COULDN'T", "DO NOT", "DON'T",
@@ -2153,8 +2153,8 @@ class AgentBrowserScanner:
         configured login page の exact 一致に加え、**authenticator episode 実行中**は
         同一 origin（scheme+netloc）の access-only ページも許可する。外部 IdP が
         ``/sign-in`` → ``/mfa`` のようにパス遷移する多段フローで、遷移先ページの認証入力
-        （TOTP/password）が filter_probe_actions に落とされて認証が完了できない問題を防ぐ
-        （Codex #154 P1）。cross-origin へ資格情報を漏らさないよう netloc 一致に限定する。
+        （TOTP/password）が filter_probe_actions に落とされて認証が完了できない問題を防ぐ。
+        cross-origin へ資格情報を漏らさないよう netloc 一致に限定する。
         """
         if self._is_configured_login_page(url):
             return True

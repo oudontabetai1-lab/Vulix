@@ -29,7 +29,7 @@ HYBRID_RECON_MAX_RETRIES = 2
 
 
 def _positive_float(value):
-    """argparse 用: 正の有限 float だけを受ける（0/負/NaN/inf を開始前に拒否・0065）。"""
+    """argparse 用: 正の有限 float だけを受ける（0/負/NaN/inf を開始前に拒否）。"""
     import argparse
     import math
     try:
@@ -44,8 +44,8 @@ def _positive_float(value):
 def _cfg_timeout(value, default: float) -> float:
     """YAML の timeout 値を正規化する（空/非数値/非有限/非正は既定・純粋）。
 
-    import 時の eager float() が空キー（None）や非数値で例外を投げ ``--help`` すら落ちるのを防ぐ
-    （Codex #173 P2）。
+    import 時の eager float() が空キー（None）や非数値で例外を投げ ``--help`` すら落ちるのを防ぐ。
+    
     """
     import math
     try:
@@ -782,7 +782,7 @@ Examples:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ── scan subcommand ────────────────────────────────────────────
-    # `replay` は scan の別名（0069 Phase1・Vulix 語彙）。flow/HAR 再生は
+    # `replay` は scan の別名（Vulix 語彙）。flow/HAR 再生は
     # scan と同じ --flows/--har 経路で行うため、独立実装せず alias で委譲する
     # （args.command は "replay" になるが dispatch の catch-all で run_scan に入る）。
     scan = sub.add_parser(
@@ -839,7 +839,7 @@ Examples:
         "--all-checks", action="store_true", default=False,
         help=(
             "登録済みの全 scanner を実行する（--checks を上書き）。既定 scan は少数 check "
-            "だけなので、全検査カバレッジを一度に得たいときに使う（0016）。"
+            "だけなので、全検査カバレッジを一度に得たいときに使う。"
         ),
     )
     scan.add_argument(
@@ -1530,7 +1530,7 @@ Examples:
     # 注: --llm-timeout / --llm-stream-timeout は agent サブコマンドには **敢えて足さない**。
     # agent モードの LLM は browser-use の Chat クライアント（ChatAnthropic/ChatOpenAI/ChatOllama）が
     # 駆動し、これらへの timeout 配線は browser-use のバージョン依存で本リポジトリからは確実に
-    # 検証できない。宣伝だけして無効な flag（inert）を避けるため非公開にする（Codex #173 P2:
+    # 検証できない。宣伝だけして無効な flag（inert）を避けるため非公開にする（
     # "Wire or remove" のうち remove を選択）。scan/triage の --llm-timeout は決定論経路で機能する。
     agent.add_argument(
         "--llm",
@@ -1815,10 +1815,10 @@ Examples:
         help="HTTP proxy URL for the manual crawl browser",
     )
 
-    # ── capability-matrix subcommand（scanner capability の可視化・0035） ──
+    # ── capability-matrix subcommand（scanner capability の可視化） ──
     cap_matrix = sub.add_parser(
         "capability-matrix",
-        help="全 scanner の carrier 別 capability matrix を表示する（0035）",
+        help="全 scanner の carrier 別 capability matrix を表示する",
     )
     cap_matrix.add_argument(
         "--json", action="store_true", default=False,
@@ -1935,7 +1935,7 @@ def _agent_exit_code(result) -> int:
 
     失敗（``error``）に加え、**正常に完了しなかった 0-findings** も非0にする。browser-use は
     実行失敗を例外だけでなく ``history.is_successful()``（→ ``result.success``）でも報告するため、
-    success=False の空振りを「成功・0 findings」と誤表示しない（D8）。findings があれば実際に検出
+    success=False の空振りを「成功・0 findings」と誤表示しない。findings があれば実際に検出
     できているので 0（不完全でも検出結果は有効）。
     """
     if result is None:
@@ -1955,7 +1955,7 @@ def _batch_exit_code(results) -> int:
     """batch 結果から CLI 終了コードを決める純粋関数。
 
     1 件でも失敗（例外/開始不能＝``success`` が偽）があれば非0。全成功・空リストは 0。
-    全対象失敗でも 0 を返し「合計0件」を成功と誤認させていた問題を防ぐ（F02）。
+    全対象失敗でも 0 を返し「合計0件」を成功と誤認させていた問題を防ぐ。
     """
     return 1 if any(not getattr(r, "success", False) for r in (results or [])) else 0
 
@@ -2177,7 +2177,7 @@ async def run_agent(args):
                 proxy=getattr(args, "proxy", "") or "",
             )
             result = await engine.run()
-            # early-return 条件は _agent_exit_code の非0条件と一致させる（D8）。
+            # early-return 条件は _agent_exit_code の非0条件と一致させる。
             # incomplete-empty（success=False かつ 0 findings）でも sleep(3600) に入れず
             # result をそのまま返し、非0 exit を確実に届ける。
             if _agent_exit_code(result):
@@ -2215,7 +2215,7 @@ def _collapse_multi_target(
 
 
 def _load_flow_files(paths) -> list[dict]:
-    """`--flows` の JSON ファイルを ScanEngine 用の flow dict へ読み込む（F09）。
+    """`--flows` の JSON ファイルを ScanEngine 用の flow dict へ読み込む。
 
     record サブコマンドは steps の**リスト**を保存し、ScanFlow.from_dict は
     ``{"name", "steps"}`` を期待する。両形式を受ける：リストは file 名を name として包み、
@@ -2243,7 +2243,7 @@ def _load_flow_files(paths) -> list[dict]:
             continue
         # 構造検証: JSON 妥当でも step が非 dict（`[1]`）や timeout 非数値だと後段の
         # ScanFlow.from_dict/FlowStep.from_dict が AttributeError/ValueError でスキャン全体を
-        # 落とす。ここで構築を試し、壊れていれば skip して他 flow・スキャンを止めない（#170 P2）。
+        # 落とす。ここで構築を試し、壊れていれば skip して他 flow・スキャンを止めない。
         try:
             ScanFlow.from_dict(candidate)
         except Exception as exc:
@@ -2252,7 +2252,7 @@ def _load_flow_files(paths) -> list[dict]:
         # action 名の妥当性を **読み込み時** に検証する。ScanFlow.from_dict は任意の action
         # 文字列を受けるため、`navigat` のような綴り誤りは replay 時まで気づかれず、しかも
         # _match_pre_attack_flow が navigate step を見つけられず flow が黙って選ばれない
-        # （前提未適用のまま警告も出ない）＝偽陰性になる（Codex #170 P2）。未知 action を含む
+        # （前提未適用のまま警告も出ない）＝偽陰性になる。未知 action を含む
         # flow はここで skip し、理由を明示する。
         _VALID_FLOW_ACTIONS = {"navigate", "fill", "submit", "click", "wait"}
         unknown = sorted({
@@ -2267,7 +2267,7 @@ def _load_flow_files(paths) -> list[dict]:
             continue
         # action ごとの必須フィールドも読み込み時に検証する。特に navigate は nonempty string
         # url が無いと _match_pre_attack_flows が最終 navigate を実ページに一致させられず、前提が
-        # 黙って無視される（未知 action と違い警告も runner の失敗報告も出ない＝偽陰性・Codex #170 P2）。
+        # 黙って無視される（未知 action と違い警告も runner の失敗報告も出ない＝偽陰性）。
         # fill/click は selector か field が無いと replay 時に "target not found" で明示失敗するが、
         # ここでも早期に弾いて他 flow・スキャンを止めない。
         def _flow_field_error(s: dict) -> str:
@@ -2294,7 +2294,7 @@ def _load_flow_files(paths) -> list[dict]:
             continue
         # navigate step を1つも持たない flow は _match_pre_attack_flows が最終 navigate で
         # ページに一致させられず、選択・再生されないまま警告も出ない（前提未適用の偽陰性）。
-        # 読み込み時に skip して理由を明示する（Codex #170 P2）。
+        # 読み込み時に skip して理由を明示する。
         if not any(
             isinstance(s, dict) and str(s.get("action", "")) == "navigate"
             for s in candidate["steps"]
@@ -2306,7 +2306,7 @@ def _load_flow_files(paths) -> list[dict]:
             continue
         # navigate url の前後空白を除いて正規化して格納する。u.strip() は真偽判定にしか使って
         # おらず、untrimmed のままだと _match_pre_attack_flows が空白入り URL を crawl URL と
-        # 一致させられず、前提 flow が黙って選ばれない（Codex #170 P2）。
+        # 一致させられず、前提 flow が黙って選ばれない。
         for _s in candidate["steps"]:
             if isinstance(_s, dict) and str(_s.get("action", "")) == "navigate" \
                     and isinstance(_s.get("url"), str):
@@ -2316,19 +2316,19 @@ def _load_flow_files(paths) -> list[dict]:
     # 同一遷移先の複数 flow は「統合」せず、ScanEngine 側が一致する flow を **file 順に全て
     # 順次再生**する（_match_pre_attack_flows が matcher の URL 等価で全一致を返す）。以前の
     # 連結統合は (a) 生文字列 group で /checkout と /checkout/ 等の等価先を取りこぼし、
-    # (b) 各 flow の最終 navigate 以外を前寄せして順序を壊す、という不具合があった（Codex #170）。
+    # (b) 各 flow の最終 navigate 以外を前寄せして順序を壊す、という不具合があった。
     return flows
 
 
-# setup 提案が出してよい flag の明示許可リスト（#170 P2）。すべて値を取らない boolean
+# setup 提案が出してよい flag の明示許可リスト。すべて値を取らない boolean
 # トグルに限定する。setup のコピー可能コマンドへそのまま連結されるため、`--header-refresh-cmd`
 # のように値がシェル実行される option（header_manager が create_subprocess_shell で実行）や
 # 任意の値付き option を弾く。構文的に正しいだけの long option は許可しない。
-# すべて scan サブコマンドに実在する option（scan --help で検証済・#170 P2）。
+# すべて scan サブコマンドに実在する option（scan --help で検証済）。
 # `--no-headless` は scan に無く生成コマンドが `unrecognized arguments` で落ちるため除外。
 # `--fast` は run_scan が depth==既定を「未指定」とみなし fast preset で depth=1 に変える＝
-# 案内した `--depth N` と実行結果が食い違うため除外（#170 P2）。
-# 提案 checks/depth の要約と**実効設定が食い違う**flag は全て除外する（#170 P2）：
+# 案内した `--depth N` と実行結果が食い違うため除外。
+# 提案 checks/depth の要約と**実効設定が食い違う**flag は全て除外する：
 #   --all-checks（--checks を全 scanner で置換）/ --dom-xss（dom_xss を checks に追加）/
 #   --ctf（ssti 追加＋遅延半減）/ --spa-crawl（クロール範囲拡大）/ --fast（depth を 1 に）/
 #   --no-headless（scan 非対応）。
@@ -2339,7 +2339,7 @@ _SAFE_SETUP_FLAGS = frozenset({
 
 
 def _parse_setup_llm(text, known_checks) -> "Optional[dict]":
-    """setup の LLM 応答テキストから {checks, depth, flags, reason} を防御的に抽出（F11）。
+    """setup の LLM 応答テキストから {checks, depth, flags, reason} を防御的に抽出。
 
     壊れた JSON・非 dict・checks 不在/全て未知は None（＝無効応答→呼び出し側が既定へ fallback）。
     checks は実レジストリ（SCANNERS）で検証し未知を落とす。depth は 1-5 の int 以外なら 2。
@@ -2366,17 +2366,17 @@ def _parse_setup_llm(text, known_checks) -> "Optional[dict]":
         return None  # 有効な check が皆無＝無効応答として扱う
     depth = data.get("depth")
     # bool は int のサブクラス（isinstance(True,int)==True）なので type() で厳密判定する。
-    # さもないと depth=true が通り `--depth True` を生成し argparse が弾く（#170 P2）。
+    # さもないと depth=true が通り `--depth True` を生成し argparse が弾く。
     if type(depth) is not int or not (1 <= depth <= 5):
         depth = 2
     # flags は setup が出すコピー可能コマンドへそのまま連結される。構文検証だけだと
     # `--header-refresh-cmd=id` のような値がシェル実行される option を通してしまうため、
-    # 無害な boolean トグルの明示許可リスト（_SAFE_SETUP_FLAGS）だけに限定する（#170 P2）。
+    # 無害な boolean トグルの明示許可リスト（_SAFE_SETUP_FLAGS）だけに限定する。
     flags_raw = data.get("flags") if isinstance(data.get("flags"), list) else []
     # 宣伝例 `--dom-xss` のように「実は check」を指すフラグを check へ正規化してから許可リストで
     # 絞る。さもないと model が例に従い checks=xss + flags=--dom-xss を返したとき、--dom-xss が
-    # _SAFE_SETUP_FLAGS に無く黙って落ちて DOM-XSS 検査が抜ける（採用表示と生成コマンドが不一致・
-    # Codex #170 P2）。`--x-y` は `x_y` に写して known_checks なら checks へ移す。
+    # _SAFE_SETUP_FLAGS に無く黙って落ちて DOM-XSS 検査が抜ける（採用表示と生成コマンドが不一致）。
+    # `--x-y` は `x_y` に写して known_checks なら checks へ移す。
     _kept_flags = []
     for f in flags_raw:
         if not isinstance(f, str):
@@ -2566,7 +2566,7 @@ async def run_scan(args):
         )
 
     # Build checks list（表示と同じ _effective_checks で解決＝banner と engine が食い違わない）。
-    # --all-checks は --checks を上書き（0016）、--dom-xss は dom_xss を追加。wizard 更新後の args を読む。
+    # --all-checks は --checks を上書き、--dom-xss は dom_xss を追加。wizard 更新後の args を読む。
     checks_list = _effective_checks(args)
 
     # A: Build accounts list from --accounts or --accounts-file
@@ -3280,7 +3280,7 @@ async def run_serve(args):
                 openai_base_url=_scan_base,
                 role_models=cfg.get("role_models", {}) or {},
                 # eager float() は WS/API が null/非数値を送ると scan 開始前に例外化する。
-                # 生値を渡し、PayloadGenerator 側の正規化（不正→既定）に一元的に委ねる（Codex #173 P2）。
+                # 生値を渡し、PayloadGenerator 側の正規化（不正→既定）に一元的に委ねる。
                 llm_timeout_seconds=cfg.get(
                     "llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30)
                 ),
@@ -3345,7 +3345,7 @@ async def run_serve(args):
                                         else bool(cfg.get("enable_component_intel"))),
                 # 明示指定が無ければ None を渡し、ScanEngine の checks 推論（checks に tls_scan が
                 # あれば有効）に委ねる。False 既定で上書きすると checks:["tls_scan"] が黙って no-op に
-                # なる（REST/WS/定期の serve リクエスト・Codex #158）。
+                # なる（REST/WS/定期の serve リクエスト）。
                 enable_tls_scan=(None if cfg.get("enable_tls_scan") is None
                                  else bool(cfg.get("enable_tls_scan"))),
                 enable_sitemap_crawl=bool(cfg.get("enable_sitemap_crawl", True)),
@@ -3652,7 +3652,7 @@ async def run_setup(args):
 
     # 提案候補の check 一覧は SCANNERS レジストリから導出する。ハードコードだと新規 scanner
     # （cors/stored_xss/security_headers/request_smuggling/cache_poisoning 等）がモデルへ提示されず
-    # 「利用不可」と誤誘導して不完全な設定を生む（Codex #170 P2）。
+    # 「利用不可」と誤誘導して不完全な設定を生む。
     from wscan.scanners import SCANNERS as _SCANNERS_FOR_PROMPT
     _available_checks = ", ".join(sorted(_SCANNERS_FOR_PROMPT))
     prompt = (
@@ -3680,7 +3680,7 @@ async def run_setup(args):
         role_models=getattr(args, "role_models", {}),
     )
 
-    # LLM 応答を検証して提案へ反映する（F11）。妥当な JSON が得られなければ（無効応答・
+    # LLM 応答を検証して提案へ反映する。妥当な JSON が得られなければ（無効応答・
     # LLM 障害・provider=none）明示的にヒューリスティックへ fallback する。両経路とも
     # 最終的に checks/depth/flags を確定させ、後段のコマンド生成へ渡す。
     from wscan.scanners import SCANNERS
@@ -3688,7 +3688,7 @@ async def run_setup(args):
 
     # ウィザード既定の system プロンプト（_SYSTEM_PROMPT）は checks/depth のみの別スキーマを
     # 要求し flags/reason を含まないため、その system のままだとモデルが setup 用の追加項目を
-    # 落とす。setup のスキーマに一致する system を渡す（#170 P2）。
+    # 落とす。setup のスキーマに一致する system を渡す。
     setup_system = (
         "You are a web security scanner configuration assistant. "
         "Follow the user's message exactly and return only the JSON object it specifies "
@@ -3710,7 +3710,7 @@ async def run_setup(args):
         if suggestion["reason"]:
             # reason は LLM 由来の任意文字列。Rich マークアップ（例: `[/admin]` の未対応閉じタグ）が
             # 含まれると console.print が MarkupError を投げ、生成コマンドの表示前に setup が落ちる。
-            # escape してプレーン文字として描画する（Codex #170 P2）。
+            # escape してプレーン文字として描画する。
             from rich.markup import escape as _rich_escape
             console.print(f"[dim]理由: {_rich_escape(str(suggestion['reason']))}[/dim]")
     else:
@@ -3788,7 +3788,7 @@ async def run_record(args):
         console.print(f"\n[bold green]✓ {len(steps)} ステップを保存しました:[/bold green] {args.output}")
         # 出力パスに空白（例: "checkout flow.json"）があると、そのまま貼れるコマンドとして
         # 表示したとき --flows が2引数に割れて _load_flow_files が両方欠落 skip し、前提 flow
-        # 無しで別状態をスキャンしてしまう。shlex.quote でシェル安全に引用する（Codex #170 P2）。
+        # 無しで別状態をスキャンしてしまう。shlex.quote でシェル安全に引用する。
         import shlex
         console.print(
             f"\n[dim]このフロー ファイルをスキャンで使用するには:[/dim]\n"
@@ -3835,7 +3835,7 @@ async def run_manual_crawl(args):
 
 
 def run_capability_matrix(args):
-    """全 scanner の carrier 別 capability matrix を Markdown / JSON で出力する（0035）。"""
+    """全 scanner の carrier 別 capability matrix を Markdown / JSON で出力する。"""
     import json as _json
 
     from wscan.scanners import SCANNERS

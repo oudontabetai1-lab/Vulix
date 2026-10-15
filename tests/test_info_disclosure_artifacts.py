@@ -1,4 +1,4 @@
-"""0017: 忘れ物 artifact / ディレクトリリスティング検出の単体テスト（純粋・オフライン）。"""
+"""忘れ物 artifact / ディレクトリリスティング検出の単体テスト（純粋・オフライン）。"""
 import re
 import types
 import unittest
@@ -119,7 +119,7 @@ class DirListingTests(unittest.TestCase):
 
     def test_nginx_empty_autoindex_parent_link_only(self):
         # nginx の空 autoindex は `<a href="../">../</a>` だけが補強行。`../`（末尾スラッシュ）を
-        # 親ディレクトリ行として受理する（Codex #156）。
+        # 親ディレクトリ行として受理する。
         self.assertTrue(m.detect_directory_listing(
             '<html><head><title>Index of /uploads/</title></head><body>'
             '<h1>Index of /uploads/</h1><hr><pre><a href="../">../</a>'
@@ -195,7 +195,7 @@ class CatchAllComparisonTests(unittest.TestCase):
 
     def test_dynamic_fields_tolerated(self):
         # catch-all が per-request な timestamp/nonce/trace-id/CSRF/UUID を含んでも同一判定する
-        # （動的値の差だけで別物にしない・Codex #156）。
+        # （動的値の差だけで別物にしない）。
         base = ('<html>Not found /wscan-nonexistent-probe-8f3a1c9e2b.zzz '
                 'ts=2026-09-10T07:15:20Z nonce="a1b2c3d4e5f6a7b8" '
                 'trace_id=9f8e7d6c5b4a3021 req=12345678901 '
@@ -212,7 +212,7 @@ class CatchAllComparisonTests(unittest.TestCase):
 
     def test_empty_normalized_bodies_not_catch_all(self):
         # 動的フィールド除去で両方が空になる場合は catch-all 同一と判定しない。
-        # `TOKEN=<hex>` だけの実 /.env が `request_id=<hex>` だけの soft-404 に潰されない（Codex #156）。
+        # `TOKEN=<hex>` だけの実 /.env が `request_id=<hex>` だけの soft-404 に潰されない。
         baseline = "request_id=9f8e7d6c5b4a3021"        # 正規化で空
         candidate = "TOKEN=0123456789abcdef0123"        # 正規化で空（だが実シークレット）
         self.assertFalse(m._same_catch_all(candidate, "/.env", baseline, m._SOFT404_PROBE))
@@ -251,7 +251,7 @@ class SensitiveVerifyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_soft404_origin_real_nonhtml_artifact_verifies(self):
         # SPA シェルを返す soft-404 origin でも、baseline と異なる実在の非HTML artifact
-        # (/web.config.bak 等・署名無し) は fallback で verify される（Codex #156）。
+        # (/web.config.bak 等・署名無し) は fallback で verify される。
         scanner = self._scanner()
 
         async def _get(url, follow_redirects=False):

@@ -1,9 +1,9 @@
-"""見逃し0（recall）ゲートの純粋ロジック（0015 PRINCIPLE-001 / ADR-0016）。
+"""見逃し0（recall）ゲートの純粋ロジック。
 
-ADR-0016 は「見逃し（false negative）最小化・製品目標0」を第一目的とし、固定 ground truth に
+設計方針は「見逃し（false negative）最小化・製品目標0」を第一目的とし、固定 ground truth に
 対する recall 100% をリリースゲートにすると定めた。本モジュールはその**判定ロジック**を提供する
 （enforcement は E2E scan 実走時＝WSCAN_E2E 有効時に blocking。PR CI は browser 不安定のため
-非 blocking のままとし、release gate は nightly workflow で定期 blocking 実行する＝DECISION-CI-RECALL=C）。
+非 blocking のままとし、release gate は nightly workflow で定期 blocking 実行する）。
 フィクスチャの
 `EXPECTED_FINDINGS`（各 spec は `check`/`path`/`field`/`note`）と、実スキャンが報告した
 `(check, path, field)` の集合から recall を算出する純粋関数群。
@@ -11,7 +11,7 @@ ADR-0016 は「見逃し（false negative）最小化・製品目標0」を第�
 ブラウザ・エンジン非依存＝ユニットテスト可能に保つ（判定ロジックを I/O から分離する規約）。
 E2E 側はこの `RecallReport` を使って `recall == 1.0` を単一ゲートとして assert する。
 
-過検知（false positive）はここでは扱わない（recall のみ）。ADR-0016 の通り過検知低減は
+過検知（false positive）はここでは扱わない（recall のみ）。設計方針に沿って過検知低減は
 検知後の証拠強化・隔離再現で行い、候補削減で recall を犠牲にしないため、関心を分離する。
 """
 from __future__ import annotations

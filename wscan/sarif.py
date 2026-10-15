@@ -99,7 +99,7 @@ class SarifExporter:
         ``coverage``（engine.coverage_summary() の出力）を渡すと、run properties へ
         検査カバレッジ補助情報（registered/selected/not_selected/前提不足/state profile skip）
         を出す。SARIF 消費側が「0 findings＝安全ではない・未実行の検査がある」を判別できる
-        （0016 観測性）。未指定なら従来どおり（後方互換）。
+        （観測性）。未指定なら従来どおり（後方互換）。
         """
         rules = self._build_rules(findings)
         results = [self._finding_to_result(f) for f in findings]
@@ -300,7 +300,7 @@ def write_sarif(
     """
     Finding オブジェクトのリスト (または to_dict() 済み dict のリスト) を
     SARIF ファイルとして output_path に書き出す。
-    書き出したパスを返す。``coverage`` を渡すと run properties へ検査カバレッジを出す（0016）。
+    書き出したパスを返す。``coverage`` を渡すと run properties へ検査カバレッジを出す。
     """
     # Finding オブジェクト (to_dict メソッド持ち) → dict に変換
     findings_dicts: list[dict] = []

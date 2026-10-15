@@ -1,16 +1,16 @@
-"""probe 証跡台帳の recorder（0032-B・append-only・I/O 分離）。
+"""probe 証跡台帳の recorder（append-only・I/O 分離）。
 
-[0032-A (#118)](probe_ledger.py) の純粋 schema を使い、実際の試行を **append-only な正本**
+[probe_ledger](probe_ledger.py) の純粋 schema を使い、実際の試行を **append-only な正本**
 `probe_attempts.jsonl` へ記録する recorder を提供する。scan 内で単調増加する attempt_id を
 払い出し、outcome/role 別の件数と **書込み失敗** を manifest に残す。
 
-最上位契約（Task 0032）:
+契約:
 - **No evidence, no COMPLETE**: 証跡の書込みに失敗したら握りつぶさず manifest に残す。scan 完了
   判定は `evidence_incomplete` を見る。
 - **Evidence for every outcome**: matched だけでなく no-match/blocked/skipped/timeout/error も
   記録する（呼び出し側が outcome を付けて append する）。
 
-**durability モデル（0032-B, DECISION: 簡素化＝単一 source-of-truth）**:
+**durability モデル（簡素化＝単一 source-of-truth）**:
 台帳の write 失敗は稀（disk 異常）で、その試行の証跡は失われる。二源（成功=jsonl / 失敗=manifest）を
 突合する複雑さを避け、次の単純な規律にする:
 - **jsonl が唯一の正本**（成功試行の source of truth）。
@@ -23,7 +23,7 @@
   manifest は temp+os.replace で原子的に置換。
 
 I/O はここに閉じ、集計は純粋 `LedgerManifest` へ分離する（I/O と判定の分離規約）。全 transport
-送信経路への配線は後続増分（0032-C）。
+送信経路への配線は今後行う。
 """
 from __future__ import annotations
 

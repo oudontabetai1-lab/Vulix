@@ -2835,12 +2835,12 @@ async function startRemoteBrowser() {
   }
   // QR 読取が非同期検証中に起動すると、プレビュー handler が TOTP 欄を一旦クリアするため
   // 空設定を session に snapshot してしまい、後から欄が埋まっても fill-totp が失敗する。
-  // 通常スキャン入口と同じく readiness を確認してから TOTP 設定を取得・送信する（Codex #151 P2）。
+  // 通常スキャン入口と同じく readiness を確認してから TOTP 設定を取得・送信する。
   if (!validateTotpReadiness()) return;
   const outputPath = document.getElementById('manualCrawlOutput').value.trim() || 'flows/manual_crawl.json';
   const proxy = document.getElementById('cfgProxy').value.trim();
   // MFA タイプが totp のときだけ TOTP 設定を送る。disabled/email 選択時に残存した TOTP 欄が
-  // _has_totp_config() を満たして意図せず自動入力されるのを防ぐ（Codex #153 P2）。
+  // _has_totp_config() を満たして意図せず自動入力されるのを防ぐ。
   const mfaType = document.getElementById('cfgMfaType').value;
   const totp = (mfaType === 'totp') ? {
     totp_uri: document.getElementById('cfgMfaTotpUri').value.trim(),
@@ -5208,7 +5208,7 @@ async function runAutoConfig() {
           openai_base_url: ((document.getElementById('cfgLlm')?.value === 'openai_compatible')
             ? (document.getElementById('cfgLlmBaseUrl')?.value || '').trim() : ''),
           role_models: collectRoleModels(),
-          // auto-config も one-shot 呼び出し。選択中の timeout を渡す（正規化はサーバ側・Codex #173 P2）。
+          // auto-config も one-shot 呼び出し。選択中の timeout を渡す（正規化はサーバ側）。
           // 空欄は undefined にして送らず、サーバ設定値を上書きしない。
           llm_timeout_seconds: document.getElementById('cfgLlmTimeoutInput')?.value || undefined,
         },

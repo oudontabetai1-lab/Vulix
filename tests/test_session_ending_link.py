@@ -1,4 +1,4 @@
-"""SPA クリック探索がログアウト等のセッション終了リンクを踏まないことの純粋判定（Codex #104 P1）。"""
+"""SPA クリック探索がログアウト等のセッション終了リンクを踏まないことの純粋判定。"""
 from __future__ import annotations
 
 import pytest
@@ -23,7 +23,7 @@ def test_looks_like_url_ref_true(value):
     ["2", "dashboard", "next", "", "   ", "page42"],
 )
 def test_looks_like_url_ref_false(value):
-    # 不透明な pagination token / 識別子は URL/パスではない（同一ページ操作・Codex #104 P2）。
+    # 不透明な pagination token / 識別子は URL/パスではない（同一ページ操作）。
     assert looks_like_url_ref(value) is False
 
 
@@ -94,7 +94,7 @@ def test_session_ending_links_are_flagged(href, text):
         ("/products?q=1", "検索"),
         ("/about", "About"),
         ("/settings/profile", "プロフィール"),
-        # トークン境界で誤検出しない（log/out・sign/out がセグメント跨ぎ・Codex #104 P2）。
+        # トークン境界で誤検出しない（log/out・sign/out がセグメント跨ぎ）。
         ("/catalog/output", ""),
         ("/blog/outdoors", ""),
         ("/prologoutfitters", ""),  # log/out を含むが単一の連続語（トークン境界なし）

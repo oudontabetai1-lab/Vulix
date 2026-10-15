@@ -28,7 +28,7 @@ def test_planner_query_collapses_whitespace():
 
 
 def test_planner_query_strips_url_embedded_in_hints():
-    # untrusted なページ title に URL が混ざるケース（Codex P2）
+    # untrusted なページ title に URL が混ざるケース
     q = build_planner_web_query("Admin https://internal.example/admin Panel")
     assert "internal.example" not in q
     assert "http" not in q.lower()
@@ -44,7 +44,7 @@ def test_planner_query_strips_bare_host_and_ip():
 
 
 def test_planner_query_strips_schemeless_host_with_path_or_port():
-    # scheme 無しで path/port が付く host は fullmatch を素通りしていた（Codex P2 #2）
+    # scheme 無しで path/port が付く host は fullmatch を素通りしていた
     for hint in (
         "Admin internal.example/admin Panel",
         "Admin internal.example:8443 Panel",
@@ -60,7 +60,7 @@ def test_planner_query_strips_schemeless_host_with_path_or_port():
 
 
 def test_planner_query_redacts_known_single_label_host():
-    # ヒューリスティックでは捕まらない単一ラベル内部 host も、対象既知なら落とす（Codex 示唆）
+    # ヒューリスティックでは捕まらない単一ラベル内部 host も、対象既知なら落とす
     q = build_planner_web_query("Admin intranet Dashboard", target_url="http://intranet/")
     assert "intranet" not in q.lower()
     assert "Admin" in q and "Dashboard" in q
@@ -79,7 +79,7 @@ def test_planner_query_target_url_optional():
 
 
 def test_planner_query_strips_relative_path_token():
-    # 相対 path も host も持たないが機微な path（Codex P2#3）
+    # 相対 path も host も持たないが機微な path
     q = build_planner_web_query("Admin /internal/tenant-42 Dashboard",
                                 target_url="http://host/internal/tenant-42")
     assert "tenant-42" not in q
@@ -102,7 +102,7 @@ def test_planner_query_allowlist_drops_any_url_structural_token():
 
 
 def test_planner_query_redacts_bare_path_segment():
-    # 区切り無しで title に現れる target 固有の path segment（Codex P2#4）
+    # 区切り無しで title に現れる target 固有の path segment
     q = build_planner_web_query("Tenant tenant-42 Overview",
                                 target_url="https://host/tenant-42")
     assert "tenant-42" not in q
@@ -132,7 +132,7 @@ def test_planner_query_redacts_spa_hash_route_identifier():
 
 
 def test_planner_query_rejects_compound_hash_route_token():
-    # `#` を末尾のみ許可＝中間に `#` を持つ複合ハッシュルートを弾く（Codex P2#5）
+    # `#` を末尾のみ許可＝中間に `#` を持つ複合ハッシュルートを弾く
     q = build_planner_web_query("View app#tenant-42 Page",
                                 target_url="https://host/app#tenant-42")
     assert "app#tenant-42" not in q and "tenant-42" not in q
@@ -144,7 +144,7 @@ def test_planner_query_rejects_compound_hash_route_token():
 
 def test_planner_query_redacts_multiword_query_value():
     # `?account=Acme+Corp` は parse_qsl で 'acme corp' になるが title は Acme/Corp に分割される
-    # → 語単位でも redact（Codex P2#6）
+    # → 語単位でも redact
     q = build_planner_web_query("Report Acme Corp Summary",
                                 target_url="https://host/r?account=Acme+Corp")
     assert "Acme" not in q and "Corp" not in q

@@ -167,7 +167,7 @@ class RequestLoggerTests(unittest.TestCase):
 
 class CountExistingRecordsTests(unittest.TestCase):
     def test_truncated_utf8_tail_is_skipped_not_raised(self):
-        # 中断で末尾に不完全な UTF-8 が残っても初期化を落とさない（Codex #172 P2）。
+        # 中断で末尾に不完全な UTF-8 が残っても初期化を落とさない。
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "payloads.jsonl"
             p.write_bytes(b'{"a": 1}\n{"b": "\xe3\x81')
@@ -176,7 +176,7 @@ class CountExistingRecordsTests(unittest.TestCase):
 
 class UnterminatedTailTests(unittest.TestCase):
     def test_append_after_unterminated_tail_stays_valid_jsonl(self):
-        # 改行無しで終わる再利用ファイルへの追記が前行と連結しない（Codex #172 P2）。
+        # 改行無しで終わる再利用ファイルへの追記が前行と連結しない。
         for tail in (b'{"a": 1}', b'{"b": "\xe3\x81'):
             with self.subTest(tail=tail), tempfile.TemporaryDirectory() as d:
                 (Path(d) / "llm_calls.jsonl").write_bytes(tail)
@@ -238,7 +238,7 @@ class ScannerPayloadLoggingTests(unittest.IsolatedAsyncioTestCase):
 class ResumeCounterTests(unittest.TestCase):
     def test_counters_init_from_existing_jsonl_on_reuse(self):
         # 既存 output dir を append 再利用（resume で --output=--resume 同一）したとき、
-        # カウンタを既存 JSONL の有効行数から初期化する（Codex #172 P2）。
+        # カウンタを既存 JSONL の有効行数から初期化する。
         with tempfile.TemporaryDirectory() as d:
             l1 = RequestLogger(d)
             l1.log_http({"request": {"method": "GET", "url": "http://t.test/"},

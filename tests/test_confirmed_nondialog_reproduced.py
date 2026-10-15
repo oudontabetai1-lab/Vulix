@@ -1,6 +1,6 @@
 """非 dialog でも confidence='confirmed' の決定的 finding は reproduced 扱いになる回帰。
 
-#105 段階1 で非 dialog 既定を assumed(=verified False) にした際、_VERIFIABLE_CHECKS に
+非 dialog 既定を assumed(=verified False) にした際、_VERIFIABLE_CHECKS に
 含まれない決定的プロデューサ（mail_header の OOB 到達確証など）が review-only に落ちる
 P1 リグレッションを防ぐ。
 """

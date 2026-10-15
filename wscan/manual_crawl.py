@@ -35,7 +35,7 @@ class ManualCrawlSeed:
     forms_by_url: dict[str, list[dict]] = field(default_factory=dict)
     steps: list[dict] = field(default_factory=list)
     # 起動時リダイレクト（http→https 等・同一ホスト）後の実効 start origin。engine が
-    # scope（access/target）へ反映して、scheme 差で seed が全滅するのを防ぐ（Codex #153）。
+    # scope（access/target）へ反映して、scheme 差で seed が全滅するのを防ぐ。
     effective_origin: str = ""
 
 
@@ -44,7 +44,7 @@ def _origin_tuple(u: str):
 
     正典は ``url_scope.origin_tuple``（IDNA 正規化・既定ポート補完）。Chromium は page.url の
     IDN ホストを Punycode（ASCII）へ正規化するため、Unicode のまま比較すると同一サイトの
-    遷移/request/snapshot/cookie が全て cross-origin 扱いになる（Codex #153 P2）。
+    遷移/request/snapshot/cookie が全て cross-origin 扱いになる。
     """
     return url_scope.origin_tuple(u)
 
@@ -54,7 +54,7 @@ def _same_origin(url: str, origin: str) -> bool:
 
     netloc だけの比較は (1) scheme を無視して http↔https を同一視し（cross-origin の SSO/決済
     popup の URL を same-origin と誤判定して記録し得る）、(2) 明示ポートと既定ポート
-    （app.test と app.test:443）を別 origin 扱いして記録を取りこぼす。両方を正す（Codex #153）。
+    （app.test と app.test:443）を別 origin 扱いして記録を取りこぼす。両方を正す。
     """
     return url_scope.same_origin(url, origin)
 
@@ -122,11 +122,11 @@ def load_manual_crawl_seed(
 
     # 起動時リダイレクト（http→https 等・同一ホスト）後の実効 origin を保存してあるので、
     # 同一ホストなら caller の same_origin_as より優先する。これをしないと、target が http の
-    # まま保存が https のとき、厳密 origin 判定で全 seed が scheme 差で落ちる（Codex #153）。
+    # まま保存が https のとき、厳密 origin 判定で全 seed が scheme 差で落ちる。
     # 別ホストへは昇格しない（host 一致を条件にする）。ただし primary（same_origin_as）だけでなく
     # **明示設定された追加ターゲット/アクセス scope のホスト**とも突き合わせる。副 target が
     # https へリダイレクトすると saved_start が primary と別ホストになり、従来は落として
-    # 副 target が丸ごと未スキャンになっていた（Codex #153・追加ターゲットのリダイレクト追従）。
+    # 副 target が丸ごと未スキャンになっていた（追加ターゲットのリダイレクト追従）。
     effective_origin = same_origin_as
     saved_start = str(data.get("start_url") or "")
     if saved_start.startswith(("http://", "https://")):
@@ -604,7 +604,7 @@ class ManualCrawlSession:
         """記録セッションを開始する。起動途中のどの例外でも資格情報とブラウザを解放する。
 
         Playwright 未導入・proxy 正規化・_bind_page 失敗等、ブラウザ生成の前後を問わず失敗すると
-        TOTP secret が残り、running=True のまま以降の start を塞ぐことがあった（Codex #153 P2）。
+        TOTP secret が残り、running=True のまま以降の start を塞ぐことがあった。
         実行中セッションは片付けないよう、running 判定だけは cleanup 対象の外で先に行う。
         """
         if self.running:
@@ -780,7 +780,7 @@ class ManualCrawlSession:
                 # snapshot/forms/requests や手入力 URL が軒並み out-of-scope になり artifact が空になる。
                 # 一方、保護 URL が即座に cross-origin の IdP へリダイレクトするケースで IdP を記録
                 # origin に昇格させると、IdP の URL(OAuth パラメータ含む)や cookie を取り込んでしまう。
-                # そのため **ホストが変わるリダイレクトは採用しない**（Codex #153）。
+                # そのため **ホストが変わるリダイレクトは採用しない**。
                 landed = initial_page.url or ""
                 if (landed.startswith(("http://", "https://"))
                         and _origin_tuple(landed)[1] == _origin_tuple(start_url)[1]):
@@ -837,21 +837,21 @@ class ManualCrawlSession:
             if frame == page.main_frame:
                 # 遅延 origin 昇格は**起動時ナビゲーションのページだけ**に限る。全 bound popup に
                 # 許すと、target ホストの別 scheme/port へ遷移した popup の URL が start_url になり
-                # same-origin 扱いで記録・攻撃 scope へ昇格され得る（Codex #153 P1）。
+                # same-origin 扱いで記録・攻撃 scope へ昇格され得る。
                 # http→https→IdP のように起動時 goto が最終 IdP URL しか返さず start_url が
                 # 旧 scheme に固定されたケースで、認証後に同一ホストの https へ戻ってきたら
                 # その scheme/port 昇格を start_url に採用する（別ホストの IdP は採用しない）。
                 # これをしないと以降の navigate/snapshot が cross-origin 扱いで target を取りこぼす
-                # （Codex #153 P2・同一ホスト origin 昇格の遅延採用）。
+                # （同一ホスト origin 昇格の遅延採用）。
                 if page is self._origin_page:
                     self._maybe_adopt_origin_upgrade(page.url)
                 # 追従タブ/popup が別オリジン（SSO/決済等）へ遷移したとき、その URL（クエリ含む）を
-                # artifact に残さない。requestfinished と同じ same-origin 判定を記録前に適用（Codex #153 P2）。
+                # artifact に残さない。requestfinished と同じ same-origin 判定を記録前に適用。
                 if _same_origin(page.url, self.start_url):
                     self._record_url(page.url, "navigate")
                     # 背景タブ（非アクティブ）でも same-origin なら form を snapshot する。active のみだと、
                     # 別 popup がアクティブな間に背景タブが新フォームを読み、そのまま停止すると
-                    # forms_by_url に構造が残らず URL だけ保存される（Codex #153 P2）。
+                    # forms_by_url に構造が残らず URL だけ保存される。
                     # snapshot() 自身が same-origin を再確認するため cross-origin の form は捕捉しない。
                     self._schedule_snapshot("navigate", page)
 
@@ -867,7 +867,7 @@ class ManualCrawlSession:
         self._bound_pages.append(page)
 
     def _maybe_adopt_origin_upgrade(self, url: str) -> None:
-        """同一ホストの scheme/port 昇格を start_url へ採用する（Codex #153 P2）。
+        """同一ホストの scheme/port 昇格を start_url へ採用する。
 
         起動時 goto が cross-origin IdP へ抜けて start_url が旧 origin に固定された後、
         認証後に同一ホストの別 scheme/port（例: http→https）へ戻ったときだけ採用する。
@@ -896,7 +896,7 @@ class ManualCrawlSession:
                     except Exception:
                         # 新ページの screencast 開始に失敗（一過性 popup が閉じた等）したら切替を確定せず、
                         # 直前のページと配信へ戻す。さもないと画面が凍結したまま、見えないページへ入力が
-                        # 送られる（Codex #153 P2）。
+                        # 送られる。
                         self._page = previous
                         if previous is not None and not previous.is_closed():
                             try:
@@ -908,7 +908,7 @@ class ManualCrawlSession:
                 self.last_error = f"page switch failed: {exc}"
         # バインド/有効化直後に snapshot（初期ページと同様）。popup の初期 document が context の page
         # コールバック前に commit 済みだと framenavigated を観測できず、URL のみ記録では forms を
-        # 取り逃す（Codex #153 P1）。snapshot は _lock を取得し same-origin のみ記録するため、
+        # 取り逃す。snapshot は _lock を取得し same-origin のみ記録するため、
         # cross-origin popup の URL/forms を artifact に残さない（P2 とも整合）。lock 外で呼ぶ（再入防止）。
         try:
             await self.snapshot(source, page=page)
@@ -931,7 +931,7 @@ class ManualCrawlSession:
             if fallback is None:
                 return
             # fallback への切替に失敗したら残りのページ（新しい順）を順に試す。全滅なら streaming を
-            # 明示的に終え、凍結画面のまま見えないページへ入力を送り続けない（Codex #153 P2）。
+            # 明示的に終え、凍結画面のまま見えないページへ入力を送り続けない。
             others = [p for p in reversed(pages) if p is not closed_page and p is not fallback]
             attached = None
             for cand in [fallback, *others]:
@@ -951,7 +951,7 @@ class ManualCrawlSession:
                 self.streaming = False
                 self.last_error = (self.last_error or "page fallback failed") + \
                     " — screencast を再開できないため streaming を終了しました"
-        # フォールバック先も same-origin なら snapshot（forms 取りこぼし防止・Codex #153 P1）。lock 外。
+        # フォールバック先も same-origin なら snapshot（forms 取りこぼし防止）。lock 外。
         if fallback is not None:
             try:
                 await self.snapshot("page_fallback", page=fallback)
@@ -990,7 +990,7 @@ class ManualCrawlSession:
             )
         except Exception:
             # startScreencast 失敗時に死んだ CDP セッションを self._cdp に残さない
-            # （running/streaming=true なのに画面が届かない状態を防ぐ・Codex #153 P2）。
+            # （running/streaming=true なのに画面が届かない状態を防ぐ）。
             try:
                 await cdp.detach()
             except Exception:
@@ -1335,7 +1335,7 @@ class ManualCrawlSession:
                 }
         self.last_mfa_selector = selector
         # cross-origin SSO ページの page.url（OAuth の state/code/token を含む）は steps に残さない。
-        # URL のスコープ判定は _record_fill（_safe_step_url）へ集約している（Codex #153）。
+        # URL のスコープ判定は _record_fill（_safe_step_url）へ集約している。
         self._record_fill({
             "selector": selector,
             "name": "",
@@ -1445,7 +1445,7 @@ class ManualCrawlSession:
         self._bound_pages = []
         self._origin_page = None
         # TOTP は実行時限りの資格情報。stop/起動失敗後もセッションが MonitorServer から参照され
-        # 続けるため、Base32 secret や secret 入り otpauth URI をメモリに残さない（Codex #153 P2）。
+        # 続けるため、Base32 secret や secret 入り otpauth URI をメモリに残さない。
         self.totp_uri = ""
         self.totp_secret = ""
         self.totp_qr = ""
@@ -1461,7 +1461,7 @@ class ManualCrawlSession:
             # 背景タブの遅延 snapshot（_schedule_snapshot の 0.3s 待ち）が stop 時点で未発火だと、
             # この後の _cleanup_browser がそのタスクを cancel し、当該タブの forms が forms_by_url に
             # 残らない。cleanup 前に bound page をすべて snapshot して取りこぼしを防ぐ（snapshot は
-            # same-origin 再確認＋URL 単位 dedup なので二重・cross-origin は無害・Codex #153）。
+            # same-origin 再確認＋URL 単位 dedup なので二重・cross-origin は無害）。
             for bound in list(self._bound_pages):
                 await self.snapshot("stop_flush", page=bound)
             if self._context:
@@ -1470,7 +1470,7 @@ class ManualCrawlSession:
                     # 認証しても IdP の cookie を JSON に書かない。ただし URL フィルタ（cookies([url])）だと
                     # 起動パス（/login）に送られる cookie しか返らず、認証後に path=/app 等へスコープされた
                     # セッション cookie を取りこぼす。そこで全 cookie を取得し host ドメイン一致で絞る
-                    # （path に依らず同一ホストは保持・別ホストは除外・Codex #153）。
+                    # （path に依らず同一ホストは保持・別ホストは除外）。
                     all_cookies = await self._context.cookies()
                     host = _origin_tuple(self.start_url)[1] if self.start_url else ""
                     self.cookies = (
@@ -1574,7 +1574,7 @@ class ManualCrawlSession:
 
         cross-origin（SSO/決済 popup 等）の URL は state/code/token をクエリに含み得る。save() は
         steps をスコープ無しで永続化するため、same-origin のときだけ URL を残し、それ以外は空にする
-        （urls/events/TOTP と同じ privacy 方針・Codex #153）。
+        （urls/events/TOTP と同じ privacy 方針）。
         """
         url = url or ""
         return url if _same_origin(url, self.start_url) else ""
@@ -1583,7 +1583,7 @@ class ManualCrawlSession:
         """操作 step の発生元 URL が cross-origin（記録 origin 外）か。
 
         cross-origin なら selector/name/text 等も含め step を丸ごと省略する（IdP のアカウント選択
-        ボタンがユーザーのメール等を label に持つ場合に steps へ書き出さない・Codex #153）。
+        ボタンがユーザーのメール等を label に持つ場合に steps へ書き出さない）。
         発生元 URL が http(s) で cross-origin のときのみ True（空/不明は in-scope 扱いで保持）。
         """
         url = url or ""

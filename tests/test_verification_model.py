@@ -1,4 +1,4 @@
-"""検証ライフサイクル型のユニットテスト（0015 MODEL-001a・ブラウザ非依存）。
+"""検証ライフサイクル型のユニットテスト（ブラウザ非依存）。
 
 型の不変条件と、既存 verification_state 文字列との後方互換を固定する。
 """
@@ -19,7 +19,7 @@ from wscan.verification_model import (
 
 
 def test_state_values_match_base_py_strings():
-    # base.py の verification_state 文字列（#105 RESULT-001）と一致＝str Enum で相互運用可
+    # base.py の verification_state 文字列と一致＝str Enum で相互運用可
     assert VerificationState.REPRODUCED == "reproduced"
     assert VerificationState.ASSUMED == "assumed"
     assert VerificationState.UNREPRODUCED == "unreproduced"

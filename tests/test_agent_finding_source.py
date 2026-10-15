@@ -153,7 +153,7 @@ Evidence: alert dialog was observed
 
     def test_security_probe_denies_access_only_sharing_target_origin(self):
         # access-only URL（/login 等）が primary target origin を共有しても probe 禁止。
-        # target scope より access scope を優先する（Codex #154 P1）。
+        # target scope より access scope を優先する。
         target_urls = ["http://fixture.test"]
         self.assertTrue(
             security_probe_allowed("http://fixture.test/app", target_urls, [])
@@ -171,7 +171,7 @@ Evidence: alert dialog was observed
                 access_urls=["http://fixture.test/login"],
             )
         )
-        # query/fragment 付きの login 変種も access-only として probe 禁止（正規化して照合・#154 P1）。
+        # query/fragment 付きの login 変種も access-only として probe 禁止（正規化して照合）。
         for variant in (
             "http://fixture.test/login?next=/home",
             "http://fixture.test/login#step2",
@@ -185,7 +185,7 @@ Evidence: alert dialog was observed
                 variant,
             )
         # 設定 access scope 自体が query 付き（/login?tenant=a）でも、正規化を両側対称に行い
-        # 候補 /login を access-only と判定して probe 禁止にする（Codex #154 P1）。
+        # 候補 /login を access-only と判定して probe 禁止にする。
         self.assertFalse(
             security_probe_allowed(
                 "http://fixture.test/login", target_urls, [],

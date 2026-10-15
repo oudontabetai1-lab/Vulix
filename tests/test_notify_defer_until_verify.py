@@ -1,4 +1,4 @@
-"""検出時通知の保留判定の回帰（#107 Codex P1）。
+"""検出時通知の保留判定の回帰。
 
 verify で最終 state が確定する finding（verifiable かつ非 dialog）は検出時に通知せず、
 reproduced 確定後にのみ通知する。confidence=confirmed 起点でも早期 confirmed 誤通知を防ぐ。

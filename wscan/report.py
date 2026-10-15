@@ -401,7 +401,7 @@ class ReportGenerator:
             report_path = self.output_dir / "report.html"
 
         # アトミックに置換する。post-analysis の再描画で write_text が既存の有効な report を
-        # truncate し、中断/ディスク満杯で空・部分 HTML を残さないようにする（Codex #172 P2）。
+        # truncate し、中断/ディスク満杯で空・部分 HTML を残さないようにする。
         tmp = report_path.with_name(report_path.name + ".tmp")
         tmp.write_text(html, encoding="utf-8")
         os.replace(tmp, report_path)
@@ -611,7 +611,7 @@ class ReportGenerator:
 <title>WScan Security Report — {self._escape(target)}</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a202c'/%3E%3Cpath d='M4 4h8v2H6v2h5v2H6v2h6v2H4z' fill='%2363b3ed'/%3E%3C/svg%3E">
 <!-- レポートは self-contained（オフライン/エアギャップ前提）。外部フォント(Google Fonts)は
-     読み込まず、font-family のシステムフォント fallback に委ねる（Codex #159）。 -->
+     読み込まず、font-family のシステムフォント fallback に委ねる。 -->
 <style>
 /* WScan レポート — ダークなマット上のライトな印刷向け document（承認済みデザイン）。
    パレット: 紫アクセント / Inter + JetBrains Mono / 抑えめ severity。単一ライト紙面にコミット。 */
@@ -1617,7 +1617,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         """到達性、試行結果、HTTP status を Finding と分離して表示する。
 
         coverage 未提供（Agent モード等 metrics を渡さない caller）では None/空 dict に
-        なる。矛盾した「Findings: 0」セクションを描画せず、セクションごと省略する（Codex #102）。
+        なる。矛盾した「Findings: 0」セクションを描画せず、セクションごと省略する。
         """
         if not coverage:
             return ""
@@ -1661,7 +1661,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                 f'{t("report.coverage.blocked_warning", blocked=blocked)}</p>'
             )
 
-        # check レベル coverage（0016）: in-scope の scanner 数と未実行（未選択）の検査を出す。
+        # check レベル coverage: in-scope の scanner 数と未実行（未選択）の検査を出す。
         # 「in-scope＝実行対象」であって「実行済み」ではない点をラベルで明確にする。
         cc = coverage.get("check_coverage", {}) or {}
         check_coverage_html = ""
@@ -1697,7 +1697,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                 f'<p>{t("report.coverage.check.not_selected", names=not_selected_html)}</p>'
             )
 
-        # prerequisite 会計（0016）: 選択されたが実行条件（前提／state profile）を満たさず
+        # prerequisite 会計: 選択されたが実行条件（前提／state profile）を満たさず
         # 実質検査できない check を理由付きで出す。「選択済み＝検査済み」ではない点を明示し、
         # 0 findings=安全 の誤解を防ぐ。前提不足と state profile skip を1表に併記する。
         from .check_coverage import localize_prerequisite_reasons, localize_state_profile_reason
@@ -1741,7 +1741,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                 f"</tr></thead><tbody>{rows}</tbody></table></div>"
             )
 
-        # capability matrix（0035-E）: in-scope の scanner × carrier の射程を可視化する。
+        # capability matrix: in-scope の scanner × carrier の射程を可視化する。
         # 純粋 renderer が生成した安全な HTML 断片をそのまま埋める（空 matrix では空文字）。
         capability_matrix_html = ""
         cap_matrix = coverage.get("capability_matrix", {}) or {}
@@ -1955,7 +1955,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         return f"""<!DOCTYPE html>
 <html lang="{self.lang}"><head><meta charset="UTF-8">
 <title>Executive Report — {self._escape(target)}</title>
-<!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
+<!-- self-contained（オフライン前提）: 外部フォントは読み込まない。 -->
 <style>
 body{{font-family:"Inter",system-ui,sans-serif;background:#161826;color:#292b31;margin:0;padding:26px 14px;-webkit-font-smoothing:antialiased}}
 .hdr{{max-width:1000px;margin:0 auto;background:#fff;border-radius:10px 10px 0 0;padding:38px 44px 22px;border-bottom:1px solid #e4e7f5;box-shadow:0 24px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:6px}}
@@ -2107,7 +2107,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
         return f"""<!DOCTYPE html>
 <html lang="{self.lang}"><head><meta charset="UTF-8">
 <title>Developer Report — {self._escape(target)}</title>
-<!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
+<!-- self-contained（オフライン前提）: 外部フォントは読み込まない。 -->
 <style>
 body{{font-family:"Inter",system-ui,sans-serif;background:#161826;color:#292b31;margin:0;padding:26px 14px;-webkit-font-smoothing:antialiased}}
 .hdr{{max-width:960px;margin:0 auto;background:#fff;border-radius:10px 10px 0 0;padding:30px 40px 20px;border-bottom:1px solid #e4e7f5;box-shadow:0 24px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:6px}} .hdr h1{{font-size:1.5rem;font-weight:500;color:#292b31}}

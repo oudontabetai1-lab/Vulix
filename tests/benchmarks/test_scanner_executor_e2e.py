@@ -45,7 +45,7 @@ def test_realistic_site_xss_scanner_scorecard():
 
 
 def test_realistic_site_sqli_scanner_scorecard():
-    """実 SQLiScanner が /products=TP・/catalog=TN を採点する（0034-R3）。"""
+    """実 SQLiScanner が /products=TP・/catalog=TN を採点する。"""
     _require_chromium()
     out = _run_manifest("realistic_site_sqli.yaml", {"sqli"})
     assert "run_error" not in out, out
@@ -54,7 +54,7 @@ def test_realistic_site_sqli_scanner_scorecard():
 
 
 def test_realistic_intranet_injection_scanner_scorecard():
-    """realistic_intranet の HTTP 注入系 4 scanner（os/ssrf/nosql/dom_xss）を実採点する（0034-R3）。
+    """realistic_intranet の HTTP 注入系 4 scanner（os/ssrf/nosql/dom_xss）を実採点する。
 
     各 check の vulnerable=TP・safe twin=TN を確認し、recall/precision 100% を固定する。
     manifest 順（os→ssrf→nosql→dom_xss、各 vulnerable→safe）に tp/tn が並ぶ。
@@ -71,7 +71,7 @@ def test_realistic_intranet_injection_scanner_scorecard():
 
 
 def test_realistic_site_injection_scanner_scorecard():
-    """ssti/path_traversal/open_redirect を実 scanner で採点（各 vuln=TP・safe twin=TN・0034-R3）。"""
+    """ssti/path_traversal/open_redirect を実 scanner で採点（各 vuln=TP・safe twin=TN）。"""
     _require_chromium()
     out = _run_manifest(
         "realistic_site_injection.yaml", {"ssti", "path_traversal", "open_redirect"}
@@ -85,7 +85,7 @@ def test_realistic_site_injection_scanner_scorecard():
 
 
 def test_realistic_site_header_injection_scanner_scorecard():
-    """header_injection（CRLF レスポンスヘッダ注入）を実 scanner で採点（0034-R3）。
+    """header_injection（CRLF レスポンスヘッダ注入）を実 scanner で採点。
 
     /locale?lang=（脆弱）=TP・/locale-safe?lang=（allow-list 検証の安全ツイン）=TN。
     """
@@ -97,7 +97,7 @@ def test_realistic_site_header_injection_scanner_scorecard():
 
 
 def test_realistic_healthcare_ldap_scanner_scorecard():
-    """realistic_healthcare の LDAP 注入を実 scanner で採点する（0034-R3）。
+    """realistic_healthcare の LDAP 注入を実 scanner で採点する。
 
     /directory/lookup?user=（uid フィルタへ生展開）=TP・/directory/search?name=
     （RFC4515 エスケープの安全ツイン）=TN。
@@ -110,7 +110,7 @@ def test_realistic_healthcare_ldap_scanner_scorecard():
 
 
 def test_realistic_healthcare_security_headers_scanner_scorecard():
-    """realistic_healthcare の security_headers（page 観測系＝passive）を実採点する（0034-R3）。
+    """realistic_healthcare の security_headers（page 観測系＝passive）を実採点する。
 
     /legacy/status（セキュリティヘッダ欠落）=TP・/legacy/status-secure（全付与の安全ツイン）=TN。
     注入点を持たない passive check を (check, path) で採点する scorer 拡張の回帰でもある。
@@ -123,7 +123,7 @@ def test_realistic_healthcare_security_headers_scanner_scorecard():
 
 
 def test_realistic_healthcare_page_observation_scanner_scorecard():
-    """realistic_healthcare の clickjacking / js_static（page 観測系＝passive）を実採点する（0034-R3）。
+    """realistic_healthcare の clickjacking / js_static（page 観測系＝passive）を実採点する。
 
     clickjacking /portal/embed=TP・/portal/embed-safe（XFO DENY + frame-ancestors 'none'）=TN、
     js_static /portal/notice（location.search→innerHTML）=TP・/portal/notice-safe=TN。
@@ -144,7 +144,7 @@ def test_realistic_healthcare_page_observation_scanner_scorecard():
 
 
 def test_realistic_healthcare_page_batch2_scanner_scorecard():
-    """realistic_healthcare の cors / host_header（page 観測系＝passive）を実採点する（0034-R3）。
+    """realistic_healthcare の cors / host_header（page 観測系＝passive）を実採点する。
 
     cors /api/v1/records/export=TP・export-safe=TN、host_header /account/reset=TP・reset-safe=TN。
     manifest 順（cors vuln→safe, host_header vuln→safe）に並ぶ。
@@ -166,7 +166,7 @@ def test_realistic_intranet_file_upload_scanner_scorecard():
 
 
 def test_realistic_api_page_observation_scanner_scorecard():
-    """realistic_api の jwt（page 観測系＝passive）を実採点する（0081）。
+    """realistic_api の jwt（page 観測系＝passive）を実採点する。
 
     /api/v1/session/bootstrap（弱秘密鍵 HS256）=TP・/bootstrap-safe（十分長い鍵）=TN。
     csrf / info_disclosure は DOM 依存で navigation 前に scan_page が走るため gap 維持（manifest 参照）。

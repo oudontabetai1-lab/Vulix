@@ -98,7 +98,7 @@ def record_llm_call(
     pg, *, provider, role, model, timeout_seconds, elapsed_seconds, status,
     retries=0, prompt_chars=None, response_chars=None, caller="", exception_type=None,
 ) -> None:
-    """LLM 呼び出しメタデータを ``pg.request_logger`` へ記録する（0065）。
+    """LLM 呼び出しメタデータを ``pg.request_logger`` へ記録する。
 
     本文は渡さず文字数のみ。request_logger 未配線・記録失敗では no-op（ベストエフォート）。
     complete_text と、complete_text を経由しない自前ストリーミング経路（planner 等）の共通入口。
@@ -174,7 +174,7 @@ async def complete_text(
     except Exception:
         return _completion_result(None, "unavailable", return_status)
 
-    # LLM 呼び出しの観測性（0065）：実際に問い合わせる経路の結果を記録する。本文は保存せず
+    # LLM 呼び出しの観測性：実際に問い合わせる経路の結果を記録する。本文は保存せず
     # 文字数のみ。request_logger 未配線（triage の使い捨て pg 等）や記録失敗では no-op。
     import time as _time
     _t0 = _time.monotonic()
@@ -184,7 +184,7 @@ async def complete_text(
     def _finish(text, status, attempt=0, exc=None):
         # 失敗の種別名だけを監査行に残す（str(exc) は URL/APIキーを含み得るので保存しない）。
         # response 処理失敗は内部ラッパーではなく元例外（TypeError/KeyError 等）の型を記録し、
-        # transport と応答処理の失敗を区別できるようにする（Codex #172 P2）。
+        # transport と応答処理の失敗を区別できるようにする。
         exc_type = None
         if isinstance(exc, BaseException):
             root = exc.__cause__ if isinstance(exc, _RetryableResponseError) and exc.__cause__ else exc
@@ -205,7 +205,7 @@ async def complete_text(
             if provider == "claude":
                 # complete_text は自前で retry ループを持つため、SDK 内蔵 retry を per-call で
                 # 無効化して監査 retries を正本にする（共有 client の retry は streaming caller の
-                # ために既定のまま残す・Codex #172 P2）。
+                # ために既定のまま残す）。
                 _claude = (
                     anthropic_client.with_options(max_retries=0)
                     if hasattr(anthropic_client, "with_options")

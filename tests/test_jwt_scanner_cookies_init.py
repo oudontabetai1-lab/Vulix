@@ -1,4 +1,4 @@
-"""F03: JWT ページ検査で cookies_str が未初期化になり検査が脱落する回帰テスト。
+"""JWT ページ検査で cookies_str が未初期化になり検査が脱落する回帰テスト。
 
 通常 ScanEngine は `auth_headers` を持つため scan_page は `if hasattr(engine,'auth_headers')`
 の真ブランチを通る。以前は `cookies_str` を else 節でのみ代入していたため、後段の

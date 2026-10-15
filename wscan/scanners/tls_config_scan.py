@@ -78,7 +78,7 @@ class TlsConfigScanner(BaseScanner):
         # sslyze は host/port へ直接ハンドシェイクするのみで、operator 設定の proxy や
         # クライアント証明書(mTLS)を経由しない。黙って別経路で接続すると監査 proxy を
         # バイパスしたり mTLS 必須の対象を「到達不能」と誤報告するため、対応できない
-        # ネットワーク設定では検査せず明示的に skip を記録する（Codex #158）。
+        # ネットワーク設定では検査せず明示的に skip を記録する。
         proxy = getattr(self.engine, "proxy", "") or ""
         tls_config = getattr(self.engine, "tls_config", None)
         needs_client_cert = bool(tls_config and tls_config.has_client_certificate())
@@ -111,7 +111,7 @@ class TlsConfigScanner(BaseScanner):
         if not issues and not tls_scan.scan_has_completed_attempts(result):
             self._record_scan_note(f"scan_incomplete:{self.CHECK_TYPE}:no_completed_attempts")
         # 一部コマンドだけ失敗（例: TLS1.0 は成功だが Heartbleed/ROBOT が ERROR）も、issue の有無に
-        # かかわらず記録する。失敗コマンドを黙って捨てて脆弱性を隠さない（Codex #158）。
+        # かかわらず記録する。失敗コマンドを黙って捨てて脆弱性を隠さない。
         incomplete = tls_scan.incomplete_commands(result)
         if incomplete:
             self._record_scan_note(
@@ -134,7 +134,7 @@ class TlsConfigScanner(BaseScanner):
                 evidence_type=f"tls_{issue['kind']}",
                 evidence_details={"label": issue["label"], "kind": issue["kind"]},
                 # check_type 一律でも severity バケツでもなく、脆弱性 kind ごとの CVSS を渡す
-                # （Heartbleed は機密性のみ＝I:N 等、根拠の無い impact を publish しない・Codex #158）。
+                # （Heartbleed は機密性のみ＝I:N 等、根拠の無い impact を publish しない）。
                 cvss_score=cvss_score,
                 cvss_vector=cvss_vector,
                 reproduction_steps=[

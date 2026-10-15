@@ -111,7 +111,7 @@ def test_canonical_host_strips_www_casefolds_and_default_ports_but_keeps_explici
     assert canonical_host("https://WWW.Fixture.Test/path") == "fixture.test"
     assert canonical_host("http://fixture.test:80") == "fixture.test"
     assert canonical_host("https://fixture.test:443") == "fixture.test"
-    # 明示された非既定 port は保持し別 origin と区別する（Codex #102）。
+    # 明示された非既定 port は保持し別 origin と区別する。
     assert canonical_host("https://WWW.Fixture.Test:8443/path") == "fixture.test:8443"
     assert canonical_host("http://fixture.test:3000") == "fixture.test:3000"
     assert canonical_host("http://fixture.test:3000") != canonical_host("http://fixture.test:8080")
@@ -256,13 +256,13 @@ def test_coverage_summary_aggregates_matrix_urls_and_http_status():
     )
 
     summary = ScanEngine.coverage_summary(engine)
-    # check_coverage（0016 追加）は別途検証し、既存キーは完全一致で守る。
+    # check_coverage は別途検証し、既存キーは完全一致で守る。
     check_cov = summary.pop("check_coverage", None)
     assert isinstance(check_cov, dict) and check_cov.get("coverage_status") in {
         "COMPLETE", "PARTIAL", "INCOMPLETE",
     }
-    summary.pop("capability_matrix", None)  # 0035-E 追加キーは別扱い（既存キーの完全一致を守る）
-    summary.pop("prerequisite_coverage", None)  # 0016 前提会計キーは別扱い
+    summary.pop("capability_matrix", None)  # 追加キーは別扱い（既存キーの完全一致を守る）
+    summary.pop("prerequisite_coverage", None)  # 前提会計キーは別扱い
 
     assert summary == {
         "reached_urls": ["http://fixture.test/a", "http://fixture.test/b"],
@@ -369,7 +369,7 @@ def test_generate_report_passes_only_display_scope_matrix(monkeypatch, tmp_path)
     )
 
     # HTML 描画（display scope matrix の適用）は _render_report_templates に集約された
-    # （_generate_report はブラウザ/monitor 配線のみ・Codex #172 P2）。
+    # （_generate_report はブラウザ/monitor 配線のみ）。
     ScanEngine._render_report_templates(engine)
 
     assert len(generated) == 3
@@ -404,7 +404,7 @@ def test_coverage_summary_excludes_reached_url_from_unreached_rows():
 def test_coverage_summary_spa_fragment_base_is_not_flagged_unreached():
     # SPA hash route は fragment 付きで reached に載る（/app#dashboard）が、queue/visited は
     # fragment を剥いた base（/app）を持つ。fragment を無視して比較しないと、到達済みの
-    # base が「未試行」に誤計上され偽の coverage 警告になる（Codex #102 P2）。
+    # base が「未試行」に誤計上され偽の coverage 警告になる。
     engine = SimpleNamespace(
         visited_urls={"http://fixture.test/app"},
         reached_urls={"http://fixture.test/app#dashboard"},
@@ -458,16 +458,16 @@ def test_coverage_summary_handles_empty_matrix_and_missing_browser():
     )
 
     _summary = ScanEngine.coverage_summary(engine)
-    _summary.pop("check_coverage", None)  # 0016 追加キーは別扱い
-    _summary.pop("capability_matrix", None)  # 0035-E 追加キーは別扱い
-    _summary.pop("prerequisite_coverage", None)  # 0016 前提会計キーは別扱い
+    _summary.pop("check_coverage", None)  # 追加キーは別扱い
+    _summary.pop("capability_matrix", None)  # 追加キーは別扱い
+    _summary.pop("prerequisite_coverage", None)  # 前提会計キーは別扱い
     assert _summary == {
         "reached_urls": [],
         "reached_count": 0,
         "attempts": 0,
         "by_status": {},
         "findings_total": 0,
-        # queued(visited)だが未到達の URL は「未試行」として unreached に出る（Codex #102）。
+        # queued(visited)だが未到達の URL は「未試行」として unreached に出る。
         "unreached": [
             {
                 "url": "http://fixture.test/discovered-only",
@@ -1098,7 +1098,7 @@ def test_top_severity_uses_explicit_order_not_lexicographic():
 
 
 def test_scan_matrix_display_and_save_exclude_skipped_rows():
-    """resume-only の skip 行は display/evidence/save から除外される（Codex #102 P2）。"""
+    """resume-only の skip 行は display/evidence/save から除外される。"""
     from wscan.engine import ScanEngine
 
     eng = ScanEngine.__new__(ScanEngine)
@@ -1115,7 +1115,7 @@ def test_scan_matrix_display_and_save_exclude_skipped_rows():
 
 
 def test_coverage_includes_live_worker_status_before_cleanup():
-    """cleanup 前でも live worker(_coverage_workers)の status が coverage に反映される（Codex #102）。"""
+    """cleanup 前でも live worker(_coverage_workers)の status が coverage に反映される。"""
     from collections import Counter
     from wscan.engine import ScanEngine
 
@@ -1134,7 +1134,7 @@ def test_coverage_includes_live_worker_status_before_cleanup():
 
 
 def test_coverage_html_omitted_when_no_metrics():
-    """coverage 未提供(None/空)なら Coverage セクションを描画しない（Codex #102）。"""
+    """coverage 未提供(None/空)なら Coverage セクションを描画しない。"""
     from wscan.report import ReportGenerator
     from pathlib import Path
     gen = ReportGenerator(Path("."))
@@ -1150,7 +1150,7 @@ def test_coverage_html_omitted_when_no_metrics():
 
 
 def test_coverage_html_renders_client_error_bucket():
-    """coverage HTML が client_error(4xx) も表示する（Codex #102）。"""
+    """coverage HTML が client_error(4xx) も表示する。"""
     from wscan.report import ReportGenerator
     from pathlib import Path
     gen = ReportGenerator(Path("."))

@@ -166,7 +166,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         )
         self.assertEqual(targets[0]["content_type"], "application/json; charset=utf-8")
         # content-type/proxy-auth/content-length/host は落とす。Authorization 等の JS 取得トークンと
-        # **Cookie** は replay 認証のため残す（Cookie は #90 R14 で温存＝唯一の資格情報のことがある。
+        # **Cookie** は replay 認証のため残す（Cookie は温存＝唯一の資格情報のことがある。
         # Finding では redact される）。非認証(X-Tenant)も残る。
         self.assertEqual(
             targets[0]["headers"],
@@ -197,7 +197,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
                 "post_data": {"q": "already-parsed"},
             }},
         ]
-        # 注: 有効な JSON スカラ("123" 等)は #90 R14 で harvest 対象（別テストで検証）。
+        # 注: 有効な JSON スカラ("123" 等)は harvest 対象（別テストで検証）。
 
         self.assertEqual(
             harvest_json_body_targets(pairs, base_netlocs={"api.test"}),
@@ -219,7 +219,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(targets[1]["method"], "PATCH")
 
     def test_ordinary_value_changes_collapse_to_one_target(self):
-        # timestamp/id/nonce 等の通常値変化は同一注入 shape として collapse（重複 probe しない・#90 R9）。
+        # timestamp/id/nonce 等の通常値変化は同一注入 shape として collapse（重複 probe しない）。
         pairs = [
             _json_pair("https://api.test/save", {"id": 1, "ts": 100, "csrf": "aaa"}),
             _json_pair("https://api.test/save", {"id": 2, "ts": 200, "csrf": "bbb"}),
@@ -230,7 +230,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_collapsed_observation_refreshes_body_to_newest(self):
         # 注入 shape 同じ・通常値変化（CSRF nonce 等）は collapse するが、replay body は最新観測へ
-        # 更新する（stale nonce/version で 403/409 にしない・#90 R10）。
+        # 更新する（stale nonce/version で 403/409 にしない）。
         pairs = [
             _json_pair("https://api.test/save", {"csrf": "OLD", "id": 1}),
             _json_pair("https://api.test/save", {"csrf": "NEW", "id": 2}),
@@ -241,7 +241,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(targets[0]["json_body"]["id"], 2)
 
     def test_anonymous_graphql_query_differentiates_operations(self):
-        # operationName 省略の匿名 GraphQL は query 本文で operation を識別＝別ターゲットに保つ（#90 R10）。
+        # operationName 省略の匿名 GraphQL は query 本文で operation を識別＝別ターゲットに保つ。
         pairs = [
             _json_pair("https://api.test/graphql", {"query": "{ user { id } }", "variables": {}}),
             _json_pair("https://api.test/graphql", {"query": "{ admin { id } }", "variables": {}}),
@@ -251,7 +251,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_body_value_differentiated_operations_kept_separate(self):
         # 同 pointer 集合でも body の**値**で operation を多重化する場合（JSON-RPC method /
-        # GraphQL operationName）は別ターゲットに保つ（#90 R8）。
+        # GraphQL operationName）は別ターゲットに保つ。
         pairs = [
             _json_pair("https://api.test/rpc", {"method": "create", "params": {"id": 1}}),
             _json_pair("https://api.test/rpc", {"method": "delete", "params": {"id": 2}}),
@@ -261,7 +261,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
     def test_semantic_duplicate_refreshes_headers(self):
-        # 値変化なしのキー順違い（raw は別だが正規化 body 同一）でも headers を最新化する（#90 R8 C2）。
+        # 値変化なしのキー順違い（raw は別だが正規化 body 同一）でも headers を最新化する。
         pairs = [
             _json_pair("https://api.test/v1/x", {"a": 1, "b": 2},
                        headers={"Authorization": "Bearer OLD"}),
@@ -273,7 +273,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(targets[0]["headers"]["Authorization"], "Bearer NEW")
 
     def test_skips_oversized_body_before_parse(self):
-        # 巨大 body は parse 前に skip（メモリ/CPU ガード・#90 R8 C3）。
+        # 巨大 body は parse 前に skip（メモリ/CPU ガード）。
         big = {"blob": "x" * (300 * 1024)}
         pairs = [_json_pair("https://api.test/v1/big", big)]
         self.assertEqual(
@@ -281,7 +281,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         )
 
     def test_non_json_content_type_does_not_consume_budget(self):
-        # 明示非 JSON(form 等)は budget を消費せず skip。後続の valid JSON が飢餓しない（#90 R8 C4）。
+        # 明示非 JSON(form 等)は budget を消費せず skip。後続の valid JSON が飢餓しない。
         forms = [
             _json_pair(f"https://api.test/form{i}", "a=1&b=2",
                        headers={"Content-Type": "application/x-www-form-urlencoded"})
@@ -293,7 +293,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_query_differentiated_operations_kept_separate(self):
         # 1 パスが query で別 operation を出す場合（?op=create/?op=delete）は別ターゲットとして残す
-        # （identity に observed query を含める・#90 R7）。replay は query 付き URL を保つ。
+        # （identity に observed query を含める）。replay は query 付き URL を保つ。
         pairs = [
             _json_pair("https://api.test/action?op=create", {"id": 1}),
             _json_pair("https://api.test/action?op=delete", {"id": 2}),
@@ -306,7 +306,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         )
 
     def test_repeated_request_refreshes_replay_headers(self):
-        # 同一 (method,url,body) の再観測で、refresh された Authorization を最新に更新する（#90 R7）。
+        # 同一 (method,url,body) の再観測で、refresh された Authorization を最新に更新する。
         pairs = [
             _json_pair("https://api.test/v1/x", {"a": 1},
                        headers={"Authorization": "Bearer OLD"}),
@@ -372,7 +372,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertLessEqual(len(targets), 3)
 
     def test_text_plain_json_body_is_harvested(self):
-        # fetch() 既定/sendBeacon の text/plain で送られた valid JSON も harvest する（#90 FN-A）。
+        # fetch() 既定/sendBeacon の text/plain で送られた valid JSON も harvest する。
         pairs = [_json_pair("https://api.test/v1/search", {"q": "x"},
                             headers={"Content-Type": "text/plain;charset=UTF-8"})]
         targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
@@ -380,13 +380,13 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(targets[0]["pointers"], ["/q"])
 
     def test_form_urlencoded_content_type_still_skipped(self):
-        # 明示的 form/multipart は従来どおり budget 消費前に弾く（#90 FN-A の非退行）。
+        # 明示的 form/multipart は従来どおり budget 消費前に弾く（非退行）。
         pairs = [_json_pair("https://api.test/v1/x", {"q": "x"},
                             headers={"Content-Type": "application/x-www-form-urlencoded"})]
         self.assertEqual(harvest_json_body_targets(pairs, base_netlocs={"api.test"}), [])
 
     def test_delete_with_json_body_is_harvested(self):
-        # bulk-delete: DELETE + JSON body も注入点として harvest（#90 FN-B）。
+        # bulk-delete: DELETE + JSON body も注入点として harvest。
         pairs = [_json_pair("https://api.test/v1/items", {"ids": [1, 2], "reason": "x"},
                             method="DELETE")]
         targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
@@ -399,7 +399,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(harvest_json_body_targets(pairs, base_netlocs={"api.test"}), [])
 
     def test_big_first_field_does_not_starve_later_pointer(self):
-        # 先頭に大きな配列があっても、後続の浅いフィールドが pointer 化される（BFS・#90 FN-C）。
+        # 先頭に大きな配列があっても、後続の浅いフィールドが pointer 化される（BFS）。
         body = {"items": [{"n": i} for i in range(250)], "promo_code": "x"}
         targets = harvest_json_body_targets([_json_pair("https://api.test/v1/cart", body)],
                                             base_netlocs={"api.test"})
@@ -407,7 +407,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertIn("/promo_code", targets[0]["pointers"])
 
     def test_operation_dispatch_header_distinguishes_targets(self):
-        # X-Amz-Target 等ヘッダで operation を分ける API は body/url 同一でも別ターゲット（#90 FN-E）。
+        # X-Amz-Target 等ヘッダで operation を分ける API は body/url 同一でも別ターゲット。
         pairs = [
             _json_pair("https://api.test/", {"TableName": "t", "Key": {"id": "1"}},
                        headers={"X-Amz-Target": "DynamoDB_20120810.GetItem"}),
@@ -418,7 +418,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
 
     def test_nonscalar_discriminator_value_distinguishes_targets(self):
-        # discriminator 値が非スカラ({"type":{"name":...}})でも別 operation を区別（#90 FN-F）。
+        # discriminator 値が非スカラ({"type":{"name":...}})でも別 operation を区別。
         targets = harvest_json_body_targets([
             _json_pair("https://api.test/rpc", {"type": {"name": "create"}, "payload": {"id": "1"}}),
             _json_pair("https://api.test/rpc", {"type": {"name": "delete"}, "payload": {"id": "1"}}),
@@ -427,7 +427,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
     def test_phase1_global_cap_preserves_later_endpoint_fairness(self):
-        # #90 R21g: 先行 high-churn endpoint が global cap を食い潰しても、後発の別 endpoint が
+        # 先行 high-churn endpoint が global cap を食い潰しても、後発の別 endpoint が
         # 丸ごと drop されない（最大バケツから evict して foothold を与える）。
         from wscan.spa_harvest import _MAX_PER_BUCKET, _MAX_TOTAL_CANDIDATES
         pairs = []
@@ -444,7 +444,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertIn("https://api.test/late-valid", urls)  # 後発 endpoint が生き残る
 
     def test_phase1_bounded_evicts_oldest_preserves_latest(self):
-        # #90 R21f: 1 endpoint に大量の distinct body を出しても Phase 1 を有界化し、最古を
+        # 1 endpoint に大量の distinct body を出しても Phase 1 を有界化し、最古を
         # evict して最新観測を保つ。_MAX_PER_BUCKET=64 なので v0..v35 は落ち v99 は残る。
         from wscan.spa_harvest import _MAX_PER_BUCKET
         n = _MAX_PER_BUCKET + 36
@@ -461,7 +461,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertLessEqual(len(targets), _MAX_PER_BUCKET)  # バケツ上限で有界
 
     def test_vendor_media_type_distinguishes_operations(self):
-        # #90 R21c: 同一 method/url/body でも vendor media type（版/operation 選択）が違えば別 target。
+        # 同一 method/url/body でも vendor media type（版/operation 選択）が違えば別 target。
         body = {"payload": {"id": "1"}}
         targets = harvest_json_body_targets([
             _json_pair("https://api.test/rpc", body,
@@ -485,7 +485,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 1)
 
     def test_discriminator_below_depth_eight_still_distinguishes(self):
-        # #90 R21b: injectable な葉(/payload/id)が浅くても discriminator(method)が8段より
+        # injectable な葉(/payload/id)が浅くても discriminator(method)が8段より
         # 深いと旧 depth_cap=8 で識別子を取りこぼし collapse していた。反復DFSで全走査し区別する。
         # 包む鍵(wrapper/lvl)は discriminator でなく、深い method のみが差分＝深さ走査を検証。
         def deep(method_value):
@@ -501,7 +501,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
     def test_nonscalar_discriminator_differs_only_after_2048_chars(self):
-        # 2048 字以降だけ異なる非スカラ discriminator でも別 operation を区別する（#90 R21）。
+        # 2048 字以降だけ異なる非スカラ discriminator でも別 operation を区別する。
         # ハッシュ前 prefix 切り詰めだと同一署名へ collapse して一方が未探索になる。
         shared = {f"k{i}": "v" * 8 for i in range(200)}  # 共通で長い前半（>2048字）
         op_a = {"type": dict(shared, sel="create"), "payload": {"id": "1"}}
@@ -515,7 +515,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_persisted_graphql_query_hash_is_discriminator(self):
         # Apollo APQ は query/operationName を省き extensions.persistedQuery.sha256Hash で operation を
-        # 識別する。別 hash（同一 pointer 集合）を別ターゲットに保つ（#90 R14）。
+        # 識別する。別 hash（同一 pointer 集合）を別ターゲットに保つ。
         targets = harvest_json_body_targets([
             _json_pair("https://api.test/graphql", {
                 "extensions": {"persistedQuery": {"version": 1, "sha256Hash": "aaa"}},
@@ -529,7 +529,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_query_distinct_operations_bucketed_separately(self):
         # ?op=create（churn 2件）と ?op=delete は別 observed_url→別バケツ。cap=2 でも round-robin で
-        # 両 operation が parse される（queryless バケツだと delete が未 parse になる・#90 R14）。
+        # 両 operation が parse される（queryless バケツだと delete が未 parse になる）。
         pairs = [
             _json_pair("https://api.test/action?op=create", {"doc": "d", "ts": 1}),
             _json_pair("https://api.test/action?op=create", {"doc": "d", "ts": 2}),
@@ -542,7 +542,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_discriminator_beyond_pointer_cap_still_distinguishes(self):
         # 200 葉を超えた位置の discriminator（method）も full-body 走査で拾い、別 operation を区別する
-        # （enumerate_leaf_pointers の 200 上限に依存しない・#90 R14）。
+        # （enumerate_leaf_pointers の 200 上限に依存しない）。
         filler = {f"f{i}": i for i in range(250)}  # 250 leaves (>200 pointer cap)
         body_create = dict(filler); body_create["method"] = "create"
         body_delete = dict(filler); body_delete["method"] = "delete"
@@ -555,7 +555,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_discriminator_not_cut_off_by_earlier_discriminator_leaves(self):
         # 多数の discriminator 名の葉(type)が先にあっても、後方の operation selector(method)まで走査して
-        # 別 operation を区別する（max_found カットオフ撤去・#90 R14）。
+        # 別 operation を区別する（max_found カットオフ撤去）。
         base = {f"n{i}": {"type": "x"} for i in range(80)}  # 80 個の nested "type" discriminator
         bc = dict(base); bc["method"] = "create"
         bd = dict(base); bd["method"] = "delete"
@@ -568,7 +568,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_scalar_root_json_body_harvested_at_root_pointer(self):
         # top-level スカラ("search term")も valid JSON。container 限定にせず、ルート pointer "" で
-        # 注入点を得る（whole-body 置換に対応・検索系 endpoint を取りこぼさない・#90 R14）。
+        # 注入点を得る（whole-body 置換に対応・検索系 endpoint を取りこぼさない）。
         targets = harvest_json_body_targets(
             [_json_pair("https://api.test/v1/search", json.dumps("search term"))],
             base_netlocs={"api.test"},
@@ -578,7 +578,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_operation_discriminator_preserves_json_type(self):
         # discriminator が JSON 型で operation を分ける（{"action":1} int vs {"action":"1"} str）場合、
-        # str() だと同じ "1" に潰れて片方を未 probe にする。repr で型を保持し別ターゲットに残す（#90 R13）。
+        # str() だと同じ "1" に潰れて片方を未 probe にする。repr で型を保持し別ターゲットに残す。
         targets = harvest_json_body_targets(
             [
                 _json_pair("https://api.test/v1/act", {"action": 1, "data": "x"}),
@@ -591,7 +591,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_value_churn_collapses_but_later_endpoint_still_harvested(self):
         # 1 endpoint の値churn（timestamp だけ違う distinct body 群）は semantic collapse で 1 ターゲット。
-        # parse 予算に headroom があれば、churn の後に来る別 endpoint も取りこぼさない（#90 R13）。
+        # parse 予算に headroom があれば、churn の後に来る別 endpoint も取りこぼさない。
         churn = [
             _json_pair("https://api.test/v1/save", {"doc": "d", "ts": i})
             for i in range(10)
@@ -610,7 +610,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_round_robin_parse_prevents_churn_starving_later_endpoint(self):
         # 1 url の値churn（tsだけ違う 50 body）が別 endpoint /b を飢餓させない。バケツ間 round-robin
-        # なので /a と /b が最初の pass で 1 body ずつ parse され、churn が予算を独占しない（#90 R14）。
+        # なので /a と /b が最初の pass で 1 body ずつ parse され、churn が予算を独占しない。
         churn = [
             _json_pair("https://api.test/v1/a", {"doc": "d", "ts": i})
             for i in range(50)
@@ -625,7 +625,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_new_operation_after_churn_still_discovered(self):
         # churn の後に来る genuine な新 operation（同一 url・別 method 値）も parse される。
-        # round-robin は url を blacklist しないため、8 collapse 後の新 method も取りこぼさない（#90 R14）。
+        # round-robin は url を blacklist しないため、8 collapse 後の新 method も取りこぼさない。
         churn = [
             _json_pair("https://api.test/rpc", {"method": "poll", "ts": i})
             for i in range(8)
@@ -641,7 +641,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_deep_json_body_does_not_wipe_earlier_targets(self):
         # 深いネスト JSON が RecursionError を起こしても per-entry 隔離で正常 target を巻き添えにしない
-        # （#90 R14・旧 rewrite は外側 except で全消去する回帰があった）。
+        # （旧 rewrite は外側 except で全消去する回帰があった）。
         deep = "[" * 20000 + "]" * 20000  # balanced だが過度にネスト（40KB<256KB・RecursionError誘発）
         pairs = [
             _json_pair("https://api.test/v1/ok", {"q": "x"}),
@@ -653,7 +653,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_semantic_collapse_keeps_latest_observation_headers(self):
         # A(H1) -> B(H2) -> A(H3)（A/B は同一注入 shape に collapse）。round-robin は観測順に並ばないが
-        # order で守り、最新観測 H3 を保つ（古い H2 で上書きしない・#90 R14）。
+        # order で守り、最新観測 H3 を保つ（古い H2 で上書きしない）。
         a = {"doc": "d", "ts": 1}
         b = {"doc": "e", "ts": 2}
         pairs = [
@@ -667,7 +667,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
     def test_many_operations_same_url_all_discovered(self):
         # 同一 url が別 operation（method 値違い）を出し続けても round-robin で全て parse される
-        # （JSON-RPC 多 method endpoint を blacklist で取りこぼさない・#90 R14）。
+        # （JSON-RPC 多 method endpoint を blacklist で取りこぼさない）。
         pairs = [
             _json_pair("https://api.test/rpc", {"method": f"m{i}", "params": "x"})
             for i in range(15)
@@ -680,7 +680,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
 class AllocatePointersRoundRobinTests(unittest.TestCase):
     def test_round_robin_prevents_single_target_monopoly(self):
-        # 多 pointer の先頭 target が cap を独占せず、少 pointer の後続 target も slot を得る（#90 R13）。
+        # 多 pointer の先頭 target が cap を独占せず、少 pointer の後続 target も slot を得る。
         targets = [
             {"pointers": [f"/a{i}" for i in range(200)]},
             {"pointers": ["/b0", "/b1", "/b2"]},
@@ -708,7 +708,7 @@ class AllocatePointersRoundRobinTests(unittest.TestCase):
 
     def test_repeated_malformed_body_does_not_starve_later_valid_json(self):
         # malformed/非container JSON は成功時にしか raw_index に載らないため、修正前は同一 body の
-        # 連投を毎回 parse して processed を食い潰し、後続の valid JSON を飢餓させた（#90 R12）。
+        # 連投を毎回 parse して processed を食い潰し、後続の valid JSON を飢餓させた。
         # 負キャッシュ(rejected)で重複拒否 body は最大 1 回だけ parse・budget も 1 回だけ消費する。
         ct = {"Content-Type": "application/json"}
         malformed = [
@@ -724,7 +724,7 @@ class AllocatePointersRoundRobinTests(unittest.TestCase):
         self.assertIn("https://api.test/v1/good", endpoints)
 
     def test_drops_stale_body_integrity_and_encoding_headers(self):
-        # Content-MD5/Digest/Content-Encoding 等は body 再直列化で無効になるため落とす（#90 R6）。
+        # Content-MD5/Digest/Content-Encoding 等は body 再直列化で無効になるため落とす。
         pairs = [_json_pair(
             "https://api.test/v1/x", {"a": 1},
             headers={
@@ -738,14 +738,14 @@ class AllocatePointersRoundRobinTests(unittest.TestCase):
         self.assertNotIn("Digest", headers)
         self.assertNotIn("Content-Encoding", headers)
         self.assertNotIn("Transfer-Encoding", headers)
-        # accept-encoding は落とす（httpx が扱えない br/zstd を広告して偽陰性にしない・#90 R11）。
+        # accept-encoding は落とす（httpx が扱えない br/zstd を広告して偽陰性にしない）。
         self.assertNotIn("Accept-Encoding", headers)
         self.assertEqual(headers.get("X-Keep"), "yes")
 
     def test_retains_idempotency_key_for_b2_regeneration(self):
         # Idempotency-Key は b1 では落とさず温存する。正しい扱いは b2 replay での**プローブ毎再生成**
         # （削除だと必須キー API で 400、温存のまま連投だと冪等 API がキャッシュ返し）で、b1 は
-        # replay しないため未決定＝温存（#90 R14・b2 バックログ）。
+        # replay しないため未決定＝温存（今後の対応）。
         pairs = [_json_pair("https://api.test/v1/pay", {"amt": 1}, headers={
             "Idempotency-Key": "abc", "X-Keep": "y",
         })]
@@ -766,7 +766,7 @@ class AllocatePointersRoundRobinTests(unittest.TestCase):
     def test_caps_pointers_per_body_not_total_targets(self):
         # 1 body の pointer 数は cap（enumerate 側 200）。ただし**総ターゲット数は harvester で
         # cap しない**（精密スコープ判定後に engine が json_ip_cap を掛ける＝除外パスばかりの観測が
-        # 有効ターゲットを飢餓させないため。Codex #90 R2）。
+        # 有効ターゲットを飢餓させないため。）。
         large_body = {f"field{i}": i for i in range(205)}
         pairs = [
             _json_pair(f"https://api.test/v1/items/{i}", {"value": i})

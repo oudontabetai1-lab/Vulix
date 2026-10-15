@@ -78,7 +78,7 @@ async def test_agent_initialization_error_prints_failed_not_zero_findings():
 @pytest.mark.asyncio
 async def test_agent_missing_browser_use_is_failed_not_traceback():
     # browser-use 未導入は _build_llm が ModuleNotFoundError(ImportError)を投げる。
-    # traceback で漏らさず FAILED＋非0 exit にする（D8・Codex #101）。
+    # traceback で漏らさず FAILED＋非0 exit にする。
     output = StringIO()
     scanner = AgentBrowserScanner(target_url="http://fixture.test")
     with patch(
@@ -100,7 +100,7 @@ async def test_agent_missing_browser_use_is_failed_not_traceback():
 @pytest.mark.asyncio
 async def test_agent_unsuccessful_history_is_incomplete_not_clean():
     # browser-use が例外でなく history.is_successful()=False で失敗を報告し、findings が
-    # 空のとき、「正常完了・0 findings」と誤表示せず INCOMPLETE＋非0 exit にする（D8）。
+    # 空のとき、「正常完了・0 findings」と誤表示せず INCOMPLETE＋非0 exit にする。
     import sys
     import types
 
@@ -169,7 +169,7 @@ async def test_agent_unsuccessful_history_is_incomplete_not_clean():
 async def test_monitored_agent_incomplete_empty_returns_before_sleep():
     # monitored 経路（ダッシュボード有り）でも、incomplete-empty（success=False かつ
     # 0 findings）のとき sleep(3600) に入らず result を返し、_agent_exit_code が非0を
-    # 返せることを検証する（D8・Codex #101 comment 3845791232）。early-return 条件を
+    # 返せることを検証する。early-return 条件を
     # `result.error` だけにしていると、Ctrl+C 待ちの sleep に落ちて非0 exit が消える。
     import types
 
@@ -248,7 +248,7 @@ async def test_monitored_agent_incomplete_empty_returns_before_sleep():
 async def test_run_recon_raises_on_hard_error_for_hybrid_fallback(tmp_path):
     # Hybrid Phase 1: browser-use 未導入等で scanner.run() が result.error を立てたとき、
     # run_recon は「偵察完了」と誤表示せず送出する。呼び出し側の Hybrid 失敗ブランチ
-    # （seed 無しで Phase 2 続行＋警告）が使われる（Codex #101 P2）。
+    # （seed 無しで Phase 2 続行＋警告）が使われる。
     from wscan.agent_engine import AgentEngine
 
     class _FailingScanner:
@@ -301,7 +301,7 @@ async def test_run_recon_returns_handoff_on_success(tmp_path):
 @pytest.mark.asyncio
 async def test_run_recon_raises_on_unsuccessful_empty(tmp_path):
     # 例外を投げずに step 上限/失敗で終わり（error=None・success=False・URL/findings 無し）
-    # の INCOMPLETE 偵察は「偵察完了」と誤表示せず送出する（Codex #101 P1）。
+    # の INCOMPLETE 偵察は「偵察完了」と誤表示せず送出する。
     from wscan.agent_engine import AgentEngine
 
     class _IncompleteScanner:

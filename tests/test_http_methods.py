@@ -1,4 +1,4 @@
-"""0018: HTTP メソッド設定不備（危険メソッド告知 / XST / WebDAV）の単体テスト。
+"""HTTP メソッド設定不備（危険メソッド告知 / XST / WebDAV）の単体テスト。
 
 純粋判定関数はオフライン検証。スキャナは httpx.AsyncClient を fake へ差し替えて
 実ネットワークなしで scan_page の分岐を検証する。
@@ -67,7 +67,7 @@ class PureFunctionTests(unittest.TestCase):
 
     def test_redact_trace_body_masks_serialized_secret_values(self):
         # 行頭 `Header: value` に現れない直列化（JSON/HTML属性/エスケープ\r\n）でも、
-        # 送信した秘匿値を渡せば literal 置換で伏字化する（Codex #157 C2）。
+        # 送信した秘匿値を渡せば literal 置換で伏字化する。
         secret = "Bearer supersecrettoken"
         cookie = "session=abcdef123"
         body = (
@@ -106,7 +106,7 @@ class PureFunctionTests(unittest.TestCase):
 
 class Review157Round2Tests(unittest.TestCase):
     def test_short_secret_values_redacted_in_context(self):
-        # 4 字未満の資格情報も名前と組の文脈で伏せる（JSON/インライン直列化・Codex #157 P1）。
+        # 4 字未満の資格情報も名前と組の文脈で伏せる（JSON/インライン直列化）。
         body = '{"headers": {"Cookie": "s=x; theme=dark", "X-API-Key": "abc"}} other x abc'
         out = hm.redact_trace_body(body, sent_secret_headers=[("Cookie", "s=x; theme=dark"),
                                                                ("X-API-Key", "abc")])
@@ -116,7 +116,7 @@ class Review157Round2Tests(unittest.TestCase):
         self.assertIn("other x abc", out)  # 文脈外の一般語は伏せない
 
     def test_query_secrets_redacted_in_url_and_trace_body(self):
-        # page probe の query に載る access_token を永続化 URL と TRACE 本文の双方で伏せる（Codex #157 P1）。
+        # page probe の query に載る access_token を永続化 URL と TRACE 本文の双方で伏せる。
         url = "http://app.test/dav?access_token=supersecret&route=dav"
         self.assertNotIn("supersecret", hm.redact_url(url))
         self.assertIn("route=dav", hm.redact_url(url))
@@ -124,7 +124,7 @@ class Review157Round2Tests(unittest.TestCase):
         self.assertNotIn("supersecret", out)
 
     def test_partitioned_cookie_only_for_matching_site(self):
-        # CHIPS cookie は宛先 site に一致する partition のものだけ送る（Codex #157 P1）。
+        # CHIPS cookie は宛先 site に一致する partition のものだけ送る。
         from wscan.engine import _scoped_cookie_header
         jar = [
             {"name": "own", "value": "1", "domain": "app.test", "path": "/",
@@ -185,9 +185,9 @@ class _FakeEngine:
         self.navigation_retries = 0
 
     def _match_pre_attack_flows(self, page):
-        # これらの http_methods テストは pre-attack flow を扱わない（#167 が
-        # _attack_one_page に導入した呼び出しへの最小スタブ。#170 で
-        # _match_pre_attack_flow→_match_pre_attack_flows へリネーム・list 返却）。
+        # これらの http_methods テストは pre-attack flow を扱わない（_attack_one_page が
+        # 呼ぶ _match_pre_attack_flows への最小スタブ。旧 _match_pre_attack_flow から
+        # リネームされ list を返す）。
         return []
 
     def _profile(self, *args, **kwargs):
@@ -195,7 +195,7 @@ class _FakeEngine:
         return None
 
     async def _recover_if_dialog_flood(self, since):
-        # F06/0059(#4): page-level 区間末の dialog flood 回復呼び出しの最小スタブ。
+        # page-level 区間末の dialog flood 回復呼び出しの最小スタブ。
         return since
 
     def _page_recovery_failed(self, where):
@@ -205,7 +205,7 @@ class _FakeEngine:
         return False
 
     async def _recovered_page_healthy(self, page):
-        # F06/0059: 準備区間（失効チェック/flow）回復後の健全性確認の最小スタブ。
+        # 準備区間（失効チェック/flow）回復後の健全性確認の最小スタブ。
         return True
 
 
@@ -247,7 +247,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hm.redact_url("https://app.test/x"), "https://app.test/x")
 
     async def test_userinfo_not_persisted_in_findings(self):
-        # URL userinfo（Basic 認証）が finding.url / pair / reproduction に残らないこと（#157 P1）。
+        # URL userinfo（Basic 認証）が finding.url / pair / reproduction に残らないこと。
         engine, scanner = self._scanner()
         recorded = []
 
@@ -275,7 +275,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("alice:secret@app.test" in str(u) for u in client.requested))
 
     async def test_dedup_none_not_inflating_coverage(self):
-        # record_finding が dedup で None を返しても findings に None を積まない（#157 P2）。
+        # record_finding が dedup で None を返しても findings に None を積まない。
         engine, scanner = self._scanner()
 
         async def _none(**kw):
@@ -329,7 +329,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_client_kwargs_uses_scoped_cookie_override(self):
         # _client_kwargs は cookie_override（URL 単位で再スコープした Cookie）で置換する。
-        # None のときは Cookie を付与しない（#157 P2）。
+        # None のときは Cookie を付与しない。
         engine, scanner = self._scanner()
 
         def _auth_headers(extra=None, *, include_cookie=True, url=""):
@@ -343,7 +343,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kw_none["headers"].get("X-Custom"), "1")  # 非 Cookie ヘッダは維持
 
     async def test_explicit_cookie_header_not_overwritten(self):
-        # operator が -H で明示した Cookie は cookie_override で上書きしない（#157 P2）。
+        # operator が -H で明示した Cookie は cookie_override で上書きしない。
         engine, scanner = self._scanner()
 
         def _auth_headers(extra=None, *, include_cookie=True, url=""):
@@ -355,7 +355,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_origin_and_page_get_path_scoped_cookies(self):
         # scan_page は各 target を engine.cookie_header_for_url で再スコープした Cookie で probe する。
-        # origin(/) は Path=/ の Cookie のみ、page(/admin) は両方（#157 P2）。
+        # origin(/) は Path=/ の Cookie のみ、page(/admin) は両方。
         engine, scanner = self._scanner()
         seen: dict[str, str] = {}
 
@@ -382,7 +382,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_target["http://app.test/admin"], "root=r; adm=a")  # page: 両方
 
     async def test_probe_cap_is_per_origin(self):
-        # 上限は origin 単位。1 origin の多数パスが枠を食い潰しても、別 origin は必ず probe される（#157）。
+        # 上限は origin 単位。1 origin の多数パスが枠を食い潰しても、別 origin は必ず probe される。
         engine, scanner = self._scanner()
         scanner._MAX_TARGETS_PER_ORIGIN = 2
         probed: list[str] = []
@@ -411,7 +411,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://b.test/x", probed)
 
     async def test_trace_body_redacts_sent_auth_header_value(self):
-        # client.headers の秘匿値が本文（JSON 直列化など行頭に出ない形）でも伏字化される（#157 C2）。
+        # client.headers の秘匿値が本文（JSON 直列化など行頭に出ない形）でも伏字化される。
         secret = "Bearer supersecrettoken"
         trace = _FakeResp(200, {"Content-Type": "message/http"},
                           'TRACE / HTTP/1.1\n{"Authorization":"%s"}\n' % secret)
@@ -562,7 +562,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_single_probe_failure_raises_for_retry(self):
         # OPTIONS だけ transport 失敗（TRACE/PROPFIND は 405 応答）でも、OPTIONS 固有のカバレッジ
-        # （危険 Allow メソッド）が欠けるので未検査扱いにして resume へ回す（Codex #157）。
+        # （危険 Allow メソッド）が欠けるので未検査扱いにして resume へ回す。
         engine, scanner = self._scanner()
 
         class _OptFail:
@@ -581,7 +581,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_transient_trace_or_propfind_raises_for_retry(self):
         # OPTIONS 成功でも TRACE/PROPFIND が一時応答なら、その probe 固有のカバレッジ（XST/PROPFIND WebDAV）
-        # が欠けるので未検査扱いで resume へ回す（Codex #157 P2）。
+        # が欠けるので未検査扱いで resume へ回す。
         for method in ("TRACE", "PROPFIND"):
             with self.subTest(method=method):
                 engine, scanner = self._scanner()
@@ -596,7 +596,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
                         await scanner.scan_page("http://app.test/")
 
     async def test_page_target_preserves_query(self):
-        # query でリソースを振り分けるアプリの page target は query を保持し fragment だけ落とす（Codex #157 P2）。
+        # query でリソースを振り分けるアプリの page target は query を保持し fragment だけ落とす。
         responses = {
             "OPTIONS": _FakeResp(200, {"allow": "GET"}),
             "TRACE": _FakeResp(405, {}, ""),
@@ -615,7 +615,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("http://app.test/index.php", urls)
 
     async def test_page_target_preserves_path_params(self):
-        # `;params` を落とさず crawl したリソースそのものを probe する（Codex #157 P2）。
+        # `;params` を落とさず crawl したリソースそのものを probe する。
         responses = {
             "OPTIONS": _FakeResp(200, {"allow": "GET"}),
             "TRACE": _FakeResp(405, {}, ""),
@@ -633,7 +633,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://app.test/dav;mode=readonly", urls)
 
     async def test_low_findings_carry_low_cvss(self):
-        # 告知のみの low finding は check 既定 CVSS(6.5) ではなく low 帯の CVSS を明示する（Codex #157 P2）。
+        # 告知のみの low finding は check 既定 CVSS(6.5) ではなく low 帯の CVSS を明示する。
         responses = {
             "OPTIONS": _FakeResp(200, {"allow": "GET, PUT, PROPFIND", "dav": "1"}),
             "TRACE": _FakeResp(405, {}, ""),
@@ -648,7 +648,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_requests_failing_raises_for_retry(self):
         # DNS/接続/TLS 等で全 probe が request 時に失敗＝応答ゼロ（未検査）→ PageDocumentUnavailable を投げ
-        # engine に error(resume 再試行)扱いさせる（[] で tested 完了→恒久 skip させない・Codex #157）。
+        # engine に error(resume 再試行)扱いさせる（[] で tested 完了→恒久 skip させない）。
         engine, scanner = self._scanner()
 
         class _Boom:
@@ -664,7 +664,7 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_target_failure_raises_even_with_findings(self):
         # origin は応答して finding が出るが page path の client が失敗 → finding があっても raise し、
-        # 失敗ターゲットを resume 対象にする（Codex #157）。
+        # 失敗ターゲットを resume 対象にする。
         engine, scanner = self._scanner()
         recorded = []
 

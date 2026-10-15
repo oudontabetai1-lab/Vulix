@@ -39,7 +39,7 @@ class _FakeMessages:
         return _FakeStream()
 
     async def create(self, *, model, **kw):
-        # AsyncAnthropic 化後（Codex #173 P2）: adaptive/planner は async create を使う。
+        # AsyncAnthropic 化後: adaptive/planner は async create を使う。
         self._sink.append(model)
         if getattr(self, "delay", 0):
             await asyncio.sleep(self.delay)
@@ -75,7 +75,7 @@ def test_stream_claude_uses_adaptive_role_model_across_executor():
 
 
 def test_stream_claude_disables_sdk_retries_for_deadline_call():
-    # deadline を wait_for で縛るため、SDK 内 retry を max_retries=0 で無効化する（Codex #173 P1）。
+    # deadline を wait_for で縛るため、SDK 内 retry を max_retries=0 で無効化する。
     opts = []
     pg = PayloadGenerator(provider="claude", claude_model="M")
     pg._get_async_anthropic_client = lambda: _FakeClient([], opts=opts)
@@ -89,7 +89,7 @@ def test_stream_claude_disables_sdk_retries_for_deadline_call():
 
 
 def test_stream_claude_enforces_deadline_without_grace():
-    # overall deadline は設定値そのもの（+5s 猶予なし）で、超過時は cancel して None（Codex #173 P2）。
+    # overall deadline は設定値そのもの（+5s 猶予なし）で、超過時は cancel して None。
     import time
     pg = PayloadGenerator(provider="claude", claude_model="M", llm_stream_timeout_seconds=0.2)
     client = _FakeClient([])
@@ -102,7 +102,7 @@ def test_stream_claude_enforces_deadline_without_grace():
 
 
 def test_payload_generator_aclose_closes_cached_async_client():
-    # 反復スキャンで AsyncAnthropic の接続プールを放置しない（Codex #173 P2）。
+    # 反復スキャンで AsyncAnthropic の接続プールを放置しない。
     closed = []
 
     class _C:

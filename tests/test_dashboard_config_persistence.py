@@ -97,7 +97,7 @@ if (safeUrlListForStorage('https://example.test/?key=SECRET\\nhttps://example.te
 
 
 def test_restore_target_gating_present_in_source():
-    # 指摘3: per-scan credential が省かれた復元では target/url を戻さない配線が存在すること。
+    # per-scan credential が省かれた復元では target/url を戻さない配線が存在すること。
     assert ("restore_target: !CONFIG_SECRET_FIELD_IDS.some(id =>" in SOURCE)
     assert "const restoreTarget = cfg.restore_target === true;" in SOURCE
     assert ("if (restoreTarget && cfg.url && safeUrlForStorage(cfg.url) "

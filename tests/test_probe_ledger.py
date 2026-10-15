@@ -1,4 +1,4 @@
-"""probe 証跡台帳 schema と純粋ヘルパのユニットテスト（0032-A・ブラウザ非依存）。
+"""probe 証跡台帳 schema と純粋ヘルパのユニットテスト（ブラウザ非依存）。
 
 redaction（機微値を残さない）・hash 安定性・JSONL 1 行直列化・相関・enum 値を固定する。
 """
@@ -115,7 +115,7 @@ def test_records_are_frozen():
 
 
 def test_redact_json_credential_fields():
-    # JSON body の quoted key/value（Codex P1）。request_logger 正典の JSON 対応へ委譲。
+    # JSON body の quoted key/value。request_logger 正典の JSON 対応へ委譲。
     out = redact_excerpt('{"password":"hunter2","access_token":"abc123","q":"safe"}')
     assert "hunter2" not in out and "abc123" not in out
     assert "<redacted>" in out
@@ -123,7 +123,7 @@ def test_redact_json_credential_fields():
 
 
 def test_redact_custom_registered_sensitive_header():
-    # runtime 登録したカスタム認証ヘッダ（Codex P2・#90 R13 の正典 registry を共有）
+    # runtime 登録したカスタム認証ヘッダ（正典 registry を共有）
     from wscan.request_logger import register_sensitive_headers, clear_sensitive_headers
     try:
         register_sensitive_headers(["X-Company-Auth"])
@@ -136,7 +136,7 @@ def test_redact_custom_registered_sensitive_header():
 
 
 def test_jsonl_redacts_url_query_credentials():
-    # request.url / response.final_url のクエリ機微値を永続化境界で伏せる（Codex P2）
+    # request.url / response.final_url のクエリ機微値を永続化境界で伏せる
     rec = ProbeAttemptRecord(
         scan_id="s", attempt_id="s:1", role=ProbeRole.ATTACK,
         request=RequestRecord(method="GET", url="http://h/cb?access_token=abc123&q=1",
@@ -151,7 +151,7 @@ def test_jsonl_redacts_url_query_credentials():
 
 
 def test_redact_escaped_quote_json_credential():
-    # `\"` を含む JSON scalar 全体を伏せる（Codex P1 追撃・escape-aware）
+    # `\"` を含む JSON scalar 全体を伏せる（escape-aware）
     out = redact_excerpt(r'{"password":"abc\"secret-tail","q":"safe"}')
     assert "secret-tail" not in out
     assert "abc" not in out or "<redacted>" in out
@@ -159,7 +159,7 @@ def test_redact_escaped_quote_json_credential():
 
 
 def test_jsonl_redacts_url_fragment_and_userinfo():
-    # OAuth implicit の fragment token と userinfo を永続化境界で伏せる（Codex P2 追撃）
+    # OAuth implicit の fragment token と userinfo を永続化境界で伏せる
     rec = ProbeAttemptRecord(
         scan_id="s", attempt_id="s:1", role=ProbeRole.ATTACK,
         request=RequestRecord(method="GET", url="http://user:pass@host/p?token=leak&id=5",

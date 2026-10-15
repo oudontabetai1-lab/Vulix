@@ -345,7 +345,7 @@ class GeminiRemediationRegressionTests(unittest.TestCase):
 
 
 class LLMObservabilityTests(unittest.TestCase):
-    """complete_text が LLM 呼び出しを本文なしで記録する（0065）。"""
+    """complete_text が LLM 呼び出しを本文なしで記録する。"""
 
     def _run_openai_ok(self, **pg_over):
         pg = _payload_generator("openai", **pg_over)
@@ -384,7 +384,7 @@ class LLMObservabilityTests(unittest.TestCase):
         self.assertEqual(logger.log_llm_call.call_args.kwargs["status"], "transient")
 
     def test_records_exception_type_without_message(self):
-        # 失敗時は例外の種別名だけを監査行へ渡す（transport と応答処理失敗を区別・Codex #172 P2）。
+        # 失敗時は例外の種別名だけを監査行へ渡す（transport と応答処理失敗を区別）。
         request = httpx.Request("POST", "https://example.test/?key=SECRETKEY")
         cases = [
             ([httpx.ConnectError("SECRETKEY", request=request)], "ConnectError"),
@@ -454,7 +454,7 @@ class RecordLLMCallHelperTests(unittest.TestCase):
 
 
 class RemediationRoleAndRetryTests(unittest.TestCase):
-    """remediation の report role 付与と Anthropic SDK retry 無効化（Codex #172 P2）。"""
+    """remediation の report role 付与と Anthropic SDK retry 無効化。"""
 
     def test_remediation_call_uses_report_role(self):
         from wscan import remediation, llm_client
@@ -474,7 +474,7 @@ class RemediationRoleAndRetryTests(unittest.TestCase):
 
     def test_shared_anthropic_client_keeps_default_retries(self):
         # 共有 client は SDK 既定 retry を保つ（streaming caller が依存）。complete_text だけが
-        # per-call で無効化する（Codex #172 P2 の回帰修正）。
+        # per-call で無効化する（回帰修正）。
         from wscan.payload_gen import PayloadGenerator
         pg = PayloadGenerator(provider="claude")
         fake_anthropic = types.ModuleType("anthropic")

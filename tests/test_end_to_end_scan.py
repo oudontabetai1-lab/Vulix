@@ -88,7 +88,7 @@ def _chromium_available() -> bool:
 # 単一の権威 probe: browser 起動可否を import 時に一度だけ評価する。decorator（collection 時）と
 # 環境 gate の assert（execution 時）が別々に probe すると、transient な launch 失敗で「recall
 # クラスだけ skip・gate は pass」の空振りが起きうる。両者で同じ結果を使い、不一致を無くす
-# （DECISION-CI-RECALL=C：blocking nightly gate が recall assertion 未実行のまま緑になるのを防ぐ）。
+# （blocking nightly gate が recall assertion 未実行のまま緑になるのを防ぐ）。
 _CHROMIUM_OK = _chromium_available()
 
 
@@ -152,7 +152,7 @@ async def _run_spa_json_scan(port: int, output_dir: str):
     return engine
 
 
-# ADR-0016 / PRINCIPLE-001（DECISION-CI-RECALL=C）の空振り防止:
+# recall ゲートの空振り防止:
 # WSCAN_E2E=1 を明示した（＝blocking な nightly recall gate 実行中）のに Chromium が
 # 起動不能なら、E2E クラスの skip で pytest が緑になり recall assertion が空振りする。
 # この gate クラスは _CHROMIUM_OK（recall クラスの skip 判定と同一の権威 probe）を **skip 条件に
@@ -244,13 +244,13 @@ class EndToEndRealisticScanTests(unittest.TestCase):
                 )
 
     def test_recall_gate_is_100_percent(self):
-        # ADR-0016 / PRINCIPLE-001: 固定 ground truth に対し recall 100% を要求する
+        # 固定 ground truth に対し recall 100% を要求する
         # （有効化した CHECKS のみを分母にする）。個別 subTest の集約＋recall 数値と見逃し一覧を
         # 1メッセージで surface する。
-        # enforcement（DECISION-CI-RECALL=C）: この assert は E2E scan 実走時（WSCAN_E2E=1）に
+        # enforcement: この assert は E2E scan 実走時（WSCAN_E2E=1）に
         # blocking。PR CI の E2E step は apt mirror 403 で不安定なため非 blocking のまま維持し、
         # recall ゲートは専用の nightly workflow（.github/workflows/nightly-recall.yml、
-        # WSCAN_E2E=1・blocking）で担保する＝ADR-0016 の release gate を定期実行で確実に回す。
+        # WSCAN_E2E=1・blocking）で担保する＝recall の release gate を定期実行で確実に回す。
         report = compute_recall(EXPECTED_FINDINGS, self.reported, target_checks=CHECKS)
         self.assertTrue(
             report.is_complete,

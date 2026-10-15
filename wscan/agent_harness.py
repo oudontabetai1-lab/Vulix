@@ -29,7 +29,7 @@ _INTERNAL_ID_KEYS = frozenset({"candidate_id"})
 
 # 1000 字超で切り詰めた文字列に付す番兵。切り詰めた候補 URL/payload は元の実行値と異なるため、
 # resume 時に「要再発見」と判定して originating probe を再キューさせ、truncated prefix を実行
-# 対象と誤認しないようにする（Codex #154 P1）。redaction と同じ「実行不能」シグナルとして扱う。
+# 対象と誤認しないようにする。redaction と同じ「実行不能」シグナルとして扱う。
 TRUNCATION_MARKER = "<wscan-truncated>"
 
 # 切り詰め境界で閉じ引用符が切れた機微 JSON 値（`"password": "SUPERS`）。
@@ -37,7 +37,7 @@ _RE_JSON_TAIL = re.compile(rf'(?i)("(?:[^"\\]*(?:{_KEYS_ALT})[^"\\]*)"\s*:\s*)"(
 
 
 def _redact_bounded(text: str, limit: int = 1000) -> str:
-    """機微値を**切り詰めより先に**伏せてから limit 字に収める（純粋・Codex #154 P1）。
+    """機微値を**切り詰めより先に**伏せてから limit 字に収める（純粋）。
 
     先に切ると JSON 秘密の閉じ引用符が境界の外に出て redact_text が一致せず、値の先頭が永続化される。
     巨大な敵対文字列を丸ごと regex に渡さないよう limit×8 字の先頭だけを伏字化し、その範囲でも
@@ -106,7 +106,7 @@ class AgentWorkItem:
 
 
 def _auth_fingerprint(material: str, salt: str) -> str:
-    """認証秘密の resume 照合用フィンガープリント（純粋・Codex #154 P2）。
+    """認証秘密の resume 照合用フィンガープリント（純粋）。
 
     per-run salt 付き scrypt。salt は state に保存されるため辞書攻撃そのものは防げないが、scrypt の
     コストで低エントロピー password のオフライン総当たりを高価にし、run 間の事前計算も無効化する。
@@ -168,7 +168,7 @@ class AgentRunState:
     work_queue: list[AgentWorkItem] = field(default_factory=list)
     hypotheses: list[dict] = field(default_factory=list)
     # 認証秘密の resume 同一性。per-run salt 付き scrypt（_auth_fingerprint）で、spec_hash には
-    # 秘密を入れない（無塩 SHA-256 だと artifact から低エントロピー password を辞書攻撃できる・Codex #154 P2）。
+    # 秘密を入れない（無塩 SHA-256 だと artifact から低エントロピー password を辞書攻撃できる）。
     auth_salt: str = ""
     auth_fingerprint: str = ""
 
@@ -241,7 +241,7 @@ def _redact_action(value) -> str:
 
 def step_signature(url: str, actions: Iterable[str], page_state: str = "") -> str:
     # page_state（観測 DOM の fingerprint）も含める。URL 固定の SPA ウィザード/カルーセル/ページ送りで
-    # 同じ indexed click が DOM を進めているのに loop と誤判定し予算を残して打ち切るのを防ぐ（Codex #154 P2）。
+    # 同じ indexed click が DOM を進めているのに loop と誤判定し予算を残して打ち切るのを防ぐ。
     payload = json.dumps(
         {"url": redact_url(str(url or "").rstrip("/")), "actions": list(actions),
          "page_state": str(page_state or "")},
@@ -568,7 +568,7 @@ class AgentHarness:
             redacted_full = self._redact_runtime(value)
             text = _redact_bounded(redacted_full)
             # 切り詰めが起きた場合は番兵を付す。resume 時に truncated prefix を実行値と誤認せず
-            # originating probe を再キューさせる（Codex #154 P1）。
+            # originating probe を再キューさせる。
             if len(redacted_full) > 1000:
                 text = f"{text}{TRUNCATION_MARKER}"
             return text
@@ -612,11 +612,11 @@ class AgentHarness:
             self.state.status = AgentRunStatus.EVIDENCE_INCOMPLETE
             # manifest だけ失敗した場合、直前の checkpoint は COMPLETE を書き込んでいる。
             # downgrade を durable checkpoint にも反映しないと agent_state.json が COMPLETE のまま
-            # 残り、resume が失敗を回収できない（Codex #154 P2）。
+            # 残り、resume が失敗を回収できない。
         if not checkpoint_ok or not manifest_ok:
             # 最終 state を durable に揃える。trace/以前の checkpoint 失敗で _evidence_failed が立つと
             # 通常 checkpoint は拒否され、manifest が書けても agent_state.json が古い status のまま残り、
-            # resume が完了扱いで上書きし得る（Codex #154 P1）。manifest 失敗時も同様。downgrade 回収
+            # resume が完了扱いで上書きし得る。manifest 失敗時も同様。downgrade 回収
             # だけは force で許可する。
             self.checkpoint(force=True)
         return self.state.status

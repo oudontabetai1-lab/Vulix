@@ -467,7 +467,7 @@ class AdaptivePayloadEngine:
 
         cheatsheet = _get_cheatsheet(check_type)
         observations = _build_observations(page_html, payloads_tried)
-        # G1/G2: 試行台帳の rich metadata（payload→status/len/reflected/timing/error）を
+        # 試行台帳の rich metadata（payload→status/len/reflected/timing/error）を
         # 観測へ合流。engine が最初の掃射後に整形済み文字列を渡す。空なら従来どおり。
         if extra_observations:
             observations = observations + "\n" + extra_observations
@@ -576,7 +576,7 @@ class AdaptivePayloadEngine:
         _resolved_model = ""
         with self.pg.use_role("adaptive"):
             # role モデルは context 内でのみ解決される（*_model は _active_role 依存の property）。
-            # 監査に実際に使ったモデルを残すため context 内で捕捉する（Codex #172 P2）。
+            # 監査に実際に使ったモデルを残すため context 内で捕捉する。
             _resolved_model = getattr(self.pg, f"{provider}_model", "") or ""
             if provider == "claude":
                 raw = await self._stream_claude(prompt)
@@ -586,9 +586,9 @@ class AdaptivePayloadEngine:
                 raw = await self._call_gemini(prompt)
             else:
                 raw = await self._stream_ollama(prompt)
-        # LLM 呼び出し観測性（0065）。mutate_payload は complete_text 非経由の自前ストリーミング。
+        # LLM 呼び出し観測性。mutate_payload は complete_text 非経由の自前ストリーミング。
         # timeout_seconds は各 backend の実効 timeout（openai/ollama=90s, gemini=60s, claude は
-        # SDK stream で明示 deadline 無し=None・Codex #172 P2）。失敗種別の transient/permanent
+        # SDK stream で明示 deadline 無し=None）。失敗種別の transient/permanent
         # 細分は self-streaming 経路の status 露出を要する follow-up で対応する。
         _adaptive_timeout = {"openai": 90.0, "ollama": 90.0, "gemini": 60.0}.get(provider)
         record_llm_call(
@@ -597,7 +597,7 @@ class AdaptivePayloadEngine:
             timeout_seconds=_adaptive_timeout, elapsed_seconds=_time.monotonic() - _t0,
             status=("ok" if raw else "empty"),
             # Claude は Anthropic SDK が透過 retry しうるため実回数不明＝None。OpenAI/Gemini/Ollama の
-            # 自前 helper は httpx 1 回きりで retry ループを持たないので 0 と確定できる（Codex #172 P2）。
+            # 自前 helper は httpx 1 回きりで retry ループを持たないので 0 と確定できる。
             retries=(None if provider == "claude" else 0),
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(raw) if isinstance(raw, str) else 0,
@@ -650,7 +650,7 @@ class AdaptivePayloadEngine:
             # httpx の scalar timeout は read/connect 等の**操作単位**の無通信 timeout で、
             # チャンクが届き続ける限り全体は無制限に延びる。llm_stream_timeout_seconds を
             # 「1応答の上限」として効かせるため streaming 全体を wait_for で有界化する
-            # （超過時は cancel され async context が stream を閉じる・Codex #173 P2）。
+            # （超過時は cancel され async context が stream を閉じる）。
             await asyncio.wait_for(_run(), timeout=self.pg.llm_stream_timeout_seconds)
             return full or None
         except asyncio.TimeoutError:
@@ -709,7 +709,7 @@ class AdaptivePayloadEngine:
                             pass
         try:
             # scalar timeout は操作単位のため、streaming 全体を wait_for で有界化する
-            # （llm_stream_timeout_seconds を1応答の上限として効かせる・Codex #173 P2）。
+            # （llm_stream_timeout_seconds を1応答の上限として効かせる）。
             await asyncio.wait_for(_run(), timeout=self.pg.llm_stream_timeout_seconds)
             if status_holder["bad"] is not None:
                 console.print(f"[yellow][AdaptiveAI] OpenAI error {status_holder['bad']}[/yellow]")
@@ -732,8 +732,8 @@ class AdaptivePayloadEngine:
         _timeout = self.pg.llm_stream_timeout_seconds
         try:
             # AsyncAnthropic の単一 create を wait_for(_timeout) で縛る。executor スレッドを使わない
-            # ので deadline 超過時は cancel で HTTP リクエストごと打ち切られ、猶予も居残りも無い
-            # （Codex #173 P2）。max_retries=0 で SDK 内 retry による deadline 超過も防ぐ。
+            # ので deadline 超過時は cancel で HTTP リクエストごと打ち切られ、猶予も居残りも無い。
+            # max_retries=0 で SDK 内 retry による deadline 超過も防ぐ。
             _c = (client.with_options(timeout=_timeout, max_retries=0)
                   if hasattr(client, "with_options") else client)
             resp = await asyncio.wait_for(
@@ -763,7 +763,7 @@ class AdaptivePayloadEngine:
             return None
         import httpx
         # 設定済み stream timeout をそのまま尊重する（60s 上限で縛ると --llm-stream-timeout 120 等の
-        # 明示値が Gemini だけ無視される・Codex #173 P2）。
+        # 明示値が Gemini だけ無視される）。
         _gemini_to = self.pg.llm_stream_timeout_seconds
         try:
             async with httpx.AsyncClient(timeout=_gemini_to) as client:

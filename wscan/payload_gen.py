@@ -91,7 +91,7 @@ class PayloadGenerator:
         self.llm_max_retries = max(0, int(llm_max_retries))
         # one-shot / streaming の1回上限。不正値（0/負/NaN/inf・serve API 等 argparse を通らない
         # 経路の null/非数値）は既定へ安全に倒す（呼び出し側の eager float() で scan 開始前に落ちない
-        # よう、正規化はここに集約する・Codex #173 P2）。既定は従来のハードコード値を維持（回帰なし）。
+        # よう、正規化はここに集約する）。既定は従来のハードコード値を維持（回帰なし）。
         import math as _math
 
         def _norm_timeout(value, default: float) -> float:
@@ -170,7 +170,7 @@ class PayloadGenerator:
         return {role: self.get_model(role) for role in roles if self.get_model(role)}
 
     def current_role(self) -> str:
-        """現在 active な role（use_role コンテキスト内）を返す。LLM 呼び出しログ記録用。既定は空文字（0065）。"""
+        """現在 active な role（use_role コンテキスト内）を返す。LLM 呼び出しログ記録用。既定は空文字。"""
         return _active_role.get() or ""
 
     @contextmanager
@@ -197,7 +197,7 @@ class PayloadGenerator:
                     import anthropic
                     # 共有 client は SDK 既定の retry を保つ。streaming caller（planner/adaptive の
                     # _call_claude/_stream_claude）は外側 retry を持たず SDK retry に依存するため、
-                    # ここで無効化すると transient 失敗で即 None になり回帰する（Codex #172 P2）。
+                    # ここで無効化すると transient 失敗で即 None になり回帰する。
                     # complete_text は自前 retry を持つので、その呼び出し時だけ per-call で
                     # with_options(max_retries=0) にして監査 retries を正本化する。
                     self._anthropic_client = anthropic.Anthropic(api_key=api_key)
@@ -210,7 +210,7 @@ class PayloadGenerator:
 
         sync client を executor で回すと wait_for でスレッドを止められず、SDK の read timeout は
         チャンク間隔にしか効かないため overall deadline にならない。async client なら wait_for の
-        cancel で HTTP リクエストごと打ち切れる（Codex #173 P2）。
+        cancel で HTTP リクエストごと打ち切れる。
         """
         if getattr(self, "_async_anthropic_client", None) is None:
             api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -268,7 +268,7 @@ class PayloadGenerator:
     # ------------------------------------------------------------------
 
     def _extract_json_list(self, text: str) -> Optional[list[str]]:
-        """Extract a JSON array of strings from LLM response text (D7 頑健版)。
+        """Extract a JSON array of strings from LLM response text (頑健版)。
 
         素朴な非貪欲 regex は配列内 `]`／前置き／コードフェンス／`<think>` で途中終了し、
         良質 payload を取りこぼしていた。フォールバック連鎖の純粋関数へ委譲する。
@@ -316,7 +316,7 @@ class PayloadGenerator:
                 if encoding_hint:
                     prompt = encoding_hint + "\n" + prompt
 
-                # G1: これまで同じフィールドへ投げた payload と結果（status/len/反射/timing/
+                # これまで同じフィールドへ投げた payload と結果（status/len/反射/timing/
                 # error）をプロンプトへ戻す（evaluator-optimizer ループの復元）。壊れたら
                 # 安全側＝履歴節を足さないだけで従来生成に戻す。
                 if attempt_history:
@@ -328,7 +328,7 @@ class PayloadGenerator:
                     except Exception:
                         pass
 
-                # G4: 学習済みで効いた payload の要約をプロンプトへ注入（既存学習データの
+                # 学習済みで効いた payload の要約をプロンプトへ注入（既存学習データの
                 # 再利用）。ここは LLM 生成パス（provider!=none・LLM 可用・template あり・
                 # custom 未指定）に入った後なので、要約構築を遅延実行させることで、消費され
                 # ないケース（custom/none/template 無し/LLM 不在）での学習履歴の無駄な走査を

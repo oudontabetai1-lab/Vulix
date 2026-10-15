@@ -65,7 +65,7 @@ _FIELD_LENIENT_CHECKS = {"stored_xss"}
 
 # payload mutation wave（未検出フィールドでバイパス変種を追加投入）でスキャンが重くなるため
 # 既存 E2E より長めに確保する。
-# F06/0059: 旧来 healthcare は単一 stored sink（/community/posts の comment）へ反射スキャナ＋
+# 旧来 healthcare は単一 stored sink（/community/posts の comment）へ反射スキャナ＋
 # evolution/mutation wave が alert flood を積み、1 フィールドだけで ~2587s を消費 → attack 途中で
 # timeout 発火 → finally の verify+report 追加 → 計 4108s/4 ERROR で完走不能だった。
 # 根本対処は 2 段構え:

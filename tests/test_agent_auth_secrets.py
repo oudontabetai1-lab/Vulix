@@ -53,7 +53,7 @@ def test_storage_state_auth_task_does_not_request_missing_placeholders():
 
 def test_resume_auth_fingerprint_covers_credentials_headers_and_storage(tmp_path):
     # 非秘密（login_url/storage/header 名）は spec 用 context hash、秘密（user/pass/TOTP/header 値）は
-    # 永続化しない material を harness が per-run salt 付き scrypt で照合する（Codex #154 P2）。
+    # 永続化しない material を harness が per-run salt 付き scrypt で照合する。
     from wscan.agent_harness import AgentHarness, AgentRunSpec
 
     storage = tmp_path / "storage.json"
@@ -100,7 +100,7 @@ def test_resume_auth_fingerprint_covers_credentials_headers_and_storage(tmp_path
 
 
 def test_auth_context_hash_uses_resolved_openai_compatible_endpoint(monkeypatch):
-    # env で解決される実効エンドポイントの変更も resume 同一性に反映する（Codex #154 P2）。
+    # env で解決される実効エンドポイントの変更も resume 同一性に反映する。
     monkeypatch.setenv("WSCAN_LLM_BASE_URL", "http://llm-a.test/v1")
     a = AgentBrowserScanner("https://app.example.test", llm_provider="openai_compatible")._auth_context_hash()
     monkeypatch.setenv("WSCAN_LLM_BASE_URL", "http://llm-b.test/v1")

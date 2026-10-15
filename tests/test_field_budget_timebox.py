@@ -1,4 +1,4 @@
-"""F06/0059: フィールド単位 attack 時間ボックス（`_apply_ip` の deadline gate）の回帰テスト。
+"""フィールド単位 attack 時間ボックス（`_apply_ip` の deadline gate）の回帰テスト。
 
 stored-XSS flood で単一フィールドが以降を starve させる回帰を防ぐため、engine._scan_field が
 task-local な ContextVar（_FIELD_ATTACK_DEADLINE 等）に締切を張り、base._apply_ip が超過後の追加
@@ -115,7 +115,7 @@ class FieldBudgetTimeboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(engine.wave_errors, [])
 
     async def test_note_carries_injection_point_when_ident_set(self):
-        """R4#2: IDENT が張られていれば note に injection point 情報（<check>:<path>|<field>）を載せ、
+        """IDENT が張られていれば note に injection point 情報（<check>:<path>|<field>）を載せ、
         benchmark が per-IP に degradation を絞れるようにする。観測系は先頭 `:` までで category を取る
         ため category は変わらない（field_budget_exceeded）。"""
         engine = _Engine()
@@ -125,7 +125,7 @@ class FieldBudgetTimeboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("field_budget_exceeded:xss:/search|q", engine.wave_errors)
 
     async def test_note_carries_carrier_location(self):
-        """Codex #181 P2: ident 第3要素の carrier を note 末尾に載せる。"""
+        """ident 第3要素の carrier を note 末尾に載せる。"""
         engine = _Engine()
         scanner = _RecordingScanner(engine)
         with _Budget(time.monotonic() - 1.0, ident=("http://h/s?q=1", "q", "URL param")):
@@ -197,7 +197,7 @@ class _FakeContext:
 
 
 class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
-    """F06/0059: stored-XSS flood で wedge した page を作り直す recreate_page の回帰。"""
+    """stored-XSS flood で wedge した page を作り直す recreate_page の回帰。"""
 
     def _bm(self):
         from wscan.browser import BrowserManager
@@ -232,7 +232,7 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await bm.recreate_page())  # 復旧不能＝安全側 False
 
     async def test_reset_dialog_keeps_wedge_signal(self):
-        """#6: reset_dialog は wedge signal（dialog_dismiss_failed）を消さない。
+        """reset_dialog は wedge signal（dialog_dismiss_failed）を消さない。
 
         XSS 等が payload 毎に reset_dialog を呼ぶため、ここで消すと初回 dismiss 失敗の
         wedge が recover 検査前に消え page が再生成されない。dialog_fired 等は消す。
@@ -250,7 +250,7 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bm.dialog_dismiss_failed)     # wedge signal は保持
 
     async def test_recreate_seeds_session_storage_via_init_script(self):
-        """#3: recreate_page は navigate 成功時に控えた最新スナップショットを init script として仕込む。
+        """recreate_page は navigate 成功時に控えた最新スナップショットを init script として仕込む。
         wedge した old page（evaluate が返らない）からの読取に依存しない。"""
         bm = self._bm()
         bm._last_session_storage = {"http://t": '{"token":"abc123"}'}
@@ -267,7 +267,7 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("getItem", script)                       # 未設定キーのみ復元
 
     async def test_seed_init_script_guards_with_sentinel(self):
-        """R4#4: init script は sentinel key で「一度 seed 済み」を記録し、以後の document では
+        """init script は sentinel key で「一度 seed 済み」を記録し、以後の document では
         復元しない。無条件復元だと app が消した auth/one-time key が次 navigation で stale 蘇生する。"""
         bm = self._bm()
         bm._last_session_storage = {"http://t": '{"token":"abc123"}'}
@@ -288,14 +288,14 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bm.page.init_scripts, [])
 
     async def test_snapshot_captures_nonempty_session_storage(self):
-        """#3: navigate 成功時の best-effort スナップショットが非空 sessionStorage を控える。"""
+        """navigate 成功時の best-effort スナップショットが非空 sessionStorage を控える。"""
         bm = self._bm()
         bm.page = _FakePage(session_json='{"token":"abc"}', origin="http://t")
         await bm._snapshot_session_storage()
         self.assertEqual(bm._last_session_storage, {"http://t": '{"token":"abc"}'})
 
     async def test_snapshot_keeps_last_nonempty_on_empty_page(self):
-        """#3: login redirect 等で空になったページでは直近の非空スナップショットを上書きしない。"""
+        """login redirect 等で空になったページでは直近の非空スナップショットを上書きしない。"""
         bm = self._bm()
         bm._last_session_storage = {"http://t": '{"token":"old"}'}
         bm.page = _FakePage(session_json="{}", origin="http://t")
@@ -303,7 +303,7 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bm._last_session_storage, {"http://t": '{"token":"old"}'})
 
     async def test_worker_recreate_reattaches_scoped_headers(self):
-        """#5: worker の recreate_page は create_worker と同じ経路で CDP scoped header interception を
+        """worker の recreate_page は create_worker と同じ経路で CDP scoped header interception を
         同期的に再 attach する（_use_scoped_headers を持たない worker でも置換 page へ配線）。"""
         from wscan.browser import BrowserManager, WorkerBrowser
         real = BrowserManager()
@@ -324,7 +324,7 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("dialog", worker.page.wired)  # 通常の配線も維持
 
     async def test_worker_recreate_fails_when_scoped_header_attach_fails(self):
-        """Codex #181 P1: scoped header 再 attach 失敗を握りつぶして成功扱いにしない。
+        """scoped header 再 attach 失敗を握りつぶして成功扱いにしない。
         置換 page は捨て、old page を戻して False（Authorization 無し page で完了扱いにする偽陰性防止）。"""
         from wscan.browser import BrowserManager, WorkerBrowser
         real = BrowserManager()
@@ -343,7 +343,7 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(real._context.created[0].closed)
 
     async def test_snapshot_uses_single_evaluate(self):
-        """Codex #181 P1: origin と storage は 1 回の evaluate で取る（遷移を跨いだ誤ラベル防止）。"""
+        """origin と storage は 1 回の evaluate で取る（遷移を跨いだ誤ラベル防止）。"""
         bm = self._bm()
         calls: list = []
 
@@ -393,7 +393,7 @@ class RecreatePageTests(unittest.IsolatedAsyncioTestCase):
 
 class AdaptiveEntryGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_expired_deadline_returns_before_setup(self):
-        """Codex #181 P1: deadline 超過なら LLM probe / page.content() の前に None（未完）で戻る。
+        """deadline 超過なら LLM probe / page.content() の前に None（未完）で戻る。
         属性を一切持たない engine でも落ちない＝setup に触れていない。"""
         from wscan.engine import ScanEngine
         eng = object.__new__(ScanEngine)
@@ -403,7 +403,7 @@ class AdaptiveEntryGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RecoveryFailureTests(unittest.IsolatedAsyncioTestCase):
-    """Codex #181 round-6 P1-C: recreate 失敗を握り潰さず、残作業を完了化させない。"""
+    """recreate 失敗を握り潰さず、残作業を完了化させない。"""
 
     def _eng(self, recreate_ok):
         from wscan.engine import ScanEngine
@@ -465,7 +465,7 @@ class RecoveryFailureTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
-    """Codex #181 round-7 P1: page-level scanner が wedge したら tested/checkpoint 化せず、per-scanner で復旧する。"""
+    """page-level scanner が wedge したら tested/checkpoint 化せず、per-scanner で復旧する。"""
 
     def _engine(self, recreate_ok):
         from unittest import mock
@@ -570,7 +570,7 @@ class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
         e._checkpoint_mark_done.assert_not_called()
 
     async def test_recovery_landing_on_login_is_unhealthy(self):
-        """Codex #181 round-9 P1: recreate 後 navigate が login/error へ 200 redirect（True）でも、
+        """recreate 後 navigate が login/error へ 200 redirect（True）でも、
         着地先が target と異なれば不健全＝後続 scanner に wrong document を検査させない。"""
         e = self._engine(recreate_ok=True)
 
@@ -657,7 +657,7 @@ class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):
         return engine, nav
 
     async def test_navigates_to_page_after_recreate_for_url_param(self):
-        """Codex #181 round-7 P2: url_param field の復旧後も page.url へ戻す。非 recreate は従来どおり navigate しない。"""
+        """url_param field の復旧後も page.url へ戻す。非 recreate は従来どおり navigate しない。"""
         from wscan.engine import CrawledPage
         for recreated in (True, False):
             engine, nav = self._engine(recreated, "http://t/l?q=1", {"q": "1"})
@@ -666,7 +666,7 @@ class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(nav.await_count, 1 if recreated else 0, recreated)
 
     async def test_recreate_landing_off_target_stops_remaining_fields(self):
-        """round-10: recreate 後の navigate が login へ着地したら次 field を走らせない（未 checkpoint）。"""
+        """recreate 後の navigate が login へ着地したら次 field を走らせない（未 checkpoint）。"""
         from wscan.engine import CrawledPage
         engine, nav = self._engine(True, "http://t/login", {"q": "1", "r": "2"})
         page = CrawledPage(url="http://t/l?q=1&r=2", html="", forms=[],
@@ -746,7 +746,7 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
         ))
 
     async def test_budget_exceeded_skips_legacy_scanner_and_not_checkpointed(self):
-        """round-10: 予算超過後は scan_injection_point を持つ legacy 直送 scanner も呼ばず、error 記録・未完。"""
+        """予算超過後は scan_injection_point を持つ legacy 直送 scanner も呼ばず、error 記録・未完。"""
         class _Legacy(BaseScanner):
             CHECK_TYPE = "file_upload"
 
@@ -870,7 +870,7 @@ class _MidLoopProbeScanner(_ProbeScanner):
 
 
 class DirectTransportGateTests(unittest.IsolatedAsyncioTestCase):
-    """#3: _apply_ip を迂回する送信経路（equivalence probe / evolution probe）も
+    """_apply_ip を迂回する送信経路（equivalence probe / evolution probe）も
     フィールド時間ボックスで短絡する。"""
 
     async def test_equivalence_probe_short_circuits_after_deadline(self):
@@ -904,7 +904,7 @@ class DirectTransportGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("sqli", eng._FIELD_BUDGET_TRUNCATED.get())
 
     async def test_equivalence_probe_stops_when_deadline_expires_mid_loop(self):
-        """#2: 入口 gate 通過後（deadline は未来）に最初の送信中に期限切れになっても、各 request 前の
+        """入口 gate 通過後（deadline は未来）に最初の送信中に期限切れになっても、各 request 前の
         再チェックで残りの probe を送らない（sql は 6 発 → 1 発だけ送って打ち切る）。"""
         engine = _GateEngine()
         scanner = _MidLoopProbeScanner(engine)
@@ -917,7 +917,7 @@ class DirectTransportGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AttackPageRestoreRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    """#1(F06/0059): restore navigate 自体が stored-XSS listing で再 flood/wedge しうるため、
+    """restore navigate 自体が stored-XSS listing で再 flood/wedge しうるため、
     restore の後にも回復し、次 field が健全 page で走るようにする。"""
 
     async def test_recovers_after_restore_navigate(self):
@@ -978,7 +978,7 @@ class AttackPageRestoreRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _CollapseUntilBrokenScanner(_ProbeScanner):
-    """R4#5: baseline+equivalent は collapse（injectable に見える）させるが、broken 対照 probe の
+    """baseline+equivalent は collapse（injectable に見える）させるが、broken 対照 probe の
     送信直前に deadline を失効させ broken を送らせない。gate 修正が無いと evaluate が broken 欠如を
     非 collapse と誤解し injectable=True（FP）を返す。"""
     async def _apply_payload(self, url, form_index, field_name, payload, is_url_param):
@@ -996,7 +996,7 @@ class _CollapseUntilBrokenScanner(_ProbeScanner):
 
 
 class EquivalenceControlTruncationTests(unittest.IsolatedAsyncioTestCase):
-    """R4#5: broken-quote 対照 probe が揃う前に truncate したら evaluate せず None を返す（FP 防止）。"""
+    """broken-quote 対照 probe が揃う前に truncate したら evaluate せず None を返す（FP 防止）。"""
 
     async def test_no_finding_when_control_truncated(self):
         engine = _GateEngine()
@@ -1022,7 +1022,7 @@ class EquivalenceControlTruncationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DomXssGateTests(unittest.IsolatedAsyncioTestCase):
-    """R4#1: DOM-XSS の独自 _apply_payload 直送経路も時間ボックス gate で短絡する。"""
+    """DOM-XSS の独自 _apply_payload 直送経路も時間ボックス gate で短絡する。"""
 
     def _scanner(self):
         from wscan.scanners.dom_xss import DOMXSSScanner
@@ -1060,7 +1060,7 @@ class DomXssGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MultiParamRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    """R4#3: _phase_multi_param は各結合送信の後で dialog flood/wedge を回復する
+    """_phase_multi_param は各結合送信の後で dialog flood/wedge を回復する
     （外側 1 回 bracket では最初の組合せが wedge した page で後続組合せが走る）。"""
 
     async def test_recovers_after_each_combined_submission(self):
@@ -1141,7 +1141,7 @@ class MultiParamRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(recover_calls), 2)
 
     async def test_recreate_in_multi_param_returns_to_page_and_stops_on_bad_landing(self):
-        """round-11 C: 組合せ末の recreate 後は page.url へ戻る。login へ着地したら以降の組合せを走らせず
+        """組合せ末の recreate 後は page.url へ戻る。login へ着地したら以降の組合せを走らせず
         _recovery_failed を立てる（about:blank/wrong page を次ページへ持ち越さない）。"""
         import types
         from unittest.mock import AsyncMock
@@ -1196,7 +1196,7 @@ class MultiParamRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 class HeaderStateCleanupTests(unittest.IsolatedAsyncioTestCase):
     async def test_recreate_forgets_old_page_header_state(self):
-        """round-11 E: 置換で close した old page の id を scoped-header 状態から除去する。"""
+        """置換で close した old page の id を scoped-header 状態から除去する。"""
         from wscan.browser import BrowserManager
 
         class _Cdp:
@@ -1218,7 +1218,7 @@ class HeaderStateCleanupTests(unittest.IsolatedAsyncioTestCase):
 
 class EntryNavigateFloodTests(unittest.IsolatedAsyncioTestCase):
     async def test_entry_navigate_flood_is_recovered_before_attack(self):
-        """round-11 D: 入口 navigate で dialog が 4+ 発火（全 dismiss 成功）でも _attack_page 前に復旧する。"""
+        """入口 navigate で dialog が 4+ 発火（全 dismiss 成功）でも _attack_page 前に復旧する。"""
         from types import SimpleNamespace
         from unittest import mock
         from wscan.engine import ScanEngine

@@ -39,13 +39,13 @@ console = Console()
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 
 # page.content() は稀に無限ハングする（開いた JS ダイアログ・停止したナビゲーション等）。
-# try/except は例外しか捕まえられずハングを防げないため、待機を有界にする（F06）。
+# try/except は例外しか捕まえられずハングを防げないため、待機を有界にする。
 # realistic_site 通し E2E が SQLi 再検証の page.content() 待ちで 900 秒 timeout していた。
 _PAGE_CONTENT_TIMEOUT = 30.0
-# dialog.dismiss() は native timeout を持たないため asyncio.wait_for で有界化する上限（F06/0059）。
+# dialog.dismiss() は native timeout を持たないため asyncio.wait_for で有界化する上限。
 _DIALOG_DISMISS_TIMEOUT = 3.0
 # playwright.stop() は close() 時に稀にハングする（TargetClosedError 起因で内部 wait が
-# timeout=None のまま閉じたループ上に残る）。close は best-effort なので有界化して抜ける（F06/0059）。
+# timeout=None のまま閉じたループ上に残る）。close は best-effort なので有界化して抜ける。
 _PLAYWRIGHT_STOP_TIMEOUT = 10.0
 
 
@@ -68,10 +68,10 @@ async def _bounded_page_content(page) -> str:
 
 # セッションを終了させるリンク（ログアウト等）。SPA クリック探索がこれを踏むと、
 # 認証セッションが失効し go_back() でも復元できず、以降の認証ページが軒並みログインへ
-# リダイレクトして攻撃面を失う（自動有効化で既定化するため特に危険・Codex #104 P1）。
+# リダイレクトして攻撃面を失う（自動有効化で既定化するため特に危険）。
 # href: logout 変種を「完全なトークン」に限定する。log[\W_]*out のように区切りを
 # 貪欲に許すと /catalog/output や /blog/outdoors が session 終了リンク扱いされ、正当な
-# SPA ルートをクリックしなくなる（Codex #104 P2）。区切りは単一の -_. のみ許し、前後は
+# SPA ルートをクリックしなくなる。区切りは単一の -_. のみ許し、前後は
 # 英数字でない（トークン境界）ことを要求する。
 _SESSION_ENDING_HREF_RE = re.compile(
     r"(?<![a-z0-9])(?:log[-_.]?out|sign[-_.]?out|log[-_.]?off|sign[-_.]?off|deauth)"
@@ -90,8 +90,8 @@ def looks_like_url_ref(value: str) -> bool:
     """値が URL/パスらしいか（純粋関数）。
 
     data-page="2" のような不透明な pagination token や data-route="dashboard" の
-    識別子はスコープを変える遷移先ではなく同一ページ操作なので、遷移先として解決しない
-    （Codex #104 P2）。パス区切り ``/`` を含むか scheme を持つ値だけを URL/パスとみなす。
+    識別子はスコープを変える遷移先ではなく同一ページ操作なので、遷移先として解決しない。
+    パス区切り ``/`` を含むか scheme を持つ値だけを URL/パスとみなす。
     外部先（``//outside`` / ``https://…``）は必ず ``/`` を含むのでスコープ判定へ回る。
     """
     v = (value or "").strip()
@@ -109,7 +109,7 @@ def click_target_in_scope(
 
     href をそのまま prefix 比較すると、プロトコル相対 ``//outside.example`` や
     lookalike absolute ``https://target.example.evil`` を内部扱いしてスコープ外へ
-    リクエストしてしまう（Codex #104 P1）。``urljoin`` で絶対化してから判定する。
+    リクエストしてしまう。``urljoin`` で絶対化してから判定する。
     href 空（button 等・URL を持たない要素）は同一ページ操作として許可する。
     """
     if not href:
@@ -139,7 +139,7 @@ def canonical_host(url_or_netloc) -> str:
 
     既定ポート（http=80/https=443）と暗黙ポートは省き http↔https / bare↔www を
     同一視するが、明示された非既定ポート（例 :3000 と :8080）は保持して別 origin と
-    区別する（Codex #102）。
+    区別する。
     """
     try:
         value = str(url_or_netloc).strip()
@@ -303,7 +303,7 @@ class NetworkCapture:
         self._pending: dict[tuple, dict] = {}
         # clear() 以降に *送信* された（on_request が発火した）リクエスト数。応答ではなく送信を
         # 数えるので、clear() で捨てた in-flight リクエストの後着応答（unmatched で pairs に入る）で
-        # 水増しされず、応答が来ない中断リクエストも送信済みとして計上できる（Codex #137 P2）。
+        # 水増しされず、応答が来ない中断リクエストも送信済みとして計上できる。
         self._requests_since_clear = 0
         # Optional RequestLogger: persists every request/response pair to a
         # JSONL audit log. clear() wipes the in-memory list per page, so the
@@ -469,7 +469,7 @@ class NetworkCapture:
     def request_count(self) -> int:
         """clear() 以降に *送信* されたリクエスト数（on_request 発火回数）。
 
-        応答ではなく送信を数えるのが要点（Codex #137 P2）:
+        応答ではなく送信を数えるのが要点:
         - clear() で捨てた in-flight リクエストの後着応答は on_request を発火させないので
           水増ししない（`pairs` を数えると unmatched 応答で誤増加する）。
         - 応答が来ない中断リクエスト（navigation interrupt）も on_request 済みなので計上できる。
@@ -569,12 +569,12 @@ class BrowserManager:
         self.network = NetworkCapture(logger=request_logger)
         self.dialog_fired: bool = False
         # 累積ダイアログ発火数（reset_dialog では戻さない）。stored-XSS flood の検知に使い、
-        # 1 ページの attack で閾値超え発火したら recreate_page で wedge をクリアする（F06/0059）。
+        # 1 ページの attack で閾値超え発火したら recreate_page で wedge をクリアする。
         self.dialog_total: int = 0
-        # dismiss 失敗（未解消で wedge した可能性）の直接フラグ（F06/0059・recreate 判定に使用）。
+        # dismiss 失敗（未解消で wedge した可能性）の直接フラグ（recreate 判定に使用）。
         self.dialog_dismiss_failed: bool = False
         # navigate 成功時に best-effort で控える origin 別 sessionStorage。
-        # recreate_page が wedge した old page 読取に依存せずこれを init script で seed する（F06/0059#3）。
+        # recreate_page が wedge した old page 読取に依存せずこれを init script で seed する。
         self._last_session_storage: dict[str, str] = {}
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
@@ -586,7 +586,7 @@ class BrowserManager:
         self.last_navigation_status: Optional[int] = None
         # 直近の probe 送達が成功したか。fill_and_submit_form/test_url_param が毎回設定する。
         # 送達失敗（form 送信の沈黙 swallow・navigate 失敗）を observability へ表面化させる観測用
-        # フラグで、判定には関与しない（scanner が _apply_ip 後に読んで transport_error を記録・0007 D1）。
+        # フラグで、判定には関与しない（scanner が _apply_ip 後に読んで transport_error を記録）。
         self.last_probe_delivered: bool = True
 
     async def init(self):
@@ -670,7 +670,7 @@ class BrowserManager:
     async def _wire_current_page(self) -> None:
         """self.page に既定 timeout・ネットワーク傍受・dialog ハンドラを配線する（初回セットアップ）。
 
-        F06/0059: recreate_page から WorkerBrowser（BrowserManager.__init__ を経ず _use_scoped_headers
+        recreate_page から WorkerBrowser（BrowserManager.__init__ を経ず _use_scoped_headers
         等を持たない並行ワーカー）でも呼ばれるため、__init__ 専用フィールドは getattr 既定で参照し
         AttributeError で配線が丸ごと失敗（新 page が timeout/network/dialog 未配線のまま残る）のを防ぐ。
         """
@@ -1231,13 +1231,13 @@ class BrowserManager:
             # dismiss() は native timeout を持たないコマンドで、CDP 応答が返らないと await が
             # 永久に完了しない。ダイアログ未解消の間は同ページの goto/content/フォーム操作が全て
             # ブロックされるため、alert() を撒く payload が1つでも wedge すると以降の全操作が
-            # 連鎖停止し外側の scan timeout まで到達する（F06/0059）。asyncio.wait_for で有界化する
+            # 連鎖停止し外側の scan timeout まで到達する。asyncio.wait_for で有界化する
             # （3.12 は timeout 時に内側 coroutine を cancel+drain するので orphan future を残さない）。
             await asyncio.wait_for(dialog.dismiss(), timeout=_DIALOG_DISMISS_TIMEOUT)
         except Exception:
             # timeout（未応答）や、並行 worker がページを navigate/close 済みのケースを含む。
             # dialog 発火の signal 自体は evidence として有効なので握りつぶして続行する。
-            # F06/0059: dismiss 失敗＝dialog が未解消で page が wedge した可能性。直接フラグに残し、
+            # dismiss 失敗＝dialog が未解消で page が wedge した可能性。直接フラグに残し、
             # _attack_one_page の recreate 判定が「_fired>3」到達を待たずに復旧できるようにする
             # （初回 alert の dismiss が wedge すると以降 dialog が開けず _fired が増えないため）。
             if self.page is page:
@@ -1290,7 +1290,7 @@ class BrowserManager:
         self._dialog_generation = getattr(self, "_dialog_generation", 0) + 1
         self.dialog_fired = False
         self._dialog_screenshot_attempted = False
-        # F06/0059: dialog_dismiss_failed は wedge signal。XSS 等の scanner が payload 毎に
+        # dialog_dismiss_failed は wedge signal。XSS 等の scanner が payload 毎に
         # reset_dialog() を呼ぶため、ここでクリアすると初回 dismiss 失敗の wedge が
         # _recover_if_dialog_flood の検査前に消え、以降 dialog が開けず dialog_total も
         # 伸びないまま page が再生成されない。実際に復旧した recreate_page() でのみクリアする。
@@ -1298,7 +1298,7 @@ class BrowserManager:
         self.dialog_screenshot_b64 = ""
 
     async def _snapshot_session_storage(self) -> None:
-        """健全な page から sessionStorage を best-effort で控える（F06/0059#3）。
+        """健全な page から sessionStorage を best-effort で控える。
 
         recreate_page が wedge した old page を読めない前提の設計。非空スナップショットだけを
         保持し、login redirect 等で一時的に空になったページで上書きしない（復元は init script が
@@ -1308,8 +1308,7 @@ class BrowserManager:
         if page is None:
             return
         try:
-            # origin と storage を 1 回の evaluate で原子的に取る（遷移を跨いで別 origin をラベルしない・
-            # Codex #181 P1）。
+            # origin と storage を 1 回の evaluate で原子的に取る（遷移を跨いで別 origin をラベルしない）。
             res = await asyncio.wait_for(
                 page.evaluate(
                     "() => [location.origin, JSON.stringify(sessionStorage)]"
@@ -1323,7 +1322,7 @@ class BrowserManager:
             pass
 
     async def recreate_page(self) -> bool:
-        """現在の page を捨てて context から新しい page を張り直す（F06/0059）。
+        """現在の page を捨てて context から新しい page を張り直す。
 
         stored-XSS の alert flood は未解消ダイアログで page を wedge させ、以降の
         goto/content/フォーム操作が全て ~上限まで張り付く（実測: flood 後の各ページが
@@ -1338,7 +1337,7 @@ class BrowserManager:
                 return False
             old = self.page
             self.page = await self._context.new_page()
-            # F06/0059(#5): concurrency>1 の worker は共有 context の CDP scoped header interception を
+            # concurrency>1 の worker は共有 context の CDP scoped header interception を
             # 持つ（create_worker が _attach_header_interception を await して張る）。置換 page は
             # _wire_current_page の _use_scoped_headers 経路を通らない（worker では未初期化）ため、
             # ここで create_worker と同じ経路を同期的に再 attach し、次 navigation が interception 未設定
@@ -1346,7 +1345,7 @@ class BrowserManager:
             _real = getattr(self, "_real", None)
             if _real is not None and getattr(_real, "_header_intercept_mode", "none") == "cdp":
                 # 失敗を握りつぶすと Authorization 無しの page を成功扱いで受理し、401/ログイン応答を
-                # 「完了スキャン」にしてしまう（偽陰性・Codex #181 P1）。失敗は置換 page を
+                # 「完了スキャン」にしてしまう（偽陰性）。失敗は置換 page を
                 # 捨てて old を戻し False を返す＝呼び出し側は従来経路。
                 try:
                     await _real._attach_header_interception(self.page)
@@ -1363,16 +1362,16 @@ class BrowserManager:
                     return False
             await self._wire_current_page()
             self.reset_dialog()
-            # F06/0059(#6): wedge signal は「実際に復旧した」ここでのみクリアする。
+            # wedge signal は「実際に復旧した」ここでのみクリアする。
             self.dialog_dismiss_failed = False
-            # F06/0059(#2): sessionStorage は document script 実行前に seed する必要がある。
+            # sessionStorage は document script 実行前に seed する必要がある。
             # navigate 後の復元では、認証SPA が bootstrap 中に sessionStorage を読む前に未認証
             # リクエスト/login redirect を出した後になり遅い。init script は各遷移で page 自前の
             # script より前に走るので、該当 origin かつ未設定キーのときだけ復元する（app が
             # 再ログイン後に書いた新値は上書きしない）。
-            # F06/0059(#3): wedge した old page からの読取に依存せず、navigate 成功時に控えた
+            # wedge した old page からの読取に依存せず、navigate 成功時に控えた
             # 最新スナップショットを使う。
-            # F06/0059(R4#4): init script は置換 page の以後の全 document で走る。無条件に
+            # init script は置換 page の以後の全 document で走る。無条件に
             # getItem(k)===null を復元すると、app が logout/期限切れ/正常完了で消した auth/one-time
             # key が次 navigation で stale 値に蘇る。sentinel key で「一度 seed 済み」を記録し、
             # 以後は復元しない（該当 origin での二重 seed を防ぐ・復元済みフラグ方式）。
@@ -1639,9 +1638,9 @@ class BrowserManager:
                         await self.settle_spa()
                     except Exception:
                         pass
-                # F06/0059(#2): sessionStorage の復元は recreate_page が仕掛けた init script が
+                # sessionStorage の復元は recreate_page が仕掛けた init script が
                 # 遷移前に seed する（navigate 後の evaluate 復元は SPA bootstrap に間に合わない）。
-                # F06/0059(#3): 健全な navigate 成功時に sessionStorage を控えておく。recreate_page は
+                # 健全な navigate 成功時に sessionStorage を控えておく。recreate_page は
                 # wedge した old page（本復旧の主因＝dialog 未解消で evaluate が返らない）から読むと
                 # 空になり認証SPA が未認証化するため、この最新スナップショットを init script で seed する。
                 await self._snapshot_session_storage()
@@ -1667,7 +1666,7 @@ class BrowserManager:
                     () => {
                         // detect_spa が認識する全マウントを対象にする。#app/#__next/
                         // #__nuxt の空シェルで body へフォールバックすると、body の
-                        // 子要素が既に非0のため hydration を待たず返ってしまう（Codex #104 P1）。
+                        // 子要素が既に非0のため hydration を待たず返ってしまう。
                         const root = document.querySelector(
                             'app-root, #root, #app, #__next, #__nuxt'
                         ) || document.body;
@@ -1698,7 +1697,7 @@ class BrowserManager:
     async def get_page_source(self) -> str:
         """Get current page HTML source.
 
-        page.content() の待機を有界にする（F06）。無限ハング時は "" を返して呼び出し側の
+        page.content() の待機を有界にする。無限ハング時は "" を返して呼び出し側の
         「取得不能＝空」経路に合流させ、通し E2E 全体の停止を防ぐ。
         """
         return await _bounded_page_content(self.page)
@@ -1708,7 +1707,7 @@ class BrowserManager:
 
         既定は失敗時 ``[]``（従来挙動）。``raise_on_error=True`` のとき評価失敗を再送出し、
         呼び出し側が「成功して空」と「抽出失敗」を区別できるようにする（flow 後の refresh が
-        transient 失敗で crawl form を消さないため・Codex #170 P2）。
+        transient 失敗で crawl form を消さないため）。
         """
         try:
             forms = await self.page.evaluate("""
@@ -1802,7 +1801,7 @@ class BrowserManager:
         self.reset_dialog()
         self.network.clear()
         # submit を dispatch したか。dispatch できれば送達成功、以降の wait/get_source 例外で
-        # 覆さない（Codex #137 P2）。
+        # 覆さない。
         dispatched = False
         # submit 直前の送信済みリクエスト数。None＝submit まで到達せず（送達判定に使わない）。
         net_before_submit = None
@@ -1911,7 +1910,7 @@ class BrowserManager:
                 # されており、URL param を form field として試した speculative probe＝送達成功扱い
                 # （True）。応答なし（status None＝transport 例外/失敗ロード）なら stale ページによる
                 # form 不在＝未送達（False）。scanner は navigate の戻り値を見ずに本メソッドを呼ぶため
-                # （xss.py 等）、ここで失敗ロードを取りこぼさない（Codex #137 P1）。speculative を
+                # （xss.py 等）、ここで失敗ロードを取りこぼさない。speculative を
                 # False にしないのは、check 粒度の _degraded_checks が当該 check の tested を全除外し
                 # 無関係な url_param safe twin まで NOT_REACHED 化して benchmark を壊すため。
                 self.last_probe_delivered = self.last_navigation_status is not None
@@ -1924,8 +1923,7 @@ class BrowserManager:
                 f"form:nth-of-type({form_index + 1}) button"
             )
             # submit 直前の送信済みリクエスト数を記録し、送達判定は「submit 後に増えたか」の差分で
-            # 見る。fill script の validation XHR や背景 polling を submit のリクエストと取り違えない
-            # （Codex #137 P2）。
+            # 見る。fill script の validation XHR や背景 polling を submit のリクエストと取り違えない。
             net_before_submit = self.network.request_count()
             if submit_btn:
                 await submit_btn.click()
@@ -1949,7 +1947,7 @@ class BrowserManager:
             pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             return source, pair
         except Exception as e:
-            # 例外を握りつぶし空 pair を返す。送達判定（0007 D1・Codex #137 P2）: submit を dispatch
+            # 例外を握りつぶし空 pair を返す。送達判定: submit を dispatch
             # 済みなら送達成功を維持。未 dispatch でも、Playwright の click() は post-dispatch の
             # navigation 待ちを含むため、リクエスト送信後に slow/interrupted navigation で click() 自体が
             # raise しうる。その場合 dispatched に到達しないが、submit 直前からのリクエスト増分
@@ -2099,7 +2097,7 @@ class BrowserManager:
         new_query = urlencode({k: v[0] for k, v in params.items()})
         test_url = urlunparse(parsed._replace(query=new_query))
 
-        # 送達フラグは form 経路（fill_and_submit_form）の *沈黙 swallow* 観測専用（#134 の対象）。
+        # 送達フラグは form 経路（fill_and_submit_form）の *沈黙 swallow* 観測専用。
         # URL param 経路はここで True にリセットするだけで navigate 結果から未送達を導かない。理由:
         # ssti/open_redirect 等は payload 次第で goto が正常に例外/応答なしになる（不正 URL・非HTTP
         # redirect 先など payload 単位の通常挙動）。これを未送達として transport_error に刻むと、
@@ -2309,7 +2307,7 @@ class BrowserManager:
                 match_text = m.group(0)
                 # コメント（`//`・`/* */`）は url_re の match として現れる。文字列外の
                 # コメントは終端まで読み飛ばし、内部の引用符/バッククォートが文字列状態を
-                # 汚染して後続の実ルートを隠すのを防ぐ（Codex #100 R14）。
+                # 汚染して後続の実ルートを隠すのを防ぐ。
                 if not in_string and match_text[:2] in ("//", "/*"):
                     if match_text[:2] == "//":
                         j = scan_body.find("\n", m.end())
@@ -2324,7 +2322,7 @@ class BrowserManager:
                 if m.start() < skip_until:
                     continue
                 preceding = scan_body[max(0, m.start() - 64):m.start()]
-                # 0009 C1: url_re は regex メタ文字（| [ ] \ ^ { }）の手前で match を
+                # url_re は regex メタ文字（| [ ] \ ^ { }）の手前で match を
                 # 打ち切るため、`/foo|bar/`→`/foo` のように切り詰めた regex 片が一見正常な
                 # path に見えて通過する。match 直後の1文字が regex 継続文字なら切り詰めとして
                 # 現候補を捨てる。さらに **regex 文脈が確定したときだけ** リテラルの閉じ `/` まで
@@ -2732,7 +2730,7 @@ class BrowserManager:
 
         探索中に張ったスコープ外リクエスト遮断 route を、呼び出し側（engine）が
         settle/harvest 後に剥がすために使う（遅延リクエストを settle 中も遮断するため
-        探索直後には剥がさない・Codex #104 P1）。
+        探索直後には剥がさない）。
         """
         handle = getattr(self, "_spa_scope_route", None)
         if not handle:
@@ -2790,7 +2788,7 @@ class BrowserManager:
         # 相対 href/routing 属性の解決基準はドキュメントの effective base URI。
         # <base href> があるとブラウザはそれ基準で解決するので、渡された base_url
         # （landed_url）ではなく document.baseURI を使う。取得失敗時は base_url へ
-        # フォールバックする（Codex #104 P1）。
+        # フォールバックする。
         try:
             effective_base = await page.evaluate("() => document.baseURI") or base_url
         except Exception:
@@ -2800,8 +2798,7 @@ class BrowserManager:
         # コントロールが onclick で fetch('//outside/…') や window.open('//outside/…')
         # する等、page.url を変えずにスコープ外へリクエストするケースは navigation ベースの
         # ガードでは捕らえられない。探索中だけスコープ外の http(s) リクエストを abort する。
-        # popup（window.open）も捕捉するため page ではなく context 単位で route を張る
-        # （Codex #104 P1）。
+        # popup（window.open）も捕捉するため page ではなく context 単位で route を張る。
         _scope_route = None
         _scope_ctx = None
         if is_in_scope is not None:
@@ -2815,7 +2812,7 @@ class BrowserManager:
                     pass
                 # 許可リクエストは route.fallback() で次の一致ハンドラ（既存の
                 # 認証ヘッダ付与 route 等）へ委譲する。continue_() だとチェーンを終端し、
-                # in-scope XHR が Authorization/カスタムヘッダを失い 401 になる（Codex #104 P2）。
+                # in-scope XHR が Authorization/カスタムヘッダを失い 401 になる。
                 try:
                     await route.fallback()
                 except Exception:
@@ -2831,7 +2828,7 @@ class BrowserManager:
                 _scope_ctx = None
         # route はここで剥がさず self に保持し、呼び出し側（engine）が settle/harvest 後に
         # clear_scope_route() する。setTimeout(()=>fetch('//outside'),5000) のような遅延
-        # リクエストが、探索直後の settle 中（guard 消失後）に飛ぶのを防ぐ（Codex #104 P1）。
+        # リクエストが、探索直後の settle 中（guard 消失後）に飛ぶのを防ぐ。
         self._spa_scope_route = (
             (_scope_ctx, _scope_route)
             if (_scope_route is not None and _scope_ctx is not None)
@@ -2870,10 +2867,10 @@ class BrowserManager:
                 if clicked >= max_clicks:
                     break
                 try:
-                    # クリック先を絶対 URL へ解決してスコープ判定する（Codex #104 P1）。
+                    # クリック先を絶対 URL へ解決してスコープ判定する。
                     # href が無い要素（button[data-route] 等）はルーティング data 属性が
                     # 遷移先を持つので、それも解決してスコープ検証する。data-route="//outside"
-                    # のような外部先を検証前にクリックしない（Codex #104 P1）。
+                    # のような外部先を検証前にクリックしない。
                     href = await el.get_attribute("href") or ""
                     route_ref = href
                     if not route_ref:
@@ -2882,7 +2879,7 @@ class BrowserManager:
                             if _v:
                                 # opaque な pagination token / 識別子（data-page="2" 等）は
                                 # 遷移先として解決せず同一ページ操作とみなす。URL/パスらしい
-                                # 値だけスコープ判定へ回す（Codex #104 P2）。
+                                # 値だけスコープ判定へ回す。
                                 if looks_like_url_ref(_v):
                                     route_ref = _v
                                 break
@@ -2890,9 +2887,9 @@ class BrowserManager:
                         continue
 
                     # セッションを終了させるリンク（logout/signout 等）はクリックしない。
-                    # 認証セッションを失効させ、以降の認証ページを軒並み失う（Codex #104 P1）。
+                    # 認証セッションを失効させ、以降の認証ページを軒並み失う。
                     # アイコンのみのコントロール（inner_text 空）向けに aria-label/title の
-                    # アクセシブル名も判定に含める（Codex #104 P1）。
+                    # アクセシブル名も判定に含める。
                     try:
                         _text = await el.inner_text()
                     except Exception:
@@ -2918,7 +2915,7 @@ class BrowserManager:
                     # href/routing 属性を持たない JS-only コントロール（onclick で
                     # location=… する tab/button 等）は遷移先を静的に検証できない。
                     # クリック後に out-of-scope へ遷移していたら記録せず即戻り、
-                    # スコープ漏れを1ナビゲーションに抑える（Codex #104 P1）。
+                    # スコープ漏れを1ナビゲーションに抑える。
                     if navigated and is_in_scope is not None and not is_in_scope(new_url):
                         recovered = False
                         try:
@@ -2932,7 +2929,7 @@ class BrowserManager:
                             # go_back 失敗（location.replace 等）or 復帰先が依然スコープ外:
                             # 外部ドキュメント上でこれ以上クリックを続けると、相対リンクが
                             # 古い in-scope effective_base で承認されつつ外部ページ基準で
-                            # クリックされ複数の不正リクエストになる。探索を中断する（Codex #104 P1）。
+                            # クリックされ複数の不正リクエストになる。探索を中断する。
                             aborted = True
                             break
                         continue
@@ -2966,7 +2963,7 @@ class BrowserManager:
                             # 場合、以降のクリックは置換ドキュメント上で古い effective_base
                             # 基準に承認され、engine の collect_links_rich(url) も元 URL 基準で
                             # 相対リンクを誤解決して偽ターゲットを作る。探索を中断する
-                            # （in-scope 遷移でも復帰不能なら止める・Codex #104 P2）。
+                            # （in-scope 遷移でも復帰不能なら止める）。
                             aborted = True
                             break
 
@@ -2990,7 +2987,7 @@ class BrowserManager:
         # 復帰不能で中断した場合、ページは置換ドキュメント上に残っている。呼び出し側は
         # 元の queued URL を基準に collect_links_rich(url) 等を行うので、外部/別ページの
         # 相対リンクを誤解決して偽ターゲットを作らないよう、元ページへ戻してから返す。
-        # 復元 goto の結果を検証し、戻れなければもう一度試みる（Codex #104 P2）。scope route は
+        # 復元 goto の結果を検証し、戻れなければもう一度試みる。scope route は
         # ここでは剥がさない（engine が settle/harvest 後に clear する）。復元先は in-scope
         # なので route が張ったままでも許可される。
         if aborted:

@@ -1,5 +1,5 @@
 """決定論観測（js_analysis の source->sink、context_mutator の反射文脈/生存文字）を
-adaptive(LLM) プロンプト用の観測節へ整形する純粋関数（G7）。判定はしない。
+adaptive(LLM) プロンプト用の観測節へ整形する純粋関数。判定はしない。
 
 観測は2種類に分けて提示する（grounding を偽らないため）:
 - **field 固有**（反射文脈・生存文字）: この入力を実際に probe した結果＝この入力に固有。

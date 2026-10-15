@@ -1,4 +1,4 @@
-"""0065: LLM streaming timeout（planner/adaptive）を config/CLI から設定可能にした回帰。"""
+"""LLM streaming timeout（planner/adaptive）を config/CLI から設定可能にした回帰。"""
 import asyncio
 import math
 import tempfile
@@ -58,7 +58,7 @@ def test_planner_ollama_uses_stream_timeout():
 
 
 def test_one_shot_timeout_invalid_falls_back_to_30():
-    # one-shot timeout も serve API 等の null/非数値/不正で例外化せず既定 30 に倒す（Codex #173 P2）。
+    # one-shot timeout も serve API 等の null/非数値/不正で例外化せず既定 30 に倒す。
     for bad in (0, -1, float("nan"), float("inf"), "x", None):
         pg = PayloadGenerator(provider="none", llm_timeout_seconds=bad)
         assert pg.llm_timeout_seconds == 30.0, bad
@@ -66,7 +66,7 @@ def test_one_shot_timeout_invalid_falls_back_to_30():
 
 
 def test_report_analysis_uses_configured_one_shot_timeout():
-    # report 分析は固定 60s ではなく設定済み one-shot timeout を使う（Codex #173 P2）。
+    # report 分析は固定 60s ではなく設定済み one-shot timeout を使う。
     import types
     from wscan.engine import ScanEngine
     from wscan import llm_client
@@ -85,7 +85,7 @@ def test_report_analysis_uses_configured_one_shot_timeout():
 
 
 def test_stream_ollama_bounded_by_overall_deadline():
-    # チャンクが届き続けても全体が llm_stream_timeout_seconds を超えたら打ち切る（Codex #173 P2）。
+    # チャンクが届き続けても全体が llm_stream_timeout_seconds を超えたら打ち切る。
     import types
     from wscan.adaptive_payload import AdaptivePayloadEngine
 
@@ -119,7 +119,7 @@ def test_stream_ollama_bounded_by_overall_deadline():
 
 
 def test_triage_passes_llm_timeout_to_payload_generator():
-    # triage の LLM 呼び出しにも設定済み timeout が渡る（Codex #173 P2）。
+    # triage の LLM 呼び出しにも設定済み timeout が渡る。
     import wscan.payload_gen as pg_mod
     from wscan.triage import TriageEngine
     captured = {}
@@ -138,7 +138,7 @@ def test_triage_passes_llm_timeout_to_payload_generator():
 
 
 def test_dashboard_auto_config_honors_llm_timeout(monkeypatch):
-    # /api/auto-config は選択/設定済み one-shot timeout を PayloadGenerator に渡す（Codex #173 P2）。
+    # /api/auto-config は選択/設定済み one-shot timeout を PayloadGenerator に渡す。
     from fastapi.testclient import TestClient
     import wscan.auto_config as ac
     from wscan.monitor import MonitorServer
@@ -162,7 +162,7 @@ def test_dashboard_auto_config_honors_llm_timeout(monkeypatch):
 
 
 def test_yaml_timeouts_tolerate_empty_or_invalid_values(tmp_path):
-    # 空キー(None)/非数値/非有限でも import 時に落ちず既定へ戻す（Codex #173 P2）。
+    # 空キー(None)/非数値/非有限でも import 時に落ちず既定へ戻す。
     import main
     cfg_path = tmp_path / "wscan.yaml"
     cfg_path.write_text("llm:\n  timeout_seconds:\n  stream_timeout_seconds: abc\n", encoding="utf-8")

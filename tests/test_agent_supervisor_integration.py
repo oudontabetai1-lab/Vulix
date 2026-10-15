@@ -82,7 +82,7 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
                 nonce = re.search(r"WSCAN-NONCE:([^\s]+)", self.kwargs["extend_system_message"]).group(1)
                 field = "r" if '"field_name": "r"' in task else "q"
                 # verifier は候補と同じ payload を再現する（payload 一致が dynamic_verified の
-                # 条件・Codex #154 P2）。field ごとに候補 payload を反映する。
+                # 条件）。field ごとに候補 payload を反映する。
                 payload = "<svg/onload=alert(2)>" if field == "r" else "<svg/onload=alert(1)>"
                 return _History(
                     f"WSCAN-NONCE:{nonce}\nVULNERABILITY FOUND:\n"
@@ -270,7 +270,7 @@ def test_resume_requeues_only_dependencies_for_redacted_pending_candidate(tmp_pa
 
 def test_resume_requeues_probe_for_truncated_candidate_url(tmp_path):
     # 1000 字超の URL は hypothesis 側で切り詰め番兵付きになる。元 probe に紐付けて再キューし
-    # verifier を完遂できるようにする（Codex #154 P1）。
+    # verifier を完遂できるようにする。
     run_spec = AgentRunSpec(
         mode="agent", target_url="http://fixture.test",
         target_urls=("http://fixture.test",), access_urls=(),
@@ -300,7 +300,7 @@ def test_resume_requeues_probe_for_truncated_candidate_url(tmp_path):
 
 
 def test_runnable_work_count_excludes_exhausted_retries(tmp_path):
-    # 試行上限に達した inconclusive は episode 予算の分母に数えない（Codex #154 P2）。
+    # 試行上限に達した inconclusive は episode 予算の分母に数えない。
     run_spec = AgentRunSpec(
         mode="agent", target_url="http://fixture.test",
         target_urls=("http://fixture.test",), access_urls=(),
@@ -463,7 +463,7 @@ def test_observed_probe_urls_only_enqueue_new_endpoints(tmp_path):
     assert {(item.target, item.check_type) for item in new_work} == {
         (url, check) for url in (
             "http://fixture.test/admin", "http://fixture.test/search?q=x&debug=1",
-            # query の順序違いは別 endpoint として probe する（Codex #154 P1）。
+            # query の順序違いは別 endpoint として probe する。
             "http://fixture.test/search?debug=1&q=x",
             "http://fixture.test/view?page=admin", "http://fixture.test/view?page=home"
         ) for check in ("xss", "sqli")
@@ -537,7 +537,7 @@ async def test_reviewer_retry_requires_explicit_gap_resolution(tmp_path, resolve
 
 def test_login_flow_page_allows_same_origin_during_authenticator():
     # 多段 IdP（/sign-in → /mfa）で、authenticator episode 中は同一 origin の遷移先でも
-    # 認証入力を許可する。非 authenticator や cross-origin は許可しない（Codex #154 P1）。
+    # 認証入力を許可する。非 authenticator や cross-origin は許可しない。
     scanner = AgentBrowserScanner(
         "http://fixture.test", checks=["xss"],
         login_url="http://idp.test/sign-in", auth_user="u", auth_pass="p",
@@ -552,7 +552,7 @@ def test_login_flow_page_allows_same_origin_during_authenticator():
 
 
 def test_candidate_for_work_rejects_redacted_execution_fields(tmp_path):
-    # resume 時、URL が無傷でも payload/field_name が redacted な候補は実行させない（Codex #154 P1）。
+    # resume 時、URL が無傷でも payload/field_name が redacted な候補は実行させない。
     scanner = AgentBrowserScanner("http://fixture.test", checks=["sqli"])
     scanner._harness = AgentHarness(
         tmp_path,
@@ -580,7 +580,7 @@ def test_candidate_for_work_rejects_redacted_execution_fields(tmp_path):
 
 
 def test_enqueue_observed_probe_work_returns_new_count(tmp_path):
-    # 新規 enqueue 数を返す（>0 なら reviewer 再キューのトリガ・Codex #154 P2）。
+    # 新規 enqueue 数を返す（>0 なら reviewer 再キューのトリガ）。
     scanner = AgentBrowserScanner("http://fixture.test", checks=["xss"])
     scanner._harness = AgentHarness(
         tmp_path,
@@ -598,7 +598,7 @@ def test_enqueue_observed_probe_work_returns_new_count(tmp_path):
 
 def test_reproduction_marks_authenticated_findings_authorization_required():
     # 認証済み run の Agent finding は request ヘッダが無くても authorization_required=True
-    # （認証セッション無しでは再現不能・Codex #154 P2）。
+    # （認証セッション無しでは再現不能）。
     from wscan.reproduction import _finding_to_repro_item
     from wscan.scanners.base import Finding
 
@@ -613,7 +613,7 @@ def test_reproduction_marks_authenticated_findings_authorization_required():
 def test_reviewer_gap_directives_parsed_from_final_not_page_content():
     # gap 指令は reviewer の final result からのみ解析する。episode_text は untrusted な
     # target ページの extracted_content() を含み、"COVERAGE GAP: bogus" で偽 gap を作られたり
-    # "GAP RESOLVED:" で実 gap を消される（prompt injection・Codex #154 P1）。call site は
+    # "GAP RESOLVED:" で実 gap を消される（prompt injection）。call site は
     # parse_reviewer_gap_lines(final) を使う。ここでは解析関数が gap 形式を拾うこと自体を確認し、
     # ページ由来テキストを源にすると危険＝final を源にすべきことを固定する。
     from wscan.llm_agent_browser import parse_reviewer_gap_lines

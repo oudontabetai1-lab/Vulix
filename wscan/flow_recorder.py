@@ -35,12 +35,12 @@ from pathlib import Path
 from typing import Optional
 
 
-# click から main-frame 遷移までを「click 起因」とみなす上限秒数（Codex #179 P1）。
+# click から main-frame 遷移までを「click 起因」とみなす上限秒数。
 VIA_CLICK_WINDOW_S = 3.0
 
 
 def _make_navigate_step(prev_steps: list[dict], url: str, click_age: Optional[float] = None) -> dict:
-    """記録用 navigate step を作る純粋関数（Codex #179）。
+    """記録用 navigate step を作る純粋関数。
 
     直前 step が click **かつ** その click から click_age 秒以内（VIA_CLICK_WINDOW_S）の遷移だけを
     click 起因とみなし via_click を付す。navigate step 自体は `_match_pre_attack_flows` の照合用に残し、
@@ -58,7 +58,7 @@ def _make_navigate_step(prev_steps: list[dict], url: str, click_age: Optional[fl
     return step
 
 
-# click 記録で「操作を意味する」祖先とみなすセレクタ（vault 0078）。closest でこのいずれかに
+# click 記録で「操作を意味する」祖先とみなすセレクタ（vault）。closest でこのいずれかに
 # 一致した要素だけを click ステップとして記録し、装飾 div 等の無関係なクリックは拾わない。
 # role は操作を表すものだけ（button/link/menuitem/tab）を明示列挙して過剰記録を避ける。
 # 既存の button/a/submit 系は後方互換のため維持する。
@@ -75,7 +75,7 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
     """記録側の監視スクリプト（change/submit/click を捕捉）を組み立てる純粋関数。
 
     fn_* は expose_function で公開したページ側グローバル名。ブラウザ非依存でテストできるよう
-    record_interactive から切り出してある（vault 0078）。
+    record_interactive から切り出してある（vault）。
     """
     # __WSCAN_CLICKABLE_SEL は closest 対象セレクタ（上記定数を JS 文字列リテラルへ埋め込む）。
     click_sel_literal = json.dumps(CLICKABLE_ANCESTOR_SELECTOR)
@@ -83,7 +83,7 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                 const __WSCAN_CLICKABLE_SEL = {click_sel_literal};
                 // id 無し要素の一意な CSS パスを組み立てる。`button[type=submit]`（type 無しの
                 // 既定 submit ボタンに一致しない）や `a`（先頭リンクを掴む）では replay が別要素を
-                // click し得るため、祖先 id か nth-of-type チェーンで一意化する（Codex #170 P2）。
+                // click し得るため、祖先 id か nth-of-type チェーンで一意化する。
                 const __wscanEsc = (v) => (window.CSS && CSS.escape) ? CSS.escape(v) : v;
                 function __wscanPath(el) {{
                     if (el.id) return '#' + __wscanEsc(el.id);
@@ -111,7 +111,7 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                         // name/value は CSS.escape した**引用符なし**属性セレクタで組む。生の
                         // `[name="..."]` だと name に引用符/バックスラッシュを含むと無効セレクタになり、
                         // 通常入力は replay 不能、radio/checkbox は querySelectorAll が throw して step
-                        // ごと欠落する（Codex #170 P2）。CSS.escape 出力は選択子として妥当。
+                        // ごと欠落する。CSS.escape 出力は選択子として妥当。
                         let sel = el.id
                             ? '#' + esc
                             : (el.name ? '[name=' + escv(el.name) + ']' : __wscanPath(el));
@@ -120,7 +120,7 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                         // id が無い場合、**明示 value 属性がグループ内で一意なとき**だけ
                         // [name][value] で弁別する。value 属性が無い（DOM の el.value は既定 "on" で
                         // 属性は不在＝そのセレクタは何にも一致しない）／同名グループで value が重複する
-                        // 場合は一意な要素パスへフォールバックする（Codex #170 P2）。
+                        // 場合は一意な要素パスへフォールバックする。
                         if (!el.id && (el.type === 'radio' || el.type === 'checkbox')) {{
                             const attrVal = el.getAttribute('value');
                             let uniqueByValue = false;
@@ -139,7 +139,7 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                         if (el.type === 'checkbox' || el.type === 'radio') {{
                             // 見た目用 label で操作される**非表示**の input は replay の page.click
                             // （actionability 検査付き）が timeout する。checked 状態を明示トークンで
-                            // fill 記録し、replay は要素のクリック可否に依存せず状態を復元する（Codex #170 P2）。
+                            // fill 記録し、replay は要素のクリック可否に依存せず状態を復元する。
                             const cs = window.getComputedStyle(el);
                             const hidden = !el.getClientRects().length || cs.visibility === 'hidden';
                             if (hidden) {{
@@ -152,7 +152,7 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                         }} else if (el.type === 'file') {{
                             // file input は録画しない。ブラウザは value を "C:\\fakepath\\..." で返し、
                             // replay で type=file の value 代入は InvalidStateError で拒否され flow 全体が
-                            // 失敗＝ページの全検査を skip してしまう（Codex #170 P2）。skip を記録
+                            // 失敗＝ページの全検査を skip してしまう。skip を記録
                             // プロセスへ通知して操作者に見えるようにする（console.warn だけでは埋もれる）。
                             if (typeof window['{fn_notify}'] === 'function') {{
                                 window['{fn_notify}']('file input はリプレイ不可のため記録しません: ' + sel);
@@ -171,7 +171,7 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                     }}
                 }}, true);
                 document.addEventListener('click', function(e) {{
-                    // script 生成の click（element.click()/dispatchEvent）は記録しない（Codex #179 P2）。
+                    // script 生成の click（element.click()/dispatchEvent）は記録しない。
                     if (!e.isTrusted) return;
                     const target = e.target;
                     if (!target || !target.closest) return;
@@ -192,7 +192,7 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                         // clickable 子孫）があり、その内側をクリックした場合、HTML 仕様上 control は
                         // トグルされず子孫自身の副作用（遷移/AJAX）が走る。closest(CLICKABLE) が
                         // label 自身を指す＝独立操作要素を経由していない＝control 活性化のときだけ
-                        // 抑止し、独立要素へのクリックは下の通常記録へ流す（Codex #179）。
+                        // 抑止し、独立要素へのクリックは下の通常記録へ流す。
                         const inner = target.closest(__WSCAN_CLICKABLE_SEL);
                         if (inner === label) {{
                             const controlType = (label.control.type || '').toLowerCase();
@@ -218,7 +218,7 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
                             // （page.click(position=...)）。ただし座標を常に付すと、inline/小要素では
                             // 記録 offset の hit-test が親要素へずれて replay が別要素を click し得る
                             // （委譲メニューの span 等）。座標志向とみなせる canvas / block 要素のときだけ、
-                            // かつ offset が有限・非負のときだけ付す（Codex #179）。
+                            // かつ offset が有限・非負のときだけ付す。
                             let ox = e.offsetX, oy = e.offsetY;
                             let coordLike = false;
                             try {{
@@ -271,7 +271,7 @@ class FlowRecorder:
             # ナビゲーション追跡。初期 goto（steps[0] と重複）だけを除き、いったん離れて
             # start_url へ**戻ってきた**遷移は記録する。全 start_url 遷移を潰すと、最後の
             # navigate が中間ページのままになり _match_pre_attack_flows が誤ったページへ flow を
-            # 適用してしまう（Codex #170 P2）。
+            # 適用してしまう。
             _initial_load = {"seen": False}
             _last_click: dict = {"t": None}  # 直近 click 記録の monotonic 時刻（via_click の時間窓判定用）
 
@@ -285,15 +285,15 @@ class FlowRecorder:
                 # append しない。ただし初期 goto が別 scheme/host/path へ **redirect** した場合は、
                 # 実着地 URL を steps[0] に反映する。さもないと最後の navigate が pre-redirect の
                 # start_url のままになり _match_pre_attack_flows が crawl 済み着地ページと結び付けられ
-                # ない／最終 target チェックで弾かれる（Codex #170 P2）。
+                # ない／最終 target チェックで弾かれる。
                 if not _initial_load["seen"]:
                     _initial_load["seen"] = True
                     if url != start_url:
                         # steps[0]（start_url への navigate）は残す。redirect 応答が SSO callback/
                         # magic link の Set-Cookie 等の前提 state を作るため、置換すると replay が
-                        # それを受け取れない（Codex #170 P2）。実着地は**実行しない照合用メタデータ**
+                        # それを受け取れない。実着地は**実行しない照合用メタデータ**
                         # として steps[0] に持たせる。別 navigate として追記すると replay が着地ページを
-                        # 二重に GET し、one-shot の確認/コールバック token を消費してしまう（Codex #170 P2）。
+                        # 二重に GET し、one-shot の確認/コールバック token を消費してしまう。
                         if steps and steps[0].get("action") == "navigate":
                             steps[0]["landed_url"] = url
                     return
@@ -315,7 +315,7 @@ class FlowRecorder:
                 {"action": "fill", "selector": selector, "value": value}
             ))
             # click は相対座標付き（座標依存要素の replay 用）。x/y は有限・非負のときだけ付す
-            # （記録スクリプトが offsetX/offsetY を検査して None 化する・Codex #179）。
+            # （記録スクリプトが offsetX/offsetY を検査して None 化する）。
             def _record_click(selector, x=None, y=None):
                 step = {"action": "click", "selector": selector}
                 if x is not None and y is not None:
@@ -329,7 +329,7 @@ class FlowRecorder:
                 {"action": "submit", "selector": selector}
             ))
             # ページ側の警告（file input skip 等）を **記録プロセスの stdout** へ出す。ページの
-            # console.warn だけだと DevTools 非表示の headed recorder では操作者に届かない（Codex #170 P2）。
+            # console.warn だけだと DevTools 非表示の headed recorder では操作者に届かない。
             await page.expose_function(
                 _fn_notify, lambda message: print(f"[FlowRecorder][warn] {message}")
             )
@@ -405,10 +405,10 @@ class FlowRecorder:
 
             if action == "navigate":
                 url = step.get("url", "")
-                # via_click な navigate は click step が既に遷移させるため通常は再実行しない
-                # （Codex #179）。ただし click が skip/timeout/非遷移で記録先へ到達していない場合は
+                # via_click な navigate は click step が既に遷移させるため通常は再実行しない。
+                # ただし click が skip/timeout/非遷移で記録先へ到達していない場合は
                 # skip すると payload fill が誤ページで走るため、到達を確認できたときだけ skip し、
-                # 未到達なら通常 navigate で fallback する（flow_runner と同じ比較器・Codex #178 P2）。
+                # 未到達なら通常 navigate で fallback する（flow_runner と同じ比較器）。
                 if step.get("via_click"):
                     from wscan import url_scope
                     if url and url_scope.same_page(getattr(browser.page, "url", ""), url):
@@ -449,7 +449,7 @@ class FlowRecorder:
             elif action == "click":
                 selector = step.get("selector", "")
                 if selector:
-                    # 座標依存要素は記録した相対座標で click する（要素中心 click だと別動作・Codex #179）。
+                    # 座標依存要素は記録した相対座標で click する（要素中心 click だと別動作）。
                     x, y = step.get("x"), step.get("y")
                     click_kw = {"position": {"x": x, "y": y}} if x is not None and y is not None else {}
                     try:
