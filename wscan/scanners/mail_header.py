@@ -165,7 +165,7 @@ class MailHeaderInjectionScanner(BaseScanner):
             ),
             CarrierCapability(
                 carrier=Carrier.JSON, state=CapabilityState.PLANNED,
-                reason="JSON body 検出改修は 0012/0035-D",
+                reason="JSON body の検出は未対応",
                 task="0035-D",
             ),
             CarrierCapability(

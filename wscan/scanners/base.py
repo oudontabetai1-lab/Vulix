@@ -931,7 +931,7 @@ class BaseScanner(ABC):
             return DispatchResult(
                 state=DispatchState.UNEXECUTABLE,
                 carrier=carrier,
-                note="facade に互換 driver 無し（独自 transport・0035-D で _dispatch_send 化）",
+                note="facade に互換 driver 無し（独自 transport の _dispatch_send 化）",
             )
 
         # 送信・例外伝播・attempt 記録は _dispatch_send（既定は _apply_ip）へ委譲する。
