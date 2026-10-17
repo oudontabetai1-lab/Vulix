@@ -679,6 +679,113 @@ class UrlParamRecreateNavigateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unreached_saved_phase_stays_incomplete_while_later_check_runs(self):
+        from wscan.checkpoint import CheckpointState
+        from wscan.engine import ScanEngine
+
+        class _ReturnsWithoutWave(BaseScanner):
+            CHECK_TYPE = "xss"
+
+            async def scan_field(self, *args, **kwargs):
+                return []
+
+            async def scan_injection_point(self, ip, field):
+                return []  # changed control flow no longer reaches saved evolution wave
+
+        class _Later(BaseScanner):
+            CHECK_TYPE = "sqli"
+
+            def __init__(self, engine):
+                super().__init__(engine)
+                self.calls = 0
+
+            async def scan_field(self, *args, **kwargs):
+                return []
+
+            async def scan_injection_point(self, ip, field):
+                self.calls += 1
+                return []
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            engine = ScanEngine(
+                "http://t", checks=["xss", "sqli"], llm_provider="none",
+                output_dir=output_dir, open_report=False,
+            )
+            state = CheckpointState(target_url="http://t", checks=["xss", "sqli"])
+            ip = engine._injection_point_for("http://t/p", "q", 0, False, -1, {"name": "q"})
+            state.save_candidate_snapshot_ip(ip, "xss", "evolution", ["stored-tail"], "context_mutator")
+            engine.checkpoint = state
+            engine._field_attack_budget_s = 1.0
+            engine.adaptive_enabled = False
+            later = _Later(engine)
+            engine.scanners = {"xss": _ReturnsWithoutWave(engine), "sqli": later}
+
+            await engine._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+
+            self.assertFalse(state.is_done_ip(ip, "xss"))
+            self.assertEqual(
+                state.get_candidate_snapshot_ip(ip, "xss", "evolution"),
+                (True, ["stored-tail"]),
+            )
+            xss_row = next(row for row in engine.scan_matrix if row["check"] == "xss")
+            self.assertEqual(xss_row["status"], "error")
+            self.assertIn("saved candidate phase not reached", xss_row["note"])
+            self.assertTrue(state.is_done_ip(ip, "sqli"))
+            self.assertEqual(later.calls, 1)
+
+    async def test_legacy_truncated_unit_stays_unknown_and_later_check_runs(self):
+        from wscan.checkpoint import CheckpointState
+        from wscan.engine import ScanEngine
+
+        class _NeverRun(BaseScanner):
+            CHECK_TYPE = "xss"
+
+            def __init__(self, engine):
+                super().__init__(engine)
+                self.calls = 0
+
+            async def scan_field(self, *args, **kwargs):
+                return []
+
+            async def scan_injection_point(self, ip, field):
+                self.calls += 1
+                return []
+
+        class _Later(BaseScanner):
+            CHECK_TYPE = "sqli"
+
+            def __init__(self, engine):
+                super().__init__(engine)
+                self.calls = 0
+
+            async def scan_field(self, *args, **kwargs):
+                return []
+
+            async def scan_injection_point(self, ip, field):
+                self.calls += 1
+                return []
+
+        engine = ScanEngine("http://t", checks=["xss", "sqli"], llm_provider="none", open_report=False)
+        ip = engine._injection_point_for("http://t/p", "q", 0, False, -1, {"name": "q"})
+        key = CheckpointState._candidate_unit_key(ip, "xss")
+        state = CheckpointState.from_dict({"version": 8, "target_url": "http://t", "checks": ["xss", "sqli"], "truncation_counts": {key: 1}})
+        engine.checkpoint = state
+        engine._field_attack_budget_s = 1.0
+        engine.adaptive_enabled = False
+        slow = _NeverRun(engine)
+        later = _Later(engine)
+        engine.scanners = {"xss": slow, "sqli": later}
+
+        await engine._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+
+        self.assertEqual(slow.calls, 0)
+        self.assertTrue(state.is_legacy_candidate_unknown_ip(ip, "xss"))
+        self.assertFalse(state.is_done_ip(ip, "xss"))
+        self.assertEqual(later.calls, 1)
+        xss_row = next(row for row in engine.scan_matrix if row["check"] == "xss")
+        self.assertEqual(xss_row["status"], "error")
+        self.assertIn("historical candidates are unknown", xss_row["note"])
+
     async def test_budget_retry_limit_advances_to_later_check_without_marking_done(self):
         """同じ先頭 check の決定論的 time-box が resume を永久停止させない。
 
@@ -695,12 +802,16 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, engine):
                 super().__init__(engine)
                 self.calls = 0
+                self.candidate_queues = []
 
             async def scan_field(self, *args, **kwargs):
                 return []
 
             async def scan_injection_point(self, ip, field):
                 self.calls += 1
+                self.candidate_queues.append(
+                    await self.get_payloads(ip.parameter_id, ip.url, ip=ip)
+                )
                 await asyncio.sleep(0.01)
                 self._field_budget_gate()
                 if self.calls == 1:
@@ -743,7 +854,15 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
             )
 
             for attempt in range(1, 4):
+                first.payload_gen.default_payloads["xss"] = [
+                    f"regenerated-{attempt}", "untried-tail"
+                ]
                 await first._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+                if attempt == 1:
+                    original_queue = slow.candidate_queues[0]
+                    self.assertIn("untried-tail", original_queue)
+                else:
+                    self.assertEqual(slow.candidate_queues[-1], original_queue)
                 self.assertEqual(
                     state.truncation_counts[next(iter(state.truncation_counts))], attempt
                 )
@@ -784,6 +903,10 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(state.is_truncation_exhausted_ip(ip, "xss"))
             self.assertFalse(state.is_done_ip(ip, "xss"))
+            self.assertEqual(
+                state.get_candidate_snapshot_ip(ip, "xss", "baseline"),
+                (True, original_queue),
+            )
             self.assertTrue(state.is_done_ip(ip, "sqli"))
             self.assertEqual(later.calls, 1)
             xss_rows = [r for r in resumed.scan_matrix if r.get("check") == "xss"]

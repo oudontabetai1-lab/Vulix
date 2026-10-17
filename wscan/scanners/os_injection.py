@@ -311,7 +311,7 @@ class OSInjectionScanner(BaseScanner):
 
         # --- Mutation wave: キャップで漏れた time-based(blind) 等を確実に投入 ---
         if not findings:
-            mutated = await self.mutated_payloads(field_name, ip.url, payloads)
+            mutated = await self.mutated_payloads(field_name, ip.url, payloads, ip=ip)
             for payload in mutated:
                 if await _test_payload(payload, "os_mutation"):
                     break

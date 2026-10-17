@@ -35,7 +35,8 @@ if TYPE_CHECKING:
 # v6: checkpoint キーの URL を揮発クエリ正規化。旧版キーは from_dict で移行。
 # v7: budget 打切り単位の再試行回数と、上限到達後も未完である印を永続化。
 # v8: 初回の打切り後に設定回数ぶん再試行できるよう exhausted 閾値を補正。
-CHECKPOINT_VERSION = 8
+# v9: field/check ごとの phase 別 payload 候補スナップショットと legacy unknown を保存。
+CHECKPOINT_VERSION = 9
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -92,6 +93,11 @@ class CheckpointState:
     # 再試行上限に達した未完 unit。resume 時には明示的に到達不能として飛ばし、後続 check を
     # 前進させる。completed_units には絶対に入れない。
     exhausted_truncations: set[str] = field(default_factory=set)
+    # 実際に生成した候補列。phase を分け、同じ field/check の baseline/adaptive/evolution/mutation
+    # の queue が互いを上書きしないようにする。
+    candidate_snapshots: object = field(default_factory=dict)
+    # 旧 checkpoint には過去の候補列が無い。復元不能な truncated unit は tested にしない。
+    legacy_candidate_unknown: set[str] = field(default_factory=set)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     # 読み込んだデータのスキーマ版（新規作成は現行版）。情報用。v1→v2 の差分
@@ -168,6 +174,110 @@ class CheckpointState:
         )
         return key in self.exhausted_truncations
 
+    @staticmethod
+    def _candidate_unit_key(ip: "InjectionPoint", check_type: str) -> str:
+        url, field_name, form_index, location_token, pointer = ip.stable_key_parts()
+        return unit_key(
+            url, field_name, int(form_index), check_type,
+            location_token=location_token, pointer=pointer,
+        )
+
+    def get_candidate_snapshot_ip(
+        self, ip: "InjectionPoint", check_type: str, phase: str,
+    ) -> tuple[bool, list[str] | None]:
+        """phase queue を返す。未保存と有効な空 queue を区別し、不正保存は明示失敗。"""
+        if not isinstance(self.candidate_snapshots, dict):
+            raise ValueError("checkpoint_candidate_snapshots_invalid")
+        unit = self.candidate_snapshots.get(self._candidate_unit_key(ip, check_type))
+        if unit is None:
+            return False, None
+        if not isinstance(unit, dict):
+            raise ValueError("checkpoint_candidate_unit_invalid")
+        if phase not in unit:
+            return False, None
+        entry = unit[phase]
+        if (
+            not isinstance(entry, dict)
+            or type(entry.get("version")) is not int
+            or entry.get("version") != 1
+            or not isinstance(entry.get("source"), str)
+            or not isinstance(entry.get("candidates"), list)
+            or any(not isinstance(item, str) for item in entry["candidates"])
+        ):
+            raise ValueError(f"checkpoint_candidate_snapshot_invalid:{phase}")
+        return True, list(entry["candidates"])
+
+    def candidate_phases_ip(self, ip: "InjectionPoint", check_type: str) -> set[str]:
+        """保存済み phase を返す。壊れた unit も unresolved として残す。"""
+        if not isinstance(self.candidate_snapshots, dict):
+            return {"__invalid__"}
+        unit = self.candidate_snapshots.get(self._candidate_unit_key(ip, check_type))
+        if unit is None:
+            return set()
+        if not isinstance(unit, dict):
+            return {"__invalid__"}
+        if any(not isinstance(phase, str) for phase in unit):
+            return {"__invalid__"}
+        return set(unit)
+
+    def save_candidate_snapshot_ip(
+        self, ip: "InjectionPoint", check_type: str, phase: str,
+        candidates: list[str], source: str,
+    ) -> list[str]:
+        """最初に保存した候補列を正とし、同時生成でも後発候補で置き換えない。"""
+        if not isinstance(self.candidate_snapshots, dict):
+            raise ValueError("checkpoint_candidate_snapshots_invalid")
+        key = self._candidate_unit_key(ip, check_type)
+        unit = self.candidate_snapshots.setdefault(key, {})
+        if not isinstance(unit, dict):
+            raise ValueError("checkpoint_candidate_unit_invalid")
+        exists, saved = self.get_candidate_snapshot_ip(ip, check_type, phase)
+        if exists:
+            return saved or []
+        if not isinstance(candidates, list) or any(not isinstance(item, str) for item in candidates):
+            raise ValueError("candidate_payloads_invalid")
+        unit[phase] = {"version": 1, "source": source, "candidates": list(candidates)}
+        self.updated_at = time.time()
+        return list(candidates)
+
+    def clear_candidate_snapshots_ip(
+        self, ip: "InjectionPoint", check_type: str, phases: set[str],
+    ) -> None:
+        if not isinstance(self.candidate_snapshots, dict):
+            return
+        key = self._candidate_unit_key(ip, check_type)
+        unit = self.candidate_snapshots.get(key)
+        if not isinstance(unit, dict):
+            return
+        for phase in phases:
+            unit.pop(phase, None)
+        if not unit:
+            self.candidate_snapshots.pop(key, None)
+        self.updated_at = time.time()
+
+    def has_legacy_truncation_without_candidates(
+        self, ip: "InjectionPoint", check_type: str,
+    ) -> bool:
+        key = self._candidate_unit_key(ip, check_type)
+        return (
+            self.source_version < 9
+            and self.truncation_counts.get(key, 0) > 0
+            and not self.candidate_phases_ip(ip, check_type)
+        )
+
+    def mark_legacy_candidate_unknown_ip(
+        self, ip: "InjectionPoint", check_type: str, phase: str = "baseline",
+    ) -> None:
+        self.legacy_candidate_unknown.add(
+            f"{self._candidate_unit_key(ip, check_type)}\x1e{phase}"
+        )
+        self.updated_at = time.time()
+
+    def is_legacy_candidate_unknown_ip(
+        self, ip: "InjectionPoint", check_type: str, phase: str = "baseline",
+    ) -> bool:
+        return f"{self._candidate_unit_key(ip, check_type)}\x1e{phase}" in self.legacy_candidate_unknown
+
     def add_finding(self, finding_dict: dict) -> None:
         self.findings.append(finding_dict)
 
@@ -190,6 +300,8 @@ class CheckpointState:
             "attempt_ledger": self.attempt_ledger,
             "truncation_counts": self.truncation_counts,
             "exhausted_truncations": sorted(self.exhausted_truncations),
+            "candidate_snapshots": self.candidate_snapshots,
+            "legacy_candidate_unknown": sorted(self.legacy_candidate_unknown),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -202,6 +314,10 @@ class CheckpointState:
             source_version = int(data.get("version", 1) or 1)
         except (TypeError, ValueError):
             source_version = 1
+        raw_legacy_candidate_unknown = data.get("legacy_candidate_unknown", [])
+        legacy_candidate_unknown = {
+            key for key in raw_legacy_candidate_unknown if isinstance(key, str)
+        } if isinstance(raw_legacy_candidate_unknown, list) else set()
         state = cls(
             target_url=data.get("target_url", ""),
             checks=list(data.get("checks", []) or []),
@@ -220,6 +336,10 @@ class CheckpointState:
                 if isinstance(key, str) and type(count) is int and count >= 0
             },
             exhausted_truncations=set(),
+            # Keep malformed candidate data verbatim so the consuming check can fail closed
+            # instead of silently treating it as absent and regenerating a different queue.
+            candidate_snapshots=data.get("candidate_snapshots", {}),
+            legacy_candidate_unknown=legacy_candidate_unknown,
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
             source_version=source_version,

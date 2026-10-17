@@ -195,7 +195,7 @@ class PathTraversalScanner(BaseScanner):
 
         # --- Mutation wave: 二重エンコード + NULL バイト + 拡張子で素朴な防御を回避 ---
         if not findings:
-            mutated = await self.mutated_payloads(field_name, ip.url, payloads)
+            mutated = await self.mutated_payloads(field_name, ip.url, payloads, ip=ip)
             for payload in mutated:
                 if await _test_payload(payload, "path_traversal_mutation"):
                     break

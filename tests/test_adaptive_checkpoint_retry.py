@@ -5,6 +5,8 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, call
 
 from wscan.engine import ScanEngine
+from wscan.checkpoint import CheckpointState
+import wscan.engine as eng
 
 
 class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
@@ -86,6 +88,8 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             _record_scan_matrix=MagicMock(),
             _record_finding=MagicMock(),
             _save_checkpoint=MagicMock(),
+            enable_checkpoint=True,
+            checkpoint=CheckpointState(),
             # _scan_field の check 毎 dialog flood 判定の最小スタブ（flood なし）。
             _dialog_wedged_since=lambda since: False,
         )
@@ -96,6 +100,64 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             ScanEngine._injection_point_for, engine
         )
         return engine
+
+    async def test_truncated_adaptive_queue_is_reused_on_resume(self):
+        engine = self._engine(["adaptive-original"])
+        ip = engine._injection_point_for(
+            "https://example.test", "q", 0, False, -1, {"name": "q"}
+        )
+        received = []
+
+        async def capture_queue(_ip, _field):
+            received.append(eng._FIELD_PAYLOAD_OVERRIDES.get()["xss"])
+            return []
+
+        engine.scanners["xss"].scan_injection_point.side_effect = capture_queue
+        engine._save_checkpoint.return_value = True
+        truncated = {"xss"}
+        token = eng._FIELD_BUDGET_TRUNCATED.set(truncated)
+        try:
+            result = await engine._adaptive_attack_field(
+                "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+            )
+        finally:
+            eng._FIELD_BUDGET_TRUNCATED.reset(token)
+        self.assertIsNone(result)
+        self.assertEqual(
+            engine.checkpoint.get_candidate_snapshot_ip(ip, "xss", "adaptive"),
+            (True, ["adaptive-original"]),
+        )
+
+        engine.adaptive_engine.generate.return_value = (["replacement"], "ok")
+        result = await engine._adaptive_attack_field(
+            "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+        )
+        self.assertEqual(result, ["adaptive-original"])
+        self.assertEqual(engine.adaptive_engine.generate.await_count, 1)
+        self.assertEqual(received, [["adaptive-original"], ["adaptive-original"]])
+        self.assertEqual(
+            engine.checkpoint.get_candidate_snapshot_ip(ip, "xss", "adaptive"),
+            (False, None),
+        )
+
+    async def test_legacy_adaptive_without_saved_queue_stays_unknown(self):
+        engine = self._engine(["replacement"])
+        engine.checkpoint = CheckpointState.from_dict({"version": 8})
+        ip = engine._injection_point_for(
+            "https://example.test", "q", 0, False, -1, {"name": "q"}
+        )
+
+        result = await engine._adaptive_attack_field(
+            "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+        )
+
+        self.assertIsNone(result)
+        engine.adaptive_engine.generate.assert_not_awaited()
+        self.assertTrue(engine.checkpoint.is_legacy_candidate_unknown_ip(ip, "xss", "adaptive"))
+        self.assertNotIn(
+            call("https://example.test", "q", 0, "(adaptive:xss)", False),
+            engine._checkpoint_mark_done.call_args_list,
+        )
 
     async def test_llm_failure_does_not_mark_adaptive_done(self):
         engine = self._engine(None)

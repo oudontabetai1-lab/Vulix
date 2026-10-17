@@ -26,6 +26,10 @@ if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
 
+class CandidateSnapshotError(RuntimeError):
+    """Candidate state is corrupt or could not be durably saved."""
+
+
 # CVSS 3.1 base score lookup table: check_type → (vector_string, numeric_score)
 # Vectors use worst-case assumptions for web scanner context.
 _CVSS_TABLE: dict[str, tuple[str, float]] = {
@@ -1143,6 +1147,43 @@ class BaseScanner(ABC):
         if monitor:
             await monitor.emit_payload_test(field_name, payload, check_type, url)
 
+    def _candidate_snapshot(self, ip, phase: str) -> tuple[bool, list[str] | None]:
+        engine = getattr(self, "engine", None)
+        checkpoint = getattr(engine, "checkpoint", None)
+        if ip is None or checkpoint is None or not getattr(engine, "enable_checkpoint", True):
+            return False, None
+        from wscan.engine import _FIELD_CANDIDATE_PHASES_SEEN
+        try:
+            exists, candidates = checkpoint.get_candidate_snapshot_ip(ip, self.CHECK_TYPE, phase)
+        except Exception as exc:
+            raise CandidateSnapshotError(str(exc)) from exc
+        seen = _FIELD_CANDIDATE_PHASES_SEEN.get()
+        if seen is not None:
+            seen.add((checkpoint._candidate_unit_key(ip, self.CHECK_TYPE), phase))
+        return exists, candidates
+
+    def _save_candidate_snapshot(
+        self, ip, phase: str, candidates: list[str], source: str,
+    ) -> list[str]:
+        engine = getattr(self, "engine", None)
+        checkpoint = getattr(engine, "checkpoint", None)
+        if ip is None or checkpoint is None or not getattr(engine, "enable_checkpoint", True):
+            return candidates
+        try:
+            saved = checkpoint.save_candidate_snapshot_ip(
+                ip, self.CHECK_TYPE, phase, candidates, source
+            )
+        except Exception as exc:
+            raise CandidateSnapshotError(str(exc)) from exc
+        save = getattr(engine, "_save_checkpoint", None)
+        if not callable(save) or save() is not True:
+            raise CandidateSnapshotError("checkpoint_candidate_snapshot_save_failed")
+        from wscan.engine import _FIELD_CANDIDATE_PHASES_SEEN
+        seen = _FIELD_CANDIDATE_PHASES_SEEN.get()
+        if seen is not None:
+            seen.add((checkpoint._candidate_unit_key(ip, self.CHECK_TYPE), phase))
+        return saved
+
     async def get_payloads(
         self,
         field_name: str,
@@ -1163,6 +1204,11 @@ class BaseScanner(ABC):
             if _overrides
             else self.engine.custom_payloads.get(self.CHECK_TYPE)
         )
+        from wscan.engine import _FIELD_PAYLOAD_STAGE
+        phase = _FIELD_PAYLOAD_STAGE.get() or "baseline"
+        found, saved = self._candidate_snapshot(ip, phase)
+        if found:
+            return saved or []
         # 試行台帳から当該注入点の履歴を取り出し、生成へ戻す（evaluator-optimizer）。
         attempt_history = None
         if ip is not None:
@@ -1225,7 +1271,12 @@ class BaseScanner(ABC):
         cap = getattr(self.engine, "max_payloads", 0)
         if cap > 0:
             payloads = payloads[:cap]
-        return payloads
+        return self._save_candidate_snapshot(
+            ip,
+            phase,
+            payloads,
+            "plan_override" if _custom else "payload_generator",
+        )
 
     def check_response_for_patterns(self, body: str, patterns: list[str]) -> Optional[str]:
         """Check response body for any of the given regex patterns."""
@@ -1525,6 +1576,17 @@ class BaseScanner(ABC):
         ``enable_payload_evolution`` が無効、または probe/mutation が失敗した
         場合は空 list を返し、既存の検知ループを壊さない。
         """
+        ip = (
+            InjectionPoint.for_url_param(url, field_name)
+            if is_url_param
+            else InjectionPoint.for_form(
+                url, field_name, form_index,
+                dom_index=-1 if dom_index is None else dom_index,
+            )
+        )
+        found, saved = self._candidate_snapshot(ip, "evolution")
+        if found:
+            return saved or []
         if not getattr(self.engine, "enable_payload_evolution", True):
             return []
         try:
@@ -1547,12 +1609,16 @@ class BaseScanner(ABC):
             cap = getattr(self.engine, "max_payloads", 0)
             if cap and cap > 0:
                 payloads = payloads[:cap]
-            return payloads
+            return self._save_candidate_snapshot(ip, "evolution", payloads, "context_mutator")
+        except CandidateSnapshotError:
+            raise
         except Exception as exc:
             self._note_wave_degradation("evolution", exc)
             return []
 
-    async def mutated_payloads(self, field_name: str, url: str, seeds: list[str]) -> list[str]:
+    async def mutated_payloads(
+        self, field_name: str, url: str, seeds: list[str], *, ip=None,
+    ) -> list[str]:
         """ペイロード変異（mutation）wave の候補を返す。
 
         標準掃射・evolution で未検出のとき、シード payload を起点にバイパス変種へ
@@ -1564,6 +1630,9 @@ class BaseScanner(ABC):
         max_payloads のキャップは「標準掃射」の絞り込み用なので、mutation wave には
         そのまま適用しない（blind 系がキャップ順で漏れるのを補うのが目的のため）。
         """
+        found, saved = self._candidate_snapshot(ip, "mutation")
+        if found:
+            return saved or []
         if not getattr(self.engine, "enable_payload_mutation", True):
             return []
         out: list[str] = []
@@ -1593,7 +1662,7 @@ class BaseScanner(ABC):
             if p and p not in seen:
                 seen.add(p)
                 deduped.append(p)
-        return deduped
+        return self._save_candidate_snapshot(ip, "mutation", deduped, "payload_mutator")
 
     def current_page_pair(self, url: str) -> dict:
         """
