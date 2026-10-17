@@ -140,11 +140,57 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             (False, None),
         )
 
-    async def test_legacy_adaptive_without_saved_queue_stays_unknown(self):
+    async def test_legacy_adaptive_without_truncation_generates_and_runs(self):
         engine = self._engine(["replacement"])
-        engine.checkpoint = CheckpointState.from_dict({"version": 8})
+        existing_finding = {"type": "sqli", "url": "https://example.test/old"}
+        engine.checkpoint = CheckpointState.from_dict({
+            "version": 8,
+            "findings": [existing_finding],
+        })
         ip = engine._injection_point_for(
             "https://example.test", "q", 0, False, -1, {"name": "q"}
+        )
+        executed = []
+
+        async def capture_queue(_ip, _field):
+            executed.extend(eng._FIELD_PAYLOAD_OVERRIDES.get()["xss"])
+            return []
+
+        engine.scanners["xss"].scan_injection_point.side_effect = capture_queue
+        engine._save_checkpoint.return_value = True
+
+        result = await engine._adaptive_attack_field(
+            "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+        )
+
+        self.assertEqual(result, ["replacement"])
+        engine.adaptive_engine.generate.assert_awaited_once()
+        self.assertEqual(executed, ["replacement"])
+        self.assertFalse(engine.checkpoint.is_legacy_candidate_unknown_ip(ip, "xss", "adaptive"))
+        self.assertIn(
+            call("https://example.test", "q", 0, "(adaptive:xss)", False),
+            engine._checkpoint_mark_done.call_args_list,
+        )
+        self.assertEqual(engine.checkpoint.findings, [existing_finding])
+        self.assertEqual(engine.checkpoint.source_version, 8)
+        restored = CheckpointState.from_dict(engine.checkpoint.to_dict())
+        self.assertEqual(restored.source_version, 9)
+        self.assertEqual(restored.findings, [existing_finding])
+
+    async def test_legacy_adaptive_with_prior_truncation_stays_unknown(self):
+        engine = self._engine(["replacement"])
+        existing_finding = {"type": "sqli", "url": "https://example.test/old"}
+        engine.checkpoint = CheckpointState.from_dict({
+            "version": 8,
+            "findings": [existing_finding],
+        })
+        ip = engine._injection_point_for(
+            "https://example.test", "q", 0, False, -1, {"name": "q"}
+        )
+        key = engine.checkpoint._candidate_unit_key(ip, "xss")
+        engine.checkpoint.truncation_counts[key] = 1
+        engine.checkpoint.save_candidate_snapshot_ip(
+            ip, "xss", "baseline", ["baseline-retained"], "payload_generator"
         )
 
         result = await engine._adaptive_attack_field(
@@ -156,6 +202,31 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engine.checkpoint.is_legacy_candidate_unknown_ip(ip, "xss", "adaptive"))
         self.assertNotIn(
             call("https://example.test", "q", 0, "(adaptive:xss)", False),
+            engine._checkpoint_mark_done.call_args_list,
+        )
+        restored = CheckpointState.from_dict(engine.checkpoint.to_dict())
+        self.assertEqual(restored.source_version, 9)
+        self.assertTrue(restored.is_legacy_candidate_unknown_ip(ip, "xss", "adaptive"))
+        self.assertEqual(restored.findings, [existing_finding])
+        self.assertEqual(
+            restored.get_candidate_snapshot_ip(ip, "xss", "baseline"),
+            (True, ["baseline-retained"]),
+        )
+
+    async def test_legacy_adaptive_safe_twin_is_still_completed(self):
+        engine = self._engine(["replacement"])
+        engine.checkpoint = CheckpointState.from_dict({"version": 8})
+        engine.scanners["xss"].scan_injection_point.return_value = []
+
+        result = await engine._adaptive_attack_field(
+            "https://example.test/safe", 0, {"name": "q"}, False, ["xss"], None
+        )
+
+        self.assertEqual(result, ["replacement"])
+        engine.scanners["xss"].scan_injection_point.assert_awaited_once()
+        self.assertFalse(engine.checkpoint.legacy_candidate_unknown)
+        self.assertIn(
+            call("https://example.test/safe", "q", 0, "(adaptive:xss)", False),
             engine._checkpoint_mark_done.call_args_list,
         )
 

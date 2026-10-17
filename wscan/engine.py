@@ -6932,7 +6932,9 @@ class ScanEngine:
                     elif (
                         not self._checkpoint_is_done_ip(ip, _adaptive_checkpoint_check(_cn))
                         and (
-                            _candidate_state.source_version < 9
+                            _candidate_state.has_legacy_truncation_without_candidates(
+                                ip, _cn, phase="adaptive"
+                            )
                             or _candidate_state.is_legacy_candidate_unknown_ip(ip, _cn, "adaptive")
                         )
                     ):

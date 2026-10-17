@@ -256,13 +256,17 @@ class CheckpointState:
         self.updated_at = time.time()
 
     def has_legacy_truncation_without_candidates(
-        self, ip: "InjectionPoint", check_type: str,
+        self, ip: "InjectionPoint", check_type: str, phase: str | None = None,
     ) -> bool:
         key = self._candidate_unit_key(ip, check_type)
+        if phase is None:
+            has_candidates = bool(self.candidate_phases_ip(ip, check_type))
+        else:
+            has_candidates, _ = self.get_candidate_snapshot_ip(ip, check_type, phase)
         return (
             self.source_version < 9
             and self.truncation_counts.get(key, 0) > 0
-            and not self.candidate_phases_ip(ip, check_type)
+            and not has_candidates
         )
 
     def mark_legacy_candidate_unknown_ip(
