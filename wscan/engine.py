@@ -6602,6 +6602,7 @@ class ScanEngine:
 
             check_errored = False
             check_wedged = False
+            scan_row = None
             _scan_note_start = len(self.wave_errors)
             checks_executed += 1
             _dlg_check = getattr(self.browser, "dialog_total", 0)
@@ -6642,6 +6643,9 @@ class ScanEngine:
                         else ""
                     ),
                 )
+                matrix = getattr(self, "scan_matrix", None)
+                if matrix:
+                    scan_row = matrix[-1]
             except AbortScan:
                 # payload 単位の即時停止でこの check は途中終了した。「済み」に
                 # しないことで resume が未完の payload を取りこぼさない（finally の
@@ -6672,6 +6676,9 @@ class ScanEngine:
                 # 未送信/一部送信の check を恒久スキップして見逃す）。truncated は resume で再試行する。
                 _truncated = _FIELD_BUDGET_TRUNCATED.get() or set()
                 if check_name in _truncated:
+                    if scan_row is not None:
+                        scan_row["status"] = "error"
+                        scan_row["note"] = "field attack budget exceeded; check remains incomplete"
                     _record_truncation = getattr(
                         self, "_checkpoint_record_truncation_ip", None
                     )

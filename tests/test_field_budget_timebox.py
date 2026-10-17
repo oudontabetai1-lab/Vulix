@@ -12,6 +12,7 @@ task-local な ContextVar（_FIELD_ATTACK_DEADLINE 等）に締切を張り、ba
 - deadline 未設定（None）／未超過では従来どおり注入する（挙動不変・FP 非増加）。
 """
 import asyncio
+import tempfile
 import time
 import unittest
 from unittest.mock import AsyncMock
@@ -684,18 +685,30 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
         最初の run は xss が deadline を消費して sqli も gate で未送信になる。retry 上限に
         達した xss は completed にせず次 run で明示的に除外し、fresh budget の sqli が実行される。
         """
-        from wscan.checkpoint import CheckpointState
+        from wscan.checkpoint import CheckpointState, load_checkpoint
         from wscan.engine import ScanEngine
+        from wscan.scanners.base import Finding
 
         class _Slow(BaseScanner):
             CHECK_TYPE = "xss"
+
+            def __init__(self, engine):
+                super().__init__(engine)
+                self.calls = 0
 
             async def scan_field(self, *args, **kwargs):
                 return []
 
             async def scan_injection_point(self, ip, field):
+                self.calls += 1
                 await asyncio.sleep(0.01)
                 self._field_budget_gate()
+                if self.calls == 1:
+                    return [Finding(
+                        check_type="xss", severity="high", url=ip.url,
+                        field_name=ip.parameter_id, payload="<script>",
+                        evidence="reflected before budget expiry",
+                    )]
                 return []
 
         class _Later(BaseScanner):
@@ -712,38 +725,79 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
                 self.calls += 1
                 return []
 
-        state = CheckpointState(target_url="http://t", checks=["xss", "sqli"])
-        first = ScanEngine("http://t", checks=["xss"], llm_provider="none", open_report=False)
-        first.scanners = {"xss": _Slow(first), "sqli": _Later(first)}
-        first.checkpoint = state
-        first._field_attack_budget_s = 0.001
-        first._field_budget_retry_limit = 0
-        first.adaptive_enabled = False
-        first._save_checkpoint = lambda: None
-        await first._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+        with tempfile.TemporaryDirectory() as output_dir:
+            state = CheckpointState(target_url="http://t", checks=["xss", "sqli"])
+            first = ScanEngine(
+                "http://t", checks=["xss", "sqli"], llm_provider="none",
+                output_dir=output_dir, open_report=False,
+            )
+            self.assertEqual(first._field_budget_retry_limit, 2)
+            first._field_attack_budget_s = 0.001
+            first.adaptive_enabled = False
+            slow = _Slow(first)
+            later = _Later(first)
+            first.scanners = {"xss": slow, "sqli": later}
+            first.checkpoint = state
+            ip = first._injection_point_for(
+                "http://t/p", "q", 0, False, -1, {"name": "q"}
+            )
 
-        ip = first._injection_point_for("http://t/p", "q", 0, False, -1, {"name": "q"})
-        self.assertTrue(state.is_truncation_exhausted_ip(ip, "xss"))
-        self.assertFalse(state.is_done_ip(ip, "xss"))
-        self.assertFalse(state.is_done_ip(ip, "sqli"))
+            for attempt in range(1, 4):
+                await first._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+                self.assertEqual(
+                    state.truncation_counts[next(iter(state.truncation_counts))], attempt
+                )
+                self.assertFalse(state.is_done_ip(ip, "xss"))
+                self.assertEqual(
+                    state.is_truncation_exhausted_ip(ip, "xss"), attempt == 3
+                )
+                self.assertEqual(first.scan_matrix[-1]["check"], "sqli")
+                self.assertEqual(first.scan_matrix[-1]["status"], "error")
+                xss_rows = [r for r in first.scan_matrix if r.get("check") == "xss"]
+                self.assertEqual(len(xss_rows), attempt)
+                self.assertTrue(all(r["status"] == "error" for r in xss_rows))
+                self.assertFalse(any(r["status"] in {"tested", "safe", "done"} for r in xss_rows))
+                self.assertEqual(xss_rows[0]["finding_count"], 1)
+                first._save_checkpoint()
+                state = load_checkpoint(output_dir)
+                self.assertEqual(state.scan_matrix, first.scan_matrix)
+                first.checkpoint = state
+                first.scan_matrix = list(state.scan_matrix)
 
-        resumed = ScanEngine("http://t", checks=["xss"], llm_provider="none", open_report=False)
-        later = _Later(resumed)
-        resumed.scanners = {"xss": _Slow(resumed), "sqli": later}
-        resumed.checkpoint = state
-        resumed._field_attack_budget_s = 1.0
-        resumed._field_budget_retry_limit = 0
-        resumed.adaptive_enabled = False
-        resumed._save_checkpoint = lambda: None
-        await resumed._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+            self.assertEqual(len(state.findings), 1)
+            self.assertEqual(state.findings[0]["evidence"], "reflected before budget expiry")
+            self.assertEqual(state.findings[0]["payload"], "<script>")
+            self.assertEqual(slow.calls, 3)
 
-        self.assertEqual(later.calls, 1)
-        self.assertFalse(state.is_done_ip(ip, "xss"))
-        self.assertTrue(state.is_done_ip(ip, "sqli"))
-        self.assertTrue(any(
-            note.startswith("field_budget_retry_exhausted:xss:")
-            for note in resumed.wave_errors
-        ))
+            resumed = ScanEngine(
+                "http://t", checks=["xss", "sqli"], llm_provider="none",
+                output_dir=output_dir, open_report=False,
+            )
+            later = _Later(resumed)
+            resumed.scanners = {"xss": _Slow(resumed), "sqli": later}
+            resumed.checkpoint = state
+            resumed.scan_matrix = list(state.scan_matrix)
+            resumed.all_findings = [Finding.from_dict(f) for f in state.findings]
+            resumed._field_attack_budget_s = 1.0
+            resumed.adaptive_enabled = False
+            await resumed._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+
+            self.assertTrue(state.is_truncation_exhausted_ip(ip, "xss"))
+            self.assertFalse(state.is_done_ip(ip, "xss"))
+            self.assertTrue(state.is_done_ip(ip, "sqli"))
+            self.assertEqual(later.calls, 1)
+            xss_rows = [r for r in resumed.scan_matrix if r.get("check") == "xss"]
+            self.assertTrue(all(r["status"] == "error" for r in xss_rows))
+            sqli_rows = [r for r in resumed.scan_matrix if r.get("check") == "sqli"]
+            self.assertEqual(sqli_rows[-1]["status"], "tested")
+            self.assertEqual(len(resumed.all_findings), 1)
+            resumed._save_checkpoint()
+            completed = load_checkpoint(output_dir)
+            self.assertEqual(completed.scan_matrix, resumed.scan_matrix)
+            self.assertEqual(
+                [r["status"] for r in completed.scan_matrix if r.get("check") == "sqli"][-1],
+                "tested",
+            )
 
     async def test_budget_exceeded_skips_legacy_scanner_and_not_checkpointed(self):
         """予算超過後は scan_injection_point を持つ legacy 直送 scanner も呼ばず、error 記録・未完。"""
