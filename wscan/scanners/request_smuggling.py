@@ -128,7 +128,7 @@ class RequestSmugglingScanner(BaseScanner):
             ),
             CarrierCapability(
                 carrier=Carrier.PATH, state=CapabilityState.PLANNED,
-                reason="raw path probe は 0035-D で接続",
+                reason="raw path probe は未接続",
                 task="0035-D",
             ),
             CarrierCapability(
