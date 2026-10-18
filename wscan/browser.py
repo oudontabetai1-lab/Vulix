@@ -2525,10 +2525,10 @@ class BrowserManager:
                     return False
                 # 設定欄が実在・編集可能なときだけ優先し、その他は純粋検出へ委譲する。
                 user = password = ""
-                if (user_field != "username" or pass_field != "password"
-                        or surface.login_form is None):
+                if user_field != "username":
                     user = (await self._editable_auth_selector(user_field) or
                             await self._editable_auth_selector(name_or_id_selector(user_field)))
+                if pass_field != "password":
                     password = (await self._editable_auth_selector(pass_field) or
                                 await self._editable_auth_selector(name_or_id_selector(pass_field)))
                 plan = ls.locate_auth_fields(body, user_selector=user, pass_selector=password)

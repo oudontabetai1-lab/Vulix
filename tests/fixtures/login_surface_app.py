@@ -19,6 +19,11 @@ PAGES = {
 <input name="user" autocomplete="username"><input name="pw" type="password" autocomplete="current-password">
 <button id="go" type="submit">Log in</button></form>
 <a href="/forgot">Forgot password?</a> <a href="/signup">Sign up</a>''',
+    "/login-url-success": '''<h1>Sign in</h1><form><input name="user"><input name="pw" type="password">
+<button type="submit">Log in</button></form><script>document.querySelector("form").onsubmit=e=>{
+ e.preventDefault();const f=e.currentTarget;if(f.user.value==="fixture-user@example.test"&&f.pw.value==="fixture-password"){
+ document.cookie="session=fixture-session;path=/";history.pushState({},"","/home");
+ document.body.innerHTML="<h1>Dashboard</h1>";}};</script>''',
     "/login-step1": '''<h2>Sign in</h2><form action="/identify" method="post">
 <input type="email" id="email" name="email"><button type="submit">Next</button></form>''',
     "/login-external-submit": '''<button id="external-go" form="external-login">Sign in</button>

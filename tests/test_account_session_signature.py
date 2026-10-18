@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from wscan.browser import BrowserManager
+from wscan.engine import ScanEngine
 
 ENGINE = Path(__file__).resolve().parent.parent / "wscan" / "engine.py"
 
@@ -68,6 +69,7 @@ def test_logged_in_marker_is_enforced():
     ("<p>Authentication failed</p>", "", "/dashboard", "sid=1"),
     ("<p>Authenticated</p>", "", "Authenticated", "sid=1"),
     ("<p>Authenticated /dashboard</p>", "/dashboard", "Missing", None),
+    ("<p>Welcome</p>", "/dashboard", "/dashboard", None),
 ])
 def test_marker_requires_body_but_success_indicator_keeps_url_support(body, marker, indicator, expected):
     assert _run(body, marker, "http://t/login?next=/dashboard", indicator) == expected
@@ -97,3 +99,27 @@ def test_auto_login_uses_login_form_with_default_named_registration_fields(field
     bm._editable_auth_selector = AsyncMock(side_effect=lambda s: s if s.startswith("input[") else "")
     assert asyncio.run(bm.auto_login("http://t/login", **fields))
     assert [call.args[0] for call in bm.page.fill.call_args_list] == expected
+
+
+def test_account_session_caller_passes_only_explicit_marker():
+    engine = ScanEngine.__new__(ScanEngine)
+    engine.login_url = "http://t/login"
+    engine.accounts = [{"username": "u", "password": "p", "role": "admin"}]
+    engine.login_user_field, engine.login_pass_field = "username", "password"
+    engine.login_success_indicator = "/dashboard"
+    engine.logged_in_marker = "/dashboard"  # fallback used by auto_login
+    engine._explicit_logged_in_marker = ""
+    engine.account_sessions = []
+    engine._browser = Mock()
+    engine._browser.create_session_for_account = AsyncMock(return_value="sid=1")
+
+    asyncio.run(engine._setup_account_sessions())
+
+    assert engine.account_sessions == [{"username": "u", "cookies": "sid=1", "role": "admin"}]
+    assert engine._browser.create_session_for_account.call_args.kwargs["logged_in_marker"] == ""
+
+    engine._explicit_logged_in_marker = "/dashboard"
+    engine._browser.create_session_for_account.reset_mock(return_value=True)
+    engine._browser.create_session_for_account.return_value = None
+    asyncio.run(engine._setup_account_sessions())
+    assert engine._browser.create_session_for_account.call_args.kwargs["logged_in_marker"] == "/dashboard"
