@@ -19,6 +19,11 @@ PAGES = {
 <input name="user" autocomplete="username"><input name="pw" type="password" autocomplete="current-password">
 <button id="go" type="submit">Log in</button></form>
 <a href="/forgot">Forgot password?</a> <a href="/signup">Sign up</a>''',
+    "/login-url-success": '''<h1>Sign in</h1><form><input name="user"><input name="pw" type="password">
+<button type="submit">Log in</button></form><script>document.querySelector("form").onsubmit=e=>{
+ e.preventDefault();const f=e.currentTarget;if(f.user.value==="fixture-user@example.test"&&f.pw.value==="fixture-password"){
+ document.cookie="session=fixture-session;path=/";history.pushState({},"","/home");
+ document.body.innerHTML="<h1>Dashboard</h1>";}};</script>''',
     "/login-step1": '''<h2>Sign in</h2><form action="/identify" method="post">
 <input type="email" id="email" name="email"><button type="submit">Next</button></form>''',
     "/login-external-submit": '''<button id="external-go" form="external-login">Sign in</button>
@@ -100,6 +105,17 @@ PAGES.update({
                   '<form action="/do-login" method="post"><input name="user" type="hidden" value="fixture-user@example.test">'
                   '<input name="pw" type="password"><button id="finish">Sign in</button></form>`};</script>',
 })
+# 登録の既定欄名より、一意なログイン form の欄を優先する。
+PAGES["/mixed-default-login"] = (
+    '<form id="registration"><h2>Create account</h2>'
+    '<input name="username" autocomplete="username">'
+    '<input name="password" type="password" autocomplete="new-password">'
+    '<button type="submit">Register</button></form>'
+    + PAGES["/login"].replace('<form action=', '<form id="signin" action=')
+    + '<script>document.querySelector("#signin").onsubmit=()=>{'
+      'sessionStorage.setItem("registration-values",JSON.stringify(Array.from('
+      'document.querySelectorAll("#registration input"),el=>el.value)))}</script>'
+)
 PAGES["/spa-first"] += '<script>document.querySelector("input").onkeydown=e=>{if(e.key==="Enter")next.click()}</script>'
 PAGES["/login-modal"] += '<script>document.querySelector("#open").onclick=()=>document.querySelector(".modal").hidden=false</script>'
 # modal の username 名も既存 endpoint に送る。

@@ -390,6 +390,62 @@ class LoginSurfaceBrowserTests(unittest.TestCase):
             self.assertNotIn(fx.USERNAME, persisted)
             self.assertNotIn("fixture-session", persisted)
 
+    def test_account_session_uses_url_fallback_but_enforces_explicit_marker(self):
+        from tests.fixtures import login_surface_app as fx
+        from tests.test_totp_login_e2e import serving
+        from playwright.async_api import async_playwright
+        from wscan.browser import BrowserManager
+        from wscan.engine import ScanEngine
+
+        with serving(fx.create_app()) as url:
+            async def exercise():
+                async with async_playwright() as playwright:
+                    browser = await playwright.chromium.launch(headless=True)
+                    manager = BrowserManager.__new__(BrowserManager)
+                    manager._browser, manager.proxy, manager.timeout = browser, None, 1000
+                    engine = ScanEngine.__new__(ScanEngine)
+                    engine.login_url = url + "/login-url-success"
+                    engine.accounts = [{"username": fx.USERNAME, "password": fx.PASSWORD, "role": "admin"}]
+                    engine._browser = manager
+                    engine.login_user_field, engine.login_pass_field = "user", "pw"
+                    engine.login_success_indicator = "/home"
+                    engine.logged_in_marker = "/home"
+                    engine._explicit_logged_in_marker = ""
+                    engine.account_sessions = []
+                    try:
+                        await engine._setup_account_sessions()
+                        assert len(engine.account_sessions) == 1
+                        assert engine.account_sessions[0]["cookies"] == "session=fixture-session"
+
+                        # The same URL text must still match the body when explicitly configured.
+                        engine._explicit_logged_in_marker = "/home"
+                        engine.account_sessions.clear()
+                        await engine._setup_account_sessions()
+                        assert engine.account_sessions == []
+                    finally:
+                        await browser.close()
+            asyncio.run(exercise())
+
+    def test_mixed_registration_and_login_preserves_registration_fields(self):
+        from tests.fixtures import login_surface_app as fx
+        from tests.test_totp_login_e2e import serving
+        from wscan.browser import BrowserManager
+        with serving(fx.create_app()) as url:
+            async def exercise():
+                for fields in ({}, {"user_field": "user"}, {"pass_field": "pw"},
+                               {"user_field": "user", "pass_field": "pw"},
+                               {"user_field": 'input[name="user"]', "pass_field": 'input[name="pw"]'}):
+                    browser = BrowserManager(headless=True, auth_user=fx.USERNAME, auth_pass=fx.PASSWORD)
+                    await browser.init()
+                    try:
+                        self.assertTrue(await browser.auto_login(url + "/mixed-default-login", **fields),
+                                        (fields, browser.last_login_assessment))
+                        self.assertEqual(await browser.page.evaluate(
+                            'JSON.parse(sessionStorage.getItem("registration-values"))'), ["", ""])
+                    finally:
+                        await browser.close()
+            asyncio.run(exercise())
+
     def test_nonlogin_and_ambiguous_surfaces_are_not_filled(self):
         from tests.fixtures import login_surface_app as fx
         from tests.test_totp_login_e2e import serving

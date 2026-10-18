@@ -1046,6 +1046,7 @@ class ScanEngine:
         # セッション失効時の自動再ログイン
         self.relogin_on_expiry: bool = relogin_on_expiry
         # 認証済みの目印（指定が無ければログイン成功判定文字列を流用）
+        self._explicit_logged_in_marker: str = logged_in_marker
         self.logged_in_marker: str = logged_in_marker or login_success_indicator
         self._relogin_count: int = 0
         # L: Webhook/Slack 通知マネージャー
@@ -8071,7 +8072,7 @@ class ScanEngine:
                 user_field=self.login_user_field,
                 pass_field=self.login_pass_field,
                 success_indicator=self.login_success_indicator,
-                logged_in_marker=self.logged_in_marker,
+                logged_in_marker=self._explicit_logged_in_marker,
             )
             if cookie_str:
                 self.account_sessions.append({
@@ -8186,7 +8187,7 @@ class ScanEngine:
                 user_field=self.login_user_field,
                 pass_field=self.login_pass_field,
                 success_indicator=self.login_success_indicator,
-                logged_in_marker=self.logged_in_marker,
+                logged_in_marker=self._explicit_logged_in_marker,
             )
             if cookie_str:
                 self.account_sessions.append({
