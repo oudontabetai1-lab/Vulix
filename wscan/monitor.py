@@ -1354,6 +1354,13 @@ class MonitorServer:
                     data = json.loads(evidence.read_text(encoding="utf-8"))
                     info["target"] = data.get("target", "") or ""
                     info["started_at"] = data.get("scan_date", "") or ""
+                    status_val = data.get("status")
+                    if status_val == "aborted" or data.get("aborted") is True:
+                        info["status"] = "aborted"
+                    elif status_val:
+                        info["status"] = str(status_val)
+                    else:
+                        info["status"] = "done"
                     findings = data.get("findings", []) or []
                     info["findings_count"] = len(findings)
                     for f in findings:
