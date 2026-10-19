@@ -4525,9 +4525,9 @@ function handleEvent(event) {
       break;
 
     case 'awaiting_config':
-      // Serve mode: show the scan config form. アイドル復帰なので、前スキャンの
-      // レビュー待ちモーダルが残っていれば閉じる（亡霊モーダル防止）。
       closeInteractiveModals();
+      // 次の設定を受け付けても、完了/中断した結果は新規スキャン操作まで保持する。
+      if (state.scanDone) break;
       document.getElementById('scanConfigOverlay').classList.add('active');
       setStatus('設定フォームに入力してスキャンを開始してください', '');
       break;

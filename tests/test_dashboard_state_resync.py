@@ -385,6 +385,7 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 "status": "aborted",
                 "aborted": True,
             })
+            await cls.monitor.emit_awaiting_config()
             return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
 
         async def finish_abort_pos(request: Request):
@@ -408,6 +409,7 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 "status": "aborted",
                 "aborted": True,
             })
+            await cls.monitor.emit_awaiting_config()
             return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
 
         async def finish_normal_zero(request: Request):
@@ -425,6 +427,7 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 "status": "done",
                 "aborted": False,
             })
+            await cls.monitor.emit_awaiting_config()
             return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
 
         async def finish_normal_pos(request: Request):
@@ -448,8 +451,18 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 "status": "done",
                 "aborted": False,
             })
+            await cls.monitor.emit_awaiting_config()
             return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
 
+        async def idle(request: Request):
+            cls.monitor.api_scan_id = None
+            cls.monitor._begin_scan_snapshot()
+            cls.monitor.api_scan_status = "idle"
+            cls.monitor.api_findings = []
+            await cls.monitor.emit_awaiting_config()
+            return {}
+
+        cls.monitor.app.add_api_route("/__test__/idle", idle, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/seed", seed, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/page", add_page, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/finish-url", finish_url, methods=["POST"])
@@ -581,6 +594,38 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             self.assertEqual(page.locator("#urlList .url-badge").all_inner_texts(), ["検査中"])
             browser.close()
 
+    def test_chromium_initial_idle_and_explicit_new_scan_after_completion(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.continue_()
+                       if route.request.url.startswith(self.base_url) else route.abort())
+            page.request.post(f"{self.base_url}/__test__/idle")
+            page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+            page.wait_for_function("document.getElementById('scanConfigOverlay').classList.contains('active')")
+            self.assertTrue(page.locator("#scanConfigOverlay").is_visible())
+            self.assertIn("設定フォーム", page.locator("#statusText").inner_text())
+
+            completed = page.request.post(f"{self.base_url}/__test__/normal-pos").json()
+            page.wait_for_function("seq => state.lastEventSequence === seq && state.scanDone",
+                                   arg=completed["sequence"])
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
+            page.locator("button.ws-newscan").click()
+            self.assertTrue(page.locator("#scanConfigOverlay").is_visible())
+            self.assertEqual(page.locator("#findingsPanel .finding-card").count(), 1)
+
+            started = page.request.post(f"{self.base_url}/__test__/new-scan").json()
+            page.wait_for_function("run => state.scanRunId === run && !state.scanDone",
+                                   arg=started["run_id"])
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
+            self.assertFalse(page.locator("#postScanActions").is_visible())
+            self.assertEqual(page.locator("#findingsPanel .finding-card").count(), 0)
+            self.assertEqual(page.locator("#statPages").inner_text(), "1")
+            self.assertIn("スキャン開始", page.locator("#statusText").inner_text())
+            browser.close()
+
     def test_chromium_operator_aborted_zero_findings_renders_aborted(self):
         from playwright.sync_api import sync_playwright
 
@@ -604,6 +649,8 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 arg={"run_id": res["run_id"], "sequence": res["sequence"]},
                 timeout=10000,
             )
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
+            self.assertTrue(page.locator("#postScanActions").is_visible())
             status_text = page.locator("#statusText").inner_text()
             self.assertIn("Scan aborted", status_text)
             self.assertIn("0 finding(s)", status_text)
@@ -621,6 +668,7 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 arg={"run_id": res["run_id"], "sequence": res["sequence"]},
                 timeout=10000,
             )
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
             status_text_after = page.locator("#statusText").inner_text()
             self.assertIn("Scan aborted", status_text_after)
             self.assertIn("0 finding(s)", status_text_after)
@@ -655,6 +703,8 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 arg={"run_id": res["run_id"], "sequence": res["sequence"]},
                 timeout=10000,
             )
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
+            self.assertTrue(page.locator("#postScanActions").is_visible())
             status_text = page.locator("#statusText").inner_text()
             self.assertIn("Scan aborted", status_text)
             self.assertIn("1 finding(s)", status_text)
@@ -674,6 +724,7 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 arg={"run_id": res["run_id"], "sequence": res["sequence"]},
                 timeout=10000,
             )
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
             status_text_after = page.locator("#statusText").inner_text()
             self.assertIn("Scan aborted", status_text_after)
             self.assertIn("1 finding(s)", status_text_after)
@@ -708,6 +759,8 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 arg={"run_id": res["run_id"], "sequence": res["sequence"]},
                 timeout=10000,
             )
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
+            self.assertTrue(page.locator("#postScanActions").is_visible())
             status_text = page.locator("#statusText").inner_text()
             self.assertIn("Scan complete", status_text)
             self.assertIn("0 finding(s)", status_text)
@@ -722,6 +775,7 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 arg={"run_id": res["run_id"], "sequence": res["sequence"]},
                 timeout=10000,
             )
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
             status_text_after = page.locator("#statusText").inner_text()
             self.assertIn("Scan complete", status_text_after)
             self.assertIn("0 finding(s)", status_text_after)
@@ -753,6 +807,8 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 arg={"run_id": res["run_id"], "sequence": res["sequence"]},
                 timeout=10000,
             )
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
+            self.assertTrue(page.locator("#postScanActions").is_visible())
             status_text = page.locator("#statusText").inner_text()
             self.assertIn("Scan complete", status_text)
             self.assertIn("1 finding(s)", status_text)
@@ -769,6 +825,7 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 arg={"run_id": res["run_id"], "sequence": res["sequence"]},
                 timeout=10000,
             )
+            self.assertFalse(page.locator("#scanConfigOverlay").is_visible())
             status_text_after = page.locator("#statusText").inner_text()
             self.assertIn("Scan complete", status_text_after)
             self.assertIn("1 finding(s)", status_text_after)
