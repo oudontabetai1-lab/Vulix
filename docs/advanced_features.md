@@ -118,10 +118,22 @@ WordPress, Drupal, Django, Laravel, EC-CUBE, Joomla, Magento
 | メソッド | パス | 説明 |
 |---------|------|------|
 | `POST` | `/api/v1/scan` | スキャンを非同期起動 |
-| `GET` | `/api/v1/scan/status` | スキャン進捗ステータス取得 |
-| `GET` | `/api/v1/scan/findings` | 検出済み脆弱性リスト取得 |
+| `GET` | `/api/v1/scan/status` | スキャン進捗ステータス取得（進捗・フェーズ・メトリクス） |
+| `GET` | `/api/v1/scan/findings` | 検出済み脆弱性リスト取得（全 findings 配列・メトリクス） |
 | `GET` | `/api/v1/scan/report` | HTML レポートのパスを返す |
-| `GET` | `/api/v1/scan/results` | 全結果サマリー（status + findings）を取得 |
+| `GET` | `/api/v1/scan/results` | 全結果サマリー（status + findings + CI 用メトリクス）を取得 |
+
+#### メトリクスフィールドの仕様
+
+`/api/v1/scan/status`, `/api/v1/scan/findings`, `/api/v1/scan/results` の各エンドポイントは、以下の共通定義を持つ明示的なメトリクスを返します：
+
+- `total_findings_count`: 発見された全 Finding 件数（未確証の仮説・Agent 由来を含む）。
+- `confirmed_findings_count`: 再現・確証された脆弱性の件数 (`finding_dict_confirmed(f)` が True のもの)。
+- `hypothesis_count`: 未確証の仮説件数 (`total_findings_count - confirmed_findings_count`)。
+
+**レガシー `findings_count` の後方互換性**:
+- `/api/v1/scan/status` および `/api/v1/scan/findings`: 従来通り全件数 (`total_findings_count`) を返します。
+- `/api/v1/scan/results`: CI/CD パイプライン向けゲートとして従来通り確証件数 (`confirmed_findings_count`) を返します。
 
 ### 利用例（CI パイプライン）
 
@@ -136,6 +148,9 @@ curl http://localhost:8765/api/v1/scan/status
 
 # 3. 結果取得
 curl http://localhost:8765/api/v1/scan/findings
+
+# 4. CI/CD 結果サマリー取得（確証済み脆弱性・仮説件数の内訳を含む）
+curl http://localhost:8765/api/v1/scan/results
 ```
 
 ---
