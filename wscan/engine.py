@@ -2927,6 +2927,8 @@ class ScanEngine:
         # no refresh command / interval was configured.
         self.header_manager.start_background_refresh()
 
+        scan_aborted = False
+        self.scan_aborted = False
         try:
             await self._browser.init()
             self._browser_ready = True  # init 成功後のみ browser 前提を「充足」とみなす
@@ -2945,8 +2947,6 @@ class ScanEngine:
             # per-payload の AbortScan が飛ぶ。AbortScan は BaseException で外側の
             # except Exception では捕まらず、ここで受けないと run() を抜けて serve
             # ループごと落ちる（crawl 由来と同じ経路）。crawl-review の cancel も同様。
-            scan_aborted = False
-            self.scan_aborted = False
             try:
                 # Auth-1: Auto-login if login URL provided
                 if self.login_url and self._browser.auth_user and self._browser.auth_pass:

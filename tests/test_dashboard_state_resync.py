@@ -219,6 +219,7 @@ class ScanSnapshotTests(unittest.TestCase):
                  patch.object(engine, "_phase_verify", AsyncMock()), \
                  patch.object(engine, "_phase_report_async", AsyncMock()), \
                  patch.object(engine, "_drain_notifications", AsyncMock()), \
+                 patch.object(engine._browser, "init", AsyncMock()), \
                  patch.object(engine._browser, "close", AsyncMock()):
                 await engine.run()
 
@@ -246,6 +247,7 @@ class ScanSnapshotTests(unittest.TestCase):
                  patch.object(engine, "_phase_verify", AsyncMock()), \
                  patch.object(engine, "_phase_report_async", AsyncMock()), \
                  patch.object(engine, "_drain_notifications", AsyncMock()), \
+                 patch.object(engine._browser, "init", AsyncMock()), \
                  patch.object(engine._browser, "close", AsyncMock()):
                 await engine.run()
 
@@ -255,6 +257,28 @@ class ScanSnapshotTests(unittest.TestCase):
         self.assertEqual(monitor.api_scan_status, "done")
         self.assertEqual(monitor._scan_complete_data.get("status"), "done")
         self.assertFalse(monitor._scan_complete_data.get("aborted"))
+
+    def test_scan_engine_preserves_browser_startup_error(self):
+        from unittest.mock import AsyncMock, patch
+        from wscan.engine import ScanEngine
+
+        monitor = MonitorServer(port=0)
+        engine = ScanEngine("http://127.0.0.1:9/target", monitor=monitor)
+        startup_error = RuntimeError("browser startup failed")
+
+        async def run_with_startup_failure():
+            with patch.object(engine._browser, "init", AsyncMock(side_effect=startup_error)), \
+                 patch.object(engine._browser, "close", AsyncMock()), \
+                 patch.object(engine.header_manager, "stop_background_refresh", AsyncMock()), \
+                 patch.object(engine, "_phase_verify", AsyncMock()), \
+                 patch.object(engine, "_phase_report_async", AsyncMock()), \
+                 patch.object(engine, "_drain_notifications", AsyncMock()):
+                await engine.run()
+
+        import asyncio
+        with self.assertRaisesRegex(RuntimeError, "browser startup failed") as caught:
+            asyncio.run(run_with_startup_failure())
+        self.assertIs(caught.exception, startup_error)
 
     def test_short_history_snapshot_preserves_url_order_statuses_and_new_run_reset(self):
         monitor = MonitorServer(port=0)
