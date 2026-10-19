@@ -84,6 +84,49 @@ class StateTests(unittest.TestCase):
         self.assertFalse(restored.is_done_ip(ip, "xss"))
         self.assertTrue(restored.is_truncation_exhausted_ip(ip, "xss"))
 
+    def test_candidate_snapshots_roundtrip_by_ip_check_and_phase(self):
+        state = CheckpointState()
+        first = InjectionPoint.for_form("http://h/a", "q", 0)
+        other = InjectionPoint.for_form("http://other/a", "q", 0)
+        json_email = InjectionPoint.for_json_body("POST", "http://h/api", "/email")
+        json_name = InjectionPoint.for_json_body("POST", "http://h/api", "/name")
+        state.save_candidate_snapshot_ip(first, "xss", "baseline", ["a", "b"], "plan_override")
+        state.save_candidate_snapshot_ip(first, "xss", "adaptive", [], "adaptive_engine")
+        state.save_candidate_snapshot_ip(other, "xss", "baseline", ["other"], "payload_generator")
+        state.save_candidate_snapshot_ip(json_email, "sqli", "baseline", ["email"], "payload_generator")
+        state.save_candidate_snapshot_ip(json_name, "sqli", "baseline", ["name"], "payload_generator")
+
+        restored = CheckpointState.from_dict(state.to_dict())
+        self.assertEqual(restored.source_version, 9)
+        self.assertEqual(restored.get_candidate_snapshot_ip(first, "xss", "baseline"), (True, ["a", "b"]))
+        self.assertEqual(restored.get_candidate_snapshot_ip(first, "xss", "adaptive"), (True, []))
+        self.assertEqual(restored.get_candidate_snapshot_ip(other, "xss", "baseline"), (True, ["other"]))
+        self.assertEqual(restored.get_candidate_snapshot_ip(json_email, "sqli", "baseline"), (True, ["email"]))
+        self.assertEqual(restored.get_candidate_snapshot_ip(json_name, "sqli", "baseline"), (True, ["name"]))
+        self.assertEqual(restored.get_candidate_snapshot_ip(first, "xss", "mutation"), (False, None))
+
+    def test_malformed_candidate_snapshot_is_not_treated_as_absent(self):
+        ip = InjectionPoint.for_form("http://h/a", "q", 0)
+        state = CheckpointState()
+        state.candidate_snapshots[state._candidate_unit_key(ip, "xss")] = {
+            "baseline": {"version": 2, "source": "old", "candidates": ["x"]}
+        }
+        with self.assertRaisesRegex(ValueError, "checkpoint_candidate_snapshot_invalid:baseline"):
+            state.get_candidate_snapshot_ip(ip, "xss", "baseline")
+
+    def test_legacy_truncated_unit_without_queue_is_explicitly_unknown(self):
+        ip = InjectionPoint.for_form("http://h/a", "q", 0)
+        key = CheckpointState._candidate_unit_key(ip, "xss")
+        state = CheckpointState.from_dict({
+            "version": 8,
+            "truncation_counts": {key: 1},
+            "exhausted_truncations": [],
+        })
+        self.assertTrue(state.has_legacy_truncation_without_candidates(ip, "xss"))
+        state.mark_legacy_candidate_unknown_ip(ip, "xss")
+        restored = CheckpointState.from_dict(state.to_dict())
+        self.assertTrue(restored.is_legacy_candidate_unknown_ip(ip, "xss"))
+
     def test_v7_truncation_metadata_gets_new_retry_limit_semantics(self):
         """v7 は旧閾値で保存された exhausted を2回目の再試行まで戻す。"""
         state = CheckpointState.from_dict({

@@ -53,6 +53,8 @@ _CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
 # Per-task payload override: maps check_type → list[str].  Set for the duration
 # of a single scan_field call so parallel workers never clobber each other.
 _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", default=None)
+_FIELD_PAYLOAD_STAGE: ContextVar = ContextVar("wscan_payload_stage", default="baseline")
+_FIELD_CANDIDATE_PHASES_SEEN: ContextVar = ContextVar("wscan_candidate_phases_seen", default=None)
 # フィールド単位 attack 時間ボックスの task-local 状態。engine 属性だと
 # --concurrency>1 の並行ワーカー（各 _scan_field は別タスク）が共有 deadline を上書きし合い、
 # 遅い stored-sink の deadline が前進し続けて budget が効かなくなる。payload override と同じく
@@ -2146,10 +2148,10 @@ class ScanEngine:
         self.checkpoint = state
         self._save_checkpoint()
 
-    def _save_checkpoint(self) -> None:
+    def _save_checkpoint(self) -> bool:
         """現在の進捗（済み単位 + Finding スナップショット）を書き出す。"""
         if not self.enable_checkpoint or self.checkpoint is None:
-            return
+            return False
         from wscan import checkpoint as cp
 
         try:
@@ -2214,8 +2216,10 @@ class ScanEngine:
                 for status, count in merged_status_counts.items()
             }
             cp.save_checkpoint(self.output_dir, self.checkpoint)
+            return True
         except Exception as exc:
             self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
+            return False
 
     async def _run_tls_seed_scans(self) -> None:
         """TLS 設定検査を crawl 結果に依存せず operator 指定の seed origin に対して実行する。
@@ -6477,6 +6481,7 @@ class ScanEngine:
         _ident_token = _FIELD_BUDGET_IDENT.set(
             (url, field_name, "URL param" if is_url_param else "form field")
         )
+        _candidate_seen_token = _FIELD_CANDIDATE_PHASES_SEEN.set(set())
         ip = self._injection_point_for(
             url, field_name, form_index, is_url_param, dom_index, field
         )
@@ -6546,6 +6551,28 @@ class ScanEngine:
                 )
                 checks_skipped_done += 1
                 continue
+            _checkpoint_state = getattr(self, "checkpoint", None)
+            if _checkpoint_state is not None and (
+                _checkpoint_state.has_legacy_truncation_without_candidates(ip, check_name)
+                or _checkpoint_state.is_legacy_candidate_unknown_ip(ip, check_name)
+            ):
+                _checkpoint_state.mark_legacy_candidate_unknown_ip(ip, check_name)
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="error",
+                    location=location,
+                    note=(
+                        "Legacy truncated check has no saved candidate queue; historical candidates "
+                        "are unknown and this unit remains incomplete."
+                    ),
+                )
+                self.wave_errors.append(
+                    f"legacy_candidate_state_unknown:{check_name}:{url}:{field_name}"
+                )
+                checks_skipped_done += 1
+                continue
             _is_truncation_exhausted = getattr(
                 self, "_checkpoint_truncation_exhausted_ip", None
             )
@@ -6602,6 +6629,7 @@ class ScanEngine:
 
             check_errored = False
             check_wedged = False
+            scan_row = None
             _scan_note_start = len(self.wave_errors)
             checks_executed += 1
             _dlg_check = getattr(self.browser, "dialog_total", 0)
@@ -6642,6 +6670,9 @@ class ScanEngine:
                         else ""
                     ),
                 )
+                matrix = getattr(self, "scan_matrix", None)
+                if matrix:
+                    scan_row = matrix[-1]
             except AbortScan:
                 # payload 単位の即時停止でこの check は途中終了した。「済み」に
                 # しないことで resume が未完の payload を取りこぼさない（finally の
@@ -6672,6 +6703,9 @@ class ScanEngine:
                 # 未送信/一部送信の check を恒久スキップして見逃す）。truncated は resume で再試行する。
                 _truncated = _FIELD_BUDGET_TRUNCATED.get() or set()
                 if check_name in _truncated:
+                    if scan_row is not None:
+                        scan_row["status"] = "error"
+                        scan_row["note"] = "field attack budget exceeded; check remains incomplete"
                     _record_truncation = getattr(
                         self, "_checkpoint_record_truncation_ip", None
                     )
@@ -6685,9 +6719,34 @@ class ScanEngine:
                             self.wave_errors.append(
                                 f"field_budget_retry_deferred:{check_name}:{attempts}:{url}:{field_name}"
                             )
+                _candidate_phase_gaps = set()
+                if _checkpoint_state is not None:
+                    _candidate_key = _checkpoint_state._candidate_unit_key(ip, check_name)
+                    _seen_phases = _FIELD_CANDIDATE_PHASES_SEEN.get() or set()
+                    _candidate_phase_gaps = {
+                        phase for phase in _checkpoint_state.candidate_phases_ip(ip, check_name)
+                        if phase != "adaptive"
+                        and (_candidate_key, phase) not in _seen_phases
+                    }
+                    if _candidate_phase_gaps:
+                        check_errored = True
+                        if scan_row is not None:
+                            scan_row["status"] = "error"
+                            scan_row["note"] = (
+                                (scan_row.get("note", "") + "; ") if scan_row.get("note") else ""
+                            ) + "saved candidate phase not reached: " + ", ".join(sorted(_candidate_phase_gaps))
+                        self.wave_errors.append(
+                            f"candidate_phase_unreached:{check_name}:{','.join(sorted(_candidate_phase_gaps))}"
+                        )
                 if _field_check_checkpointable(
                     check_errored, check_name in _truncated, check_wedged
                 ):
+                    if _checkpoint_state is not None:
+                        _checkpoint_state.clear_candidate_snapshots_ip(
+                            ip,
+                            check_name,
+                            _checkpoint_state.candidate_phases_ip(ip, check_name) - {"adaptive"},
+                        )
                     self._checkpoint_mark_done_ip(ip, check_name)
                 elif check_wedged:
                     self.wave_errors.append(
@@ -6772,6 +6831,7 @@ class ScanEngine:
         _FIELD_BUDGET_NOTES.reset(_notes_token)
         _FIELD_BUDGET_TRUNCATED.reset(_trunc_token)
         _FIELD_BUDGET_IDENT.reset(_ident_token)
+        _FIELD_CANDIDATE_PHASES_SEEN.reset(_candidate_seen_token)
 
         self.completed_fields += 1
         # フィールド完了ごとに進捗を永続化（中断しても次回ここから再開できる）
@@ -6853,9 +6913,53 @@ class ScanEngine:
         if not check_names:
             return None
 
+        _candidate_state = (
+            getattr(self, "checkpoint", None)
+            if getattr(self, "enable_checkpoint", True) else None
+        )
+        _saved_adaptive: dict[str, list[str]] = {}
+        _candidate_errors: set[str] = set()
+        if _candidate_state is not None:
+            for _cn in check_names:
+                if _cn in _ADAPTIVE_PAGE_LEVEL_CHECKS:
+                    continue
+                try:
+                    _found, _queue = _candidate_state.get_candidate_snapshot_ip(
+                        ip, _cn, "adaptive"
+                    )
+                    if _found:
+                        _saved_adaptive[_cn] = _queue or []
+                    elif (
+                        not self._checkpoint_is_done_ip(ip, _adaptive_checkpoint_check(_cn))
+                        and (
+                            _candidate_state.has_legacy_truncation_without_candidates(
+                                ip, _cn, phase="adaptive"
+                            )
+                            or _candidate_state.is_legacy_candidate_unknown_ip(ip, _cn, "adaptive")
+                        )
+                    ):
+                        _candidate_state.mark_legacy_candidate_unknown_ip(ip, _cn, "adaptive")
+                        self._save_checkpoint()
+                        _candidate_errors.add(_cn)
+                        self.wave_errors.append(
+                            f"legacy_adaptive_candidate_state_unknown:{_cn}:{url}:{field_name}"
+                        )
+                except Exception as exc:
+                    _candidate_errors.add(_cn)
+                    self.wave_errors.append(
+                        f"candidate_snapshot_error:{_cn}:adaptive:{type(exc).__name__}"
+                    )
+        _needs_adaptive_generation = any(
+            _cn not in _saved_adaptive
+            and _cn not in _candidate_errors
+            and _cn not in _ADAPTIVE_PAGE_LEVEL_CHECKS
+            and not self._checkpoint_is_done_ip(ip, _adaptive_checkpoint_check(_cn))
+            for _cn in check_names
+        )
+
         # provider 自体が使えない場合はフォールバック完了として収束させる。
         # 個別 generate() の一時失敗とは分離し、可用性 probe は scan 中に一度だけ行う。
-        if self._adaptive_llm_available is None:
+        if _needs_adaptive_generation and self._adaptive_llm_available is None:
             async with self._adaptive_llm_availability_lock:
                 if self._adaptive_llm_available is None:
                     self._adaptive_llm_available = (
@@ -6867,12 +6971,13 @@ class ScanEngine:
                             f"Adaptive LLM 可用性: {availability}"
                         )
 
-        if not self._adaptive_llm_available:
+        if self._adaptive_llm_available is False and not _saved_adaptive:
             checkpoint_updated = False
             for check_name in check_names:
                 if (
                     check_name not in self.scanners
                     or check_name in _ADAPTIVE_PAGE_LEVEL_CHECKS
+                    or check_name in _candidate_errors
                 ):
                     continue
                 adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
@@ -6882,15 +6987,19 @@ class ScanEngine:
                 checkpoint_updated = True
             if checkpoint_updated:
                 self._save_checkpoint()
-            return []
+            if not _candidate_errors:
+                return []
 
         # Get current page HTML as probe context
         try:
             # 有界版（無限ハング時は ""）。事前 deadline チェック後に始めた read が wedge で
             # 永久ブロックしないよう、かつ "" は取得不能として中断（未完）扱いにする。
-            page_html = await self.browser.get_page_source()
-            if not page_html:
-                return None
+            if _needs_adaptive_generation and self._adaptive_llm_available:
+                page_html = await self.browser.get_page_source()
+                if not page_html:
+                    return None
+            else:
+                page_html = ""
         except Exception:
             return None
 
@@ -6919,6 +7028,9 @@ class ScanEngine:
             adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
             if self._checkpoint_is_done_ip(ip, adaptive_checkpoint_check):
                 continue
+            if check_name in _candidate_errors:
+                generation_failed = True
+                continue
 
             # フィールド時間ボックス超過中は adaptive を実行/完了化しない。
             # 同じ期限切れ deadline 下では送信が _field_budget_gate で短絡され空振りするだけで、
@@ -6931,7 +7043,7 @@ class ScanEngine:
 
             # 別 field/check の恒久失敗で可用性キャッシュが倒れた場合も、以降は
             # LLM を呼ばずフォールバック完了として収束させる。
-            if self._adaptive_llm_available is False:
+            if check_name not in _saved_adaptive and self._adaptive_llm_available is False:
                 self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
                 self._save_checkpoint()
                 continue
@@ -6976,16 +7088,19 @@ class ScanEngine:
             extra = "\n".join(x for x in (history_note, det_obs) if x)
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
-            adaptive_payloads, generation_status = await self.adaptive_engine.generate(
-                check_type=check_name,
-                field_name=field_name,
-                url=url,
-                payloads_tried=tried,
-                page_html=page_html,
-                waf_name=self.waf_detector._detected,
-                extra_observations=extra,
-                return_status=True,
-            )
+            if check_name in _saved_adaptive:
+                adaptive_payloads, generation_status = _saved_adaptive[check_name], "snapshot"
+            else:
+                adaptive_payloads, generation_status = await self.adaptive_engine.generate(
+                    check_type=check_name,
+                    field_name=field_name,
+                    url=url,
+                    payloads_tried=tried,
+                    page_html=page_html,
+                    waf_name=self.waf_detector._detected,
+                    extra_observations=extra,
+                    return_status=True,
+                )
 
             # API キー・モデル・URL 等の恒久不備が判明したら scan 内キャッシュを倒す。
             # 後続 field/check は上の可用性ゲートで収束し、同じ失敗呼び出しを繰り返さない。
@@ -6997,8 +7112,24 @@ class ScanEngine:
                 generation_failed = True
                 continue
 
+            if check_name not in _saved_adaptive and _candidate_state is not None:
+                try:
+                    adaptive_payloads = _candidate_state.save_candidate_snapshot_ip(
+                        ip, check_name, "adaptive", adaptive_payloads, "adaptive_engine"
+                    )
+                    if not self._save_checkpoint():
+                        raise RuntimeError("checkpoint_candidate_snapshot_save_failed")
+                except Exception as exc:
+                    generation_failed = True
+                    self.wave_errors.append(
+                        f"candidate_snapshot_save_error:{check_name}:adaptive:{type(exc).__name__}"
+                    )
+                    continue
+
             generated_payloads.extend(adaptive_payloads)
             if not adaptive_payloads:
+                if _candidate_state is not None:
+                    _candidate_state.clear_candidate_snapshots_ip(ip, check_name, {"adaptive"})
                 self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
                 self._save_checkpoint()
                 continue
@@ -7006,6 +7137,7 @@ class ScanEngine:
             # Run scanner again with adaptive payloads — isolated via ContextVar
             current_overrides = _FIELD_PAYLOAD_OVERRIDES.get() or {}
             _adaptive_token = _FIELD_PAYLOAD_OVERRIDES.set({**current_overrides, check_name: adaptive_payloads})
+            _stage_token = _FIELD_PAYLOAD_STAGE.set("adaptive")
 
             try:
                 findings = await scanner.scan_injection_point(ip, field)
@@ -7031,10 +7163,13 @@ class ScanEngine:
                 if check_name in _truncated:
                     generation_failed = True
                 else:
+                    if _candidate_state is not None:
+                        _candidate_state.clear_candidate_snapshots_ip(ip, check_name, {"adaptive"})
                     self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
                     # 後続 check の失敗やプロセス中断でも部分成功を保持する。
                     self._save_checkpoint()
             finally:
+                _FIELD_PAYLOAD_STAGE.reset(_stage_token)
                 _FIELD_PAYLOAD_OVERRIDES.reset(_adaptive_token)
 
             # CTF: scan page again after adaptive probe

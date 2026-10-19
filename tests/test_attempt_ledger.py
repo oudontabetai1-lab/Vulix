@@ -7,6 +7,7 @@
 """
 import json
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -19,6 +20,8 @@ from wscan.attempt_ledger import (
     unique_payloads,
 )
 from wscan.injection_point import InjectionPoint
+from wscan.checkpoint import CheckpointState
+from wscan.engine import _FIELD_PAYLOAD_STAGE
 from wscan.scanners.base import BaseScanner
 
 
@@ -308,6 +311,121 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payloads, ["default1"])
         self.assertIsNotNone(engine.payload_gen.captured_history)
         self.assertEqual(engine.payload_gen.captured_history[0].payload, "<script>")
+
+    async def test_final_candidate_queue_survives_restart_and_phase_isolated(self):
+        class _QueueGen:
+            def __init__(self, payload):
+                self.payload = payload
+                self.default_payloads = {"xss": []}
+                self.calls = 0
+
+            async def generate(self, **kwargs):
+                self.calls += 1
+                return [self.payload]
+
+        engine = _GenEngine()
+        engine.enable_checkpoint = True
+        engine.checkpoint = CheckpointState()
+        engine._save_checkpoint = lambda: True
+        engine.payload_gen = _QueueGen("planned-original")
+        scanner = _PlainScanner(engine)
+        ip = InjectionPoint.for_form("http://fixture.test/p", "q")
+        self.assertEqual(await scanner.get_payloads("q", ip.url, ip=ip), ["planned-original"])
+
+        # A restarted planner/generator offers different input; persisted baseline wins.
+        engine.checkpoint = CheckpointState.from_dict(engine.checkpoint.to_dict())
+        replacement = _QueueGen("planner-replacement")
+        engine.payload_gen = replacement
+        scanner = _PlainScanner(engine)
+        self.assertEqual(await scanner.get_payloads("q", ip.url, ip=ip), ["planned-original"])
+        self.assertEqual(replacement.calls, 0)
+
+        # Adaptive generation shares the same IP/check but must own a distinct queue.
+        engine.payload_gen = _QueueGen("adaptive-original")
+        scanner = _PlainScanner(engine)
+        token = _FIELD_PAYLOAD_STAGE.set("adaptive")
+        try:
+            self.assertEqual(await scanner.get_payloads("q", ip.url, ip=ip), ["adaptive-original"])
+        finally:
+            _FIELD_PAYLOAD_STAGE.reset(token)
+        self.assertEqual(
+            engine.checkpoint.get_candidate_snapshot_ip(ip, "xss", "adaptive"),
+            (True, ["adaptive-original"]),
+        )
+
+    async def test_evolution_and_mutation_queues_survive_restart(self):
+        engine = _GenEngine()
+        engine.enable_checkpoint = True
+        engine.checkpoint = CheckpointState()
+        engine._save_checkpoint = lambda: True
+        engine.enable_payload_evolution = True
+        engine.enable_payload_mutation = True
+        engine.adaptive_enabled = False
+        scanner = _PlainScanner(engine)
+        ip = InjectionPoint.for_form("http://fixture.test/p", "q", 1)
+
+        scanner._evolution_probe = AsyncMock(return_value=("", set(), {"marker": "one"}))
+        with patch("wscan.context_mutator.mutate", side_effect=[["evolved-original"], ["evolved-new"]]) as mutate:
+            self.assertEqual(
+                await scanner.evolved_payloads(ip.url, ip.form_index, "q", False, dom_index=1),
+                ["evolved-original"],
+            )
+            engine.checkpoint = CheckpointState.from_dict(engine.checkpoint.to_dict())
+            restarted = _PlainScanner(engine)
+            restarted._evolution_probe = AsyncMock(return_value=("", set(), {"marker": "two"}))
+            self.assertEqual(
+                await restarted.evolved_payloads(ip.url, ip.form_index, "q", False, dom_index=1),
+                ["evolved-original"],
+            )
+            mutate.assert_called_once()
+            restarted._evolution_probe.assert_not_awaited()
+
+        with patch("wscan.payload_mutator.mutation_payloads", side_effect=[["mutation-original"], ["mutation-new"]]) as mutate:
+            self.assertEqual(
+                await scanner.mutated_payloads("q", ip.url, ["seed-one"], ip=ip),
+                ["mutation-original"],
+            )
+            engine.checkpoint = CheckpointState.from_dict(engine.checkpoint.to_dict())
+            restarted = _PlainScanner(engine)
+            self.assertEqual(
+                await restarted.mutated_payloads("q", ip.url, ["seed-two"], ip=ip),
+                ["mutation-original"],
+            )
+            mutate.assert_called_once()
+
+    async def test_corrupt_or_unsaved_candidate_queue_fails_closed(self):
+        from wscan.scanners.base import CandidateSnapshotError
+
+        class _QueueGen:
+            def __init__(self):
+                self.default_payloads = {"xss": []}
+                self.calls = 0
+
+            async def generate(self, **kwargs):
+                self.calls += 1
+                return ["new-candidate"]
+
+        engine = _GenEngine()
+        engine.enable_checkpoint = True
+        engine.checkpoint = CheckpointState()
+        engine._save_checkpoint = lambda: True
+        generator = _QueueGen()
+        engine.payload_gen = generator
+        scanner = _PlainScanner(engine)
+        ip = InjectionPoint.for_form("http://fixture.test/p", "q")
+        engine.checkpoint.candidate_snapshots[
+            engine.checkpoint._candidate_unit_key(ip, "xss")
+        ] = {"baseline": {"version": 2, "source": "unsupported", "candidates": ["old"]}}
+        with self.assertRaises(CandidateSnapshotError):
+            await scanner.get_payloads("q", ip.url, ip=ip)
+        self.assertEqual(generator.calls, 0)
+
+        engine.checkpoint = CheckpointState()
+        engine._save_checkpoint = lambda: False
+        scanner = _PlainScanner(engine)
+        with self.assertRaisesRegex(CandidateSnapshotError, "save_failed"):
+            await scanner.get_payloads("q", ip.url, ip=ip)
+        self.assertFalse(engine.checkpoint.is_done_ip(ip, "xss"))
 
     async def test_no_ip_means_no_history(self):
         engine = _GenEngine()

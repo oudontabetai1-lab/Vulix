@@ -562,7 +562,7 @@ class SQLiScanner(BaseScanner):
 
         # --- Mutation wave: bypass変種 + キャップで漏れた blind(boolean/time) を確実に投入 ---
         if not findings:
-            mutated = await self.mutated_payloads(field_name, ip.url, payloads)
+            mutated = await self.mutated_payloads(field_name, ip.url, payloads, ip=ip)
             for payload in mutated:
                 if await _test_payload(payload, "sqli_mutation"):
                     break
