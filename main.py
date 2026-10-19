@@ -3097,8 +3097,8 @@ async def run_serve(args):
                 "openai_base_url": cfg.get("openai_base_url", "") or "",
                 "role_models":  cfg.get("role_models", {}) or {},
             })
-        # scan_started は event_history に積まれ再接続クライアントへ再生されるため、
-        # Bearer/TOTP/ヘッダ等の秘匿値を伏字化して配信する（エンジンへはフルの cfg を
+        # scan_started は WebSocket で配信され state snapshot にも保持されるため、
+        # Bearer/TOTP/ヘッダ等の秘匿値を伏字化する（エンジンへはフルの cfg を
         # 別経路で渡すので機能には影響しない）。
         await monitor.emit_scan_started(_redact_secrets(cfg))
 
@@ -3491,10 +3491,8 @@ async def run_serve(args):
             monitor.scan_request_event.clear()
             monitor.scan_in_progress = True
             monitor.mark_scan_started()  # watchdog 計測開始
-            # New scan accepted: clear the previous run's event log so this scan
-            # starts from a clean slate in the dashboard. Also drop any pending
-            # interactive modal (e.g. the idle awaiting_config) so a client that
-            # reconnects mid-scan is not shown a stale config form / old review.
+            # New scan accepted: discard the previous run's retained events and
+            # pending modal; reconnecting dashboards receive this run's snapshot.
             monitor.event_history.clear()
             monitor.pending_interactive = None
             cfg = monitor.scan_request_data or {}
