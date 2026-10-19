@@ -7924,9 +7924,12 @@ class ScanEngine:
                 console.print(f"  [yellow]差分スキャン失敗: {exc}[/yellow]")
 
         llm_summary = self._llm_runtime_summary()
+        terminal_status = "aborted" if self.scan_aborted else "done"
         evidence = {
             "target": self.target_url,
             "scan_date": datetime.datetime.now().isoformat(),
+            "status": terminal_status,
+            "aborted": bool(self.scan_aborted),
             "checks": self.checks,
             "visited_urls": list(self.visited_urls),
             "llm_summary": llm_summary,

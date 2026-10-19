@@ -858,6 +858,178 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             self.assertEqual(page.locator("#findingsPanel .finding-card").count(), 1)
             browser.close()
 
+    def test_chromium_history_list_renders_aborted_and_done_badges(self):
+        import json
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from playwright.sync_api import sync_playwright
+        import wscan.monitor as monitor_mod
+
+        tmp_out = Path(tempfile.mkdtemp(prefix="wscan_history_ui_test_"))
+        orig_base = monitor_mod.OUTPUT_BASE
+        try:
+            monitor_mod.OUTPUT_BASE = tmp_out
+
+            # 1. Aborted scan folder
+            d_aborted = tmp_out / "20261019_010000"
+            d_aborted.mkdir(parents=True)
+            (d_aborted / "report.html").write_text("<html>aborted</html>", encoding="utf-8")
+            (d_aborted / "evidence.json").write_text(json.dumps({
+                "target": "http://127.0.0.1:9/target-aborted",
+                "scan_date": "2026-10-19T01:00:00",
+                "status": "aborted",
+                "aborted": True,
+                "findings": [],
+            }), encoding="utf-8")
+
+            # 2. Done scan folder (normal safe twin)
+            d_done = tmp_out / "20261019_020000"
+            d_done.mkdir(parents=True)
+            (d_done / "report.html").write_text("<html>done</html>", encoding="utf-8")
+            (d_done / "evidence.json").write_text(json.dumps({
+                "target": "http://127.0.0.1:9/target-done",
+                "scan_date": "2026-10-19T02:00:00",
+                "status": "done",
+                "aborted": False,
+                "findings": [],
+            }), encoding="utf-8")
+
+            # 3. Legacy scan folder without status/aborted
+            d_legacy = tmp_out / "20261019_030000"
+            d_legacy.mkdir(parents=True)
+            (d_legacy / "report.html").write_text("<html>legacy</html>", encoding="utf-8")
+            (d_legacy / "evidence.json").write_text(json.dumps({
+                "target": "http://127.0.0.1:9/target-legacy",
+                "scan_date": "2026-10-19T03:00:00",
+                "findings": [],
+            }), encoding="utf-8")
+
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page()
+
+                def local_only(route):
+                    if route.request.url.startswith(self.base_url):
+                        route.continue_()
+                    else:
+                        route.abort()
+
+                page.route("**/*", local_only)
+                page.goto(f"{self.base_url}/", wait_until="domcontentloaded")
+                page.wait_for_selector("#scanRows tr td span.st")
+
+                rows = page.locator("#scanRows tr")
+                self.assertEqual(rows.count(), 3)
+
+                badges = page.locator("#scanRows tr td span.st").all_inner_texts()
+                classes = [
+                    page.locator("#scanRows tr td span.st").nth(i).get_attribute("class")
+                    for i in range(rows.count())
+                ]
+
+                # Verify presence of 'aborted' and 'done' statuses and styling
+                self.assertIn("aborted", badges)
+                self.assertIn("done", badges)
+                self.assertTrue(any("st aborted" in c for c in classes))
+                self.assertTrue(any("st done" in c for c in classes))
+
+                browser.close()
+        finally:
+            monitor_mod.OUTPUT_BASE = orig_base
+            shutil.rmtree(tmp_out, ignore_errors=True)
+
+
+class ScanHistoryStatusPersistenceTests(unittest.TestCase):
+    def test_save_evidence_writes_status_and_aborted_for_aborted_and_normal(self):
+        import json
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from wscan.engine import ScanEngine
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="wscan_evidence_test_"))
+        try:
+            # Aborted twin
+            eng_aborted = ScanEngine("http://127.0.0.1:9/target", output_dir=str(tmp_dir / "aborted"))
+            eng_aborted.scan_aborted = True
+            eng_aborted._save_evidence()
+
+            ev_aborted = json.loads((tmp_dir / "aborted" / "evidence.json").read_text(encoding="utf-8"))
+            self.assertEqual(ev_aborted.get("status"), "aborted")
+            self.assertIs(ev_aborted.get("aborted"), True)
+
+            # Normal completion safe twin
+            eng_normal = ScanEngine("http://127.0.0.1:9/target", output_dir=str(tmp_dir / "normal"))
+            eng_normal.scan_aborted = False
+            eng_normal._save_evidence()
+
+            ev_normal = json.loads((tmp_dir / "normal" / "evidence.json").read_text(encoding="utf-8"))
+            self.assertEqual(ev_normal.get("status"), "done")
+            self.assertIs(ev_normal.get("aborted"), False)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_list_scans_returns_truthful_status_for_aborted_done_and_legacy(self):
+        import json
+        import shutil
+        import tempfile
+        from pathlib import Path
+        import wscan.monitor as monitor_mod
+
+        tmp_base = Path(tempfile.mkdtemp(prefix="wscan_scans_test_"))
+        orig_base = monitor_mod.OUTPUT_BASE
+        try:
+            monitor_mod.OUTPUT_BASE = tmp_base
+            monitor = monitor_mod.MonitorServer(port=0)
+
+            # Aborted persisted evidence
+            d_aborted = tmp_base / "scan_aborted"
+            d_aborted.mkdir(parents=True)
+            (d_aborted / "report.html").write_text("<html>rpt</html>", encoding="utf-8")
+            (d_aborted / "evidence.json").write_text(json.dumps({
+                "target": "http://127.0.0.1:9/target",
+                "scan_date": "2026-10-19T01:00:00",
+                "status": "aborted",
+                "aborted": True,
+                "findings": [],
+            }), encoding="utf-8")
+
+            # Normal completed persisted evidence
+            d_done = tmp_base / "scan_done"
+            d_done.mkdir(parents=True)
+            (d_done / "report.html").write_text("<html>rpt</html>", encoding="utf-8")
+            (d_done / "evidence.json").write_text(json.dumps({
+                "target": "http://127.0.0.1:9/target",
+                "scan_date": "2026-10-19T02:00:00",
+                "status": "done",
+                "aborted": False,
+                "findings": [],
+            }), encoding="utf-8")
+
+            # Legacy persisted evidence without status/aborted
+            d_legacy = tmp_base / "scan_legacy"
+            d_legacy.mkdir(parents=True)
+            (d_legacy / "report.html").write_text("<html>rpt</html>", encoding="utf-8")
+            (d_legacy / "evidence.json").write_text(json.dumps({
+                "target": "http://127.0.0.1:9/target",
+                "scan_date": "2026-10-19T03:00:00",
+                "findings": [],
+            }), encoding="utf-8")
+
+            client = TestClient(monitor.app)
+            resp = client.get("/api/v1/scans")
+            self.assertEqual(resp.status_code, 200)
+            scans_by_id = {s["id"]: s for s in resp.json().get("scans", [])}
+
+            self.assertEqual(scans_by_id["scan_aborted"]["status"], "aborted")
+            self.assertEqual(scans_by_id["scan_done"]["status"], "done")
+            self.assertEqual(scans_by_id["scan_legacy"]["status"], "done")
+        finally:
+            monitor_mod.OUTPUT_BASE = orig_base
+            shutil.rmtree(tmp_base, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
+
