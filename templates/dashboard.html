@@ -64,6 +64,7 @@ body {
 .status-dot.running { background: var(--running); animation: pulse 1.5s infinite; }
 .status-dot.done { background: var(--success); }
 .status-dot.error { background: var(--critical); }
+.status-dot.aborted { background: var(--high); }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 .status-text { color: var(--text-muted); font-size: 0.85rem; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.status-bar{min-width:0}
 .header-stats {
@@ -926,7 +927,7 @@ body { padding-left: 212px; }
 .ws-newscan:hover{background:linear-gradient(to bottom,#6f64a8,#5d5294)}.ws-newscan:focus-visible,.hdr-newscan:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .ws-rail .ws-cur{padding:12px 12px 2px}
 .ws-rail .ws-eyebrow{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px}
-.ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--text-muted)}.ws-rail .pulse.running{background:var(--running);animation:wsPulseRail 1.8s ease-in-out infinite}.ws-rail .pulse.done{background:var(--success)}.ws-rail .pulse.error{background:var(--critical)}
+.ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--text-muted)}.ws-rail .pulse.running{background:var(--running);animation:wsPulseRail 1.8s ease-in-out infinite}.ws-rail .pulse.done{background:var(--success)}.ws-rail .pulse.error{background:var(--critical)}.ws-rail .pulse.aborted{background:var(--high)}
 @keyframes wsPulseRail{0%,100%{opacity:1}50%{opacity:.35}}
 .ws-rail .ws-cur-status{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ws-rail .foot{margin-top:auto;padding:0 18px;display:flex;flex-direction:column;gap:8px;font-size:11.5px;color:var(--text-muted)}
@@ -4454,16 +4455,23 @@ function handleEvent(event) {
         if (rep) { rep.href = `/reports/${encodeURIComponent(data.scan_id)}/report.html`; rep.style.display = ''; }
         if (zip) { zip.href = `/api/v1/scans/${encodeURIComponent(data.scan_id)}/download`; zip.style.display = ''; }
       }
-      setStatus(`Scan complete — ${data.total_findings} finding(s)`, 'done');
-      document.getElementById('progressBar').style.width = '100%';
-      document.getElementById('statPct').textContent = '100%';
-      document.getElementById('progressStripe').style.display = 'none';
-      addEventLog('status', `Scan complete. Report: ${data.report_path}`);
-      // Finalize ETA display
+      const isAborted = data.status === 'aborted' || !!data.aborted;
       state.scanDone = true;
-      document.getElementById('statRemain').textContent = '完了';
+      document.getElementById('progressStripe').style.display = 'none';
       document.getElementById('statETA').textContent = '—';
       showPostScanActions(true);
+
+      if (isAborted) {
+        setStatus(`Scan aborted (partial report) — ${data.total_findings} finding(s)`, 'aborted');
+        addEventLog('status', `Scan aborted (partial report). Report: ${data.report_path || ''}`);
+        document.getElementById('statRemain').textContent = '中断';
+      } else {
+        setStatus(`Scan complete — ${data.total_findings} finding(s)`, 'done');
+        document.getElementById('progressBar').style.width = '100%';
+        document.getElementById('statPct').textContent = '100%';
+        addEventLog('status', `Scan complete. Report: ${data.report_path}`);
+        document.getElementById('statRemain').textContent = '完了';
+      }
       // Close timing for any phase that started but didn't get a "next phase" event
       { ['crawl','plan','attack','report'].forEach(p => {
           if (state.phaseStartTs[p] != null && state.phaseTimes[p] == null) {
@@ -4517,9 +4525,9 @@ function handleEvent(event) {
       break;
 
     case 'awaiting_config':
-      // Serve mode: show the scan config form. アイドル復帰なので、前スキャンの
-      // レビュー待ちモーダルが残っていれば閉じる（亡霊モーダル防止）。
       closeInteractiveModals();
+      // 次の設定を受け付けても、完了/中断した結果は新規スキャン操作まで保持する。
+      if (state.scanDone) break;
       document.getElementById('scanConfigOverlay').classList.add('active');
       setStatus('設定フォームに入力してスキャンを開始してください', '');
       break;
@@ -4656,7 +4664,7 @@ function applyScanSnapshot(event) {
   state.urlStatuses = data.url_statuses && typeof data.url_statuses === 'object'
     ? {...data.url_statuses} : {};
   state.phase = data.phase || null;
-  state.scanDone = status === 'done';
+  state.scanDone = status === 'done' || status === 'aborted';
   document.getElementById('eventCount').textContent = state.eventCount;
   document.getElementById('statPages').textContent = state.pageCount;
   renderCheckCounters();
@@ -4675,7 +4683,7 @@ function applyScanSnapshot(event) {
   document.getElementById('statPct').textContent = pct + '%';
   document.getElementById('statCurrent').textContent = progress.current ?? 0;
   document.getElementById('statTotal').textContent = progress.total > 0 ? '/' + progress.total : '';
-  document.getElementById('progressStripe').style.display = status === 'done' ? 'none' : (pct < 100 ? 'block' : 'none');
+  document.getElementById('progressStripe').style.display = (status === 'done' || status === 'aborted') ? 'none' : (pct < 100 ? 'block' : 'none');
 
   if (status === 'done') {
     const complete = data.complete || {};
@@ -4689,6 +4697,28 @@ function applyScanSnapshot(event) {
       showPostScanActions(true);
     } else {
       setStatus(`Scan complete — ${findings.length} finding(s)`, 'done');
+    }
+  } else if (status === 'aborted') {
+    const complete = data.complete || {};
+    const abortPayload = {
+      ...complete,
+      status: 'aborted',
+      aborted: true,
+      total_findings: complete.total_findings != null ? complete.total_findings : findings.length,
+      findings: complete.findings || findings,
+      report_path: complete.report_path || '',
+      scan_id: complete.scan_id || data.scan_id || '',
+    };
+    if (Object.keys(complete).length && !wasDone) {
+      handleEvent({type: 'scan_complete', data: abortPayload, timestamp: event.timestamp});
+    } else if (!wasDone) {
+      setStatus(`Scan aborted (partial report) — ${findings.length} finding(s)`, 'aborted');
+      state.scanDone = true;
+      document.getElementById('statRemain').textContent = '中断';
+      document.getElementById('statETA').textContent = '—';
+      showPostScanActions(true);
+    } else {
+      setStatus(`Scan aborted (partial report) — ${findings.length} finding(s)`, 'aborted');
     }
   } else if (status === 'error') {
     setStatus(data.status_message || 'Scan failed', 'error');

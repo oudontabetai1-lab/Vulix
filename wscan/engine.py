@@ -945,6 +945,7 @@ class ScanEngine:
         # fast_mode forces 0; ctf_mode halves the delay
         self._effective_delay: float = request_delay * self.sleep_factor
         self.navigation_retries: int = max(0, int(navigation_retries))
+        self.scan_aborted: bool = False
         self._cookies: str = cookies
         self.cookie_list: list = list(cookie_list or [])
         # Normalise low-privilege cookies: prefer list form when both are given
@@ -2926,6 +2927,8 @@ class ScanEngine:
         # no refresh command / interval was configured.
         self.header_manager.start_background_refresh()
 
+        scan_aborted = False
+        self.scan_aborted = False
         try:
             await self._browser.init()
             self._browser_ready = True  # init 成功後のみ browser 前提を「充足」とみなす
@@ -2944,7 +2947,6 @@ class ScanEngine:
             # per-payload の AbortScan が飛ぶ。AbortScan は BaseException で外側の
             # except Exception では捕まらず、ここで受けないと run() を抜けて serve
             # ループごと落ちる（crawl 由来と同じ経路）。crawl-review の cancel も同様。
-            scan_aborted = False
             try:
                 # Auth-1: Auto-login if login URL provided
                 if self.login_url and self._browser.auth_user and self._browser.auth_pass:
@@ -3031,6 +3033,7 @@ class ScanEngine:
                 self._profile("attack: done")
             except AbortScan:
                 scan_aborted = True
+                self.scan_aborted = True
                 # 中断時点の Finding と進捗を必ず永続化してから続行する。payload 単位の
                 # 即時停止は _scan_field 末尾の _save_checkpoint より前に抜けるため、
                 # ここで保存しないと中断フィールドで既に記録した Finding が checkpoint
@@ -3061,6 +3064,7 @@ class ScanEngine:
                     self._profile("phase3b: done")
                 except AbortScan:
                     scan_aborted = True
+                    self.scan_aborted = True
 
             # ── Phase 3c: Post-Auth Crawl + Attack (if SQLi bypass detected) ──
             if not scan_aborted and self.auth_bypass_detected:
@@ -3089,6 +3093,7 @@ class ScanEngine:
                         )
                 except AbortScan:
                     scan_aborted = True
+                    self.scan_aborted = True
                     # 中断時点の Finding/進捗を永続化（resume と部分レポートの整合）。
                     self._save_checkpoint()
 
@@ -3149,7 +3154,8 @@ class ScanEngine:
 
             if self.monitor:
                 self.monitor.api_findings = [f.to_dict() for f in self.all_findings]
-                self.monitor.api_scan_status = "done"
+                terminal_status = "aborted" if scan_aborted else "done"
+                self.monitor.api_scan_status = terminal_status
                 # Only expose a portal-servable scan id when the output folder
                 # lives under OUTPUT_BASE; the /reports endpoint resolves ids
                 # there, so a custom output_dir elsewhere would 404.
@@ -3164,6 +3170,8 @@ class ScanEngine:
                     "report_path": str(self.output_dir / "report.html"),
                     "scan_id": served_scan_id,
                     "findings": self.monitor.api_findings,
+                    "status": terminal_status,
+                    "aborted": scan_aborted,
                 })
 
     # =========================================================================

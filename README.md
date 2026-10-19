@@ -284,7 +284,11 @@ Agent は LLM がページを観察し、操作、ペイロード選択、結果
 
 ### 実行中・結果
 
-実行中は Crawl / Plan / Attack / Report のフェーズ、巡回マップ、ブラウザ画面、チェック進捗、現在の URL/Field/Check/Payload、Findings、Request/Response、Event Log を確認できます。一時停止、再開、フィールド/ページのスキップ、中断、手動ペイロード実行も利用できます。中断時はその時点までの部分レポートを保存します。
+実行中は Crawl / Plan / Attack / Report のフェーズ、巡回マップ、ブラウザ画面、チェック進捗、現在の URL/Field/Check/Payload、Findings、Request/Response、Event Log を確認できます。一時停止、再開、フィールド/ページのスキップ、中断、手動ペイロード実行も利用できます。中断すると終端状態は「中断」と表示され、通常完了とは区別されます。その時点までに得られた Finding の部分レポートは保存されます。
+
+完了・中断後は結果画面を保持します。次のスキャンは「＋ 新規スキャン」から設定できます。
+
+![中断したスキャンの終端状態](docs/images/dashboard-aborted.png)
 
 詳しい画面操作は [ダッシュボード利用ガイド](docs/dashboard_usage_ja.md) を参照してください。
 
