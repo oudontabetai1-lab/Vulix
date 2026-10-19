@@ -2189,6 +2189,10 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
 const state = {
   ws: null,
   connected: false,
+  serverInstanceId: null,
+  scanRunId: null,
+  scanId: null,
+  lastEventSequence: 0,
   eventCount: 0,
   findingCount: 0,
   pageCount: 0,
@@ -4171,7 +4175,36 @@ function handleEvent(event) {
   const { type, data, timestamp } = event;
   if (type === 'ping') return;
 
-  state.eventCount++;
+  if (type === 'scan_snapshot') {
+    applyScanSnapshot(event);
+    return;
+  }
+
+  if (event.server_id && Number.isInteger(event.sequence)) {
+    if (state.serverInstanceId && event.server_id !== state.serverInstanceId) return;
+    const incomingRunId = event.run_id || null;
+    const newRun = incomingRunId !== state.scanRunId;
+    if (newRun) {
+      if (type !== 'scan_started') return;
+      resetLiveScanState();
+      state.serverInstanceId = event.server_id;
+      state.scanRunId = incomingRunId;
+      state.lastEventSequence = 0;
+    }
+    if (event.sequence <= state.lastEventSequence) return;
+    if (event.sequence !== state.lastEventSequence + 1) {
+      // A sequence gap means some live state was missed; reconnect for a fresh snapshot.
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.close();
+      return;
+    }
+    state.serverInstanceId = event.server_id;
+    state.scanRunId = incomingRunId;
+    state.scanId = event.scan_id || null;
+    state.lastEventSequence = event.sequence;
+    state.eventCount = event.sequence;
+  } else if (type !== 'manual_crawl_frame') {
+    state.eventCount++;
+  }
   document.getElementById('eventCount').textContent = state.eventCount;
 
   switch (type) {
@@ -4512,9 +4545,7 @@ function handleEvent(event) {
       // (他タブ/REST の観測)なら最新の(伏字)config を採用して stale を避ける。
       _promotePendingScan(data);
       showPostScanActions(false);
-      resetLiveScanState();
-      state.eventCount = 1;
-      document.getElementById('eventCount').textContent = state.eventCount;
+      if (!event.run_id) resetLiveScanState();
       setStatus(`スキャン開始: ${data.url || ''}`, 'running');
       addEventLog('status', `Scan started: ${data.url || 'target'}`);
       break;
@@ -4524,6 +4555,10 @@ function handleEvent(event) {
 // ─── Phase / URL / Payload helpers ──────────────────────────────
 function resetLiveScanState() {
   state.eventCount = 0;
+  state.serverInstanceId = null;
+  state.scanRunId = null;
+  state.scanId = null;
+  state.lastEventSequence = 0;
   state.findingCount = 0;
   state.findingKeys = new Set();
   state.findingCards = new Map();
@@ -4594,6 +4629,78 @@ function resetLiveScanState() {
   renderUrlList();
   renderCheckCounters();
   renderCheckProgressBars();
+}
+
+function applyScanSnapshot(event) {
+  const data = event.data || {};
+  const sameRun = !!state.serverInstanceId
+    && state.serverInstanceId === event.server_id
+    && state.scanRunId === (event.run_id || null);
+  const wasDone = state.scanDone;
+  if (!sameRun) resetLiveScanState();
+  state.serverInstanceId = event.server_id || null;
+  state.scanRunId = event.run_id || null;
+  state.scanId = event.scan_id || null;
+  state.lastEventSequence = Number.isInteger(event.sequence) ? event.sequence : 0;
+  state.eventCount = state.lastEventSequence;
+
+  const status = data.status || 'idle';
+  const findings = Array.isArray(data.findings) ? data.findings : [];
+  state.pageCount = Number(data.page_count) || 0;
+  state.checkCounts = data.check_counts && typeof data.check_counts === 'object'
+    ? {...data.check_counts} : {};
+  state.checkStats = Object.fromEntries(
+    Object.entries(state.checkCounts).map(([name, done]) => [name, {done: Number(done) || 0}])
+  );
+  state.urlOrder = Array.isArray(data.url_order) ? [...data.url_order] : [];
+  state.urlStatuses = data.url_statuses && typeof data.url_statuses === 'object'
+    ? {...data.url_statuses} : {};
+  state.phase = data.phase || null;
+  state.scanDone = status === 'done';
+  document.getElementById('eventCount').textContent = state.eventCount;
+  document.getElementById('statPages').textContent = state.pageCount;
+  renderCheckCounters();
+  renderCheckProgressBars();
+  renderUrlList();
+  replaceFindings(findings);
+
+  if (data.started_config) _promotePendingScan(data.started_config);
+  if (data.scan_config) handleEvent({type: 'scan_config', data: data.scan_config, timestamp: event.timestamp});
+  setPauseState(!!data.paused);
+  if (state.phase) updatePhaseBar(state.phase);
+
+  const progress = data.progress || {};
+  const pct = Number(progress.percent) || 0;
+  document.getElementById('progressBar').style.width = pct + '%';
+  document.getElementById('statPct').textContent = pct + '%';
+  document.getElementById('statCurrent').textContent = progress.current ?? 0;
+  document.getElementById('statTotal').textContent = progress.total > 0 ? '/' + progress.total : '';
+  document.getElementById('progressStripe').style.display = status === 'done' ? 'none' : (pct < 100 ? 'block' : 'none');
+
+  if (status === 'done') {
+    const complete = data.complete || {};
+    if (Object.keys(complete).length && !wasDone) {
+      handleEvent({type: 'scan_complete', data: complete, timestamp: event.timestamp});
+    } else if (!wasDone) {
+      setStatus(`Scan complete — ${findings.length} finding(s)`, 'done');
+      state.scanDone = true;
+      document.getElementById('statRemain').textContent = '完了';
+      document.getElementById('statETA').textContent = '—';
+      showPostScanActions(true);
+    } else {
+      setStatus(`Scan complete — ${findings.length} finding(s)`, 'done');
+    }
+  } else if (status === 'error') {
+    setStatus(data.status_message || 'Scan failed', 'error');
+  } else if (status === 'scanning') {
+    setStatus(`スキャン中: ${data.target || ''}`, 'running');
+  } else {
+    setStatus('Connected — waiting for scan...', '');
+  }
+
+  if (data.pending_interactive) handleEvent(data.pending_interactive);
+  state.eventCount = state.lastEventSequence;
+  document.getElementById('eventCount').textContent = state.eventCount;
 }
 
 function updatePhaseBar(phase) {

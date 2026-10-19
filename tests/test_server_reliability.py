@@ -107,22 +107,21 @@ class PendingInteractiveReplayTests(unittest.TestCase):
         asyncio.run(srv.emit_awaiting_config())
         self.assertEqual(srv.pending_interactive["type"], "awaiting_config")
 
-    def test_replay_suppresses_resolved_review(self):
-        """解決済み(crawl_review を履歴に持つが pending=None)では再接続で再生されない。"""
+    def test_snapshot_does_not_replay_old_resolved_review(self):
+        """解決済みレビューは新しい状態 snapshot から再表示されない。"""
         srv = MonitorServer(port=0, auth_token="")
         srv.event_history.append({"type": "crawl_review", "timestamp": 0, "data": {"pages": []}})
         srv.event_history.append({"type": "finding", "timestamp": 0, "data": {"id": 1}})
         srv.pending_interactive = None  # 既に操作で解決済み
-        # crawl_review は再生抑制対象として宣言されている
-        self.assertIn("crawl_review", MonitorServer._REPLAY_SUPPRESS_TYPES)
         c = TestClient(srv.app)
         with c.websocket_connect("/ws") as ws:
-            msg = ws.receive_json()  # 抑制されない finding が先頭に届く
-            self.assertEqual(msg["type"], "finding")
+            msg = ws.receive_json()
+            self.assertEqual(msg["type"], "scan_snapshot")
+            self.assertIsNone(msg["data"]["pending_interactive"])
             ws.close()
 
-    def test_replay_redelivers_unresolved_review(self):
-        """未解決(pending=crawl_review)なら再接続で1件だけ再送される。"""
+    def test_snapshot_includes_only_current_pending_review(self):
+        """短い履歴でも未解決レビューを snapshot と一緒に再表示する。"""
         srv = MonitorServer(port=0, auth_token="")
         srv.event_history.append({"type": "crawl_review", "timestamp": 0, "data": {"pages": []}})
         srv.event_history.append({"type": "finding", "timestamp": 0, "data": {"id": 1}})
@@ -130,10 +129,9 @@ class PendingInteractiveReplayTests(unittest.TestCase):
         c = TestClient(srv.app)
         with c.websocket_connect("/ws") as ws:
             first = ws.receive_json()
-            second = ws.receive_json()
             ws.close()
-        self.assertEqual(first["type"], "finding")        # 履歴中の crawl_review は抑制
-        self.assertEqual(second["type"], "crawl_review")  # pending を末尾に1件だけ再送
+        self.assertEqual(first["type"], "scan_snapshot")
+        self.assertEqual(first["data"]["pending_interactive"]["type"], "crawl_review")
 
 
 if __name__ == "__main__":

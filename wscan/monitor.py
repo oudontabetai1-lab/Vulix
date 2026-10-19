@@ -4,6 +4,7 @@ FastAPI + WebSocket server for real-time scan monitoring dashboard.
 """
 import asyncio
 import collections
+import copy
 import datetime
 import hashlib
 import json
@@ -255,27 +256,31 @@ def due_schedule_ids(schedules: list, now_epoch: Optional[float] = None) -> list
 class MonitorServer:
     """Real-time monitoring server for scan progress."""
 
-    # 履歴の素朴な再生からは除外する一過性モーダルイベント。これらは
-    # 「今まさに操作待ちかどうか」が本質で、解決後に再生すると亡霊モーダルになる。
-    # 未解決の1件だけ pending_interactive 経由で別途送る。
-    _REPLAY_SUPPRESS_TYPES = frozenset({"crawl_review", "plan_review", "awaiting_config"})
-
     def __init__(self, port: int = 8765, auth_token: str = ""):
         self.port = port
         # Shared access token. Empty string => authentication disabled.
         self.auth_token: str = (auth_token or "").strip()
         self._session_value: str = _session_value(self.auth_token) if self.auth_token else ""
         self.clients: Set[WebSocket] = set()
+        self._ws_sync_buffers: dict[WebSocket, list[dict]] = {}
         self._queue: asyncio.Queue = asyncio.Queue()
         self.app = self._create_app()
         self._started = False
         self.event_history: collections.deque = collections.deque(maxlen=1000)
-        # 「操作待ち」の一過性モーダルイベント（crawl_review / plan_review /
-        # awaiting_config）は解決済みでも event_history に残る。これをそのまま
-        # 再接続/リロード時に再生すると、解決済みのレビュー画面や次スキャン準備中の
-        # 旧レビューが亡霊のように再表示される。そこで「現在まだ未解決の1件」だけを
-        # ここで保持し、再生時は履歴から一過性モーダルを除外して本フィールドを末尾に
-        # 1件だけ送る。None なら未解決のモーダルは無い。
+        self._server_instance_id = uuid.uuid4().hex
+        self._scan_run_id = ""
+        self._scan_sequence = 0
+        self._scan_page_count = 0
+        self._scan_check_counts: dict[str, int] = {}
+        self._scan_url_order: list[str] = []
+        self._scan_url_statuses: dict[str, str] = {}
+        self._scan_config: dict = {}
+        self._scan_started_config: dict = {}
+        self._scan_complete_data: dict = {}
+        self._scan_status_message = ""
+        self._scan_paused = False
+        # 一過性の操作待ちモーダルは履歴ではなく、未解決の1件だけを
+        # 状態 snapshot に含める。None なら未解決のモーダルは無い。
         self.pending_interactive: Optional[dict] = None
 
         # ── Intervention / plan-confirm channels ──────────────────────
@@ -560,16 +565,23 @@ class MonitorServer:
                 return
             await ws.accept()
             self.clients.add(ws)
-            # Send event history to newly connected client.
-            # 一過性モーダル(crawl_review/plan_review/awaiting_config)は素朴に
-            # 再生せず除外し、未解決の1件だけを末尾に送る（亡霊モーダル防止）。
+            self._ws_sync_buffers[ws] = []
+            snapshot = self._scan_snapshot_event()
             try:
-                for event in list(self.event_history)[-200:]:
-                    if event.get("type") in self._REPLAY_SUPPRESS_TYPES:
-                        continue
-                    await ws.send_text(json.dumps(event))
-                if self.pending_interactive is not None:
-                    await ws.send_text(json.dumps(self.pending_interactive))
+                await ws.send_text(json.dumps(snapshot))
+                # Events emitted while the snapshot is in flight are buffered by
+                # emit() and delivered after its cursor, so state cannot race the snapshot.
+                while True:
+                    buffered = self._ws_sync_buffers.get(ws)
+                    if buffered is None:
+                        break
+                    if not buffered:
+                        self._ws_sync_buffers.pop(ws, None)
+                        break
+                    batch = list(buffered)
+                    buffered.clear()
+                    for event in batch:
+                        await ws.send_text(json.dumps(event))
                 # Keep connection alive and process incoming messages
                 while True:
                     try:
@@ -582,6 +594,7 @@ class MonitorServer:
             except (WebSocketDisconnect, Exception):
                 pass
             finally:
+                self._ws_sync_buffers.pop(ws, None)
                 self.clients.discard(ws)
 
         @app.get("/health")
@@ -900,6 +913,7 @@ class MonitorServer:
             self.scan_request_data = config
             self.scan_request_event.set()
             self.api_scan_id = str(int(time.time()))
+            self._begin_scan_snapshot()
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
@@ -1565,6 +1579,7 @@ class MonitorServer:
             return False
         self.scan_request_data = dict(config or {})
         self.api_scan_id = str(int(time.time()))
+        self._begin_scan_snapshot()
         self.api_scan_status = "scanning"
         self.api_findings = []
         self.api_report_path = None
@@ -1812,6 +1827,7 @@ class MonitorServer:
                 return
             self.scan_request_data = cfg
             self.api_scan_id = str(int(time.time()))
+            self._begin_scan_snapshot()
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
@@ -1866,24 +1882,121 @@ class MonitorServer:
             return
         self.pending_interactive = None
 
+    def _begin_scan_snapshot(self) -> None:
+        """Start a new live-state generation without changing the public scan ID."""
+        self._clear_pending_interactive()
+        self._scan_run_id = uuid.uuid4().hex
+        self._scan_sequence = 0
+        self._scan_page_count = 0
+        self._scan_check_counts = {}
+        self._scan_url_order = []
+        self._scan_url_statuses = {}
+        self._scan_config = {}
+        self._scan_started_config = {}
+        self._scan_complete_data = {}
+        self._scan_status_message = ""
+        self._scan_paused = False
+        self.event_history.clear()
+
+    def _scan_snapshot_event(self) -> dict:
+        """Return the canonical UI state at the latest per-scan event cursor."""
+        return {
+            "type": "scan_snapshot",
+            "server_id": self._server_instance_id,
+            "run_id": self._scan_run_id,
+            "scan_id": self.api_scan_id,
+            "sequence": self._scan_sequence,
+            "timestamp": time.time(),
+            "data": {
+                "status": self.api_scan_status,
+                "status_message": self._scan_status_message,
+                "paused": self._scan_paused,
+                "target": self.api_target,
+                "phase": self.api_phase,
+                "progress": copy.deepcopy(self.api_progress),
+                "findings": copy.deepcopy(self.api_findings),
+                "page_count": self._scan_page_count,
+                "check_counts": dict(self._scan_check_counts),
+                "url_order": list(self._scan_url_order),
+                "url_statuses": dict(self._scan_url_statuses),
+                "scan_config": copy.deepcopy(self._scan_config),
+                "started_config": copy.deepcopy(self._scan_started_config),
+                "complete": copy.deepcopy(self._scan_complete_data),
+                "pending_interactive": copy.deepcopy(self.pending_interactive),
+            },
+        }
+
     # ------------------------------------------------------------------
     # Broadcast helpers
     # ------------------------------------------------------------------
 
     async def emit(self, event_type: str, data: Any = None):
         """Send an event to all connected monitoring clients."""
+        event_data = data or {}
         # スキャンが完了したら未解決のレビュー待ちは無効化する。
         # （非serve単発や異常終了で pending が残ったまま再接続→亡霊表示を防ぐ）
         if event_type == "scan_complete":
             self._clear_pending_interactive()
+            self.api_scan_status = "done"
+            self._scan_complete_data = {
+                key: copy.deepcopy(event_data[key])
+                for key in ("total_findings", "report_path", "scan_id")
+                if key in event_data
+            }
+        elif event_type == "page_start":
+            self._scan_page_count += 1
+        elif event_type == "payload_test":
+            check_type = event_data.get("check_type") if isinstance(event_data, dict) else None
+            if check_type:
+                self._scan_check_counts[check_type] = self._scan_check_counts.get(check_type, 0) + 1
+        elif event_type == "url_start":
+            url = event_data.get("url")
+            if url is not None:
+                if not self._scan_url_statuses.get(url):
+                    self._scan_url_order.append(url)
+                    self._scan_url_statuses[url] = "pending"
+                for known_url, status in self._scan_url_statuses.items():
+                    if status == "scanning":
+                        self._scan_url_statuses[known_url] = "done"
+                self._scan_url_statuses[url] = "scanning"
+        elif event_type == "url_complete":
+            url = event_data.get("url")
+            if self._scan_url_statuses.get(url) == "scanning":
+                self._scan_url_statuses[url] = "done"
+        elif event_type == "scan_gap":
+            url = event_data.get("url") or ""
+            if url:
+                if not self._scan_url_statuses.get(url):
+                    self._scan_url_order.append(url)
+                self._scan_url_statuses[url] = "error"
+        elif event_type == "finding":
+            url = event_data.get("url")
+            if url and url in self._scan_url_statuses:
+                self._scan_url_statuses[url] = "vuln"
+        elif event_type == "scan_config":
+            self._scan_config = copy.deepcopy(event_data)
+        elif event_type == "scan_started":
+            self._scan_started_config = copy.deepcopy(event_data)
+        elif event_type == "status" and isinstance(event_data, dict):
+            self._scan_status_message = event_data.get("message", "")
+
+        self._scan_sequence += 1
         event = {
             "type": event_type,
+            "server_id": self._server_instance_id,
+            "run_id": self._scan_run_id,
+            "scan_id": self.api_scan_id,
+            "sequence": self._scan_sequence,
             "timestamp": time.time(),
-            "data": data or {},
+            "data": event_data,
         }
         self.event_history.append(event)
         dead = set()
         for client in list(self.clients):
+            sync_buffer = self._ws_sync_buffers.get(client)
+            if sync_buffer is not None:
+                sync_buffer.append(event)
+                continue
             try:
                 await client.send_text(json.dumps(event))
             except Exception:
@@ -1893,13 +2006,17 @@ class MonitorServer:
     async def broadcast_ephemeral(self, event_type: str, data: Any = None):
         """履歴に残さず接続中クライアントへ送る（高頻度・大容量イベント用）。
 
-        スクリーンキャストのフレームのように毎秒大量に流れ、再生する意味のない
-        イベントは ``event_history`` に積まない（メモリ肥大・再接続時の再生事故を防ぐ）。
+        スクリーンキャストのフレームのように毎秒大量に流れるイベントは
+        ``event_history`` に積まず、不要なメモリ増加を防ぐ。
         """
         event = {"type": event_type, "timestamp": time.time(), "data": data or {}}
         payload = json.dumps(event)
         dead = set()
         for client in list(self.clients):
+            sync_buffer = self._ws_sync_buffers.get(client)
+            if sync_buffer is not None:
+                sync_buffer.append(event)
+                continue
             try:
                 await client.send_text(payload)
             except Exception:
@@ -1996,6 +2113,8 @@ class MonitorServer:
 
     async def emit_scan_started(self, config: dict):
         """Tell the dashboard the scan has started with the given config."""
+        if not self._scan_run_id:
+            self._begin_scan_snapshot()
         await self.emit("scan_started", config)
 
     async def emit_page_start(self, url: str):
@@ -2116,6 +2235,7 @@ class MonitorServer:
 
     async def emit_intervention_state(self, paused: bool):
         """Tell the dashboard whether the scan is paused."""
+        self._scan_paused = bool(paused)
         await self.emit("intervention_state", {"paused": paused})
 
     # ------------------------------------------------------------------
