@@ -272,6 +272,8 @@ class MonitorServer:
         self._scan_sequence = 0
         self._scan_page_count = 0
         self._scan_check_counts: dict[str, int] = {}
+        self._scan_url_order: list[str] = []
+        self._scan_url_statuses: dict[str, str] = {}
         self._scan_config: dict = {}
         self._scan_started_config: dict = {}
         self._scan_complete_data: dict = {}
@@ -1887,6 +1889,8 @@ class MonitorServer:
         self._scan_sequence = 0
         self._scan_page_count = 0
         self._scan_check_counts = {}
+        self._scan_url_order = []
+        self._scan_url_statuses = {}
         self._scan_config = {}
         self._scan_started_config = {}
         self._scan_complete_data = {}
@@ -1913,6 +1917,8 @@ class MonitorServer:
                 "findings": copy.deepcopy(self.api_findings),
                 "page_count": self._scan_page_count,
                 "check_counts": dict(self._scan_check_counts),
+                "url_order": list(self._scan_url_order),
+                "url_statuses": dict(self._scan_url_statuses),
                 "scan_config": copy.deepcopy(self._scan_config),
                 "started_config": copy.deepcopy(self._scan_started_config),
                 "complete": copy.deepcopy(self._scan_complete_data),
@@ -1943,6 +1949,30 @@ class MonitorServer:
             check_type = event_data.get("check_type") if isinstance(event_data, dict) else None
             if check_type:
                 self._scan_check_counts[check_type] = self._scan_check_counts.get(check_type, 0) + 1
+        elif event_type == "url_start":
+            url = event_data.get("url")
+            if url is not None:
+                if not self._scan_url_statuses.get(url):
+                    self._scan_url_order.append(url)
+                    self._scan_url_statuses[url] = "pending"
+                for known_url, status in self._scan_url_statuses.items():
+                    if status == "scanning":
+                        self._scan_url_statuses[known_url] = "done"
+                self._scan_url_statuses[url] = "scanning"
+        elif event_type == "url_complete":
+            url = event_data.get("url")
+            if self._scan_url_statuses.get(url) == "scanning":
+                self._scan_url_statuses[url] = "done"
+        elif event_type == "scan_gap":
+            url = event_data.get("url") or ""
+            if url:
+                if not self._scan_url_statuses.get(url):
+                    self._scan_url_order.append(url)
+                self._scan_url_statuses[url] = "error"
+        elif event_type == "finding":
+            url = event_data.get("url")
+            if url and url in self._scan_url_statuses:
+                self._scan_url_statuses[url] = "vuln"
         elif event_type == "scan_config":
             self._scan_config = copy.deepcopy(event_data)
         elif event_type == "scan_started":

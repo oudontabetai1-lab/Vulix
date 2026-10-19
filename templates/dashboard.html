@@ -4652,12 +4652,16 @@ function applyScanSnapshot(event) {
   state.checkStats = Object.fromEntries(
     Object.entries(state.checkCounts).map(([name, done]) => [name, {done: Number(done) || 0}])
   );
+  state.urlOrder = Array.isArray(data.url_order) ? [...data.url_order] : [];
+  state.urlStatuses = data.url_statuses && typeof data.url_statuses === 'object'
+    ? {...data.url_statuses} : {};
   state.phase = data.phase || null;
   state.scanDone = status === 'done';
   document.getElementById('eventCount').textContent = state.eventCount;
   document.getElementById('statPages').textContent = state.pageCount;
   renderCheckCounters();
   renderCheckProgressBars();
+  renderUrlList();
   replaceFindings(findings);
 
   if (data.started_config) _promotePendingScan(data.started_config);

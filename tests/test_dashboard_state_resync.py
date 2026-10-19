@@ -1,4 +1,5 @@
 """Regression coverage for dashboard state reconstruction after WebSocket reconnects."""
+import os
 import socket
 import threading
 import time
@@ -103,6 +104,57 @@ class ScanSnapshotTests(unittest.TestCase):
         })
         self.assertEqual(snapshot["data"]["findings"], monitor.api_findings)
 
+    def test_short_history_snapshot_preserves_url_order_statuses_and_new_run_reset(self):
+        monitor = MonitorServer(port=0)
+        monitor.api_scan_id = "url-run"
+        monitor._begin_scan_snapshot()
+
+        async def seed():
+            await monitor.emit_url_start("http://127.0.0.1:9/first")
+            await monitor.emit_url_complete("http://127.0.0.1:9/first")
+            await monitor.emit_scan_gap("http://127.0.0.1:9/blocked")
+            await monitor.emit_url_start("http://127.0.0.1:9/second")
+
+        import asyncio
+        asyncio.run(seed())
+        self.assertLess(len(monitor.event_history), 200)
+        client = TestClient(monitor.app)
+        with client.websocket_connect("/ws") as ws:
+            snapshot = ws.receive_json()
+        self.assertEqual(snapshot["data"]["url_order"], [
+            "http://127.0.0.1:9/first",
+            "http://127.0.0.1:9/blocked",
+            "http://127.0.0.1:9/second",
+        ])
+        self.assertEqual(snapshot["data"]["url_statuses"], {
+            "http://127.0.0.1:9/first": "done",
+            "http://127.0.0.1:9/blocked": "error",
+            "http://127.0.0.1:9/second": "scanning",
+        })
+
+        old_run = monitor._scan_run_id
+        monitor.api_scan_id = "next-url-run"
+        monitor._begin_scan_snapshot()
+        self.assertNotEqual(monitor._scan_run_id, old_run)
+        self.assertEqual(monitor._scan_url_order, [])
+        self.assertEqual(monitor._scan_url_statuses, {})
+
+    def test_finding_promotes_an_existing_url_status_to_vulnerable(self):
+        monitor = MonitorServer(port=0)
+        monitor._begin_scan_snapshot()
+        url = "http://127.0.0.1:9/finding-page"
+
+        async def seed():
+            await monitor.emit_url_start(url)
+            await monitor.emit_finding({
+                "url": url, "field_name": "q", "check_type": "xss",
+                "payload": "fixture", "evidence_type": "reflected", "verified": False,
+            })
+
+        import asyncio
+        asyncio.run(seed())
+        self.assertEqual(monitor._scan_snapshot_event()["data"]["url_statuses"][url], "vuln")
+
 
 class DashboardResyncChromiumTests(unittest.TestCase):
     """Exercise the production dashboard and WebSocket against a loopback fixture only."""
@@ -125,13 +177,14 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             await cls.monitor.emit_scan_config(cls.monitor.api_target, ["xss"], 1, 1, 5)
             await cls.monitor.emit_phase("attack")
             await cls.monitor.emit_intervention_state(True)
+            await cls.monitor.emit_url_start("http://127.0.0.1:9/probe-page", 1)
             for i in range(198):
                 await cls.monitor.emit("status", {"message": f"fixture event {i}"})
             for _ in range(2):
                 await cls.monitor.emit_page_start(cls.monitor.api_target)
                 await cls.monitor.emit_payload_test("q", "fixture", "xss", cls.monitor.api_target)
             await cls.monitor.emit_finding({
-                "url": cls.monitor.api_target, "field_name": "q", "check_type": "xss",
+                "url": "http://127.0.0.1:9/finding-page", "field_name": "q", "check_type": "xss",
                 "severity": "high", "confidence": "tentative", "payload": "fixture",
                 "evidence": "fixture finding", "evidence_type": "reflected", "verified": False,
                 "verification_state": "assumed",
@@ -140,6 +193,15 @@ class DashboardResyncChromiumTests(unittest.TestCase):
 
         async def add_page(request: Request):
             await cls.monitor.emit_page_start(cls.monitor.api_target)
+            return {"sequence": cls.monitor._scan_sequence}
+
+        async def finish_url(request: Request):
+            await cls.monitor.emit_url_complete("http://127.0.0.1:9/probe-page")
+            await cls.monitor.emit("scan_complete", {
+                "total_findings": len(cls.monitor.api_findings),
+                "report_path": "output/fixture/report.html",
+                "scan_id": cls.monitor.api_scan_id,
+            })
             return {"sequence": cls.monitor._scan_sequence}
 
         async def new_scan(request: Request):
@@ -152,11 +214,13 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             cls.monitor.api_findings = []
             await cls.monitor.emit_scan_started({"url": cls.monitor.api_target})
             await cls.monitor.emit_page_start(cls.monitor.api_target)
+            await cls.monitor.emit_url_start(cls.monitor.api_target, 1)
             await cls.monitor.emit_payload_test("id", "fixture", "sqli", cls.monitor.api_target)
             return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
 
         cls.monitor.app.add_api_route("/__test__/seed", seed, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/page", add_page, methods=["POST"])
+        cls.monitor.app.add_api_route("/__test__/finish-url", finish_url, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/new-scan", new_scan, methods=["POST"])
         cls.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         cls.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -210,15 +274,25 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             self.assertIn("fixture finding", page.locator("#findingsPanel").inner_text())
             self.assertIn("スキャン中", page.locator("#statusText").inner_text())
             self.assertIn("visible", page.locator("#ibPauseState").get_attribute("class"))
+            probe_url = "http://127.0.0.1:9/probe-page"
+            self.assertEqual(page.evaluate("url => state.urlStatuses[url]", probe_url), "scanning")
+            self.assertEqual(page.locator("#urlList .url-text").all_text_contents(), [probe_url])
 
             page.evaluate("() => { window.__oldSocket = state.ws; state.ws.close(); }")
+            completed = page.request.post(f"{self.base_url}/__test__/finish-url").json()
             page.wait_for_function(
                 """expected => state.ws !== window.__oldSocket && state.ws.readyState === WebSocket.OPEN &&
-                    state.lastEventSequence === expected""",
-                arg=seed["sequence"], timeout=10000,
+                    state.lastEventSequence === expected && state.scanDone &&
+                    state.urlStatuses['http://127.0.0.1:9/probe-page'] === 'done'""",
+                arg=completed["sequence"], timeout=10000,
             )
             self.assertEqual(page.locator("#statPages").inner_text(), "2")
             self.assertEqual(page.locator("#findingsPanel .finding-card").count(), 1)
+            self.assertEqual(page.locator("#urlList .url-text").all_text_contents(), [probe_url])
+            self.assertEqual(page.locator("#urlList .url-badge").all_inner_texts(), ["完了"])
+            screenshot_path = os.environ.get("WSCAN_DASHBOARD_RESYNC_SCREENSHOT")
+            if screenshot_path:
+                page.screenshot(path=screenshot_path, full_page=True)
 
             old_run_id = page.evaluate("state.scanRunId")
             old_sequence = page.evaluate("state.lastEventSequence")
@@ -226,11 +300,14 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             page.wait_for_function(
                 """expected => state.scanRunId && state.lastEventSequence === expected &&
                     state.pageCount === 2 && state.checkCounts.xss === 2 && state.findingCount === 1 &&
-                    state.paused === true""",
-                arg=seed["sequence"], timeout=10000,
+                    state.paused === true && state.scanDone &&
+                    state.urlStatuses['http://127.0.0.1:9/probe-page'] === 'done'""",
+                arg=completed["sequence"], timeout=10000,
             )
             self.assertEqual(page.locator("#statPages").inner_text(), "2")
             self.assertEqual(page.locator("#findingsPanel .finding-card").count(), 1)
+            self.assertEqual(page.locator("#urlList .url-text").all_text_contents(), [probe_url])
+            self.assertEqual(page.locator("#urlList .url-badge").all_inner_texts(), ["完了"])
 
             page.request.post(f"{self.base_url}/__test__/page")
             page.wait_for_function(
@@ -246,6 +323,7 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                     sequence:state.lastEventSequence + 2, data:{url:'out-of-order'}});
             }""")
             self.assertEqual(page.locator("#statPages").inner_text(), "3")
+            self.assertEqual(page.locator("#urlList .url-badge").all_inner_texts(), ["完了"])
             page.wait_for_function(
                 """expected => state.ws.readyState === WebSocket.OPEN && state.lastEventSequence === expected &&
                     state.pageCount === 3""", arg=old_sequence + 1, timeout=10000,
@@ -263,6 +341,8 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                 sequence:9999, data:{url:'stale-old-scan'}})""", old_run_id)
             self.assertEqual(page.locator("#statPages").inner_text(), "1")
             self.assertEqual(page.locator("#checkCounters").inner_text().strip(), "sqli 1")
+            self.assertEqual(page.locator("#urlList .url-text").all_text_contents(), ["http://127.0.0.1:9/fixture-two"])
+            self.assertEqual(page.locator("#urlList .url-badge").all_inner_texts(), ["検査中"])
             browser.close()
 
 
