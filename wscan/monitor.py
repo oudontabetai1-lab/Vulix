@@ -309,7 +309,7 @@ class MonitorServer:
         self.default_scan_cfg: dict = {}
         # D: CI/CD REST API state
         self.api_scan_id: str = ""
-        self.api_scan_status: str = "idle"   # idle / scanning / done / error
+        self.api_scan_status: str = "idle"   # idle / scanning / done / error / aborted
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
         # 進捗のスナップショット（ポータルが /api/v1/scan/status でモニターを
@@ -937,6 +937,7 @@ class MonitorServer:
                 "target": self.api_target,
                 "phase": self.api_phase,
                 "progress": self.api_progress,
+                "aborted": self.api_scan_status == "aborted",
             })
 
         @app.get("/api/v1/scan/findings")
@@ -947,6 +948,7 @@ class MonitorServer:
                 "status": self.api_scan_status,
                 "findings": self.api_findings,
                 "findings_count": len(self.api_findings),
+                "aborted": self.api_scan_status == "aborted",
             })
 
         @app.get("/api/v1/scan/report")
@@ -981,6 +983,7 @@ class MonitorServer:
                 "critical_count": sum(1 for f in confirmed if f.get("severity") == "critical"),
                 "high_count": sum(1 for f in confirmed if f.get("severity") == "high"),
                 "report_available": bool(self.api_report_path and Path(self.api_report_path).exists()),
+                "aborted": self.api_scan_status == "aborted",
             })
 
         @app.post("/api/v1/manual-crawl/start")
@@ -1937,12 +1940,26 @@ class MonitorServer:
         # （非serve単発や異常終了で pending が残ったまま再接続→亡霊表示を防ぐ）
         if event_type == "scan_complete":
             self._clear_pending_interactive()
-            self.api_scan_status = "done"
+            status = event_data.get("status")
+            if not status:
+                if event_data.get("aborted") or self.api_scan_status == "aborted":
+                    status = "aborted"
+                else:
+                    status = "done"
+            self.api_scan_status = status
+            keys_to_copy = ["total_findings", "report_path", "scan_id"]
+            if "status" in event_data:
+                keys_to_copy.append("status")
+            if "aborted" in event_data:
+                keys_to_copy.append("aborted")
             self._scan_complete_data = {
                 key: copy.deepcopy(event_data[key])
-                for key in ("total_findings", "report_path", "scan_id")
+                for key in keys_to_copy
                 if key in event_data
             }
+            if status == "aborted":
+                self._scan_complete_data.setdefault("status", "aborted")
+                self._scan_complete_data.setdefault("aborted", True)
         elif event_type == "page_start":
             self._scan_page_count += 1
         elif event_type == "payload_test":
@@ -2031,6 +2048,8 @@ class MonitorServer:
         # D: CI/CD API — ステータス自動更新
         if state == "done":
             self.api_scan_status = "done"
+        elif state == "aborted":
+            self.api_scan_status = "aborted"
         elif state == "error":
             self.api_scan_status = "error"
         elif state == "running" and self.api_scan_status == "idle":

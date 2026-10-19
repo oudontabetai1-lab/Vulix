@@ -104,6 +104,158 @@ class ScanSnapshotTests(unittest.TestCase):
         })
         self.assertEqual(snapshot["data"]["findings"], monitor.api_findings)
 
+    def test_operator_aborted_scan_zero_findings_contract(self):
+        monitor = MonitorServer(port=0)
+        monitor.api_scan_id = "aborted-zero"
+        monitor._begin_scan_snapshot()
+        monitor.api_findings = []
+
+        import asyncio
+        asyncio.run(monitor.emit("scan_complete", {
+            "total_findings": 0, "report_path": "output/aborted/report.html",
+            "scan_id": "aborted-zero", "findings": [],
+            "status": "aborted", "aborted": True,
+        }))
+        client = TestClient(monitor.app)
+        status_resp = client.get("/api/v1/scan/status").json()
+        self.assertEqual(status_resp["status"], "aborted")
+        self.assertTrue(status_resp["aborted"])
+        self.assertEqual(status_resp["findings_count"], 0)
+
+        with client.websocket_connect("/ws") as ws:
+            snapshot = ws.receive_json()
+        self.assertEqual(snapshot["data"]["status"], "aborted")
+        self.assertEqual(snapshot["data"]["complete"]["status"], "aborted")
+        self.assertTrue(snapshot["data"]["complete"]["aborted"])
+        self.assertEqual(snapshot["data"]["findings"], [])
+
+    def test_operator_aborted_scan_positive_findings_contract(self):
+        monitor = MonitorServer(port=0)
+        monitor.api_scan_id = "aborted-pos"
+        monitor._begin_scan_snapshot()
+        monitor.api_findings = [{"check_type": "xss", "verified": True}]
+
+        import asyncio
+        asyncio.run(monitor.emit("scan_complete", {
+            "total_findings": 1, "report_path": "output/aborted/report.html",
+            "scan_id": "aborted-pos", "findings": monitor.api_findings,
+            "status": "aborted", "aborted": True,
+        }))
+        client = TestClient(monitor.app)
+        status_resp = client.get("/api/v1/scan/status").json()
+        self.assertEqual(status_resp["status"], "aborted")
+        self.assertTrue(status_resp["aborted"])
+        self.assertEqual(status_resp["findings_count"], 1)
+
+        with client.websocket_connect("/ws") as ws:
+            snapshot = ws.receive_json()
+        self.assertEqual(snapshot["data"]["status"], "aborted")
+        self.assertEqual(snapshot["data"]["complete"]["status"], "aborted")
+        self.assertTrue(snapshot["data"]["complete"]["aborted"])
+        self.assertEqual(len(snapshot["data"]["findings"]), 1)
+
+    def test_normal_unaborted_scan_zero_findings_safe_twin(self):
+        monitor = MonitorServer(port=0)
+        monitor.api_scan_id = "normal-zero"
+        monitor._begin_scan_snapshot()
+        monitor.api_findings = []
+
+        import asyncio
+        asyncio.run(monitor.emit("scan_complete", {
+            "total_findings": 0, "report_path": "output/normal/report.html",
+            "scan_id": "normal-zero", "findings": [],
+            "status": "done", "aborted": False,
+        }))
+        client = TestClient(monitor.app)
+        status_resp = client.get("/api/v1/scan/status").json()
+        self.assertEqual(status_resp["status"], "done")
+        self.assertFalse(status_resp["aborted"])
+        self.assertEqual(status_resp["findings_count"], 0)
+
+        with client.websocket_connect("/ws") as ws:
+            snapshot = ws.receive_json()
+        self.assertEqual(snapshot["data"]["status"], "done")
+        self.assertEqual(snapshot["data"]["complete"]["status"], "done")
+        self.assertFalse(snapshot["data"]["complete"]["aborted"])
+        self.assertEqual(snapshot["data"]["findings"], [])
+
+    def test_normal_unaborted_scan_positive_findings_safe_twin(self):
+        monitor = MonitorServer(port=0)
+        monitor.api_scan_id = "normal-pos"
+        monitor._begin_scan_snapshot()
+        monitor.api_findings = [{"check_type": "sqli", "verified": True}]
+
+        import asyncio
+        asyncio.run(monitor.emit("scan_complete", {
+            "total_findings": 1, "report_path": "output/normal/report.html",
+            "scan_id": "normal-pos", "findings": monitor.api_findings,
+            "status": "done", "aborted": False,
+        }))
+        client = TestClient(monitor.app)
+        status_resp = client.get("/api/v1/scan/status").json()
+        self.assertEqual(status_resp["status"], "done")
+        self.assertFalse(status_resp["aborted"])
+        self.assertEqual(status_resp["findings_count"], 1)
+
+        with client.websocket_connect("/ws") as ws:
+            snapshot = ws.receive_json()
+        self.assertEqual(snapshot["data"]["status"], "done")
+        self.assertEqual(snapshot["data"]["complete"]["status"], "done")
+        self.assertFalse(snapshot["data"]["complete"]["aborted"])
+        self.assertEqual(len(snapshot["data"]["findings"]), 1)
+
+    def test_scan_engine_aborted_sets_truthful_terminal_status_and_payload(self):
+        from unittest.mock import AsyncMock, patch
+        from wscan.engine import ScanEngine
+        from wscan.intervention import AbortScan
+
+        monitor = MonitorServer(port=0)
+        engine = ScanEngine("http://127.0.0.1:9/target", monitor=monitor)
+
+        async def run_aborted():
+            with patch.object(engine, "_phase_crawl", AsyncMock(return_value=[])), \
+                 patch.object(engine, "_phase_plan", AsyncMock(return_value={})), \
+                 patch.object(engine, "_phase_attack", AsyncMock(side_effect=AbortScan("operator abort"))), \
+                 patch.object(engine, "_phase_verify", AsyncMock()), \
+                 patch.object(engine, "_phase_report_async", AsyncMock()), \
+                 patch.object(engine, "_drain_notifications", AsyncMock()), \
+                 patch.object(engine._browser, "close", AsyncMock()):
+                await engine.run()
+
+        import asyncio
+        asyncio.run(run_aborted())
+        self.assertTrue(engine.scan_aborted)
+        self.assertEqual(monitor.api_scan_status, "aborted")
+        self.assertEqual(monitor._scan_complete_data.get("status"), "aborted")
+        self.assertTrue(monitor._scan_complete_data.get("aborted"))
+
+    def test_scan_engine_normal_completion_sets_done_terminal_status(self):
+        from unittest.mock import AsyncMock, patch
+        from wscan.engine import ScanEngine
+
+        monitor = MonitorServer(port=0)
+        engine = ScanEngine("http://127.0.0.1:9/target", monitor=monitor)
+
+        async def run_normal():
+            with patch.object(engine, "_phase_crawl", AsyncMock(return_value=[])), \
+                 patch.object(engine, "_phase_plan", AsyncMock(return_value={})), \
+                 patch.object(engine, "_phase_attack", AsyncMock()), \
+                 patch.object(engine, "_run_api_template_checks", AsyncMock()), \
+                 patch.object(engine, "_run_json_injection_checks", AsyncMock()), \
+                 patch.object(engine, "_run_tls_seed_scans", AsyncMock()), \
+                 patch.object(engine, "_phase_verify", AsyncMock()), \
+                 patch.object(engine, "_phase_report_async", AsyncMock()), \
+                 patch.object(engine, "_drain_notifications", AsyncMock()), \
+                 patch.object(engine._browser, "close", AsyncMock()):
+                await engine.run()
+
+        import asyncio
+        asyncio.run(run_normal())
+        self.assertFalse(engine.scan_aborted)
+        self.assertEqual(monitor.api_scan_status, "done")
+        self.assertEqual(monitor._scan_complete_data.get("status"), "done")
+        self.assertFalse(monitor._scan_complete_data.get("aborted"))
+
     def test_short_history_snapshot_preserves_url_order_statuses_and_new_run_reset(self):
         monitor = MonitorServer(port=0)
         monitor.api_scan_id = "url-run"
@@ -218,10 +370,94 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             await cls.monitor.emit_payload_test("id", "fixture", "sqli", cls.monitor.api_target)
             return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
 
+        async def finish_abort_zero(request: Request):
+            cls.monitor.api_scan_id = "fixture-abort-zero"
+            cls.monitor._begin_scan_snapshot()
+            cls.monitor.api_scan_status = "scanning"
+            cls.monitor.api_target = "http://127.0.0.1:9/abort-zero"
+            cls.monitor.api_findings = []
+            await cls.monitor.emit_scan_started({"url": cls.monitor.api_target})
+            await cls.monitor.emit("scan_complete", {
+                "total_findings": 0,
+                "report_path": "output/abort-zero/report.html",
+                "scan_id": cls.monitor.api_scan_id,
+                "findings": [],
+                "status": "aborted",
+                "aborted": True,
+            })
+            return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
+
+        async def finish_abort_pos(request: Request):
+            cls.monitor.api_scan_id = "fixture-abort-pos"
+            cls.monitor._begin_scan_snapshot()
+            cls.monitor.api_scan_status = "scanning"
+            cls.monitor.api_target = "http://127.0.0.1:9/abort-pos"
+            finding = {
+                "url": "http://127.0.0.1:9/abort-pos", "field_name": "q", "check_type": "xss",
+                "severity": "high", "confidence": "tentative", "payload": "<script>",
+                "evidence": "reflected", "evidence_type": "reflected", "verified": False,
+            }
+            cls.monitor.api_findings = []
+            await cls.monitor.emit_scan_started({"url": cls.monitor.api_target})
+            await cls.monitor.emit_finding(finding)
+            await cls.monitor.emit("scan_complete", {
+                "total_findings": 1,
+                "report_path": "output/abort-pos/report.html",
+                "scan_id": cls.monitor.api_scan_id,
+                "findings": cls.monitor.api_findings,
+                "status": "aborted",
+                "aborted": True,
+            })
+            return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
+
+        async def finish_normal_zero(request: Request):
+            cls.monitor.api_scan_id = "fixture-normal-zero"
+            cls.monitor._begin_scan_snapshot()
+            cls.monitor.api_scan_status = "scanning"
+            cls.monitor.api_target = "http://127.0.0.1:9/normal-zero"
+            cls.monitor.api_findings = []
+            await cls.monitor.emit_scan_started({"url": cls.monitor.api_target})
+            await cls.monitor.emit("scan_complete", {
+                "total_findings": 0,
+                "report_path": "output/normal-zero/report.html",
+                "scan_id": cls.monitor.api_scan_id,
+                "findings": [],
+                "status": "done",
+                "aborted": False,
+            })
+            return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
+
+        async def finish_normal_pos(request: Request):
+            cls.monitor.api_scan_id = "fixture-normal-pos"
+            cls.monitor._begin_scan_snapshot()
+            cls.monitor.api_scan_status = "scanning"
+            cls.monitor.api_target = "http://127.0.0.1:9/normal-pos"
+            finding = {
+                "url": "http://127.0.0.1:9/normal-pos", "field_name": "id", "check_type": "sqli",
+                "severity": "critical", "confidence": "certain", "payload": "1' OR '1'='1",
+                "evidence": "syntax error", "evidence_type": "error", "verified": True,
+            }
+            cls.monitor.api_findings = []
+            await cls.monitor.emit_scan_started({"url": cls.monitor.api_target})
+            await cls.monitor.emit_finding(finding)
+            await cls.monitor.emit("scan_complete", {
+                "total_findings": 1,
+                "report_path": "output/normal-pos/report.html",
+                "scan_id": cls.monitor.api_scan_id,
+                "findings": cls.monitor.api_findings,
+                "status": "done",
+                "aborted": False,
+            })
+            return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
+
         cls.monitor.app.add_api_route("/__test__/seed", seed, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/page", add_page, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/finish-url", finish_url, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/new-scan", new_scan, methods=["POST"])
+        cls.monitor.app.add_api_route("/__test__/abort-zero", finish_abort_zero, methods=["POST"])
+        cls.monitor.app.add_api_route("/__test__/abort-pos", finish_abort_pos, methods=["POST"])
+        cls.monitor.app.add_api_route("/__test__/normal-zero", finish_normal_zero, methods=["POST"])
+        cls.monitor.app.add_api_route("/__test__/normal-pos", finish_normal_pos, methods=["POST"])
         cls.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         cls.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         cls.sock.bind(("127.0.0.1", 0))
@@ -343,6 +579,202 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             self.assertEqual(page.locator("#checkCounters").inner_text().strip(), "sqli 1")
             self.assertEqual(page.locator("#urlList .url-text").all_text_contents(), ["http://127.0.0.1:9/fixture-two"])
             self.assertEqual(page.locator("#urlList .url-badge").all_inner_texts(), ["検査中"])
+            browser.close()
+
+    def test_chromium_operator_aborted_zero_findings_renders_aborted(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            def local_only(route):
+                if route.request.url.startswith(self.base_url):
+                    route.continue_()
+                else:
+                    route.abort()
+
+            page.route("**/*", local_only)
+            page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+            res = page.request.post(f"{self.base_url}/__test__/abort-zero").json()
+
+            page.wait_for_function(
+                """expected => state.scanRunId === expected.run_id &&
+                    state.lastEventSequence === expected.sequence && state.scanDone""",
+                arg={"run_id": res["run_id"], "sequence": res["sequence"]},
+                timeout=10000,
+            )
+            status_text = page.locator("#statusText").inner_text()
+            self.assertIn("Scan aborted", status_text)
+            self.assertIn("0 finding(s)", status_text)
+            self.assertNotIn("Scan complete", status_text)
+            self.assertNotIn("スキャン完了", status_text)
+            self.assertEqual(page.locator("#statRemain").inner_text(), "中断")
+            self.assertIn("aborted", page.locator("#statusDot").get_attribute("class"))
+            self.assertNotIn("done", page.locator("#statusDot").get_attribute("class"))
+
+            # Test reload / reconnect snapshot rendering
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_function(
+                """expected => state.scanRunId === expected.run_id &&
+                    state.lastEventSequence === expected.sequence && state.scanDone""",
+                arg={"run_id": res["run_id"], "sequence": res["sequence"]},
+                timeout=10000,
+            )
+            status_text_after = page.locator("#statusText").inner_text()
+            self.assertIn("Scan aborted", status_text_after)
+            self.assertIn("0 finding(s)", status_text_after)
+            self.assertNotIn("Scan complete", status_text_after)
+            self.assertNotIn("スキャン完了", status_text_after)
+            self.assertEqual(page.locator("#statRemain").inner_text(), "中断")
+            self.assertIn("aborted", page.locator("#statusDot").get_attribute("class"))
+            self.assertNotIn("done", page.locator("#statusDot").get_attribute("class"))
+            browser.close()
+
+    def test_chromium_operator_aborted_positive_findings_renders_aborted(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            def local_only(route):
+                if route.request.url.startswith(self.base_url):
+                    route.continue_()
+                else:
+                    route.abort()
+
+            page.route("**/*", local_only)
+            page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+            res = page.request.post(f"{self.base_url}/__test__/abort-pos").json()
+
+            page.wait_for_function(
+                """expected => state.scanRunId === expected.run_id &&
+                    state.lastEventSequence === expected.sequence && state.scanDone &&
+                    state.findingCount === 1""",
+                arg={"run_id": res["run_id"], "sequence": res["sequence"]},
+                timeout=10000,
+            )
+            status_text = page.locator("#statusText").inner_text()
+            self.assertIn("Scan aborted", status_text)
+            self.assertIn("1 finding(s)", status_text)
+            self.assertNotIn("Scan complete", status_text)
+            self.assertNotIn("スキャン完了", status_text)
+            self.assertEqual(page.locator("#statRemain").inner_text(), "中断")
+            self.assertIn("aborted", page.locator("#statusDot").get_attribute("class"))
+            self.assertNotIn("done", page.locator("#statusDot").get_attribute("class"))
+            self.assertEqual(page.locator("#findingsPanel .finding-card").count(), 1)
+
+            # Test reload / reconnect snapshot rendering
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_function(
+                """expected => state.scanRunId === expected.run_id &&
+                    state.lastEventSequence === expected.sequence && state.scanDone &&
+                    state.findingCount === 1""",
+                arg={"run_id": res["run_id"], "sequence": res["sequence"]},
+                timeout=10000,
+            )
+            status_text_after = page.locator("#statusText").inner_text()
+            self.assertIn("Scan aborted", status_text_after)
+            self.assertIn("1 finding(s)", status_text_after)
+            self.assertNotIn("Scan complete", status_text_after)
+            self.assertNotIn("スキャン完了", status_text_after)
+            self.assertEqual(page.locator("#statRemain").inner_text(), "中断")
+            self.assertIn("aborted", page.locator("#statusDot").get_attribute("class"))
+            self.assertNotIn("done", page.locator("#statusDot").get_attribute("class"))
+            self.assertEqual(page.locator("#findingsPanel .finding-card").count(), 1)
+            browser.close()
+
+    def test_chromium_normal_unaborted_zero_findings_safe_twin(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            def local_only(route):
+                if route.request.url.startswith(self.base_url):
+                    route.continue_()
+                else:
+                    route.abort()
+
+            page.route("**/*", local_only)
+            page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+            res = page.request.post(f"{self.base_url}/__test__/normal-zero").json()
+
+            page.wait_for_function(
+                """expected => state.scanRunId === expected.run_id &&
+                    state.lastEventSequence === expected.sequence && state.scanDone""",
+                arg={"run_id": res["run_id"], "sequence": res["sequence"]},
+                timeout=10000,
+            )
+            status_text = page.locator("#statusText").inner_text()
+            self.assertIn("Scan complete", status_text)
+            self.assertIn("0 finding(s)", status_text)
+            self.assertEqual(page.locator("#statRemain").inner_text(), "完了")
+            self.assertIn("done", page.locator("#statusDot").get_attribute("class"))
+
+            # Test reload / reconnect snapshot rendering
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_function(
+                """expected => state.scanRunId === expected.run_id &&
+                    state.lastEventSequence === expected.sequence && state.scanDone""",
+                arg={"run_id": res["run_id"], "sequence": res["sequence"]},
+                timeout=10000,
+            )
+            status_text_after = page.locator("#statusText").inner_text()
+            self.assertIn("Scan complete", status_text_after)
+            self.assertIn("0 finding(s)", status_text_after)
+            self.assertEqual(page.locator("#statRemain").inner_text(), "完了")
+            self.assertIn("done", page.locator("#statusDot").get_attribute("class"))
+            browser.close()
+
+    def test_chromium_normal_unaborted_positive_findings_safe_twin(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            def local_only(route):
+                if route.request.url.startswith(self.base_url):
+                    route.continue_()
+                else:
+                    route.abort()
+
+            page.route("**/*", local_only)
+            page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+            res = page.request.post(f"{self.base_url}/__test__/normal-pos").json()
+
+            page.wait_for_function(
+                """expected => state.scanRunId === expected.run_id &&
+                    state.lastEventSequence === expected.sequence && state.scanDone &&
+                    state.findingCount === 1""",
+                arg={"run_id": res["run_id"], "sequence": res["sequence"]},
+                timeout=10000,
+            )
+            status_text = page.locator("#statusText").inner_text()
+            self.assertIn("Scan complete", status_text)
+            self.assertIn("1 finding(s)", status_text)
+            self.assertEqual(page.locator("#statRemain").inner_text(), "完了")
+            self.assertIn("done", page.locator("#statusDot").get_attribute("class"))
+            self.assertEqual(page.locator("#findingsPanel .finding-card").count(), 1)
+
+            # Test reload / reconnect snapshot rendering
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_function(
+                """expected => state.scanRunId === expected.run_id &&
+                    state.lastEventSequence === expected.sequence && state.scanDone &&
+                    state.findingCount === 1""",
+                arg={"run_id": res["run_id"], "sequence": res["sequence"]},
+                timeout=10000,
+            )
+            status_text_after = page.locator("#statusText").inner_text()
+            self.assertIn("Scan complete", status_text_after)
+            self.assertIn("1 finding(s)", status_text_after)
+            self.assertEqual(page.locator("#statRemain").inner_text(), "完了")
+            self.assertIn("done", page.locator("#statusDot").get_attribute("class"))
+            self.assertEqual(page.locator("#findingsPanel .finding-card").count(), 1)
             browser.close()
 
 
