@@ -62,8 +62,8 @@ class EvolutionObservationFlowTests(unittest.IsolatedAsyncioTestCase):
         engine._adaptive_llm_availability_lock = asyncio.Lock()
         engine._injection_point_for = types.MethodType(ScanEngine._injection_point_for, engine)
         engine._adaptive_attack_field = types.MethodType(ScanEngine._adaptive_attack_field, engine)
-        engine._checkpoint_is_done_ip = MagicMock(return_value=False)
-        engine._checkpoint_mark_done_ip = MagicMock()
+        engine._checkpoint_is_done_ip = types.MethodType(ScanEngine._checkpoint_is_done_ip, engine)
+        engine._checkpoint_mark_done_ip = types.MethodType(ScanEngine._checkpoint_mark_done_ip, engine)
         engine._record_scan_matrix = MagicMock()
         engine._record_finding = MagicMock()
         engine._save_checkpoint = MagicMock(return_value=True)
@@ -140,3 +140,46 @@ class EvolutionObservationFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("second", prompts["first"])
         self.assertIn("second", prompts["second"])
         self.assertNotIn("first", prompts["second"])
+
+    async def test_completed_field_not_rescanned_on_in_memory_checkpoint(self):
+        """Verify that an already-completed field is not re-probed when marked done in checkpoint."""
+        with tempfile.TemporaryDirectory() as output:
+            engine = self._engine(None)
+            engine.enable_checkpoint = True
+            from wscan.checkpoint import CheckpointState
+            engine.checkpoint = CheckpointState()
+            engine.request_logger = RequestLogger(output)
+            engine._adaptive_llm_available = True
+            engine.adaptive_engine = AdaptivePayloadEngine(PayloadGenerator(provider="ollama"))
+            browser = engine.browser
+            captured = []
+
+            async def fake_complete_text(_pg, prompt, **_kwargs):
+                captured.append(prompt)
+                return "", "blocked"
+
+            async def submit(_dom, _field, probe):
+                body = f'<input value="{probe}">'
+                return body, {"response": {"body": body}}
+
+            browser.navigate = AsyncMock(return_value=True)
+            browser.fill_and_submit_form = AsyncMock(side_effect=submit)
+            scanner = _ProbeScanner(engine)
+            engine.scanners = {"xss": scanner}
+
+            with patch("wscan.adaptive_payload.llm_client.complete_text", new=fake_complete_text):
+                await ScanEngine._scan_field(engine, "https://example.test/", 0, {"name": "q"})
+
+            audit = [json.loads(line) for line in Path(output, "payloads.jsonl").read_text().splitlines()]
+            self.assertEqual(len(audit), 1)
+            self.assertEqual(len(captured), 1)
+            self.assertIn("double_quoted_attr", captured[0])
+
+            # Re-scanning the same field: in-memory checkpoint marks it done, so second pass skips adaptive
+            with patch("wscan.adaptive_payload.llm_client.complete_text", new=fake_complete_text):
+                await ScanEngine._scan_field(engine, "https://example.test/", 0, {"name": "q"})
+
+            # Audit still has exactly 1 probe; no duplicate probe sent
+            audit2 = [json.loads(line) for line in Path(output, "payloads.jsonl").read_text().splitlines()]
+            self.assertEqual(len(audit2), 1)
+            self.assertEqual(len(captured), 1)
