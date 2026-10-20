@@ -496,6 +496,114 @@ class NetworkCapture:
         return bucketize_status_counts(self.status_counts)
 
 
+def build_browser_context_options(
+    *,
+    target_url: str = "",
+    tls_config: Any = None,
+    proxy: str = "",
+    user_agent: str = "",
+    extra_headers: Optional[dict[str, Any]] = None,
+    header_scope_origins: Optional[list[str]] = None,
+    header_scope_enforce: bool = True,
+    expect_late_headers: bool = False,
+    viewport: Optional[dict[str, int]] = None,
+) -> dict[str, Any]:
+    """BrowserContext 生成用オプション dict を構築する純粋関数。"""
+    use_scoped_headers = bool(extra_headers and header_scope_origins)
+    scoped_headers_possible = bool(
+        header_scope_enforce
+        and header_scope_origins
+        and (extra_headers or expect_late_headers)
+    )
+    block_service_workers = scoped_headers_possible
+
+    ctx_kwargs: dict[str, Any] = {
+        "viewport": viewport or {"width": 1280, "height": 800},
+        "user_agent": user_agent or BrowserManager.DEFAULT_USER_AGENT,
+    }
+    if tls_config is not None and hasattr(tls_config, "playwright_context_options"):
+        ctx_kwargs.update(tls_config.playwright_context_options(target_url))
+    if proxy:
+        ctx_kwargs["proxy"] = {"server": proxy}
+    if extra_headers and not use_scoped_headers:
+        # Keep header names case-preserving but de-dupe case-insensitive collisions
+        # so Playwright doesn't reject duplicates.
+        seen: dict[str, str] = {}
+        for k, v in extra_headers.items():
+            seen[k.lower()] = str(v)
+            ctx_kwargs.setdefault("extra_http_headers", {})[k] = str(v)
+    if block_service_workers:
+        ctx_kwargs["service_workers"] = "block"
+    return ctx_kwargs
+
+
+def prepare_cloned_cookies(cookies: Optional[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """既存 BrowserContext の Cookie 一覧を新 context へ安全に複製するための純粋関数。"""
+    if not cookies:
+        return []
+    cloned: list[dict[str, Any]] = []
+    for c in cookies:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        value = c.get("value")
+        if not name or value is None:
+            continue
+        item: dict[str, Any] = {
+            "name": str(name),
+            "value": str(value),
+        }
+        if "url" in c and c["url"]:
+            item["url"] = str(c["url"])
+        else:
+            item["domain"] = str(c.get("domain") or "")
+            item["path"] = str(c.get("path") or "/")
+        for opt in ("expires", "httpOnly", "secure", "sameSite"):
+            if opt in c and c[opt] is not None:
+                item[opt] = c[opt]
+        cloned.append(item)
+    return cloned
+
+
+def prepare_cloned_storage_state(
+    state: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Playwright ``storage_state`` を新 context へ渡す前に正規化する純粋関数。
+
+    Cookie は ``prepare_cloned_cookies`` で不正値を除去し、origins（localStorage）は
+    形の整った項目だけ残す。Cookie だけ複製すると SPA の JWT 等が worker で失われ
+    黙った偽陰性になるため、storage_state ごと渡す経路の前処理として使う。
+    """
+    if not isinstance(state, dict):
+        return None
+    cookies = prepare_cloned_cookies(state.get("cookies"))
+    origins: list[dict[str, Any]] = []
+    raw_origins = state.get("origins")
+    if isinstance(raw_origins, list):
+        for entry in raw_origins:
+            if not isinstance(entry, dict):
+                continue
+            origin = entry.get("origin")
+            if not origin:
+                continue
+            local_storage: list[dict[str, str]] = []
+            for item in entry.get("localStorage") or []:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                if name is None or name == "":
+                    continue
+                local_storage.append({
+                    "name": str(name),
+                    "value": str(item.get("value") if item.get("value") is not None else ""),
+                })
+            origins.append({
+                "origin": str(origin),
+                "localStorage": local_storage,
+            })
+    return {"cookies": cookies, "origins": origins}
+
+
 class BrowserManager:
     """Manages Playwright browser and provides helper methods."""
 
@@ -543,6 +651,8 @@ class BrowserManager:
         # origins are known they are added per request; otherwise the legacy
         # context-wide behavior is preserved.
         self.extra_headers: dict[str, str] = dict(extra_headers or {})
+        # create_worker が作った WorkerBrowser。header/cookie refresh を全 context へ配る。
+        self._active_workers: list = []
         self.header_scope_enforce = bool(header_scope_enforce)
         self.expect_late_headers = bool(expect_late_headers)
         self.popup_header_intercept = bool(popup_header_intercept)
@@ -601,6 +711,19 @@ class BrowserManager:
         # フラグで、判定には関与しない（scanner が _apply_ip 後に読んで transport_error を記録）。
         self.last_probe_delivered: bool = True
 
+    def _context_options(self) -> dict[str, Any]:
+        """BrowserContext 生成用のオプション dict を構築する。"""
+        return build_browser_context_options(
+            target_url=getattr(self, "target_url", ""),
+            tls_config=getattr(self, "tls_config", None),
+            proxy=getattr(self, "proxy", ""),
+            user_agent=getattr(self, "DEFAULT_USER_AGENT", ""),
+            extra_headers=getattr(self, "extra_headers", None),
+            header_scope_origins=getattr(self, "header_scope_origins", None),
+            header_scope_enforce=getattr(self, "header_scope_enforce", True),
+            expect_late_headers=getattr(self, "expect_late_headers", False),
+        )
+
     async def init(self):
         """Launch browser and create page."""
         if self.extra_headers and not self.header_scope_enforce:
@@ -633,25 +756,7 @@ class BrowserManager:
         if self.proxy:
             launch_kwargs["proxy"] = {"server": self.proxy}
         self._browser = await self._playwright.chromium.launch(**launch_kwargs)
-        ctx_kwargs: dict = {
-            "viewport": {"width": 1280, "height": 800},
-            "user_agent": self.DEFAULT_USER_AGENT,
-        }
-        ctx_kwargs.update(self.tls_config.playwright_context_options(self.target_url))
-        if self.proxy:
-            ctx_kwargs["proxy"] = {"server": self.proxy}
-        if self.extra_headers and not use_scoped_headers:
-            # Keep header names case-preserving but de-dupe case-insensitive collisions
-            # so Playwright doesn't reject duplicates.
-            seen: dict[str, str] = {}
-            for k, v in self.extra_headers.items():
-                seen[k.lower()] = v
-                ctx_kwargs.setdefault("extra_http_headers", {})[k] = str(v)
-        if block_service_workers:
-            # Service Worker が処理するリクエストは CDP Fetch / context.route()
-            # のどちらでも確実に傍受できないため、初期ヘッダがある場合に加え、
-            # refresh で後から届き得る場合もコンテキスト生成時に無効化する。
-            ctx_kwargs["service_workers"] = "block"
+        ctx_kwargs = self._context_options()
         try:
             self._context = await self._browser.new_context(**ctx_kwargs)
         except TypeError:
@@ -1043,11 +1148,12 @@ class BrowserManager:
             return
 
         async def _attach() -> None:
-            if self._context is None:
+            ctx = getattr(page, "context", None) or self._context
+            if ctx is None:
                 raise RuntimeError("browser context is unavailable")
             cdp = None
             try:
-                cdp = await self._context.new_cdp_session(page)
+                cdp = await ctx.new_cdp_session(page)
                 cdp.on(
                     "Fetch.requestPaused",
                     lambda event: self._dispatch_fetch_request_paused(cdp, event),
@@ -1275,16 +1381,24 @@ class BrowserManager:
         if self.extra_headers and not self.header_scope_enforce:
             await self._warn_header_scope_disabled()
         if self._context is None:
+            if not isinstance(self, WorkerBrowser):
+                await self._fanout_headers_to_workers(headers)
             return
         if self._header_route_active:
             self._header_intercept_mode = "route"
+            if not isinstance(self, WorkerBrowser):
+                await self._fanout_headers_to_workers(headers)
             return
         if self._header_intercept_mode in {"cdp", "route"}:
+            if not isinstance(self, WorkerBrowser):
+                await self._fanout_headers_to_workers(headers)
             return
         if self.extra_headers and self.header_scope_origins:
             # Service Worker の block はコンテキスト生成時にしか設定できない。
             # 遅延有効化でも CDP -> route -> context の順序は維持する。
             await self._activate_scoped_header_interception(self.page)
+            if not isinstance(self, WorkerBrowser):
+                await self._fanout_headers_to_workers(headers)
             return
         try:
             await self._context.set_extra_http_headers(self.extra_headers)
@@ -1297,6 +1411,32 @@ class BrowserManager:
             self._header_intercept_mode = (
                 "context" if self._context_wide_headers_active else "none"
             )
+        if not isinstance(self, WorkerBrowser):
+            await self._fanout_headers_to_workers(headers)
+
+    async def _fanout_headers_to_workers(self, headers: dict) -> None:
+        """Refresh で回転したヘッダを全 worker context へ配布する。
+
+        CDP/route モードは main の handler が main.extra_headers を読むので Cookie ほど
+        致命的ではないが、context-wide モードと worker 側の参照コピーを最新化する。
+        WorkerBrowser 自身からの再配布はしない（isinstance ガードは呼び出し側）。
+        """
+        payload = dict(headers or {})
+        context_wide = (
+            getattr(self, "_header_intercept_mode", "none") == "context"
+            or getattr(self, "_context_wide_headers_active", False)
+        )
+        for worker in list(getattr(self, "_active_workers", ()) or ()):
+            try:
+                worker.extra_headers = dict(payload)
+                if not context_wide:
+                    continue
+                ctx = getattr(worker, "_context", None)
+                if ctx is None:
+                    continue
+                await ctx.set_extra_http_headers(payload)
+            except Exception:
+                pass
 
     def reset_dialog(self):
         self._dialog_generation = getattr(self, "_dialog_generation", 0) + 1
@@ -2396,6 +2536,10 @@ class BrowserManager:
                 })
         if cookies:
             await self._context.add_cookies(cookies)
+            # Header refresh 等で main が Cookie を回転したとき、隔離された worker
+            # context にも同じセッションを届ける（未認証攻撃＝黙った偽陰性を防ぐ）。
+            if not isinstance(self, WorkerBrowser):
+                await self._fanout_cookies_to_workers(cookies_str, url)
 
     async def set_cookies_from_list(self, cookie_list: list, url: str):
         """Set cookies from a list of dicts (browser JSON export format).
@@ -2418,6 +2562,40 @@ class BrowserManager:
             })
         if normalized:
             await self._context.add_cookies(normalized)
+            if not isinstance(self, WorkerBrowser):
+                await self._fanout_cookie_list_to_workers(cookie_list, url)
+
+    async def _fanout_cookies_to_workers(self, cookies_str: str, url: str) -> None:
+        """Main context に入れた Cookie 文字列を全 active worker へ複製する。"""
+        for worker in list(getattr(self, "_active_workers", ()) or ()):
+            try:
+                await worker.set_cookies(cookies_str, url)
+            except Exception:
+                pass
+
+    async def _fanout_cookie_list_to_workers(self, cookie_list: list, url: str) -> None:
+        for worker in list(getattr(self, "_active_workers", ()) or ()):
+            try:
+                await worker.set_cookies_from_list(cookie_list, url)
+            except Exception:
+                pass
+
+    def _register_worker(self, worker: "WorkerBrowser") -> None:
+        workers = getattr(self, "_active_workers", None)
+        if workers is None:
+            self._active_workers = []
+            workers = self._active_workers
+        if worker not in workers:
+            workers.append(worker)
+
+    def _unregister_worker(self, worker: "WorkerBrowser") -> None:
+        workers = getattr(self, "_active_workers", None)
+        if not workers:
+            return
+        try:
+            workers.remove(worker)
+        except ValueError:
+            pass
 
     async def _editable_auth_selector(self, selector: str) -> str:
         """実 DOM 上で一意・可視・編集可能な input だけを認証入力先にする。"""
@@ -2720,20 +2898,61 @@ class BrowserManager:
 
     async def create_worker(self) -> "WorkerBrowser":
         """
-        Create an additional browser page for concurrent scanning.
-        The worker shares the same browser context (cookies) as the main page
-        but has its own Playwright page, network capture, and dialog state.
+        Create an additional browser worker for concurrent scanning.
+        Each worker has its own isolated BrowserContext and cookie jar,
+        pre-seeded with a snapshot of the current baseline storage_state
+        (cookies + localStorage) so SPA JWT 等の認証が worker でも維持される。
         """
-        page = await self._context.new_page()
+        browser = self._browser
+        worker_ctx = None
+        if browser is not None:
+            ctx_kwargs = self._context_options()
+            # Cookie だけだと localStorage の認証トークンが落ちる。storage_state で
+            # まとめて複製し、prepare_cloned_storage_state で不正 Cookie を除去する。
+            if self._context is not None and hasattr(self._context, "storage_state"):
+                try:
+                    raw_state = await self._context.storage_state()
+                    cloned_state = prepare_cloned_storage_state(raw_state)
+                    if cloned_state is not None:
+                        ctx_kwargs["storage_state"] = cloned_state
+                except Exception:
+                    pass
+            try:
+                worker_ctx = await browser.new_context(**ctx_kwargs)
+            except TypeError:
+                if "service_workers" in ctx_kwargs:
+                    ctx_kwargs.pop("service_workers", None)
+                    worker_ctx = await browser.new_context(**ctx_kwargs)
+                else:
+                    raise
+
+            if self.header_scope_origins:
+                try:
+                    worker_ctx.on("page", self._on_header_context_page)
+                except Exception:
+                    pass
+
+            if getattr(self, "_header_intercept_mode", "none") == "route":
+                try:
+                    await worker_ctx.route("**/*", self._auth_header_route)
+                except Exception:
+                    pass
+
+            page = await worker_ctx.new_page()
+            worker = WorkerBrowser(self, page, context=worker_ctx)
+        else:
+            page = await self._context.new_page()
+            worker = WorkerBrowser(self, page, context=self._context)
+
         if self._header_intercept_mode == "cdp":
             # context の page イベントと競合しても attach 側の task ガードで
             # Fetch.enable は一度だけになる。worker の初回遷移前を明示保証する。
             await self._attach_header_interception(page)
         page.set_default_timeout(self.timeout)
-        worker = WorkerBrowser(self, page)
         page.on("request", worker.network.on_request)
         page.on("response", worker._on_response)
         page.on("dialog", worker._on_dialog)
+        self._register_worker(worker)
         return worker
 
     # ------------------------------------------------------------------
@@ -3178,13 +3397,17 @@ class WorkerBrowser(BrowserManager):
     A BrowserManager slice for one concurrent page worker.
 
     Inherits ALL methods from BrowserManager so scanners don't need any changes.
-    The key difference: ``self.page`` points to this worker's dedicated Playwright
-    page instead of the main page, so all navigation / form-filling / screenshot
-    operations are fully isolated.  The shared browser context (cookies, auth)
-    comes from the real BrowserManager.
+    The key difference: ``self.page`` and ``self._context`` point to this worker's
+    dedicated Playwright page and isolated BrowserContext, so navigation, cookies,
+    authentication, and dialog operations are fully isolated.
     """
 
-    def __init__(self, real_browser: "BrowserManager", page):
+    def __init__(
+        self,
+        real_browser: "BrowserManager",
+        page,
+        context: Optional[BrowserContext] = None,
+    ):
         # Bypass BrowserManager.__init__ — we just copy the fields we need.
         self.headless = real_browser.headless
         self.timeout = real_browser.timeout
@@ -3197,9 +3420,26 @@ class WorkerBrowser(BrowserManager):
         self.sleep_factor = real_browser.sleep_factor
         # SPA 描画確定待ちフラグを引き継ぐ（worker の attack navigate でも settle する）。
         self.spa_settle = getattr(real_browser, "spa_settle", False)
+        self.target_url = getattr(real_browser, "target_url", "")
+        self.tls_config = getattr(real_browser, "tls_config", None)
+        self.extra_headers = getattr(real_browser, "extra_headers", {})
+        self.header_scope_origins = getattr(real_browser, "header_scope_origins", [])
+        self.header_scope_enforce = getattr(real_browser, "header_scope_enforce", True)
+        self.expect_late_headers = getattr(real_browser, "expect_late_headers", False)
+        self._header_intercept_mode = getattr(real_browser, "_header_intercept_mode", "none")
+        self._header_attached_page_ids = getattr(real_browser, "_header_attached_page_ids", set())
+        self._header_attach_tasks = getattr(real_browser, "_header_attach_tasks", {})
+        self._header_cdp_sessions = getattr(real_browser, "_header_cdp_sessions", {})
+        self._header_auto_attach_active = getattr(real_browser, "_header_auto_attach_active", False)
+        self._header_explicit_target_ids = getattr(real_browser, "_header_explicit_target_ids", set())
         self._playwright = real_browser._playwright
         self._browser = real_browser._browser
-        self._context = real_browser._context      # Shared — cookies are inherited
+        if context is not None:
+            self._context = context
+            self._owns_context = (context is not real_browser._context)
+        else:
+            self._context = real_browser._context
+            self._owns_context = False
         self._real = real_browser
 
         # Worker-private state
@@ -3211,12 +3451,30 @@ class WorkerBrowser(BrowserManager):
         self.request_logger = getattr(real_browser, "request_logger", None)
         self.network = NetworkCapture(logger=self.request_logger)
         self.dialog_fired: bool = False
+        self.dialog_total: int = 0
+        self.dialog_dismiss_failed: bool = False
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""
+        self.last_login_url: str = ""
+        self.last_login_success: bool = False
+        self.last_navigation_error: str = ""
+        self.last_navigation_status: Optional[int] = None
+        self.last_probe_delivered: bool = True
 
     async def close(self):
-        """Close only this worker's page (not the whole browser)."""
+        """Close this worker's page and context (not the whole browser)."""
+        real = getattr(self, "_real", None)
+        if real is not None and hasattr(real, "_unregister_worker"):
+            try:
+                real._unregister_worker(self)
+            except Exception:
+                pass
         try:
             await self.page.close()
         except Exception:
             pass
+        if getattr(self, "_owns_context", False) and self._context is not None:
+            try:
+                await self._context.close()
+            except Exception:
+                pass

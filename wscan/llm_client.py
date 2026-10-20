@@ -104,6 +104,8 @@ def record_llm_call(
     complete_text と、complete_text を経由しない自前ストリーミング経路（planner 等）の共通入口。
     """
     logger = getattr(pg, "request_logger", None)
+    if logger is None and hasattr(pg, "log_llm_call"):
+        logger = pg
     if logger is None:
         return
     try:
@@ -138,6 +140,7 @@ async def complete_text(
     timeout=None,
     retries=None,
     return_status=False,
+    caller="complete_text",
 ) -> str | None | tuple[str | None, CompletionStatus]:
     """設定済みプロバイダへ問い合わせ、生テキストと任意の失敗種別を返す。"""
     provider = getattr(pg, "provider", "none")
@@ -189,14 +192,23 @@ async def complete_text(
         if isinstance(exc, BaseException):
             root = exc.__cause__ if isinstance(exc, _RetryableResponseError) and exc.__cause__ else exc
             exc_type = type(root).__name__
+
+        is_timeout = (
+            isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError))
+            or (exc is not None and exc.__class__.__name__ in {"APITimeoutError"})
+        )
         record_llm_call(
             pg, provider=provider, role=_role, model=_model,
             timeout_seconds=request_timeout, elapsed_seconds=_time.monotonic() - _t0,
-            status=status, retries=attempt,
+            status=("timeout" if is_timeout else status), retries=attempt,
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(text) if isinstance(text, str) else 0,
-            caller="complete_text", exception_type=exc_type,
+            caller=caller, exception_type=exc_type,
         )
+        if is_timeout:
+            wave_errors = getattr(pg, "wave_errors", None)
+            if wave_errors is not None:
+                wave_errors.append(f"llm_timeout:{caller}:{_role or provider}")
         return _completion_result(text, status, return_status)
 
     for attempt in range(max_retries + 1):
