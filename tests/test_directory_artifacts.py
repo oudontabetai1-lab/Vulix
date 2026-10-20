@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from tests.fixtures.directory_artifacts import app, LISTING, SAFE, EXPECTED_FINDINGS, SAFE_ENDPOINTS
+from tests.fixtures.directory_artifacts import app, LISTING, ROOT_LISTING, ROOT_SAFE, SAFE, EXPECTED_FINDINGS, SAFE_ENDPOINTS
 from wscan.directory_artifacts import (
     classify_directory_listing, classify_backup, control_matches,
     derive_artifact_candidates, normalize_candidate_url, parse_source_map,
@@ -87,6 +87,34 @@ async def test_fixture_twins_and_reverification(monkeypatch):
             assert await safe_scan.verify_finding(finding) is False
     for state in ('planned', 'executed'):
         assert f'candidate_{state}:directory_artifacts' in scan.engine.wave_errors
+
+@pytest.mark.asyncio
+async def test_root_directory_listing_reverification_matches_nonroot_and_safe_twin(monkeypatch):
+    def handle(request):
+        path = request.url.path
+        host = request.url.host
+        if path == '/':
+            body = ROOT_SAFE if host == 'safe.fixture.test' else ROOT_LISTING
+            return httpx.Response(200, text=body, request=request)
+        if path == '/exposed/':
+            return httpx.Response(200, text=LISTING, request=request)
+        if path == '/safe/':
+            return httpx.Response(200, text=SAFE, request=request)
+        return httpx.Response(404, text='Not found', request=request)
+
+    async def verdict(url):
+        scan = scanner(monkeypatch, handle)
+        scan.engine._is_access_allowed_url = lambda value: value.startswith((
+            'http://fixture.test/', 'http://safe.fixture.test/'
+        ))
+        findings = await scan.scan_page(url)
+        finding = next(f for f in findings if f.url == url and f.evidence_type == 'directory_listing')
+        assert finding.confidence == 'tentative'
+        return await scan.verify_finding(finding)
+
+    assert await verdict('http://fixture.test/') is True
+    assert await verdict('http://safe.fixture.test/') is False
+    assert await verdict('http://fixture.test/exposed/') is True
 
 @pytest.mark.asyncio
 async def test_redirect_scope_and_exclusion(monkeypatch):

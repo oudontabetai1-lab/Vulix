@@ -110,7 +110,7 @@ def classify_directory_listing(body: str, url: str = "") -> ListingObservation:
         name = posixpath.basename(path.rstrip("/"))
         if label.rstrip("/") != name or not name or name in (".", ".."):
             continue
-        if url and posixpath.dirname(parts.path.rstrip("/")) + "/" != directory:
+        if url and posixpath.dirname(parts.path.rstrip("/")).rstrip("/") + "/" != directory:
             continue
         if href not in entries:
             entries.append(href)
