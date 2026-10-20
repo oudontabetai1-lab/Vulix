@@ -438,6 +438,7 @@ class AdaptivePayloadEngine:
 
     def __init__(self, payload_gen: "PayloadGenerator"):
         self.pg = payload_gen
+        self._last_call_timeout: bool = False
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -510,6 +511,7 @@ class AdaptivePayloadEngine:
                 max_tokens=1000,
                 temperature=0.8,
                 return_status=True,
+                caller="adaptive_payload.generate",
             )
 
         _adaptive_footer()
@@ -574,6 +576,7 @@ class AdaptivePayloadEngine:
         from .llm_client import record_llm_call
         _t0 = _time.monotonic()
         _resolved_model = ""
+        self._last_call_timeout = False
         with self.pg.use_role("adaptive"):
             # role モデルは context 内でのみ解決される（*_model は _active_role 依存の property）。
             # 監査に実際に使ったモデルを残すため context 内で捕捉する。
@@ -587,22 +590,33 @@ class AdaptivePayloadEngine:
             else:
                 raw = await self._stream_ollama(prompt)
         # LLM 呼び出し観測性。mutate_payload は complete_text 非経由の自前ストリーミング。
-        # timeout_seconds は各 backend の実効 timeout（openai/ollama=90s, gemini=60s, claude は
-        # SDK stream で明示 deadline 無し=None）。失敗種別の transient/permanent
-        # 細分は self-streaming 経路の status 露出を要する follow-up で対応する。
-        _adaptive_timeout = {"openai": 90.0, "ollama": 90.0, "gemini": 60.0}.get(provider)
+        # timeout_seconds は設定された実効 stream timeout（llm_stream_timeout_seconds）。
+        _adaptive_timeout = getattr(self.pg, "llm_stream_timeout_seconds", 90.0)
+        try:
+            _adaptive_timeout = float(_adaptive_timeout)
+        except (TypeError, ValueError):
+            _adaptive_timeout = 90.0
+
+        is_timeout = getattr(self, "_last_call_timeout", False)
+        status = "timeout" if is_timeout else ("ok" if raw else "empty")
+        exc_type = "TimeoutError" if is_timeout else None
         record_llm_call(
             self.pg, provider=provider, role="adaptive",
             model=_resolved_model,
             timeout_seconds=_adaptive_timeout, elapsed_seconds=_time.monotonic() - _t0,
-            status=("ok" if raw else "empty"),
+            status=status,
             # Claude は Anthropic SDK が透過 retry しうるため実回数不明＝None。OpenAI/Gemini/Ollama の
             # 自前 helper は httpx 1 回きりで retry ループを持たないので 0 と確定できる。
             retries=(None if provider == "claude" else 0),
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(raw) if isinstance(raw, str) else 0,
             caller="adaptive_payload.mutate_payload",
+            exception_type=exc_type,
         )
+        if is_timeout:
+            wave_errors = getattr(self.pg, "wave_errors", None)
+            if wave_errors is not None:
+                wave_errors.append(f"llm_timeout:adaptive_mutate:{check_type}")
 
         if not raw:
             return []
@@ -653,8 +667,9 @@ class AdaptivePayloadEngine:
             # （超過時は cancel され async context が stream を閉じる）。
             await asyncio.wait_for(_run(), timeout=self.pg.llm_stream_timeout_seconds)
             return full or None
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, httpx.TimeoutException):
             console.print("[yellow][AdaptiveAI] Ollama stream overall timeout[/yellow]")
+            self._last_call_timeout = True
             return full or None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] Ollama error: {e}[/yellow]")
@@ -715,8 +730,9 @@ class AdaptivePayloadEngine:
                 console.print(f"[yellow][AdaptiveAI] OpenAI error {status_holder['bad']}[/yellow]")
                 return None
             return full or None
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, httpx.TimeoutException):
             console.print("[yellow][AdaptiveAI] OpenAI stream overall timeout[/yellow]")
+            self._last_call_timeout = True
             return full or None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] OpenAI error: {e}[/yellow]")
@@ -751,6 +767,7 @@ class AdaptivePayloadEngine:
             return text or None
         except asyncio.TimeoutError:
             console.print("[yellow][AdaptiveAI] Claude timeout[/yellow]")
+            self._last_call_timeout = True
             return None
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] Claude error: {e}[/yellow]")
@@ -782,6 +799,9 @@ class AdaptivePayloadEngine:
                     sys.stdout.flush()
                     return text
                 console.print(f"[yellow][AdaptiveAI] Gemini error {resp.status_code}[/yellow]")
+        except httpx.TimeoutException:
+            console.print("[yellow][AdaptiveAI] Gemini timeout[/yellow]")
+            self._last_call_timeout = True
         except Exception as e:
             console.print(f"[yellow][AdaptiveAI] Gemini error: {e}[/yellow]")
         return None

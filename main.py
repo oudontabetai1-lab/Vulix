@@ -31,14 +31,22 @@ HYBRID_RECON_MAX_RETRIES = 2
 def _positive_float(value):
     """argparse 用: 正の有限 float だけを受ける（0/負/NaN/inf を開始前に拒否）。"""
     import argparse
-    import math
+    from wscan.timeout_validation import validate_positive_timeout
     try:
-        f = float(value)
-    except (TypeError, ValueError):
-        raise argparse.ArgumentTypeError(f"数値ではありません: {value!r}")
-    if not math.isfinite(f) or f <= 0:
-        raise argparse.ArgumentTypeError(f"正の有限秒を指定してください（0/負/NaN/inf 不可）: {value!r}")
-    return f
+        return validate_positive_timeout(value, "タイムアウト")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _positive_int_or_float(value):
+    """argparse 用: 正の有限 int または float を受ける（0/負/NaN/inf を開始前に拒否）。"""
+    import argparse
+    from wscan.timeout_validation import validate_positive_timeout
+    try:
+        f = validate_positive_timeout(value, "タイムアウト")
+        return int(f) if float(f).is_integer() else f
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _cfg_timeout(value, default: float) -> float:
@@ -905,17 +913,17 @@ Examples:
         help=f"Monitoring dashboard port (default: {_CFG.get('port', 8765)})",
     )
     scan.add_argument(
-        "--timeout", type=int, default=_CFG.get("timeout", 30), metavar="SECS",
+        "--timeout", type=_positive_int_or_float, default=_CFG.get("timeout", 30), metavar="SECS",
         help=f"HTTP/ページ読み込みのタイムアウト秒（LLM ではない。default: {_CFG.get('timeout', 30)}）",
     )
     scan.add_argument(
         "--llm-timeout", type=_positive_float, default=None, metavar="SECS",
-        help="LLM 1回（one-shot: baseline/adaptive/report/triage）の応答上限秒。"
+        help="LLM 1回（one-shot: baseline/adaptive/report/triage）の応答上限秒（HTTP/ページ読み込み上限ではない）。"
              f"未指定は config llm.timeout_seconds（既定 {_CFG.get('llm_timeout_seconds', 30)}）。",
     )
     scan.add_argument(
         "--llm-stream-timeout", type=_positive_float, default=None, metavar="SECS",
-        help="LLM streaming（planner・適応ペイロード変異）の1回応答上限秒。"
+        help="LLM streaming（planner・適応ペイロード変異）の1回応答上限秒（HTTP/ページ読み込み上限ではない）。"
              f"未指定は config llm.stream_timeout_seconds（既定 {_CFG.get('llm_stream_timeout_seconds', 90)}）。",
     )
     scan.add_argument(
@@ -1527,11 +1535,11 @@ Examples:
         "--report-lang", choices=("ja", "en"), default=_CFG.get("report_lang", "ja"),
         help="HTML レポートの言語 (既定: ja)",
     )
-    # 注: --llm-timeout / --llm-stream-timeout は agent サブコマンドには **敢えて足さない**。
-    # agent モードの LLM は browser-use の Chat クライアント（ChatAnthropic/ChatOpenAI/ChatOllama）が
-    # 駆動し、これらへの timeout 配線は browser-use のバージョン依存で本リポジトリからは確実に
-    # 検証できない。宣伝だけして無効な flag（inert）を避けるため非公開にする（
-    # "Wire or remove" のうち remove を選択）。scan/triage の --llm-timeout は決定論経路で機能する。
+    agent.add_argument(
+        "--llm-timeout", type=_positive_float, default=None, metavar="SECS",
+        help="LLM（Chat クライアント）の応答上限秒（HTTP/ページ読み込み上限ではない）。"
+             f"未指定は config llm.timeout_seconds（既定 {_CFG.get('llm_timeout_seconds', 30)}）。",
+    )
     agent.add_argument(
         "--llm",
         choices=["claude", "openai", "openai_compatible", "ollama"],
@@ -2107,6 +2115,10 @@ async def run_agent(args):
         border_style="magenta",
     ))
 
+    _agent_llm_timeout = getattr(args, "llm_timeout", None)
+    if _agent_llm_timeout is None:
+        _agent_llm_timeout = float(_CFG.get("llm_timeout_seconds", 30))
+
     if getattr(args, "no_monitor", False):
         monitor = MonitorServer(port=args.port)
         engine = AgentEngine(
@@ -2116,6 +2128,7 @@ async def run_agent(args):
             llm_model=args.model or "",
             ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
             llm_base_url=_agent_base,
+            llm_timeout_seconds=_agent_llm_timeout,
             checks=args.checks,
             headless=headless,
             auth_user=getattr(args, "auth_user", "") or "",
@@ -2160,6 +2173,7 @@ async def run_agent(args):
                 llm_model=args.model or "",
                 ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
                 llm_base_url=_agent_base,
+                llm_timeout_seconds=_agent_llm_timeout,
                 checks=args.checks,
                 headless=headless,
                 auth_user=getattr(args, "auth_user", "") or "",
@@ -3102,6 +3116,23 @@ async def run_serve(args):
         # 別経路で渡すので機能には影響しない）。
         await monitor.emit_scan_started(_redact_secrets(cfg))
 
+        from wscan.timeout_validation import validate_scan_timeouts
+        try:
+            _timeouts = validate_scan_timeouts(
+                timeout=cfg.get("timeout", _CFG.get("timeout", 30)),
+                llm_timeout=cfg.get("llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30)),
+                llm_stream_timeout=cfg.get("llm_stream_timeout_seconds", _CFG.get("llm_stream_timeout_seconds", 90)),
+                default_timeout=float(_CFG.get("timeout", 30)),
+                default_llm_timeout=float(_CFG.get("llm_timeout_seconds", 30)),
+                default_llm_stream_timeout=float(_CFG.get("llm_stream_timeout_seconds", 90)),
+            )
+        except ValueError as exc:
+            err_msg = f"タイムアウト設定が無効なためスキャンを開始できません: {exc}"
+            console.print(f"[red]{err_msg}[/red]")
+            if monitor is not None:
+                await monitor.emit_status(err_msg, "error")
+            return
+
         _int_cfg = dict(cfg)
         _int_cfg.setdefault(
             "llm_max_retries", _CFG.get("llm_max_retries", 2)
@@ -3146,6 +3177,7 @@ async def run_serve(args):
                     llm_model=cfg.get("agent_model", "") or "",
                     ollama_url=cfg.get("agent_ollama_url", "http://localhost:11434") or "http://localhost:11434",
                     llm_base_url=_scan_base,
+                    llm_timeout_seconds=_timeouts["llm_timeout"],
                     checks=checks,
                     headless=bool(cfg.get("headless", True)),
                     auth_user=cfg.get("auth_user", "") or "",
@@ -3201,6 +3233,7 @@ async def run_serve(args):
                     llm_model=cfg.get("hybrid_model", "") or "",
                     ollama_url=cfg.get("hybrid_ollama_url", "http://localhost:11434") or "http://localhost:11434",
                     llm_base_url=_recon_base,
+                    llm_timeout_seconds=_timeouts["llm_timeout"],
                     checks=checks,
                     headless=bool(cfg.get("headless", True)),
                     auth_user=cfg.get("auth_user", "") or "",
@@ -3267,7 +3300,7 @@ async def run_serve(args):
                 report_lang=cfg.get("report_lang", _CFG.get("report_lang", "ja")),
                 monitor=monitor,
                 depth=_serve_ints["depth"],
-                timeout=_serve_ints["timeout"],
+                timeout=int(_timeouts["timeout"]) if float(_timeouts["timeout"]).is_integer() else _timeouts["timeout"],
                 max_forms=_serve_ints["max_forms"],
                 headless=bool(cfg.get("headless", True)),
                 concurrency=_serve_ints["concurrency"],
@@ -3279,14 +3312,8 @@ async def run_serve(args):
                 claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
                 openai_base_url=_scan_base,
                 role_models=cfg.get("role_models", {}) or {},
-                # eager float() は WS/API が null/非数値を送ると scan 開始前に例外化する。
-                # 生値を渡し、PayloadGenerator 側の正規化（不正→既定）に一元的に委ねる。
-                llm_timeout_seconds=cfg.get(
-                    "llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30)
-                ),
-                llm_stream_timeout_seconds=cfg.get(
-                    "llm_stream_timeout_seconds", _CFG.get("llm_stream_timeout_seconds", 90)
-                ),
+                llm_timeout_seconds=_timeouts["llm_timeout"],
+                llm_stream_timeout_seconds=_timeouts["llm_stream_timeout"],
                 llm_max_retries=_serve_ints["llm_max_retries"],
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
