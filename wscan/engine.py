@@ -1111,6 +1111,7 @@ class ScanEngine:
             if enable_payload_evolution is None
             else enable_payload_evolution
         )
+        self.enable_evolution_observation_reuse = self.enable_payload_evolution
         self.enable_community_payloads = (
             _community_payloads_enabled_by_config()
             if enable_community_payloads is None
@@ -6502,6 +6503,7 @@ class ScanEngine:
             (url, field_name, "URL param" if is_url_param else "form field")
         )
         _candidate_seen_token = _FIELD_CANDIDATE_PHASES_SEEN.set(set())
+        _evolution_observations: dict[str, tuple[dict, set[str]]] = {}
         ip = self._injection_point_for(
             url, field_name, form_index, is_url_param, dom_index, field
         )
@@ -6656,6 +6658,10 @@ class ScanEngine:
             try:
                 before_count = len(self.all_findings)
                 findings = await scanner.scan_injection_point(ip, field)
+                if getattr(self, "enable_evolution_observation_reuse", False):
+                    _observation = getattr(scanner, "_last_evolution_observation", None)
+                    if _observation:
+                        _evolution_observations[check_name] = _observation
                 _ssti_control_unavailable = any(
                     note.startswith("baseline_unavailable:ssti")
                     for note in self.wave_errors[_scan_note_start:]
@@ -7108,7 +7114,15 @@ class ScanEngine:
             from wscan.adaptive_observations import format_deterministic_observations
             _js_for_check = det_js_risks if check_name in _DOM_OBS_CHECKS else None
             det_obs = format_deterministic_observations(_js_for_check)
-            extra = "\n".join(x for x in (history_note, det_obs) if x)
+            evolution_obs = ""
+            if getattr(self, "enable_evolution_observation_reuse", False):
+                try:
+                    _context, _surviving = _evolution_observations.get(check_name, ({}, set()))
+                    from wscan.context_mutator import format_reflection_observation
+                    evolution_obs = format_reflection_observation(_context, _surviving)
+                except Exception:
+                    evolution_obs = ""
+            extra = "\n".join(x for x in (history_note, det_obs, evolution_obs) if x)
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
             if check_name in _saved_adaptive:

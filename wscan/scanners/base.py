@@ -1555,6 +1555,7 @@ class BaseScanner(ABC):
             surviving = context_mutator.surviving_chars(response_source, marker)
             context = context_mutator.detect_context(response_source, marker)
             context["marker"] = marker
+            self._last_evolution_observation = (context, surviving)
             return response_source, surviving, context
         except Exception as exc:
             # probe 失敗（ナビゲーション不能・ブラウザ異常など）も観測可能にする。
@@ -1584,6 +1585,7 @@ class BaseScanner(ABC):
                 dom_index=-1 if dom_index is None else dom_index,
             )
         )
+        self._last_evolution_observation = None
         found, saved = self._candidate_snapshot(ip, "evolution")
         if found:
             return saved or []

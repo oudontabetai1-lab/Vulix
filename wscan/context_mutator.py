@@ -65,6 +65,31 @@ def surviving_chars(response: str, marker: str) -> set[str]:
     return survivors
 
 
+def format_reflection_observation(context: dict, surviving: set[str]) -> str:
+    """Format already collected evolution observations; never probes or injects."""
+    field_lines = []
+    if isinstance(context, dict) and context.get("context"):
+        detail = ""
+        if context.get("attribute"):
+            detail = f" (attribute '{context['attribute']}'"
+            if context.get("quote"):
+                detail += f", quote {context['quote']}"
+            detail += ")"
+        field_lines.append(
+            f"- Reflection context: injected marker reflected in {context['context']}{detail}"
+        )
+    if surviving:
+        chars = "".join(sorted(c for c in surviving if not c.isalnum() and c.strip()))[:40]
+        if chars:
+            field_lines.append(f"- Characters surviving unescaped (usable for breakout): {chars}")
+    if not field_lines:
+        return ""
+    return (
+        "## Deterministic observations for this input (grounded - prioritise over guesses)\n"
+        + "\n".join(field_lines)
+    )
+
+
 def detect_context(response: str, marker: str) -> dict:
     """marker の反射位置から HTML/JS 文脈を分類する。"""
     idx = response.find(marker) if response and marker else -1
