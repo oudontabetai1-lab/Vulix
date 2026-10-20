@@ -17,6 +17,7 @@ from wscan.browser import (
     WorkerBrowser,
     build_browser_context_options,
     prepare_cloned_cookies,
+    prepare_cloned_storage_state,
 )
 
 
@@ -102,6 +103,50 @@ class TestPureContextIsolation(unittest.TestCase):
         self.assertEqual(prepare_cloned_cookies(None), [])
         self.assertEqual(prepare_cloned_cookies([]), [])
 
+    def test_prepare_cloned_storage_state_keeps_local_storage_and_filters_cookies(self):
+        raw = {
+            "cookies": [
+                {
+                    "name": "sess",
+                    "value": "abc",
+                    "domain": "example.com",
+                    "path": "/",
+                },
+                {"name": "", "value": "drop_me"},
+                {"name": "bad", "value": None},
+            ],
+            "origins": [
+                {
+                    "origin": "https://app.example.com",
+                    "localStorage": [
+                        {"name": "jwt", "value": "token-1"},
+                        {"name": "", "value": "drop"},
+                        "invalid",
+                        {"name": "theme", "value": "dark"},
+                    ],
+                },
+                {"origin": "", "localStorage": [{"name": "x", "value": "y"}]},
+                "not-a-dict",
+            ],
+        }
+        cloned = prepare_cloned_storage_state(raw)
+        self.assertIsNotNone(cloned)
+        self.assertEqual(len(cloned["cookies"]), 1)
+        self.assertEqual(cloned["cookies"][0]["name"], "sess")
+        self.assertEqual(len(cloned["origins"]), 1)
+        self.assertEqual(cloned["origins"][0]["origin"], "https://app.example.com")
+        ls = cloned["origins"][0]["localStorage"]
+        self.assertEqual(ls, [
+            {"name": "jwt", "value": "token-1"},
+            {"name": "theme", "value": "dark"},
+        ])
+
+    def test_prepare_cloned_storage_state_rejects_non_dict(self):
+        self.assertIsNone(prepare_cloned_storage_state(None))
+        self.assertIsNone(prepare_cloned_storage_state([]))  # type: ignore[arg-type]
+        empty = prepare_cloned_storage_state({})
+        self.assertEqual(empty, {"cookies": [], "origins": []})
+
 
 class TestWorkerBrowserContextIsolation(unittest.IsolatedAsyncioTestCase):
     """Test WorkerBrowser context creation, isolation, and lifecycle."""
@@ -172,6 +217,157 @@ class TestWorkerBrowserContextIsolation(unittest.IsolatedAsyncioTestCase):
             # Closing worker closes dedicated context
             await worker1.close()
             await worker2.close()
+            self.assertEqual(real._active_workers, [])
+        finally:
+            await real.close()
+
+    @unittest.skipUnless(_chromium_available(), "Chromium is not available")
+    async def test_create_worker_clones_local_storage_auth_token(self):
+        """B1 false-negative guard: SPA JWT in localStorage must reach workers."""
+        real = BrowserManager(headless=True)
+        await real.init()
+        server = None
+        server_thread = None
+        try:
+            class Handler(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    body = b"<html><body>ok</body></html>"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *args):
+                    pass
+
+            server = _FixtureServer(("127.0.0.1", 0), Handler)
+            port = server.server_port
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            origin = f"http://127.0.0.1:{port}"
+
+            await real.navigate(origin + "/")
+            await real.page.evaluate("localStorage.setItem('jwt', 'auth-token-xyz')")
+            await real.set_cookies("sess=cookie-baseline", origin)
+
+            worker = await real.create_worker()
+            try:
+                await worker.navigate(origin + "/")
+                jwt = await worker.page.evaluate("localStorage.getItem('jwt')")
+                self.assertEqual(jwt, "auth-token-xyz")
+                cookies = await worker._context.cookies()
+                self.assertTrue(
+                    any(c["name"] == "sess" and c["value"] == "cookie-baseline" for c in cookies)
+                )
+            finally:
+                await worker.close()
+        finally:
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if server_thread is not None:
+                server_thread.join(timeout=2)
+            await real.close()
+
+    @unittest.skipUnless(_chromium_available(), "Chromium is not available")
+    async def test_worker_local_storage_stays_isolated(self):
+        """B1 safe twin: worker-local localStorage mutations must not leak across workers."""
+        real = BrowserManager(headless=True)
+        await real.init()
+        server = None
+        server_thread = None
+        try:
+            class Handler(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    body = b"<html><body>ok</body></html>"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *args):
+                    pass
+
+            server = _FixtureServer(("127.0.0.1", 0), Handler)
+            port = server.server_port
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            origin = f"http://127.0.0.1:{port}"
+
+            worker1 = await real.create_worker()
+            worker2 = await real.create_worker()
+            try:
+                await worker1.navigate(origin + "/")
+                await worker2.navigate(origin + "/")
+                await worker1.page.evaluate("localStorage.setItem('role', 'alice')")
+                await worker2.page.evaluate("localStorage.setItem('role', 'bob')")
+                self.assertEqual(
+                    await worker1.page.evaluate("localStorage.getItem('role')"),
+                    "alice",
+                )
+                self.assertEqual(
+                    await worker2.page.evaluate("localStorage.getItem('role')"),
+                    "bob",
+                )
+            finally:
+                await worker1.close()
+                await worker2.close()
+        finally:
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if server_thread is not None:
+                server_thread.join(timeout=2)
+            await real.close()
+
+    @unittest.skipUnless(_chromium_available(), "Chromium is not available")
+    async def test_main_cookie_refresh_propagates_to_all_workers(self):
+        """B2 false-negative guard: rotated Cookie on main must reach every worker jar."""
+        real = BrowserManager(headless=True)
+        await real.init()
+        try:
+            target_url = "http://127.0.0.1:9999"
+            real.target_url = target_url
+            worker1 = await real.create_worker()
+            worker2 = await real.create_worker()
+            try:
+                await real.set_cookies("auth=rotated-v2", target_url)
+
+                for worker in (worker1, worker2):
+                    cookies = await worker._context.cookies()
+                    self.assertTrue(
+                        any(c["name"] == "auth" and c["value"] == "rotated-v2" for c in cookies),
+                        msg=f"worker missing refreshed cookie: {cookies}",
+                    )
+
+                # Safe twin: worker-local cookie writes still must not cross-contaminate.
+                await worker1.set_cookies("worker_only=w1", target_url)
+                c2 = await worker2._context.cookies()
+                self.assertFalse(any(c["name"] == "worker_only" for c in c2))
+            finally:
+                await worker1.close()
+                await worker2.close()
+        finally:
+            await real.close()
+
+    @unittest.skipUnless(_chromium_available(), "Chromium is not available")
+    async def test_main_header_refresh_updates_worker_extra_headers_and_context(self):
+        """B2: context-wide header refresh must update worker.extra_headers and context."""
+        real = BrowserManager(headless=True, extra_headers={"Authorization": "Bearer old"})
+        await real.init()
+        try:
+            worker1 = await real.create_worker()
+            worker2 = await real.create_worker()
+            try:
+                self.assertEqual(real._header_intercept_mode, "context")
+                await real.update_extra_headers({"Authorization": "Bearer rotated"})
+                self.assertEqual(worker1.extra_headers.get("Authorization"), "Bearer rotated")
+                self.assertEqual(worker2.extra_headers.get("Authorization"), "Bearer rotated")
+            finally:
+                await worker1.close()
+                await worker2.close()
         finally:
             await real.close()
 
