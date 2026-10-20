@@ -12,6 +12,25 @@ from wscan.monitor import MonitorServer
 
 
 class ScanSnapshotTests(unittest.TestCase):
+    def test_progress_metadata_matches_live_event_and_snapshot(self):
+        monitor = MonitorServer(port=0)
+        monitor.api_scan_id = "eta-progress"
+        monitor._begin_scan_snapshot()
+
+        import asyncio
+        asyncio.run(monitor.emit_progress(
+            current=2, total=10, message="field",
+            phase="attack", unit="field", total_known=False,
+        ))
+
+        live = monitor.event_history[-1]["data"]
+        snapshot = monitor._scan_snapshot_event()["data"]["progress"]
+        self.assertEqual(snapshot, {k: live[k] for k in snapshot})
+        self.assertEqual(snapshot["phase"], "attack")
+        self.assertEqual(snapshot["unit"], "field")
+        self.assertFalse(snapshot["total_known"])
+        self.assertEqual(snapshot["percent"], 20)
+
     def test_long_history_returns_full_snapshot_instead_of_truncated_event_tail(self):
         monitor = MonitorServer(port=0)
         monitor.api_scan_id = "fixture-scan"
@@ -486,7 +505,37 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             await cls.monitor.emit_awaiting_config()
             return {}
 
+        async def eta_unknown(request: Request):
+            cls.monitor.api_scan_id = "fixture-eta-unknown"
+            cls.monitor._begin_scan_snapshot()
+            cls.monitor.api_scan_status = "scanning"
+            cls.monitor.api_target = "http://127.0.0.1:9/eta"
+            cls.monitor.api_findings = []
+            await cls.monitor.emit_scan_started({"url": cls.monitor.api_target})
+            await cls.monitor.emit_phase("attack")
+            await cls.monitor.emit_progress(
+                2, 12, "field", phase="attack", unit="field", total_known=False
+            )
+            return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
+
+        async def eta_transition(request: Request):
+            cls.monitor.api_scan_id = "fixture-eta-transition"
+            cls.monitor._begin_scan_snapshot()
+            cls.monitor.api_scan_status = "scanning"
+            cls.monitor.api_target = "http://127.0.0.1:9/eta-transition"
+            cls.monitor.api_findings = []
+            await cls.monitor.emit_scan_started({"url": cls.monitor.api_target})
+            await cls.monitor.emit_progress(
+                2, 12, "field", phase="attack", unit="field", total_known=False
+            )
+            await cls.monitor.emit_progress(
+                2, 5, "finding", phase="verify", unit="finding", total_known=True
+            )
+            return {"run_id": cls.monitor._scan_run_id, "sequence": cls.monitor._scan_sequence}
+
         cls.monitor.app.add_api_route("/__test__/idle", idle, methods=["POST"])
+        cls.monitor.app.add_api_route("/__test__/eta-unknown", eta_unknown, methods=["POST"])
+        cls.monitor.app.add_api_route("/__test__/eta-transition", eta_transition, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/seed", seed, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/page", add_page, methods=["POST"])
         cls.monitor.app.add_api_route("/__test__/finish-url", finish_url, methods=["POST"])
@@ -616,6 +665,56 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             self.assertEqual(page.locator("#checkCounters").inner_text().strip(), "sqli 1")
             self.assertEqual(page.locator("#urlList .url-text").all_text_contents(), ["http://127.0.0.1:9/fixture-two"])
             self.assertEqual(page.locator("#urlList .url-badge").all_inner_texts(), ["検査中"])
+            browser.close()
+
+    def test_chromium_eta_phase_boundary_and_unknown_snapshot(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.continue_()
+                       if route.request.url.startswith(self.base_url) else route.abort())
+
+            unknown = page.request.post(f"{self.base_url}/__test__/eta-unknown").json()
+            page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+            page.wait_for_function(
+                "expected => state.scanRunId === expected.run_id && state.lastEventSequence === expected.sequence",
+                arg=unknown,
+            )
+            self.assertEqual(page.locator("#statRemain").inner_text(), "残量未確定")
+            self.assertEqual(page.locator("#statETA").inner_text(), "—")
+
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_function(
+                "expected => state.scanRunId === expected.run_id && state.lastEventSequence === expected.sequence",
+                arg=unknown,
+            )
+            self.assertEqual(page.locator("#statRemain").inner_text(), "残量未確定")
+            self.assertEqual(page.locator("#statETA").inner_text(), "—")
+
+            transitioned = page.request.post(f"{self.base_url}/__test__/eta-transition").json()
+            page.wait_for_function(
+                "expected => state.scanRunId === expected.run_id && state.lastEventSequence === expected.sequence",
+                arg=transitioned,
+            )
+            series = page.evaluate("({phase: state.etaSeries.phase, unit: state.etaSeries.unit, startCurrent: state.etaSeries.startCurrent})")
+            self.assertEqual(series, {"phase": "verify", "unit": "finding", "startCurrent": 2})
+            self.assertEqual(page.locator("#statRemain").inner_text(), "計測中…")
+
+            values = page.evaluate("""() => {
+              state.scanDone = false;
+              state.scanStartTime = null;
+              state.etaSeries = null;
+              updateETA(0, 5, 10, 'verify', 'finding', true);
+              updateETA(1, 5, 11, 'verify', 'finding', true);
+              const stable = document.getElementById('statRemain').textContent;
+              state.scanDone = true;
+              document.getElementById('statRemain').textContent = '完了';
+              updateETA(2, 5, 12, 'verify', 'finding', true);
+              return {stable, terminal: document.getElementById('statRemain').textContent};
+            }""")
+            self.assertEqual(values, {"stable": "4秒", "terminal": "完了"})
             browser.close()
 
     def test_chromium_initial_idle_and_explicit_new_scan_after_completion(self):
@@ -1301,6 +1400,11 @@ class DashboardConsistencyContractTests(unittest.TestCase):
         self.assertEqual(status_res["progress"]["current"], 50)
         self.assertEqual(status_res["progress"]["total"], 50)
         self.assertEqual(status_res["progress"]["percent"], 100)
+        self.assertEqual(status_res["progress"]["phase"], "verify")
+        self.assertEqual(status_res["progress"]["unit"], "finding")
+        self.assertTrue(status_res["progress"]["total_known"])
+        self.assertEqual(status_res["progress"]["eta_current"], 1)
+        self.assertEqual(status_res["progress"]["eta_total"], 1)
         self.assertEqual(status_res["total_findings_count"], 1)
         self.assertEqual(status_res["confirmed_findings_count"], 1)
         self.assertEqual(status_res["hypothesis_count"], 0)

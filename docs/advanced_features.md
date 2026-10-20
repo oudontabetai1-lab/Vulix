@@ -135,6 +135,8 @@ WordPress, Drupal, Django, Laravel, EC-CUBE, Joomla, Magento
 
 ダッシュボードの WebSocket 状態 snapshot と `scan_complete` イベントも同じ件数（`total_findings_count` / `confirmed_findings_count` / `hypothesis_count`）を持ちます。正常完了時は `progress.percent` が 100 になります。
 
+進捗 (`progress`) には、ETAの計測単位を示す `phase` / `unit` と、`total_known` が含まれます。`total_known=false` の間は残量と完了時刻を数値表示せず、ダッシュボードは「残量未確定」と表示します。`current` / `total` / `percent` の既存項目は従来どおりで、フェーズ内の推定に別カウンタが必要な場合のみ `eta_current` / `eta_total` が加わります。
+
 **レガシー `findings_count` の後方互換性**:
 - `/api/v1/scan/status` および `/api/v1/scan/findings`: 従来通り全件数 (`total_findings_count`) を返します。
 - `/api/v1/scan/results`: CI/CD パイプライン向けゲートとして従来通り確証件数 (`confirmed_findings_count`) を返します。
