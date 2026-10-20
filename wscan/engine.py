@@ -3172,8 +3172,14 @@ class ScanEngine:
                     served_scan_id = self.output_dir.name
                 except ValueError:
                     served_scan_id = ""
+                from wscan.scanners.base import finding_dict_confirmed
+                total_f = len(self.all_findings)
+                conf_f = sum(1 for f in self.monitor.api_findings if finding_dict_confirmed(f))
                 await self.monitor.emit("scan_complete", {
-                    "total_findings": len(self.all_findings),
+                    "total_findings": total_f,
+                    "total_findings_count": total_f,
+                    "confirmed_findings_count": conf_f,
+                    "hypothesis_count": total_f - conf_f,
                     "report_path": str(self.output_dir / "report.html"),
                     "scan_id": served_scan_id,
                     "findings": self.monitor.api_findings,
@@ -7603,10 +7609,9 @@ class ScanEngine:
                 # 生成時の初期 state（assumed 等）で積まれた snapshot を検証結果で差し替え、
                 # ライブ（/api・ダッシュボード）が最終 scan_complete を待たず正しく見えるようにする。
                 await self.monitor.emit_finding_update(finding.to_dict())
-                await self.monitor.emit_progress(
-                    current=i + 1,
-                    total=len(to_verify),
-                    message=f"検証 {i+1}/{len(to_verify)}: {finding.check_type}/{finding.field_name}",
+                await self.monitor.emit_status(
+                    f"検証 {i+1}/{len(to_verify)}: {finding.check_type}/{finding.field_name}",
+                    "running",
                 )
 
     async def _verify_one(self, f: Finding) -> str:

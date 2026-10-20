@@ -683,6 +683,9 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             self.assertEqual(page.locator("#statRemain").inner_text(), "中断")
             self.assertIn("aborted", page.locator("#statusDot").get_attribute("class"))
             self.assertNotIn("done", page.locator("#statusDot").get_attribute("class"))
+            findings_text = page.locator("#findingsPanel").inner_text()
+            self.assertIn("スキャンは中断されました", findings_text)
+            self.assertNotIn("No vulnerabilities detected.", findings_text)
 
             # Test reload / reconnect snapshot rendering
             page.reload(wait_until="domcontentloaded")
@@ -701,6 +704,9 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             self.assertEqual(page.locator("#statRemain").inner_text(), "中断")
             self.assertIn("aborted", page.locator("#statusDot").get_attribute("class"))
             self.assertNotIn("done", page.locator("#statusDot").get_attribute("class"))
+            findings_text = page.locator("#findingsPanel").inner_text()
+            self.assertIn("スキャンは中断されました", findings_text)
+            self.assertNotIn("No vulnerabilities detected.", findings_text)
             browser.close()
 
     def test_chromium_operator_aborted_positive_findings_renders_aborted(self):
@@ -1160,6 +1166,144 @@ class ScanFindingMetricsContractTests(unittest.TestCase):
         self.assertEqual(status_res["findings_count"], 4)
         self.assertEqual(findings_res["findings_count"], 4)
         self.assertEqual(results_res["findings_count"], 2)
+
+
+class DashboardConsistencyContractTests(unittest.TestCase):
+    def setUp(self):
+        self.monitor = MonitorServer(port=0)
+        self.monitor.api_scan_id = "test-consistency"
+        self.monitor._begin_scan_snapshot()
+        self.client = TestClient(self.monitor.app)
+
+    def test_websocket_snapshot_exposes_explicit_finding_counts_and_aborted(self):
+        self.monitor.api_findings = [
+            {
+                "id": "f_reproduced",
+                "check_type": "sqli",
+                "severity": "critical",
+                "verified": True,
+                "verification_state": "reproduced",
+            },
+            {
+                "id": "f_assumed",
+                "check_type": "xss",
+                "severity": "high",
+                "verified": False,
+                "verification_state": "assumed",
+            },
+        ]
+        self.monitor.api_scan_status = "aborted"
+
+        with self.client.websocket_connect("/ws") as ws:
+            snapshot = ws.receive_json()
+
+        data = snapshot["data"]
+        self.assertEqual(data["total_findings_count"], 2)
+        self.assertEqual(data["confirmed_findings_count"], 1)
+        self.assertEqual(data["hypothesis_count"], 1)
+        self.assertEqual(data["findings_count"], 2)
+        self.assertTrue(data["aborted"])
+        self.assertEqual(data["status"], "aborted")
+
+    def test_scan_gap_and_observability_coverage_consistency(self):
+        import asyncio
+        asyncio.run(
+            self.monitor.emit_scan_gap(
+                url="http://127.0.0.1:9/unreachable",
+                field_name="(page)",
+                check="access",
+                location="navigation",
+                note="Connection refused",
+            )
+        )
+
+        status_res = self.client.get("/api/v1/scan/status").json()
+        results_res = self.client.get("/api/v1/scan/results").json()
+
+        self.assertEqual(status_res["scan_gap_count"], 1)
+        self.assertEqual(len(status_res["scan_gaps"]), 1)
+        self.assertEqual(status_res["scan_gaps"][0]["url"], "http://127.0.0.1:9/unreachable")
+        self.assertEqual(results_res["scan_gap_count"], 1)
+
+        with self.client.websocket_connect("/ws") as ws:
+            snapshot = ws.receive_json()
+        self.assertEqual(snapshot["data"]["scan_gap_count"], 1)
+        self.assertEqual(len(snapshot["data"]["scan_gaps"]), 1)
+        self.assertEqual(snapshot["data"]["url_statuses"]["http://127.0.0.1:9/unreachable"], "error")
+
+    def test_scan_complete_preserves_field_progress_and_completion_percentage(self):
+        import asyncio
+        asyncio.run(self.monitor.emit_progress(current=42, total=42, message="Done testing"))
+        asyncio.run(
+            self.monitor.emit("scan_complete", {
+                "total_findings": 0,
+                "total_findings_count": 0,
+                "confirmed_findings_count": 0,
+                "hypothesis_count": 0,
+                "status": "done",
+            })
+        )
+
+        status_res = self.client.get("/api/v1/scan/status").json()
+        self.assertEqual(status_res["status"], "done")
+        self.assertEqual(status_res["progress"]["current"], 42)
+        self.assertEqual(status_res["progress"]["total"], 42)
+        self.assertEqual(status_res["progress"]["percent"], 100)
+
+    def test_abort_endpoint_sets_status_aborting_and_marks_aborted_liveness(self):
+        self.monitor.scan_in_progress = True
+        self.monitor.api_scan_status = "scanning"
+
+        r = self.client.post("/api/v1/scan/abort")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"status": "aborting"})
+
+        status_res = self.client.get("/api/v1/scan/status").json()
+        self.assertEqual(status_res["status"], "aborting")
+        self.assertTrue(status_res["aborted"])
+
+        with self.client.websocket_connect("/ws") as ws:
+            snapshot = ws.receive_json()
+        self.assertEqual(snapshot["data"]["status"], "aborting")
+        self.assertTrue(snapshot["data"]["aborted"])
+
+    def test_phase_verify_does_not_clobber_attack_fields_progress(self):
+        from unittest.mock import AsyncMock, patch
+        from wscan.engine import ScanEngine
+        from wscan.scanners.base import Finding, VerificationState
+
+        engine = ScanEngine("http://127.0.0.1:9/target", monitor=self.monitor)
+        engine.completed_fields = 50
+        engine.total_fields = 50
+
+        f = Finding.from_dict({
+            "url": "http://127.0.0.1:9/target",
+            "field_name": "q",
+            "check_type": "xss",
+            "payload": "<script>1</script>",
+            "evidence": "alert",
+            "evidence_type": "reflected",
+            "severity": "high",
+            "confidence": "firm",
+            "verified": False,
+            "verification_state": "assumed",
+        })
+        engine.all_findings = [f]
+
+        import asyncio
+        asyncio.run(self.monitor.emit_progress(current=50, total=50, message="attack complete"))
+        with patch.object(engine, "_verify_one", AsyncMock(return_value="reproduced")), \
+             patch.object(engine._browser, "init", AsyncMock()), \
+             patch.object(engine._browser, "close", AsyncMock()):
+            asyncio.run(engine._phase_verify())
+
+        status_res = self.client.get("/api/v1/scan/status").json()
+        self.assertEqual(status_res["progress"]["current"], 50)
+        self.assertEqual(status_res["progress"]["total"], 50)
+        self.assertEqual(status_res["progress"]["percent"], 100)
+        self.assertEqual(status_res["total_findings_count"], 1)
+        self.assertEqual(status_res["confirmed_findings_count"], 1)
+        self.assertEqual(status_res["hypothesis_count"], 0)
 
 
 if __name__ == "__main__":

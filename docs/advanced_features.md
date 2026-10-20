@@ -130,6 +130,10 @@ WordPress, Drupal, Django, Laravel, EC-CUBE, Joomla, Magento
 - `total_findings_count`: 発見された全 Finding 件数（未確証の仮説・Agent 由来を含む）。
 - `confirmed_findings_count`: 再現・確証された脆弱性の件数 (`finding_dict_confirmed(f)` が True のもの)。
 - `hypothesis_count`: 未確証の仮説件数 (`total_findings_count - confirmed_findings_count`)。
+- `scan_gap_count`: 未検査（エラー/除外）として記録された対象・入力の件数。0 findings でもこの値が正なら検査範囲が不完全です。`/api/v1/scan/status` は明細の `scan_gaps` も返します。
+- `aborted`: 中断要求を受けた時点（`status=aborting`）から `true` になります。
+
+ダッシュボードの WebSocket 状態 snapshot と `scan_complete` イベントも同じ件数（`total_findings_count` / `confirmed_findings_count` / `hypothesis_count`）を持ちます。正常完了時は `progress.percent` が 100 になります。
 
 **レガシー `findings_count` の後方互換性**:
 - `/api/v1/scan/status` および `/api/v1/scan/findings`: 従来通り全件数 (`total_findings_count`) を返します。

@@ -1991,6 +1991,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
       <div class="panel-header">
         Findings
         <span class="panel-badge" id="findingCount" style="color:var(--critical)">0</span>
+        <span class="panel-badge" id="hypothesisCount" style="display:none;color:#facc15;font-size:0.68rem">0 hyp</span>
         <div style="display:flex;gap:6px;margin-left:auto;align-items:center">
           <select id="filterSeverity" onchange="filterFindings()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem">
             <option value="">All</option>
@@ -1998,6 +1999,11 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
             <option value="high">High</option>
             <option value="medium">Medium</option>
             <option value="low">Low</option>
+          </select>
+          <select id="filterVerification" onchange="filterFindings()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem">
+            <option value="">All Verification</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="hypothesis">Hypothesis</option>
           </select>
           <input id="filterSearch" type="text" placeholder="Search…" oninput="filterFindings()"
             style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem;width:100px">
@@ -2200,6 +2206,10 @@ const state = {
   lastEventSequence: 0,
   eventCount: 0,
   findingCount: 0,
+  confirmedCount: 0,
+  hypothesisCount: 0,
+  scanGapCount: 0,
+  scanGaps: [],
   pageCount: 0,
   testCount: 0,
   autoScroll: true,
@@ -2320,6 +2330,34 @@ function computeVerification(data) {
   if (st === 'skipped') return { cls: 'fc-unverified', label: 'skipped (needs review)' };
   if (!verified) return { cls: 'fc-unverified', label: 'not reproduced' };
   return { cls: 'fc-verified', label: 'reproduced/assumed' };
+}
+
+function isFindingConfirmed(data) {
+  if (!data) return false;
+  const st = data.verification_state || '';
+  if (st) return st === 'reproduced';
+  if (typeof data.verified === 'boolean') return data.verified;
+  if (data.source === 'agent') return false;
+  return true;
+}
+
+function updateFindingCounters() {
+  const statEl = document.getElementById('statFindings');
+  const findCountEl = document.getElementById('findingCount');
+  const hypEl = document.getElementById('hypothesisCount');
+  if (findCountEl) findCountEl.textContent = state.findingCount;
+  if (state.hypothesisCount > 0) {
+    if (statEl) {
+      statEl.innerHTML = `${state.confirmedCount}<span style="font-size:0.65rem;color:#facc15;font-weight:400" title="${state.confirmedCount} confirmed, ${state.hypothesisCount} hypothesis"> (${state.hypothesisCount} hyp)</span>`;
+    }
+    if (hypEl) {
+      hypEl.style.display = '';
+      hypEl.textContent = `${state.hypothesisCount} hyp`;
+    }
+  } else {
+    if (statEl) statEl.textContent = state.findingCount;
+    if (hypEl) hypEl.style.display = 'none';
+  }
 }
 
 // ─── Config form state ───────────────────────────────────────────
@@ -4362,9 +4400,10 @@ function handleEvent(event) {
       // 重複(再接続時の履歴再送など)はカウンタにも反映しない。
       const added = addFinding(data);
       if (!added) break;
+      if (isFindingConfirmed(data)) state.confirmedCount++;
+      else state.hypothesisCount++;
       state.findingCount++;
-      document.getElementById('statFindings').textContent = state.findingCount;
-      document.getElementById('findingCount').textContent = state.findingCount;
+      updateFindingCounters();
       addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${(data.evidence||'').substring(0,60)}`);
       if (data.url) state.urlFindingCounts[data.url] = (state.urlFindingCounts[data.url] || 0) + 1;
       if (data.url) markSiteMapVuln(data.url);
@@ -4387,18 +4426,34 @@ function handleEvent(event) {
           badge.className = 'fc-verify-badge ' + vb.cls;
           badge.textContent = vb.label;
         }
+        const wasConf = card.dataset.confirmed === 'true';
+        const nowConf = isFindingConfirmed(data);
+        card.dataset.confirmed = nowConf ? 'true' : 'false';
+        if (wasConf !== nowConf) {
+          if (nowConf) {
+            state.confirmedCount++;
+            state.hypothesisCount = Math.max(0, state.hypothesisCount - 1);
+          } else {
+            state.confirmedCount = Math.max(0, state.confirmedCount - 1);
+            state.hypothesisCount++;
+          }
+          updateFindingCounters();
+        }
       } else {
         const added = addFinding(data);
         if (added) {
+          if (isFindingConfirmed(data)) state.confirmedCount++;
+          else state.hypothesisCount++;
           state.findingCount++;
-          document.getElementById('statFindings').textContent = state.findingCount;
-          document.getElementById('findingCount').textContent = state.findingCount;
+          updateFindingCounters();
         }
       }
       break;
     }
 
     case 'scan_gap': {
+      state.scanGapCount = (state.scanGapCount || 0) + 1;
+      if (data) state.scanGaps.push(data);
       const u = data.url || '';
       if (u) {
         if (!state.urlStatuses[u]) state.urlOrder.push(u);
@@ -4446,6 +4501,11 @@ function handleEvent(event) {
       closeInteractiveModals();
       // 設定 + 結果サマリはサーバ側でアウトプットフォルダに自動保存される。
       // 必要に応じて「📤 設定をエクスポート」ボタンから手動でダウンロード可能。
+      // replaceFindings が 0 件時の中断注記を判定するため、state を先に確定させる。
+      const isAborted = data.status === 'aborted' || !!data.aborted;
+      state.scanDone = true;
+      state.status = isAborted ? 'aborted' : 'done';
+      state.aborted = isAborted;
       if (Array.isArray(data.findings)) {
         replaceFindings(data.findings);
       }
@@ -4461,8 +4521,6 @@ function handleEvent(event) {
         if (rep) { rep.href = `/reports/${encodeURIComponent(data.scan_id)}/report.html`; rep.style.display = ''; }
         if (zip) { zip.href = `/api/v1/scans/${encodeURIComponent(data.scan_id)}/download`; zip.style.display = ''; }
       }
-      const isAborted = data.status === 'aborted' || !!data.aborted;
-      state.scanDone = true;
       document.getElementById('progressStripe').style.display = 'none';
       document.getElementById('statETA').textContent = '—';
       showPostScanActions(true);
@@ -4574,6 +4632,10 @@ function resetLiveScanState() {
   state.scanId = null;
   state.lastEventSequence = 0;
   state.findingCount = 0;
+  state.confirmedCount = 0;
+  state.hypothesisCount = 0;
+  state.scanGapCount = 0;
+  state.scanGaps = [];
   state.findingKeys = new Set();
   state.findingCards = new Map();
   state.pageCount = 0;
@@ -4601,6 +4663,7 @@ function resetLiveScanState() {
 
   const textDefaults = {
     eventCount: '0', statPages: '0', statFindings: '0', findingCount: '0',
+    hypothesisCount: '0 hyp',
     statPct: '―%', statElapsed: '—', statRemain: '—', statETA: '—',
     statCurrent: '0', statTotal: '', ctUrl: '—', ctField: '—',
     ctCheckType: '—', ctPayload: '—', reqContent: 'No request captured yet.',
@@ -4610,6 +4673,8 @@ function resetLiveScanState() {
     const el = document.getElementById(id);
     if (el) el.textContent = value;
   });
+  const hypEl = document.getElementById('hypothesisCount');
+  if (hypEl) hypEl.style.display = 'none';
   const ctUrl = document.getElementById('ctUrl');
   if (ctUrl) ctUrl.title = '';
   const payloadFull = document.getElementById('ctPayloadFull');
@@ -4660,6 +4725,10 @@ function applyScanSnapshot(event) {
 
   const status = data.status || 'idle';
   const findings = Array.isArray(data.findings) ? data.findings : [];
+  state.scanGapCount = Number(data.scan_gap_count) || 0;
+  state.scanGaps = Array.isArray(data.scan_gaps) ? [...data.scan_gaps] : [];
+  state.status = status;
+  state.aborted = status === 'aborted' || !!data.aborted;
   state.pageCount = Number(data.page_count) || 0;
   state.checkCounts = data.check_counts && typeof data.check_counts === 'object'
     ? {...data.check_counts} : {};
@@ -4684,7 +4753,8 @@ function applyScanSnapshot(event) {
   if (state.phase) updatePhaseBar(state.phase);
 
   const progress = data.progress || {};
-  const pct = Number(progress.percent) || 0;
+  let pct = Number(progress.percent) || 0;
+  if (status === 'done') pct = 100;
   document.getElementById('progressBar').style.width = pct + '%';
   document.getElementById('statPct').textContent = pct + '%';
   document.getElementById('statCurrent').textContent = progress.current ?? 0;
@@ -4891,6 +4961,7 @@ function addFinding(data) {
   card.className = 'finding-card';
   card.dataset.severity = sev;
   card.dataset.confidence = confidence;
+  card.dataset.confirmed = isFindingConfirmed(data) ? 'true' : 'false';
 
   // XSS confirmed: show prominent alert banner
   let alertBanner = '';
@@ -4966,10 +5037,18 @@ function replaceFindings(findings) {
   state.findingKeys = new Set();  // full re-sync: rebuild dedup index from scratch
   state.findingCards = new Map();  // カード参照も貼り直す
   state.findingCount = findings.length;
-  document.getElementById('statFindings').textContent = state.findingCount;
-  document.getElementById('findingCount').textContent = state.findingCount;
+  state.confirmedCount = findings.filter(isFindingConfirmed).length;
+  state.hypothesisCount = state.findingCount - state.confirmedCount;
+  updateFindingCounters();
   if (!findings.length) {
-    panel.innerHTML = '<div class="no-findings-msg">No vulnerabilities detected.</div>';
+    if (state.scanDone && (state.status === 'aborted' || state.aborted)) {
+      panel.innerHTML = '<div class="no-findings-msg" style="color:var(--high)">⚠ スキャンは中断されました — 中断前に検出された脆弱性はありません (部分結果)。<br><span style="font-size:0.75rem;color:var(--text-muted)">No vulnerabilities detected before scan was aborted.</span></div>';
+    } else if (state.scanGapCount > 0 || Object.values(state.urlStatuses).some(s => s === 'error')) {
+      const errCount = state.scanGapCount || Object.values(state.urlStatuses).filter(s => s === 'error').length;
+      panel.innerHTML = `<div class="no-findings-msg">検査済み対象に脆弱性は検出されませんでした。<br><span style="color:#facc15;font-size:0.75rem">⚠ 注意: ${errCount} 件の対象/入力は未検査(エラー/除外)です。</span></div>`;
+    } else {
+      panel.innerHTML = '<div class="no-findings-msg">No vulnerabilities detected.</div>';
+    }
     return;
   }
   findings.slice().reverse().forEach(addFinding);
@@ -5032,6 +5111,7 @@ function sendIntervention(command) {
 
 function confirmAbort() {
   if (confirm('スキャンを中断しますか？\n現在までの結果で部分レポートが保存されます。')) {
+    setStatus('中断処理中...', 'aborted');
     sendIntervention('abort');
   }
 }
@@ -5141,14 +5221,17 @@ function confirmPlan() {
 
 // ─── U-2: Finding filter ────────────────────────────────────────
 function filterFindings() {
-  const sev = document.getElementById('filterSeverity').value.toLowerCase();
-  const q   = document.getElementById('filterSearch').value.toLowerCase();
+  const sev = (document.getElementById('filterSeverity')?.value || '').toLowerCase();
+  const ver = (document.getElementById('filterVerification')?.value || '').toLowerCase();
+  const q   = (document.getElementById('filterSearch')?.value || '').toLowerCase();
   document.querySelectorAll('#findingsPanel .finding-card').forEach(card => {
     const cardSev = (card.dataset.severity || '').toLowerCase();
+    const isConf  = card.dataset.confirmed === 'true';
     const text    = card.textContent.toLowerCase();
     const sevOk   = !sev || cardSev === sev;
+    const verOk   = !ver || (ver === 'confirmed' ? isConf : !isConf);
     const searchOk = !q || text.includes(q);
-    card.style.display = (sevOk && searchOk) ? '' : 'none';
+    card.style.display = (sevOk && verOk && searchOk) ? '' : 'none';
   });
 }
 

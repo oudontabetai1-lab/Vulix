@@ -279,6 +279,7 @@ class MonitorServer:
         self._scan_complete_data: dict = {}
         self._scan_status_message = ""
         self._scan_paused = False
+        self._scan_gaps: list[dict] = []
         # 一過性の操作待ちモーダルは履歴ではなく、未解決の1件だけを
         # 状態 snapshot に含める。None なら未解決のモーダルは無い。
         self.pending_interactive: Optional[dict] = None
@@ -940,10 +941,12 @@ class MonitorServer:
                 "total_findings_count": total,
                 "confirmed_findings_count": confirmed,
                 "hypothesis_count": total - confirmed,
+                "scan_gap_count": len(self._scan_gaps),
+                "scan_gaps": list(self._scan_gaps),
                 "target": self.api_target,
                 "phase": self.api_phase,
                 "progress": self.api_progress,
-                "aborted": self.api_scan_status == "aborted",
+                "aborted": self.api_scan_status in ("aborted", "aborting"),
             })
 
         @app.get("/api/v1/scan/findings")
@@ -960,7 +963,8 @@ class MonitorServer:
                 "total_findings_count": total,
                 "confirmed_findings_count": confirmed,
                 "hypothesis_count": total - confirmed,
-                "aborted": self.api_scan_status == "aborted",
+                "scan_gap_count": len(self._scan_gaps),
+                "aborted": self.api_scan_status in ("aborted", "aborting"),
             })
 
         @app.get("/api/v1/scan/report")
@@ -997,10 +1001,11 @@ class MonitorServer:
                 "total_findings_count": total,
                 "confirmed_findings_count": confirmed_count,
                 "hypothesis_count": total - confirmed_count,
+                "scan_gap_count": len(self._scan_gaps),
                 "critical_count": sum(1 for f in confirmed if f.get("severity") == "critical"),
                 "high_count": sum(1 for f in confirmed if f.get("severity") == "high"),
                 "report_available": bool(self.api_report_path and Path(self.api_report_path).exists()),
-                "aborted": self.api_scan_status == "aborted",
+                "aborted": self.api_scan_status in ("aborted", "aborting"),
             })
 
         @app.post("/api/v1/manual-crawl/start")
@@ -1183,6 +1188,7 @@ class MonitorServer:
                     {"error": "実行中のスキャンはありません。"}, status_code=409
                 )
             self.command_queue.put_nowait("abort")
+            self.api_scan_status = "aborting"
             self._audit("scan_abort", self._client_ip(request), self.current_scan_id)
             return JSONResponse({"status": "aborting"})
 
@@ -1923,10 +1929,14 @@ class MonitorServer:
         self._scan_complete_data = {}
         self._scan_status_message = ""
         self._scan_paused = False
+        self._scan_gaps = []
         self.event_history.clear()
 
     def _scan_snapshot_event(self) -> dict:
         """Return the canonical UI state at the latest per-scan event cursor."""
+        from wscan.scanners.base import finding_dict_confirmed
+        total = len(self.api_findings)
+        confirmed = sum(1 for f in self.api_findings if finding_dict_confirmed(f))
         return {
             "type": "scan_snapshot",
             "server_id": self._server_instance_id,
@@ -1938,10 +1948,17 @@ class MonitorServer:
                 "status": self.api_scan_status,
                 "status_message": self._scan_status_message,
                 "paused": self._scan_paused,
+                "aborted": self.api_scan_status in ("aborted", "aborting"),
                 "target": self.api_target,
                 "phase": self.api_phase,
                 "progress": copy.deepcopy(self.api_progress),
                 "findings": copy.deepcopy(self.api_findings),
+                "findings_count": total,
+                "total_findings_count": total,
+                "confirmed_findings_count": confirmed,
+                "hypothesis_count": total - confirmed,
+                "scan_gap_count": len(self._scan_gaps),
+                "scan_gaps": copy.deepcopy(self._scan_gaps),
                 "page_count": self._scan_page_count,
                 "check_counts": dict(self._scan_check_counts),
                 "url_order": list(self._scan_url_order),
@@ -1971,11 +1988,19 @@ class MonitorServer:
                 else:
                     status = "done"
             self.api_scan_status = status
+            if status == "done":
+                if self.api_progress.get("total", 0) > 0:
+                    self.api_progress["current"] = self.api_progress["total"]
+                    self.api_progress["percent"] = 100
+                else:
+                    self.api_progress["percent"] = 100
             keys_to_copy = ["total_findings", "report_path", "scan_id"]
-            if "status" in event_data:
-                keys_to_copy.append("status")
-            if "aborted" in event_data:
-                keys_to_copy.append("aborted")
+            for optional_key in (
+                "status", "aborted", "total_findings_count",
+                "confirmed_findings_count", "hypothesis_count",
+            ):
+                if optional_key in event_data:
+                    keys_to_copy.append(optional_key)
             self._scan_complete_data = {
                 key: copy.deepcopy(event_data[key])
                 for key in keys_to_copy
@@ -2010,6 +2035,7 @@ class MonitorServer:
                 if not self._scan_url_statuses.get(url):
                     self._scan_url_order.append(url)
                 self._scan_url_statuses[url] = "error"
+            self._scan_gaps.append(dict(event_data))
         elif event_type == "finding":
             url = event_data.get("url")
             if url and url in self._scan_url_statuses:
