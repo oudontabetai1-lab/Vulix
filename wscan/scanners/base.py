@@ -933,7 +933,22 @@ class BaseScanner(ABC):
         # いた旧版は query/form で _apply_ip→AttributeError になった。capability を正本に判定する。
         cap = self.CONTRACT.capability(carrier)
         if cap is None or cap.state != CapabilityState.SUPPORTED:
-            return DispatchResult(state=DispatchState.UNSUPPORTED, carrier=carrier)
+            reason = (cap.reason if cap and cap.reason else "carrier capability not supported")
+            param = getattr(ip, "parameter_id", "") or "(none)"
+            self._record_scan_note(f"carrier_unsupported:{self.CHECK_TYPE}:{carrier.value}:{param}:{reason}")
+            # attempt_ledger にも試行台帳エントリを記録（best-effort）
+            ledger = getattr(getattr(self, "engine", None), "attempt_ledger", None)
+            if ledger is not None:
+                try:
+                    from wscan.attempt_ledger import Attempt
+                    ledger.record(
+                        ip.stable_key_parts(),
+                        self.CHECK_TYPE,
+                        Attempt(payload="[unsupported]", error=True),
+                    )
+                except Exception:
+                    pass
+            return DispatchResult(state=DispatchState.UNSUPPORTED, carrier=carrier, note=reason)
         # policy gate は driver 分類より **先** に置く。driver 不在でも policy が拒否するなら
         # BLOCKED（＋state_change_skipped 記録）を優先し、UNEXECUTABLE で観測ログを落とさない。
         # BLOCKED では即 return し _apply_ip を呼ばないため、ここで skip を1回記録する
