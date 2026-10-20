@@ -2230,12 +2230,22 @@ class MonitorServer:
             "url": url,
         })
 
-    async def emit_progress(self, current: int, total: int, message: str = ""):
+    async def emit_progress(
+        self, current: int, total: int, message: str = "", *,
+        phase: str = "", unit: str = "", total_known: bool | None = None,
+        eta_current: int | None = None, eta_total: int | None = None,
+    ):
         self.api_progress = {
             "current": current,
             "total": total,
             "percent": int(current / total * 100) if total > 0 else 0,
+            "phase": phase,
+            "unit": unit,
+            "total_known": total > 0 if total_known is None else total_known,
         }
+        if eta_current is not None and eta_total is not None:
+            self.api_progress["eta_current"] = eta_current
+            self.api_progress["eta_total"] = eta_total
         await self.emit("progress", {**self.api_progress, "message": message})
 
     async def emit_phase(self, phase: str) -> None:

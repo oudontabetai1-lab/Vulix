@@ -6861,6 +6861,9 @@ class ScanEngine:
                 current=self.completed_fields,
                 total=self.total_fields,
                 message=f"{field_name} ({url})",
+                phase="attack",
+                unit="field",
+                total_known=False,
             )
 
     def _page_js_risks(self, url, crawl_html, external_scripts, check_names) -> list:
@@ -7612,6 +7615,16 @@ class ScanEngine:
                 await self.monitor.emit_status(
                     f"検証 {i+1}/{len(to_verify)}: {finding.check_type}/{finding.field_name}",
                     "running",
+                )
+                await self.monitor.emit_progress(
+                    current=self.completed_fields,
+                    total=self.total_fields,
+                    message=f"verification {i+1}/{len(to_verify)}",
+                    phase="verify",
+                    unit="finding",
+                    total_known=True,
+                    eta_current=i + 1,
+                    eta_total=len(to_verify),
                 )
 
     async def _verify_one(self, f: Finding) -> str:
