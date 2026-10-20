@@ -3,6 +3,7 @@ Base Scanner Class
 Provides common utilities for all vulnerability scanners.
 """
 import asyncio
+from contextvars import ContextVar
 import json
 import re
 import time
@@ -28,6 +29,11 @@ if TYPE_CHECKING:
 
 class CandidateSnapshotError(RuntimeError):
     """Candidate state is corrupt or could not be durably saved."""
+
+
+_CURRENT_EVOLUTION_OBSERVATION: ContextVar[Optional[tuple[dict, set[str]]]] = ContextVar(
+    "wscan_current_evolution_observation", default=None
+)
 
 
 # CVSS 3.1 base score lookup table: check_type → (vector_string, numeric_score)
@@ -702,6 +708,15 @@ class BaseScanner(ABC):
             except Exception:
                 return
         errors.append(note)
+
+    def _begin_evolution_observation(self):
+        return _CURRENT_EVOLUTION_OBSERVATION.set(None)
+
+    def _get_evolution_observation(self):
+        return _CURRENT_EVOLUTION_OBSERVATION.get()
+
+    def _restore_evolution_observation(self, token) -> None:
+        _CURRENT_EVOLUTION_OBSERVATION.reset(token)
 
     def may_scan_injection_point(
         self,
@@ -1586,6 +1601,7 @@ class BaseScanner(ABC):
             )
         )
         self._last_evolution_observation = None
+        _CURRENT_EVOLUTION_OBSERVATION.set(None)
         found, saved = self._candidate_snapshot(ip, "evolution")
         if found:
             return saved or []
@@ -1601,6 +1617,9 @@ class BaseScanner(ABC):
                 is_url_param,
                 dom_index=dom_index,
             )
+            observation = (context, surviving)
+            self._last_evolution_observation = observation
+            _CURRENT_EVOLUTION_OBSERVATION.set(observation)
             marker = context.get("marker") or context_mutator.make_marker()
             payloads = context_mutator.mutate(
                 self.CHECK_TYPE,
