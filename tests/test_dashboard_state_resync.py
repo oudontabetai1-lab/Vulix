@@ -1030,6 +1030,139 @@ class ScanHistoryStatusPersistenceTests(unittest.TestCase):
             shutil.rmtree(tmp_base, ignore_errors=True)
 
 
+class ScanFindingMetricsContractTests(unittest.TestCase):
+    def setUp(self):
+        self.monitor = MonitorServer(port=0)
+        self.client = TestClient(self.monitor.app)
+        self.monitor.api_scan_id = "metrics-test-scan"
+        self.monitor.api_scan_status = "scanning"
+
+    def test_empty_findings_contract(self):
+        self.monitor.api_findings = []
+
+        status_res = self.client.get("/api/v1/scan/status").json()
+        findings_res = self.client.get("/api/v1/scan/findings").json()
+        results_res = self.client.get("/api/v1/scan/results").json()
+
+        for res in (status_res, findings_res, results_res):
+            self.assertEqual(res["total_findings_count"], 0)
+            self.assertEqual(res["confirmed_findings_count"], 0)
+            self.assertEqual(res["hypothesis_count"], 0)
+
+        # Legacy behavior
+        self.assertEqual(status_res["findings_count"], 0)
+        self.assertEqual(findings_res["findings_count"], 0)
+        self.assertEqual(results_res["findings_count"], 0)
+        self.assertEqual(results_res["findings"], [])
+
+    def test_hypothetical_assumed_finding_contract_1_0_1(self):
+        # 1 assumed finding: total=1, confirmed=0, hypothesis=1
+        self.monitor.api_findings = [
+            {
+                "id": "f_assumed",
+                "check_type": "xss",
+                "severity": "high",
+                "verified": False,
+                "verification_state": "assumed",
+            }
+        ]
+
+        status_res = self.client.get("/api/v1/scan/status").json()
+        findings_res = self.client.get("/api/v1/scan/findings").json()
+        results_res = self.client.get("/api/v1/scan/results").json()
+
+        # Explicit parallel metrics match across all 3 endpoints
+        for res in (status_res, findings_res, results_res):
+            self.assertEqual(res["total_findings_count"], 1)
+            self.assertEqual(res["confirmed_findings_count"], 0)
+            self.assertEqual(res["hypothesis_count"], 1)
+
+        # Legacy findings_count semantics preserved
+        self.assertEqual(status_res["findings_count"], 1)
+        self.assertEqual(findings_res["findings_count"], 1)
+        self.assertEqual(results_res["findings_count"], 0)  # results only counts confirmed for CI/CD
+
+        # Findings lists remain unpruned
+        self.assertEqual(len(findings_res["findings"]), 1)
+        self.assertEqual(len(results_res["findings"]), 1)
+
+    def test_confirmed_reproduced_finding_contract_1_1_0(self):
+        # 1 reproduced finding: total=1, confirmed=1, hypothesis=0
+        self.monitor.api_findings = [
+            {
+                "id": "f_reproduced",
+                "check_type": "sqli",
+                "severity": "critical",
+                "verified": True,
+                "verification_state": "reproduced",
+            }
+        ]
+
+        status_res = self.client.get("/api/v1/scan/status").json()
+        findings_res = self.client.get("/api/v1/scan/findings").json()
+        results_res = self.client.get("/api/v1/scan/results").json()
+
+        for res in (status_res, findings_res, results_res):
+            self.assertEqual(res["total_findings_count"], 1)
+            self.assertEqual(res["confirmed_findings_count"], 1)
+            self.assertEqual(res["hypothesis_count"], 0)
+
+        # Legacy findings_count matches confirmed in this case
+        self.assertEqual(status_res["findings_count"], 1)
+        self.assertEqual(findings_res["findings_count"], 1)
+        self.assertEqual(results_res["findings_count"], 1)
+        self.assertEqual(results_res["critical_count"], 1)
+
+    def test_mixed_findings_and_legacy_fallback(self):
+        # 1 reproduced + 2 assumed + 1 legacy dict without state (defaults to confirmed)
+        self.monitor.api_findings = [
+            {
+                "id": "f1",
+                "check_type": "sqli",
+                "severity": "critical",
+                "verified": True,
+                "verification_state": "reproduced",
+            },
+            {
+                "id": "f2",
+                "check_type": "xss",
+                "severity": "high",
+                "verified": False,
+                "verification_state": "assumed",
+            },
+            {
+                "id": "f3",
+                "check_type": "rce",
+                "severity": "critical",
+                "source": "agent",
+                "verified": False,
+                "verification_state": "assumed",
+            },
+            {
+                "id": "f4_legacy",
+                "check_type": "header",
+                "severity": "low",
+                # No verification_state or verified bool -> legacy confirmed fallback
+            },
+        ]
+
+        status_res = self.client.get("/api/v1/scan/status").json()
+        findings_res = self.client.get("/api/v1/scan/findings").json()
+        results_res = self.client.get("/api/v1/scan/results").json()
+
+        # Total = 4, confirmed = 2 (f1, f4_legacy), hypothesis = 2 (f2, f3)
+        for res in (status_res, findings_res, results_res):
+            self.assertEqual(res["total_findings_count"], 4)
+            self.assertEqual(res["confirmed_findings_count"], 2)
+            self.assertEqual(res["hypothesis_count"], 2)
+
+        # Legacy findings_count semantics
+        self.assertEqual(status_res["findings_count"], 4)
+        self.assertEqual(findings_res["findings_count"], 4)
+        self.assertEqual(results_res["findings_count"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

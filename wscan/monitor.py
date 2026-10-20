@@ -930,10 +930,16 @@ class MonitorServer:
         @app.get("/api/v1/scan/status")
         async def api_scan_status():
             """スキャンステータスを返す（進捗・フェーズ・対象を含む）。"""
+            from wscan.scanners.base import finding_dict_confirmed
+            total = len(self.api_findings)
+            confirmed = sum(1 for f in self.api_findings if finding_dict_confirmed(f))
             return JSONResponse({
                 "status": self.api_scan_status,
                 "scan_id": self.api_scan_id,
-                "findings_count": len(self.api_findings),
+                "findings_count": total,
+                "total_findings_count": total,
+                "confirmed_findings_count": confirmed,
+                "hypothesis_count": total - confirmed,
                 "target": self.api_target,
                 "phase": self.api_phase,
                 "progress": self.api_progress,
@@ -943,11 +949,17 @@ class MonitorServer:
         @app.get("/api/v1/scan/findings")
         async def api_scan_findings():
             """検出結果を JSON で返す (スキャン中も随時取得可)。"""
+            from wscan.scanners.base import finding_dict_confirmed
+            total = len(self.api_findings)
+            confirmed = sum(1 for f in self.api_findings if finding_dict_confirmed(f))
             return JSONResponse({
                 "scan_id": self.api_scan_id,
                 "status": self.api_scan_status,
                 "findings": self.api_findings,
-                "findings_count": len(self.api_findings),
+                "findings_count": total,
+                "total_findings_count": total,
+                "confirmed_findings_count": confirmed,
+                "hypothesis_count": total - confirmed,
                 "aborted": self.api_scan_status == "aborted",
             })
 
@@ -969,17 +981,22 @@ class MonitorServer:
         async def api_scan_results():
             """findings + metadata をまとめて返す (CI/CD パイプライン用)。
 
-            件数は confirmed(verified) のみを脆弱性として数える。
+            件数は confirmed(verified) のみを脆弱性として数える (レガシー findings_count)。
+            明示的なメトリクスとして total_findings_count, confirmed_findings_count, hypothesis_count を提供する。
             findings 配列は未確証も含めて全件返し、verification_state で区別する。
             """
             from wscan.scanners.base import finding_dict_confirmed
             confirmed = [f for f in self.api_findings if finding_dict_confirmed(f)]
+            total = len(self.api_findings)
+            confirmed_count = len(confirmed)
             return JSONResponse({
                 "scan_id": self.api_scan_id,
                 "status": self.api_scan_status,
                 "findings": self.api_findings,
-                "findings_count": len(confirmed),
-                "hypothesis_count": len(self.api_findings) - len(confirmed),
+                "findings_count": confirmed_count,
+                "total_findings_count": total,
+                "confirmed_findings_count": confirmed_count,
+                "hypothesis_count": total - confirmed_count,
                 "critical_count": sum(1 for f in confirmed if f.get("severity") == "critical"),
                 "high_count": sum(1 for f in confirmed if f.get("severity") == "high"),
                 "report_available": bool(self.api_report_path and Path(self.api_report_path).exists()),
