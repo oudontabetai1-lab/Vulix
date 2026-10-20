@@ -14,10 +14,14 @@ SAFE_ENDPOINTS = [
     {"path": "/safe/app.js.map", "field": "(source_map)", "note": "Public map has no private paths or source content"},
 ]
 LISTING = '<title>Index of /exposed/</title><h1>Index of /exposed/</h1><pre><a href="../">../</a><a href="app.js">app.js</a> 2026-01-01 12:00 <a href="readme.txt">readme.txt</a></pre>'
-ROOT_LISTING = '<title>Index of /</title><h1>Index of /</h1><pre><a href="alpha.txt">alpha.txt</a> 2026-01-01 12:00 <a href="beta.txt">beta.txt</a> 2026-01-02 12:00</pre>'
+ROOT_LISTING = '<title>Index of /</title><h1>Index of /</h1><pre><a href="alpha.txt">alpha.txt</a> 2026-01-01 12:00 <a href="beta.txt">beta.txt</a> 2026-01-02 12:00 <a href="safe/">safe/</a></pre>'
 ROOT_SAFE = '<title>Index of /</title><h1>Index of /</h1><p>Product catalog</p>'
 SAFE = '<title>Index of /safe/</title><p>Product catalog</p><script src="app.js"></script>'
 app = FastAPI()
+
+@app.get('/')
+def root_listing():
+    return HTMLResponse(ROOT_LISTING)
 
 @app.get('/{path:path}')
 def resource(path: str):
@@ -34,3 +38,6 @@ def resource(path: str):
     if path == 'safe/app.js.map':
         return Response(json.dumps({"version": 3, "sources": ["public.js"], "mappings": ""}), media_type='application/json')
     return PlainTextResponse('Not found', status_code=404)
+
+def create_app():
+    return app

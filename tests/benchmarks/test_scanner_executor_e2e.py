@@ -193,3 +193,23 @@ def test_realistic_healthcare_stored_xss_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+
+
+def test_directory_artifacts_root_listing_scanner_scorecard():
+    """Root listing is confirmed while its reachable safe twin is rejected on re-verification."""
+    _require_chromium()
+    out = _run_manifest("directory_artifacts.yaml", {"directory_artifacts"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "fp"], out
+    assert [c["classification"]["confirmed"] for c in out["cases"]] == ["tp", "tn"], out
+    assert out["metrics"]["candidate"] == {
+        "tp": 1, "fn": 0, "fp": 1, "tn": 0,
+        "recall": 1.0, "precision": 0.5,
+        "recall_denominator": 1, "precision_denominator": 2,
+    }, out
+    assert out["metrics"]["confirmed"] == {
+        "tp": 1, "fn": 0, "fp": 0, "tn": 1,
+        "recall": 1.0, "precision": 1.0,
+        "recall_denominator": 1, "precision_denominator": 1,
+    }, out
