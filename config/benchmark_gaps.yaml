@@ -5,10 +5,6 @@
 # 新しい scanner を registry へ追加したら、ここへ gap を足すか benchmark case を作らない限り
 # registry 完全性テスト（tests/benchmarks/test_registry_completeness.py）が失敗する。
 gaps:
-  directory_artifacts:
-    reason: HTTP fixture の脆弱・安全ツインで検証済み。ブラウザ E2E benchmark は未計測
-    owner_task: "directory-artifacts-benchmark"
-    deadline: "2026-12-31"
   cache_poisoning:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"

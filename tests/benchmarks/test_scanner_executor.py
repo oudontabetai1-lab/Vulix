@@ -10,7 +10,7 @@ import pytest
 from wscan import benchmark_runner as br
 from wscan.benchmark_runner import ScanOutcome
 from wscan.benchmark_model import (
-    CaseExecutionState as State, checks_covered_by_suites, load_manifest_file,
+    CaseExecutionState as State, build_scorecard, checks_covered_by_suites, load_manifest_file,
 )
 from wscan.benchmark_scan import ScanEngineScanRunner
 
@@ -247,6 +247,21 @@ def test_unexercised_case_is_not_reached(suite):
     assert results[0].state == State.COMPLETED  # vulnerable は実行済み
     assert results[1].state == State.NOT_REACHED  # safe は未実行→陰性にしない
     assert results[1].candidate_match is False and results[1].confirmed_match is False
+
+
+def test_directory_artifacts_unexercised_pages_are_incomplete_not_negative():
+    manifest = Path(__file__).resolve().parents[2] / "benchmarks/manifests/directory_artifacts.yaml"
+    directory_suite = load_manifest_file(manifest, registry_keys={"directory_artifacts"})
+    outcome = ScanOutcome(findings=[], exercised=frozenset())
+    results = br.score_cases(directory_suite, outcome, ran_checks={"directory_artifacts"})
+    score = build_scorecard(
+        directory_suite, results, run_id="test", source_sha="sha",
+        manifest_digest="manifest", registry_digest="registry",
+    )
+    assert [row["state"] for row in score["cases"]] == ["not_reached", "not_reached"]
+    assert score["overall_status"] == "INCOMPLETE"
+    assert score["metrics"]["candidate"]["recall_denominator"] == 0
+    assert score["metrics"]["candidate"]["precision_denominator"] == 0
 
 
 def test_other_carrier_exercised_is_not_reached(suite):

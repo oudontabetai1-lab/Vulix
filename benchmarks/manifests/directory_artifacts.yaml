@@ -1,0 +1,24 @@
+schema_version: 1
+suite_id: directory_artifacts_root_listing
+fixture_id: directory_artifacts
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# Page-level evidence is credited only when ScanEngine records the exact page identity as exercised.
+cases:
+  - case_id: directory_artifacts.root_listing.vulnerable
+    expected: vulnerable
+    check: directory_artifacts
+    request: {method: GET, path: /}
+    match: {path: /, field: "(page)", location: page-level}
+    twin_id: directory_artifacts.safe_listing.safe
+    taxonomy: [directory_listing, unauthenticated, root]
+    gate: observed
+  - case_id: directory_artifacts.safe_listing.safe
+    expected: safe
+    check: directory_artifacts
+    request: {method: GET, path: /safe/}
+    match: {path: /safe/, field: "(page)", location: page-level}
+    twin_id: directory_artifacts.root_listing.vulnerable
+    taxonomy: [directory_listing, unauthenticated, safe_twin]
+    gate: observed
