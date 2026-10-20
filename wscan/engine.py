@@ -6655,11 +6655,17 @@ class ScanEngine:
             _scan_note_start = len(self.wave_errors)
             checks_executed += 1
             _dlg_check = getattr(self.browser, "dialog_total", 0)
+            _begin_observation = getattr(scanner, "_begin_evolution_observation", None)
+            _observation_scope = _begin_observation() if callable(_begin_observation) else None
             try:
                 before_count = len(self.all_findings)
                 findings = await scanner.scan_injection_point(ip, field)
                 if getattr(self, "enable_evolution_observation_reuse", False):
-                    _observation = getattr(scanner, "_last_evolution_observation", None)
+                    _get_observation = getattr(scanner, "_get_evolution_observation", None)
+                    _observation = (
+                        _get_observation() if callable(_get_observation)
+                        else getattr(scanner, "_last_evolution_observation", None)
+                    )
                     if _observation:
                         _evolution_observations[check_name] = _observation
                 _ssti_control_unavailable = any(
@@ -6718,6 +6724,8 @@ class ScanEngine:
                 )
                 console.print(f"    [yellow]Scanner error ({check_name}): {e}[/yellow]")
             finally:
+                if _observation_scope is not None:
+                    scanner._restore_evolution_observation(_observation_scope)
                 if _override_token is not None:
                     _FIELD_PAYLOAD_OVERRIDES.reset(_override_token)
                 # この (url, field, check) 単位を完了として記録（再開時に飛ばす）。
@@ -6843,6 +6851,7 @@ class ScanEngine:
                 dom_index=dom_index,
                 crawl_html=crawl_html,
                 external_scripts=external_scripts,
+                evolution_observations=_evolution_observations,
             )
             # None はいずれかの check が未完、list は今回対象がすべて完了。
             # 完了記録自体は check_type ごとに _adaptive_attack_field が行う。
@@ -6910,6 +6919,7 @@ class ScanEngine:
         dom_index: int = -1,
         crawl_html: str = "",
         external_scripts: Optional[dict] = None,
+        evolution_observations: Optional[dict[str, tuple[dict, set[str]]]] = None,
     ) -> Optional[list[str]]:
         """
         Phase 3b: Adaptive AI round.
@@ -7117,7 +7127,9 @@ class ScanEngine:
             evolution_obs = ""
             if getattr(self, "enable_evolution_observation_reuse", False):
                 try:
-                    _context, _surviving = _evolution_observations.get(check_name, ({}, set()))
+                    _context, _surviving = (evolution_observations or {}).get(
+                        check_name, ({}, set())
+                    )
                     from wscan.context_mutator import format_reflection_observation
                     evolution_obs = format_reflection_observation(_context, _surviving)
                 except Exception:
