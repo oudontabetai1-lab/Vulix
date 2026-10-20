@@ -464,7 +464,7 @@ def _page_state_fingerprint(state) -> str:
 
 
 def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11434",
-               base_url: str = ""):
+               base_url: str = "", timeout: float | None = None):
     """
     browser-use の BaseChatModel インスタンスを provider 名から生成する。
     """
@@ -474,7 +474,10 @@ def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY 環境変数が設定されていません。")
-        return ChatAnthropic(model=model or "claude-sonnet-4-5-20250929", api_key=api_key)
+        kwargs = {"model": model or "claude-sonnet-4-5-20250929", "api_key": api_key}
+        if timeout is not None:
+            kwargs["timeout"] = float(timeout)
+        return ChatAnthropic(**kwargs)
 
     elif provider in ("openai", "openai_compatible"):
         from browser_use.llm import ChatOpenAI
@@ -489,6 +492,8 @@ def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11
         # openai_compatible のときだけカスタムエンドポイントへ向ける。値はここで
         # 解決して直接渡すため、グローバル env を書き換えない（operator 設定を壊さない）。
         kwargs = {"model": model or "gpt-4o-mini", "api_key": api_key}
+        if timeout is not None:
+            kwargs["timeout"] = float(timeout)
         base = llm_endpoint.resolve_instance_base(provider, base_url)
         if base and base != llm_endpoint.DEFAULT_OPENAI_BASE:
             kwargs["base_url"] = base
@@ -505,7 +510,10 @@ def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11
                 f"[yellow]⚠️  警告: {model_name!r} はブラウザ操作には小さすぎる可能性があります。"
                 f" 最低でも 7B 以上 (例: qwen2.5-coder:7b, llama3:8b) を推奨します。[/yellow]"
             )
-        return ChatOllama(model=model_name, host=host)
+        kwargs = {"model": model_name, "host": host}
+        if timeout is not None:
+            kwargs["timeout"] = float(timeout)
+        return ChatOllama(**kwargs)
 
     else:
         raise RuntimeError(
@@ -655,6 +663,8 @@ class AgentBrowserScanner:
         harness_output_dir: str | Path | None = None,
         resume: bool = False,
         proxy: str = "",
+        llm_timeout_seconds: float = 30.0,
+        request_logger: Any = None,
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
         raw_target_url = str(target_url or "").strip()
@@ -701,6 +711,20 @@ class AgentBrowserScanner:
         self.harness_output_dir = Path(harness_output_dir) if harness_output_dir else None
         self.resume = bool(resume)
         self.proxy = normalize_proxy_server(proxy)
+        import math as _math
+        try:
+            val = float(llm_timeout_seconds)
+            self.llm_timeout_seconds = val if (_math.isfinite(val) and val > 0) else 30.0
+        except (TypeError, ValueError):
+            self.llm_timeout_seconds = 30.0
+
+        from .request_logger import RequestLogger
+        if request_logger is not None:
+            self.request_logger = request_logger
+        elif self.harness_output_dir:
+            self.request_logger = RequestLogger(self.harness_output_dir)
+        else:
+            self.request_logger = None
         self._header_origins = allowed_header_origins(
             self.target_url,
             self.target_urls,
@@ -1158,7 +1182,7 @@ class AgentBrowserScanner:
 
         try:
             llm = _build_llm(self.llm_provider, self.llm_model, self.ollama_url,
-                             base_url=self.llm_base_url)
+                             base_url=self.llm_base_url, timeout=self.llm_timeout_seconds)
         except (RuntimeError, ImportError) as e:
             # ImportError(ModuleNotFoundError 含む)= browser-use 未導入。`_build_llm` は
             # `from browser_use.llm import ...` を実行するため、後段の except ImportError より
@@ -1226,6 +1250,50 @@ class AgentBrowserScanner:
 
         task = self._build_recon_task() if self.recon_mode else self._build_task()
         browser = None
+
+        resolved_for_log = (
+            getattr(llm, "model", None)
+            or getattr(llm, "model_name", None)
+            or self.llm_model
+            or {"claude": "claude-sonnet-4-5-20250929", "openai": "gpt-4o-mini", "ollama": "llama3"}.get(self.llm_provider, "default")
+        )
+        if hasattr(llm, "ainvoke"):
+            orig_ainvoke = llm.ainvoke
+            async def _logging_ainvoke(*args, **kwargs):
+                import time as _time
+                import httpx as _httpx
+                from .llm_client import record_llm_call
+                _t0 = _time.monotonic()
+                _status = "ok"
+                _exc = None
+                _resp_chars = 0
+                try:
+                    res = await orig_ainvoke(*args, **kwargs)
+                    if hasattr(res, "completion"):
+                        _resp_chars = len(str(res.completion))
+                    return res
+                except Exception as exc:
+                    _exc = exc
+                    exc_name = type(exc).__name__
+                    is_to = isinstance(exc, (asyncio.TimeoutError, _httpx.TimeoutException)) or "timeout" in exc_name.lower()
+                    _status = "timeout" if is_to else "transient"
+                    raise
+                finally:
+                    exc_type = type(_exc).__name__ if _exc is not None else None
+                    if getattr(self, "request_logger", None) is not None:
+                        record_llm_call(
+                            self.request_logger,
+                            provider=self.llm_provider,
+                            role="recon" if self.recon_mode else "agent",
+                            model=str(resolved_for_log),
+                            timeout_seconds=self.llm_timeout_seconds,
+                            elapsed_seconds=_time.monotonic() - _t0,
+                            status=_status,
+                            response_chars=_resp_chars,
+                            caller="llm_agent_browser",
+                            exception_type=exc_type,
+                        )
+            llm.ainvoke = _logging_ainvoke
 
         try:
             from browser_use import Agent, Browser
