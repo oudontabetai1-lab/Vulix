@@ -1364,6 +1364,7 @@ class ScanEngine:
         )
         # LLM 呼び出し観測性：complete_text がここから logger を getattr で拾う。
         self.payload_gen.request_logger = self.request_logger
+        self.payload_gen.engine = self
 
         # Central registry lives in wscan/scanners/__init__.py
         from .scanners import SCANNERS as _SCANNERS
@@ -1433,6 +1434,7 @@ class ScanEngine:
         # State
         self.all_findings: list = []
         self.wave_errors: list = []                  # 検出力低下事象の観測ログ（base から共有）
+        self.payload_gen.wave_errors = self.wave_errors
         # フィールド単位の attack 時間ボックス。stored sink（コメント欄等）で反射
         # スキャナ＋evolution/mutation wave が alert flood を積み、単一フィールドが数千秒を消費して
         # 以降のフィールドを SCAN_TIMEOUT で starve させる回帰を防ぐ（実測: comment 1 件で 2587s）。
@@ -3097,6 +3099,11 @@ class ScanEngine:
                     # 中断時点の Finding/進捗を永続化（resume と部分レポートの整合）。
                     self._save_checkpoint()
 
+        except asyncio.CancelledError:
+            scan_aborted = True
+            self.scan_aborted = True
+            self._save_checkpoint()
+            raise
         except Exception as _run_exc:
             console.print(f"\n[bold red]Scan error:[/bold red] {_run_exc}")
             if self.monitor:
@@ -8477,14 +8484,25 @@ class ScanEngine:
         console.print(f"  Target   : [cyan]{self.target_url}[/cyan]")
         console.print(f"  Pages    : [cyan]{len(self.visited_urls)}[/cyan]")
         console.print(f"  Plans    : [cyan]{len(self.attack_plans)}[/cyan]")
-        color = "red" if self.all_findings else "green"
-        console.print(f"  Findings : [{color}]{len(self.all_findings)}[/{color}]")
-        observability_warning = _observability_warning_text(
-            self.observability_summary()
+        obs_summary = self.observability_summary()
+        cov_summary = self.coverage_summary()
+        has_issues = (
+            getattr(self, "scan_aborted", False)
+            or int(obs_summary.get("total", 0) or 0) > 0
+            or int(cov_summary.get("unreached_count", 0) or 0) > 0
         )
+        if self.all_findings:
+            console.print(f"  Findings : [red]{len(self.all_findings)}[/red]")
+        elif has_issues:
+            console.print(
+                "  Findings : [bold yellow]0 件 (未完了/中断/エラーあり — 0件は安全を意味しません)[/bold yellow]"
+            )
+        else:
+            console.print("  Findings : [green]0[/green]")
+        observability_warning = _observability_warning_text(obs_summary)
         if observability_warning:
             console.print(f"  [yellow]{observability_warning}[/yellow]")
-        coverage = self.coverage_summary()
+        coverage = cov_summary
         coverage_color = (
             "yellow"
             if int((coverage.get("http_status", {}) or {}).get("blocked", 0) or 0) > 0

@@ -424,6 +424,7 @@ Consider stored / second-order attacks carefully:
         self.enabled_checks: set[str] = set(enabled_checks)
         # Inherited from payload_gen so both stay in sync
         self.enable_web_browsing: bool = getattr(payload_gen, "enable_web_browsing", False)
+        self._last_call_timeout: bool = False
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -564,6 +565,7 @@ Consider stored / second-order attacks carefully:
         from .llm_client import record_llm_call
         _t0 = _time.monotonic()
         _resolved_model = ""
+        self._last_call_timeout = False
         with self.payload_gen.use_role("planner"):
             # role モデルは context 内でのみ解決される（claude_model 等は _active_role 依存の
             # property）。監査に「実際に使ったモデル」を残すため context 内で捕捉する。context を
@@ -578,22 +580,33 @@ Consider stored / second-order attacks carefully:
             else:
                 raw = await self._call_ollama(prompt)
         # LLM 呼び出し観測性。planner は complete_text 非経由の自前実装なので個別記録する。
-        # timeout_seconds は各 provider の実効 HTTP timeout（claude は SDK stream で明示 deadline を
-        # 持たないため None）。失敗種別の transient/permanent 細分は self-streaming
-        # 経路の status 露出（streaming-deadline と同経路）を要する follow-up で対応する。
-        _planner_timeout = {"openai": 90.0, "ollama": 90.0, "gemini": 90.0}.get(provider)
+        # timeout_seconds は設定された実効 stream timeout（llm_stream_timeout_seconds）。
+        _planner_timeout = getattr(self.payload_gen, "llm_stream_timeout_seconds", 90.0)
+        try:
+            _planner_timeout = float(_planner_timeout)
+        except (TypeError, ValueError):
+            _planner_timeout = 90.0
+
+        is_timeout = getattr(self, "_last_call_timeout", False)
+        status = "timeout" if is_timeout else ("ok" if raw else "empty")
+        exc_type = "TimeoutError" if is_timeout else None
         record_llm_call(
             self.payload_gen, provider=provider, role="planner",
             model=_resolved_model,
             timeout_seconds=_planner_timeout, elapsed_seconds=_time.monotonic() - _t0,
-            status=("ok" if raw else "empty"),
+            status=status,
             # Claude は Anthropic SDK が透過 retry しうるため実回数不明＝None。OpenAI/Gemini/Ollama の
             # 自前 helper は httpx 1 回きりで retry ループを持たないので 0 と確定できる。
             retries=(None if provider == "claude" else 0),
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(raw) if isinstance(raw, str) else 0,
             caller="attack_planner._llm_plan",
+            exception_type=exc_type,
         )
+        if is_timeout:
+            wave_errors = getattr(self.payload_gen, "wave_errors", None)
+            if wave_errors is not None:
+                wave_errors.append(f"llm_timeout:planner:{url}")
 
         if not raw:
             return None
@@ -632,6 +645,7 @@ Consider stored / second-order attacks carefully:
         except asyncio.TimeoutError:
             _thinking_footer()
             console.print("[yellow][AttackPlanner] Claude timeout[/yellow]")
+            self._last_call_timeout = True
             return None
         except Exception as e:
             _thinking_footer()
@@ -685,9 +699,10 @@ Consider stored / second-order attacks carefully:
                 console.print(f"[yellow][AttackPlanner] Ollama error {status_holder['bad']}[/yellow]")
                 return None
             return full if full else None
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, httpx.TimeoutException):
             _thinking_footer()
             console.print("[yellow][AttackPlanner] Ollama stream overall timeout[/yellow]")
+            self._last_call_timeout = True
             return full if full else None
         except Exception as e:
             _thinking_footer()
@@ -747,9 +762,10 @@ Consider stored / second-order attacks carefully:
                 console.print(f"[yellow][AttackPlanner] OpenAI error {status_holder['bad']}[/yellow]")
                 return None
             return full if full else None
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, httpx.TimeoutException):
             _thinking_footer()
             console.print("[yellow][AttackPlanner] OpenAI stream overall timeout[/yellow]")
+            self._last_call_timeout = True
             return full if full else None
         except Exception as e:
             _thinking_footer()
@@ -782,6 +798,9 @@ Consider stored / second-order attacks carefully:
                     _thinking_footer()
                     return text
                 console.print(f"[yellow][AttackPlanner] Gemini error {resp.status_code}[/yellow]")
+        except httpx.TimeoutException:
+            console.print("[yellow][AttackPlanner] Gemini timeout[/yellow]")
+            self._last_call_timeout = True
         except Exception as e:
             console.print(f"[yellow][AttackPlanner] Gemini error: {e}[/yellow]")
         _thinking_footer()

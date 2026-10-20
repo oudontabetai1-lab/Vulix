@@ -159,6 +159,7 @@ class AgentEngine:
         resume: bool = False,
         report_lang: str = "ja",
         proxy: str = "",
+        llm_timeout_seconds: float = 30.0,
     ):
         self.url = url.rstrip("/")
         from .i18n import normalize_lang
@@ -185,6 +186,12 @@ class AgentEngine:
         self.storage_state = str(storage_state or "")
         self.resume = bool(resume)
         self.proxy = normalize_proxy_server(proxy)
+        import math as _math
+        try:
+            val = float(llm_timeout_seconds)
+            self.llm_timeout_seconds = val if (_math.isfinite(val) and val > 0) else 30.0
+        except (TypeError, ValueError):
+            self.llm_timeout_seconds = 30.0
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / f"agent_{ts}"
@@ -233,6 +240,7 @@ class AgentEngine:
             harness_output_dir=self.output_dir,
             resume=self.resume,
             proxy=self.proxy,
+            llm_timeout_seconds=self.llm_timeout_seconds,
         )
 
         result: AgentScanResult = await scanner.run()
@@ -416,6 +424,7 @@ class AgentEngine:
             harness_output_dir=self.output_dir,
             resume=self.resume,
             proxy=self.proxy,
+            llm_timeout_seconds=self.llm_timeout_seconds,
         )
 
         result = await scanner.run()
