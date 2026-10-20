@@ -6,6 +6,16 @@ from wscan.scanners.base import BaseScanner
 
 
 class ContextMutatorTests(unittest.TestCase):
+    def test_format_reflection_observation_reuses_only_supplied_observations(self):
+        text = cm.format_reflection_observation(
+            {"context": "double_quoted_attr", "attribute": "value", "quote": '"', "marker": "secret-marker"},
+            {'"', "<", ">"},
+        )
+        self.assertIn("double_quoted_attr", text)
+        self.assertIn("surviving unescaped", text)
+        self.assertNotIn("secret-marker", text)
+        self.assertEqual(cm.format_reflection_observation({}, set()), "")
+
     def test_marker_and_char_probe_are_plain_and_ordered(self):
         marker = cm.make_marker()
 
