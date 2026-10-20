@@ -683,6 +683,9 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             self.assertEqual(page.locator("#statRemain").inner_text(), "中断")
             self.assertIn("aborted", page.locator("#statusDot").get_attribute("class"))
             self.assertNotIn("done", page.locator("#statusDot").get_attribute("class"))
+            findings_text = page.locator("#findingsPanel").inner_text()
+            self.assertIn("スキャンは中断されました", findings_text)
+            self.assertNotIn("No vulnerabilities detected.", findings_text)
 
             # Test reload / reconnect snapshot rendering
             page.reload(wait_until="domcontentloaded")
@@ -701,6 +704,9 @@ class DashboardResyncChromiumTests(unittest.TestCase):
             self.assertEqual(page.locator("#statRemain").inner_text(), "中断")
             self.assertIn("aborted", page.locator("#statusDot").get_attribute("class"))
             self.assertNotIn("done", page.locator("#statusDot").get_attribute("class"))
+            findings_text = page.locator("#findingsPanel").inner_text()
+            self.assertIn("スキャンは中断されました", findings_text)
+            self.assertNotIn("No vulnerabilities detected.", findings_text)
             browser.close()
 
     def test_chromium_operator_aborted_positive_findings_renders_aborted(self):

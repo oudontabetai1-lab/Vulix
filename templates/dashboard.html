@@ -4495,6 +4495,11 @@ function handleEvent(event) {
       closeInteractiveModals();
       // 設定 + 結果サマリはサーバ側でアウトプットフォルダに自動保存される。
       // 必要に応じて「📤 設定をエクスポート」ボタンから手動でダウンロード可能。
+      // replaceFindings が 0 件時の中断注記を判定するため、state を先に確定させる。
+      const isAborted = data.status === 'aborted' || !!data.aborted;
+      state.scanDone = true;
+      state.status = isAborted ? 'aborted' : 'done';
+      state.aborted = isAborted;
       if (Array.isArray(data.findings)) {
         replaceFindings(data.findings);
       }
@@ -4510,8 +4515,6 @@ function handleEvent(event) {
         if (rep) { rep.href = `/reports/${encodeURIComponent(data.scan_id)}/report.html`; rep.style.display = ''; }
         if (zip) { zip.href = `/api/v1/scans/${encodeURIComponent(data.scan_id)}/download`; zip.style.display = ''; }
       }
-      const isAborted = data.status === 'aborted' || !!data.aborted;
-      state.scanDone = true;
       document.getElementById('progressStripe').style.display = 'none';
       document.getElementById('statETA').textContent = '—';
       showPostScanActions(true);
