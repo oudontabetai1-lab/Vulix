@@ -4864,8 +4864,7 @@ class ScanEngine:
                     # task-local Cookie は global self._cookies へ昇格させない（URL スコープ違いの
                     # Cookie が並行ページ/verification へ混線するため）。verification は URL 毎に
                     # browser jar から再スコープする（_phase_verify）。
-                    # 既知の残課題(follow-up): 再ログイン/応答 Set-Cookie による共有 jar の競合は
-                    # per-worker BrowserContext が必要。本実装は read 隔離＋flow ページ直列化まで。
+                    # worker ごとに独立した BrowserContext を保持して cookie jar を隔離。
                     if cookie_token is not None:
                         _WORKER_COOKIES.reset(cookie_token)
                     if gate_held:
