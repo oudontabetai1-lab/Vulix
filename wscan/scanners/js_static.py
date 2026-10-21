@@ -24,6 +24,7 @@ from wscan.scanner_contract import (
 )
 
 from .base import BaseScanner, Finding
+from wscan.finding_provenance import JsStaticEvidenceDetails
 from wscan import js_analysis
 
 if TYPE_CHECKING:
@@ -230,14 +231,14 @@ class JsStaticScanner(BaseScanner):
                 # 対象ページに居ない（別ページ/別ワーカーのタブのまま）。ライブ
                 # スクショを撮ると無関係なURLの画像が添付されるため明示的に空にする。
                 screenshot_b64="",
-                evidence_details={
-                    "sink": risk.sink,
-                    "source": risk.source,
-                    "tainted": risk.tainted,
-                    "line": risk.line,
-                    "script": source_url,
-                    "snippet": risk.snippet,
-                },
+                evidence_details=JsStaticEvidenceDetails(
+                    sink=risk.sink,
+                    source=risk.source,
+                    tainted=risk.tainted,
+                    line=risk.line,
+                    script=source_url,
+                    snippet=risk.snippet,
+                ),
                 reproduction_steps=[
                     f"Open {page_url}",
                     f"Inspect JavaScript: {source_url}",

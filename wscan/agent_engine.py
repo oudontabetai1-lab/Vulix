@@ -17,6 +17,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
+from .finding_provenance import AgentEvidenceDetails
 from .url_normalize import normalize_proxy_server
 
 from rich.console import Console
@@ -87,11 +88,11 @@ def _convert_agent_findings(agent_findings: list) -> list:
             field_name=af.field_name,
             payload=af.payload,
             evidence=af.evidence,
-            evidence_details={
-                "agent_dynamic_reproduced": bool(
+            evidence_details=AgentEvidenceDetails(
+                agent_dynamic_reproduced=bool(
                     getattr(af, "dynamic_verified", False)
                 )
-            },
+            ),
             verification_note=(
                 "Independent Agent dynamic replay observed; "
                 "deterministic scanner verification is still pending."
