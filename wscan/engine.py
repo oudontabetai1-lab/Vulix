@@ -1803,6 +1803,12 @@ class ScanEngine:
         if self.proxy and "proxy" not in overrides:
             kwargs["proxy"] = self.proxy
         kwargs.update(overrides)
+        logger = getattr(self, "request_logger", None)
+        hook = getattr(logger, "log_httpx_submission", None)
+        if callable(hook):
+            hooks = dict(kwargs.get("event_hooks") or {})
+            hooks["request"] = [*(hooks.get("request") or []), hook]
+            kwargs["event_hooks"] = hooks
         return kwargs
 
     @staticmethod
@@ -8007,6 +8013,9 @@ class ScanEngine:
                 for p in self.attack_plans
             ],
         }
+        ledger = getattr(getattr(self, "request_logger", None), "probe_ledger", None)
+        if ledger is not None:
+            ledger.write_manifest()
         evidence_path = self.output_dir / "evidence.json"
         with open(evidence_path, "w", encoding="utf-8") as fp:
             json.dump(evidence, fp, ensure_ascii=False, indent=2)
