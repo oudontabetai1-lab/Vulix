@@ -260,7 +260,7 @@ class WebSocketScanner(BaseScanner):
 
     async def _send_ws_message(self, ws_url: str, message: str, *, role=None) -> list[str]:
         from wscan.probe_ledger import ProbeRole, Transport
-        self._record_probe_evidence(
+        attempt_id = self._record_probe_evidence(
             role=role or ProbeRole.ATTACK, transport=Transport.WEBSOCKET,
             check=self.CHECK_TYPE, actor=self.__class__.__name__,
             pair={"request": {"method": "SEND", "url": ws_url}},
@@ -297,7 +297,17 @@ class WebSocketScanner(BaseScanner):
                 """,
                 {"wsUrl": ws_url, "message": message, "waitMs": wait_ms},
             )
-            return [str(item) for item in (result or [])]
+            responses = [str(item) for item in (result or [])]
+            for response in responses:
+                self._record_probe_evidence(
+                    role=role or ProbeRole.ATTACK, transport=Transport.WEBSOCKET,
+                    check=self.CHECK_TYPE, actor=self.__class__.__name__,
+                    parent_id=attempt_id or "",
+                    pair={"request": {"method": "SEND", "url": ws_url},
+                          "response": {"url": ws_url, "body": response}},
+                    rationale="WebSocket message observed; send completion and outcome unknown",
+                )
+            return responses
         except Exception as exc:
             self._record_scan_note(f"websocket_observation_error:{type(exc).__name__}")
             return []

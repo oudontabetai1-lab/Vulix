@@ -1808,6 +1808,9 @@ class ScanEngine:
         if callable(hook):
             hooks = dict(kwargs.get("event_hooks") or {})
             hooks["request"] = [*(hooks.get("request") or []), hook]
+            response_hook = getattr(logger, "log_httpx_response", None)
+            if callable(response_hook):
+                hooks["response"] = [*(hooks.get("response") or []), response_hook]
             kwargs["event_hooks"] = hooks
         return kwargs
 

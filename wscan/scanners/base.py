@@ -784,12 +784,12 @@ class BaseScanner(ABC):
         except Exception:
             pass
 
-    def _record_probe_evidence(self, **observation) -> None:
+    def _record_probe_evidence(self, **observation) -> Optional[str]:
         """Evidence failures must not change transport results or exception flow."""
         try:
             record = getattr(getattr(self.engine, "request_logger", None), "log_probe", None)
             if callable(record):
-                record(**observation)
+                return record(**observation)
         except Exception as exc:
             self._record_scan_note(f"probe_evidence_error:{type(exc).__name__}")
 
@@ -1854,9 +1854,30 @@ class BaseScanner(ABC):
 
         current = url
         response = None
+        from wscan.probe_ledger import ProbeRole, Transport
+
+        async def get_hop(hop_url):
+            headers = _headers_for(hop_url) or None
+            request = {"method": "GET", "url": hop_url, "headers": headers}
+            attempt_id = self._record_probe_evidence(
+                role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT,
+                actor="api_get_capture", pair={"request": request},
+                rationale="API GET submission; delivery and outcome unknown",
+            )
+            result = await request_ctx.get(hop_url, headers=headers, **get_kwargs)
+            self._record_probe_evidence(
+                role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT,
+                actor="api_get_capture", sent=True, parent_id=attempt_id or "",
+                pair={"request": request, "response": {
+                    "status": result.status, "url": str(getattr(result, "url", hop_url)),
+                    "headers": dict(result.headers), "timestamp": time.time()}},
+                rationale="API GET response observed; detector role and outcome unknown",
+            )
+            return result
+
         try:
             # 最初の GET も try 内に入れ、cookie を変異させ得る送信は必ず finally の再同期に載せる。
-            response = await request_ctx.get(current, headers=_headers_for(current) or None, **get_kwargs)
+            response = await get_hop(current)
             hops = 0
             while response.status in (301, 302, 303, 307, 308) and hops < 5:
                 loc = response.headers.get("location")
@@ -1871,9 +1892,7 @@ class BaseScanner(ABC):
                 await self._dispose_response(response)  # 中間 response の body を解放
                 hops += 1
                 current = target
-                response = await request_ctx.get(
-                    current, headers=_headers_for(current) or None, **get_kwargs
-                )
+                response = await get_hop(current)
             body_unavailable = False
             try:
                 text = await response.text()
@@ -1902,15 +1921,6 @@ class BaseScanner(ABC):
                 body_unavailable=body_unavailable,
             )
             self._record_probe_status(direct)
-            from wscan.probe_ledger import ProbeRole, Transport
-            self._record_probe_evidence(
-                role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT,
-                actor="api_get_capture", sent=True,
-                pair={"request": {"method": "GET", "url": current},
-                      "response": {"status": direct.status_code,
-                                   "url": direct.url, "headers": direct.headers}},
-                rationale="API GET response observed; detector role and outcome unknown",
-            )
             return direct
         finally:
             # 監査 GET が Playwright context の Cookie を rotation/削除させた可能性があるため、

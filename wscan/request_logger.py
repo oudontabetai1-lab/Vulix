@@ -159,8 +159,9 @@ class RequestLogger:
         self.probe_ledger = ProbeLedger(self.output_dir, self.output_dir.name, enabled=enabled)
 
     def log_probe(self, *, role, pair=None, transport=None, check="", field="",
-                  payload=None, url="", sent=False, actor="", rationale="") -> None:
-        """Append observation only; unknown delivery/outcome stays unknown."""
+                  payload=None, url="", sent=False, actor="", rationale="",
+                  parent_id="") -> Optional[str]:
+        """Append observation only; return its ID only after a successful write."""
         # shortcut: transport captures use discover; add an observation-only role before phase accounting.
         if not self.enabled:
             return
@@ -196,24 +197,55 @@ class RequestLogger:
                 rationale = f"payload_sha256={sha256_hex(payload)}; bytes={body_length(payload)}; {rationale}"
             record = ProbeAttemptRecord(
                 scan_id=self.probe_ledger.scan_id,
-                attempt_id=self.probe_ledger.next_attempt_id(), role=role,
+                attempt_id=self.probe_ledger.next_attempt_id(), role=role, parent_id=parent_id,
                 check=check, injection_key=redact_excerpt(field), actor=actor,
                 started_at=req.get("timestamp") or time.time(),
                 ended_at=resp.get("timestamp"), request=request, response=response,
                 rationale=redact_excerpt(rationale),
             )
-            self.probe_ledger.append(record)
+            if self.probe_ledger.append(record):
+                return record.attempt_id
         except Exception as exc:
             self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
 
     async def log_httpx_submission(self, request) -> None:
         """HTTPX event hook; never consume a streaming request body."""
         from wscan.probe_ledger import ProbeRole, Transport
-        self.log_probe(
-            role=ProbeRole.DISCOVER, transport=Transport.HTTPX, actor="transport_capture",
-            pair={"request": {"method": request.method, "url": str(request.url),
-                              "headers": dict(request.headers)}},
-            rationale="transport submission; detector role and delivery unknown",
+        try:
+            attempt_id = self.log_probe(
+                role=ProbeRole.DISCOVER, transport=Transport.HTTPX, actor="transport_capture",
+                pair={"request": {"method": request.method, "url": str(request.url),
+                                  "headers": dict(request.headers)}},
+                rationale="transport submission; detector role and delivery unknown",
+            )
+            request.extensions["vulix_probe_submission"] = (self, attempt_id)
+        except Exception as exc:
+            self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
+
+    async def log_httpx_response(self, response) -> None:
+        """Correlate headers to the actual request; leave streaming bodies untouched."""
+        from wscan.probe_ledger import ProbeRole, Transport
+        try:
+            request = response.request
+            owner, attempt_id = request.extensions.get("vulix_probe_submission", (None, None))
+            self.log_probe(
+                role=ProbeRole.DISCOVER, transport=Transport.HTTPX, actor="transport_capture",
+                parent_id=attempt_id if owner is self and attempt_id else "", sent=True,
+                pair={"request": {"method": request.method, "url": str(request.url),
+                                  "headers": dict(request.headers)},
+                      "response": {"status": response.status_code, "url": str(response.url),
+                                   "headers": dict(response.headers), "timestamp": time.time()}},
+                rationale="HTTP response observed; detector role and outcome unknown",
+            )
+        except Exception as exc:
+            self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
+
+    def log_browser_submission(self, request: dict) -> Optional[str]:
+        from wscan.probe_ledger import ProbeRole, Transport
+        return self.log_probe(
+            role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT, actor="transport_capture",
+            pair={"request": request},
+            rationale="browser submission; detector role and delivery unknown",
         )
 
     def _append(self, path: Path, record: dict) -> bool:
@@ -272,6 +304,9 @@ class RequestLogger:
         from wscan.probe_ledger import ProbeRole, Transport
         self.log_probe(role=ProbeRole.DISCOVER, pair=pair, transport=Transport.PLAYWRIGHT,
                        sent=True, actor="transport_capture",
+                       parent_id=(req.get("_probe_attempt_id") or "")
+                       if req.get("_req_id") is not None
+                       and req.get("_req_id") == resp.get("_req_id") else "",
                        rationale="HTTP response observed; detector role and outcome unknown")
 
     def log_payload(self, field: str, payload: str, check_type: str, url: str = "") -> None:

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import collections
 import json
+import logging
 import re
 import socket
 import time
@@ -332,6 +333,12 @@ class NetworkCapture:
             self._pending[key].update(url="[authentication]", headers={}, post_data="[REDACTED]",
                                       _authentication=True)
         self._requests_since_clear += 1
+        record = getattr(self.logger, "log_browser_submission", None)
+        if callable(record):
+            try:
+                self._pending[key]["_probe_attempt_id"] = record(self._pending[key])
+            except Exception as exc:
+                logging.getLogger(__name__).warning("probe_submission_error:%s", type(exc).__name__)
 
     def on_response(self, response: Response):
         # Match by (url, id(response.request)) so concurrent requests to the same URL
