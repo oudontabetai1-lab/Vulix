@@ -44,17 +44,34 @@ async def test_httpx_capture_redacts_url_userinfo_in_request_and_response(tmp_pa
     assert request.headers["Authorization"] == "Bearer auth-secret"
 
 
-def test_browser_http_logs_redact_userinfo_in_request_and_response_headers(tmp_path):
+@pytest.mark.parametrize("location,expected", [
+    ("https://carol:response-secret@t.test/next", "https://<redacted>@t.test/next"),
+    ("//alice:relative-secret@t.test/next", "//<redacted>@t.test/next"),
+    ("https://alice:quote'secret@t.test/next", "https://<redacted>@t.test/next"),
+    ('https://alice:quote"secret@t.test/next', "https://<redacted>@t.test/next"),
+])
+def test_browser_http_logs_redact_userinfo_in_request_and_response_headers(tmp_path, location, expected):
     logger = RequestLogger(tmp_path)
+    headers = {"Location": location, "X-Next": "//t.test/next", "From": "user@host",
+               "Accept": "*/*"}
     logger.log_http({
         "request": {"url": "https://alice:url-secret@t.test/", "method": "GET",
-                    "headers": {"Referer": "https://bob:request-secret@t.test/"}},
-        "response": {"status": 302, "headers": {
-            "Location": "https://carol:response-secret@t.test/next"}},
+                    "headers": {"Referer": "https://bob:request-secret@t.test/", **headers}},
+        "response": {"status": 302, "headers": headers},
     })
     for path in (logger.http_path, logger.probe_ledger.path):
         assert "secret" not in path.read_text()
         assert "<redacted>@t.test" in path.read_text()
+    legacy = json.loads(logger.http_path.read_text())
+    observed, = rows(logger)
+    for side in ("request", "response"):
+        assert legacy[f"{side}_headers"]["Location"] == expected
+        assert f"Location: {expected}" in observed[side]["headers_excerpt"]
+        for name in ("X-Next", "From", "Accept"):
+            assert legacy[f"{side}_headers"][name] == headers[name]
+            assert f"{name}: {headers[name]}" in observed[side]["headers_excerpt"]
+    assert observed["outcome"] is None
+    assert headers["Location"] == location
 
 
 def test_browser_pairs_preserve_old_log_and_do_not_infer_outcome(tmp_path):

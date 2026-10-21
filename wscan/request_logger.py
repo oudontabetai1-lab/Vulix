@@ -101,7 +101,7 @@ _SENSITIVE_BODY_KEYS = url_scope.SENSITIVE_KEY_TOKENS
 _KEYS_ALT = url_scope.KEYS_ALT
 
 # Match through the last @ in an authority, including URLs embedded in header values.
-_URL_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.\-]*://)[^/?#\s<>\"']*@")
+_URL_USERINFO = re.compile(r"(?i)((?:[a-z][a-z0-9+.\-]*:)?//)[^/?#\s]*@")
 
 
 def _redact_url_userinfo(text):
