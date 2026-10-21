@@ -3068,6 +3068,13 @@ async def run_serve(args):
     # ログインPW・Cookie 等）を空にして配信し、エンドポイント経由の漏洩を防ぐ
     # （digits/period/algorithm 等の非秘匿フィールドは保持）。
     monitor.default_scan_cfg = _redact_secrets(monitor.default_scan_cfg, placeholder="")
+    # report と同じ宣言 matrix を表示するだけで、実行カバレッジは再計算しない。
+    from wscan.scanners import SCANNERS
+    from wscan.scanner_contract import build_capability_matrix, render_capability_matrix_html
+    monitor.default_scan_cfg["capability_matrix_html"] = render_capability_matrix_html(
+        build_capability_matrix({name: cls.CONTRACT for name, cls in SCANNERS.items()}),
+        lang=monitor.default_scan_cfg["report_lang"],
+    )
     # /api/auto-config エンドポイント用に LLM 設定をキャッシュ
     _llm_section = _CFG.get("llm", {}) if isinstance(_CFG.get("llm"), dict) else {}
     monitor.llm_cfg = {
