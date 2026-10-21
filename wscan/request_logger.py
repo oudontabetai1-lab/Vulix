@@ -171,7 +171,7 @@ class RequestLogger:
 
     def log_probe(self, *, role, pair=None, transport=None, check="", field="",
                   payload=None, url="", sent=False, actor="", rationale="",
-                  parent_id="") -> Optional[str]:
+                  parent_id="", outcome=None, decision_rule="", decision_version="") -> Optional[str]:
         """Append observation only; return its ID only after a successful write."""
         # shortcut: transport captures use discover; add an observation-only role before phase accounting.
         if not self.enabled:
@@ -212,6 +212,7 @@ class RequestLogger:
                 check=check, injection_key=redact_excerpt(field), actor=actor,
                 started_at=req.get("timestamp") or time.time(),
                 ended_at=resp.get("timestamp"), request=request, response=response,
+                outcome=outcome, decision_rule=decision_rule, decision_version=decision_version,
                 rationale=redact_excerpt(rationale),
             )
             if self.probe_ledger.append(record):
@@ -239,7 +240,7 @@ class RequestLogger:
         try:
             request = response.request
             owner, attempt_id = request.extensions.get("vulix_probe_submission", (None, None))
-            self.log_probe(
+            observation_id = self.log_probe(
                 role=ProbeRole.DISCOVER, transport=Transport.HTTPX, actor="transport_capture",
                 parent_id=attempt_id if owner is self and attempt_id else "", sent=True,
                 pair={"request": {"method": request.method, "url": str(request.url),
@@ -248,6 +249,7 @@ class RequestLogger:
                                    "headers": dict(response.headers), "timestamp": time.time()}},
                 rationale="HTTP response observed; detector role and outcome unknown",
             )
+            response.extensions["vulix_probe_observation"] = (self, observation_id)
         except Exception as exc:
             self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
 
