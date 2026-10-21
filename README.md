@@ -268,6 +268,10 @@ python3 main.py serve --host 127.0.0.1 --port 8765
 
 「スキャン開始」は通常モードです。`planner.interactive=true` または画面の攻撃プラン確認を有効にした場合、巡回後にフィールド、チェック、カスタムペイロードを確認してから攻撃へ進みます。
 
+「検査項目」タブ下部の **Carrier Coverage Matrix** を開くと、通常モード / Hybrid の決定論スキャナ全体について、scanner × carrier の宣言上の対応と未実装セルを確認できます。各セルにマウスを重ねると value kind・transport・非対応理由を表示します。`s` は宣言上の対応（E2E 未接続）、`P` は実装予定、`U` は非対応、`?` は未分類です。選択した検査項目や実行済みの検査を示す表ではなく、Agent の探索範囲も含みません。
+
+![入力経路ごとの宣言上の対応表](docs/images/dashboard-carrier-coverage.png)
+
 認証タブの TOTP は `otpauth://` URI、Base32 シークレット、QR 画像からサーバー内でローカル生成します。Bearer トークンまたは1行1件のカスタムヘッダは、通常ツール層（`scan`）の crawl と全 HTTP リクエストに加え、Agent モードと Hybrid Phase 1 の Agent 偵察にも適用されます。明示した `Authorization` ヘッダは Bearer 欄より優先されます。TOTP URI/シークレットと Bearer は設定 export やブラウザ保存へ含めません。任意コマンドを実行する `header_refresh_cmd` はサーバー配備時の RCE 面になるため、ダッシュボードには公開していません。
 
 サーバー配備時は、TLS 証明書/秘密鍵/PFX/CA、カスタムペイロード、手動巡回 JSON をブラウザからアップロードできます。保存先は `output/uploads/`、上限は1ファイル 8MBです。拡張子は用途別に制限され、既存のサーバー側パス入力も後方互換で利用できます。出力ディレクトリと手動巡回の保存先はアップロード対象ではないため、リモート運用では空欄（自動）を推奨します。

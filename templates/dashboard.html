@@ -744,6 +744,13 @@ body {
 .cfg-check-item:hover { border-color: var(--accent); }
 .cfg-check-item.checked { border-color: var(--accent); background: var(--accent-glow); color: var(--accent); }
 .cfg-check-item input[type=checkbox] { display: none; }
+.carrier-coverage { margin-top: 20px; font-size: 0.78rem; }
+.carrier-coverage h3 { margin-bottom: 8px; }
+.carrier-coverage .table-wrap { overflow: auto; max-height: 420px; margin: 10px 0; }
+.carrier-coverage table { border-collapse: collapse; white-space: nowrap; }
+.carrier-coverage th, .carrier-coverage td { padding: 6px 8px; border: 1px solid var(--border); }
+.carrier-coverage thead th { position: sticky; top: 0; background: var(--surface2); }
+.carrier-coverage details > p:last-child { color: var(--text-muted) !important; }
 .cfg-toggle-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .cfg-toggle {
   display: flex; align-items: center; gap: 6px;
@@ -1176,6 +1183,11 @@ body { padding-left: 212px; }
           <h4>ファイル・その他</h4>
           <div class="cfg-checks-grid" id="checkGroup-file"></div>
         </div>
+        <section class="carrier-coverage" aria-labelledby="carrierCoverageHeading">
+          <h3 id="carrierCoverageHeading">Carrier Coverage Matrix</h3>
+          <p class="cfg-field-hint">通常モード / Hybrid の決定論スキャナ全体の宣言上の対応表です。検査項目の選択や実行結果とは独立しており、検査済み・安全を意味しません。Agent の探索範囲は含みません。</p>
+          <div id="carrierCoverageMatrix">対応表を取得できません。HTML レポートの対応表も確認してください。</div>
+        </section>
       </div>
 
       <!-- Tab: Auth -->
@@ -3681,6 +3693,8 @@ async function loadDefaultConfigFromServer() {
     if (!resp.ok) return;
     const cfg = await resp.json();
     if (!cfg || typeof cfg !== 'object') return;
+    // HTML はサーバ側の report 共通 renderer がエスケープ済みの宣言データから生成する。
+    if (cfg.capability_matrix_html) document.getElementById('carrierCoverageMatrix').innerHTML = cfg.capability_matrix_html;
     if (cfg.depth != null) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout != null) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
     if (cfg.report_lang) document.getElementById('cfgReportLang').value = cfg.report_lang;
