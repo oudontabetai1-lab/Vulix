@@ -235,6 +235,8 @@ def test_payload_submission_has_explicit_role_but_no_claim_of_delivery(tmp_path,
     logger = RequestLogger(tmp_path)
     logger.log_payload("q", "private-payload", check, "https://t.test/?token=hidden")
     row, = rows(logger)
+    payload_row = json.loads(logger.payload_path.read_text())
+    assert payload_row["probe_attempt_id"] == row["attempt_id"]
     assert row["role"] == role
     assert row["check"] == check
     assert row["request"] is None
@@ -292,6 +294,7 @@ def test_observation_failure_is_visible_and_does_not_interrupt_legacy_logging(tm
     logger = RequestLogger(tmp_path)
     logger.probe_ledger.append = Mock(side_effect=RuntimeError("secret"))
     logger.log_payload("q", "value", "xss")
+    assert "probe_attempt_id" not in json.loads(logger.payload_path.read_text())
     assert logger.payload_count == 1
     assert logger.probe_ledger.evidence_incomplete
     assert logger.probe_ledger.manifest.write_errors[-1]["error"] == "probe_observation_error:RuntimeError"

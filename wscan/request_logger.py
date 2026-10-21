@@ -326,6 +326,17 @@ class RequestLogger:
         """フィールドへ投入したペイロードを記録する。"""
         if not self.enabled:
             return
+        from wscan.probe_ledger import ProbeRole
+        labels = check_type.split("_")
+        role = next((role for token, role in (
+            ("baseline", ProbeRole.BASELINE), ("control", ProbeRole.CONTROL),
+            ("verify", ProbeRole.VERIFY), ("cleanup", ProbeRole.CLEANUP),
+        ) if token in labels), ProbeRole.ATTACK)
+        attempt_id = self.log_probe(
+            role=role, check=check_type, field=field, payload=payload,
+            url=url, actor="payload_submission",
+            rationale=f"url={redact_url(url)}; payload prepared; transport, delivery and outcome unknown",
+        )
         record = {
             "ts": time.time(),
             "url": _redact_url(url),
@@ -333,17 +344,10 @@ class RequestLogger:
             "check_type": check_type,
             "payload": payload,
         }
+        if attempt_id:
+            record["probe_attempt_id"] = attempt_id
         self._append(self.payload_path, record)
         self.payload_count += 1
-        from wscan.probe_ledger import ProbeRole
-        labels = check_type.split("_")
-        role = next((role for token, role in (
-            ("baseline", ProbeRole.BASELINE), ("control", ProbeRole.CONTROL),
-            ("verify", ProbeRole.VERIFY), ("cleanup", ProbeRole.CLEANUP),
-        ) if token in labels), ProbeRole.ATTACK)
-        self.log_probe(role=role, check=check_type, field=field, payload=payload,
-                       url=url, actor="payload_submission",
-                       rationale=f"url={redact_url(url)}; payload prepared; transport, delivery and outcome unknown")
 
     def log_llm_call(
         self, *, provider: str = "", role: str = "", model: str = "",
