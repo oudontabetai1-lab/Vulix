@@ -98,6 +98,8 @@ Target URL を入力し、目的に近いプロファイルを選びます。
 
 ![検査設定の入力例](images/dashboard-configured.png)
 
+「検査項目」タブでは、SCANNERS レジストリに登録された全 check をカテゴリ別に選択できます。既定で有効なのは SQLi・OS インジェクション・XSS です。
+
 ### 入力経路ごとの対応を確認する
 
 「検査項目」タブ下部の **Carrier Coverage Matrix** 内の対応表を開くと、report と共通の宣言データで scanner × carrier（query / form / json 等）を確認できます。通常モードと Hybrid の決定論スキャナ全体が対象で、チェック選択によらず全行を表示します。Agent の自律探索は含みません。
