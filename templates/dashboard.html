@@ -2403,16 +2403,22 @@ const CHECK_GROUPS = {
     {id:'nosql',        label:'NoSQLi',            def:false},
     {id:'ssti',         label:'SSTI',              def:false},
     {id:'deserialization', label:'逆シリアル化',    def:false},
+    {id:'graphql',      label:'GraphQL',           def:false},
+    {id:'ldap',         label:'LDAPインジェクション', def:false},
+    {id:'mass_assignment', label:'Mass Assignment', def:false},
+    {id:'prototype_pollution', label:'Prototype Pollution', def:false},
   ],
   xss: [
     {id:'xss',          label:'XSS',              def:true},
     {id:'stored_xss',   label:'Stored XSS',       def:false},
     {id:'dom_xss',      label:'DOM XSS',          def:false},
+    {id:'js_static',    label:'JavaScript静的解析', def:false},
   ],
   access: [
     {id:'csrf',         label:'CSRF',             def:false},
     {id:'session',      label:'セッション管理',   def:false},
     {id:'privesc',      label:'権限昇格',         def:false},
+    {id:'race_condition', label:'競合状態',        def:false},
   ],
   header: [
     {id:'header_injection',  label:'ヘッダインジェクション', def:false},
@@ -2420,6 +2426,7 @@ const CHECK_GROUPS = {
     {id:'open_redirect',     label:'オープンリダイレクト',   def:false},
     {id:'path_traversal',    label:'パストラバーサル',       def:false},
     {id:'host_header',       label:'Hostヘッダ攻撃',         def:false},
+    {id:'xxe',               label:'XXE',                    def:false},
   ],
   proto: [
     {id:'cors',              label:'CORS',                   def:false},
@@ -2429,9 +2436,19 @@ const CHECK_GROUPS = {
     {id:'info_disclosure',   label:'情報漏えい',             def:false},
     {id:'directory_artifacts', label:'一覧・バックアップ・ソースマップ', def:false},
     {id:'ssrf',              label:'SSRF',                   def:false},
+    {id:'websocket',         label:'WebSocket設定',           def:false},
+    {id:'secret_leak',       label:'シークレット漏えい',       def:false},
+    {id:'sri',               label:'Subresource Integrity',    def:false},
+    {id:'tls_scan',          label:'TLS設定',                  def:false},
+    {id:'transport_security', label:'通信セキュリティ',        def:false},
+    {id:'jwt',               label:'JWT',                     def:false},
   ],
   file: [
     {id:'clickjacking',  label:'クリックジャッキング', def:false},
+    {id:'file_upload',   label:'ファイルアップロード', def:false},
+    {id:'cms',           label:'CMS',                 def:false},
+    {id:'outdated_components', label:'古いコンポーネント', def:false},
+    {id:'cache_poisoning', label:'キャッシュポイズニング', def:false},
   ],
 };
 
