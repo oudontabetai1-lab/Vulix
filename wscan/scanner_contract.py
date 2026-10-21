@@ -196,6 +196,24 @@ def validate_scanner_contract(check: str, contract: ScannerContract) -> list[str
     return errors
 
 
+def validate_carrier_implementation(
+    check: str,
+    contract: ScannerContract,
+    implemented_carriers: frozenset[Carrier],
+    *,
+    carrier_scope: frozenset[Carrier] = ALL_CARRIERS,
+) -> list[str]:
+    """指定範囲で宣言と独立に調べた実装 carrier 集合を照合する（送信しない）。"""
+    declared = contract.supported_carriers() & carrier_scope
+    implemented = implemented_carriers & carrier_scope
+    errors = []
+    for carrier in sorted(declared - implemented, key=lambda c: c.value):
+        errors.append(f"{check}:{carrier.value}: declared supported but no implementation")
+    for carrier in sorted(implemented - declared, key=lambda c: c.value):
+        errors.append(f"{check}:{carrier.value}: implemented but not declared supported")
+    return errors
+
+
 def _cell(cap: CarrierCapability | None) -> str:
     """matrix セル記号。 では E2E 未接続なので supported は 's'。"""
     if cap is None:
