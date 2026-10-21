@@ -8,6 +8,7 @@ Detects dangerous Cross-Origin Resource Sharing configurations:
 import httpx
 from typing import TYPE_CHECKING
 
+from wscan.probe_ledger import ProbeOutcome, ProbeRole, Transport
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
     PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
@@ -141,7 +142,10 @@ class CORSScanner(BaseScanner):
             reflected_acao = r.headers.get("access-control-allow-origin", "")
             reflected_acac = r.headers.get("access-control-allow-credentials", "").lower()
 
-            if reflected_acao == _CANARY_ORIGIN:
+            matched = reflected_acao == _CANARY_ORIGIN
+            self._record_cors_decision(r, url, matched,
+                                      ProbeRole.ATTACK, "cors_origin_reflection")
+            if matched:
                 severity = "critical" if reflected_acac == "true" else "high"
                 finding = await self.record_finding(
                     url=url,
@@ -172,6 +176,7 @@ class CORSScanner(BaseScanner):
                 findings.append(finding)
 
         except Exception as exc:
+            self._record_scan_note(f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}")
             if self.monitor:
                 await self.monitor.emit_status(
                     f"[warn] cors: arbitrary-origin probe failed on {url}: {exc}"
@@ -210,26 +215,55 @@ class CORSScanner(BaseScanner):
             ),
         }
 
+    def _record_cors_decision(self, response, url: str, matched: bool,
+                              role: ProbeRole, rule: str) -> None:
+        try:
+            logger = getattr(self.engine, "request_logger", None)
+            owner, parent_id = getattr(response, "extensions", {}).get(
+                "vulix_probe_observation", (None, None))
+            self._record_probe_evidence(
+                role=role, transport=Transport.HTTPX, check=self.CHECK_TYPE,
+                actor=self.__class__.__name__, sent=True,
+                parent_id=parent_id if owner is logger and parent_id else "",
+                pair={"request": {"method": "GET", "url": url},
+                      "response": {"status": getattr(response, "status_code", None),
+                                   "url": str(getattr(response, "url", url)),
+                                   "headers": dict(response.headers)}},
+                outcome=ProbeOutcome.MATCHED if matched else ProbeOutcome.NO_MATCH,
+                decision_rule=rule, decision_version="1",
+                rationale="CORS header comparison completed",
+            )
+        except Exception as exc:
+            self._record_scan_note(f"probe_evidence_error:{type(exc).__name__}")
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         details = getattr(finding, "evidence_details", {}) or {}
         if finding.evidence_type == "cors_wildcard_credentials":
             try:
                 r = await self._get_with_origin(finding.url, _CANARY_ORIGIN)
-            except Exception:
+            except Exception as exc:
+                self._record_scan_note(f"verification_error:{self.CHECK_TYPE}:{type(exc).__name__}")
                 return None
             acao = r.headers.get("access-control-allow-origin", "")
             acac = r.headers.get("access-control-allow-credentials", "").lower()
-            return acao == "*" and acac == "true"
+            matched = acao == "*" and acac == "true"
+            self._record_cors_decision(r, finding.url, matched, ProbeRole.VERIFY,
+                                      "cors_wildcard_credentials")
+            return matched
 
         if finding.evidence_type == "cors_origin_reflection":
             origin = details.get("origin") or _CANARY_ORIGIN
             try:
                 r = await self._get_with_origin(finding.url, origin)
-            except Exception:
+            except Exception as exc:
+                self._record_scan_note(f"verification_error:{self.CHECK_TYPE}:{type(exc).__name__}")
                 return None
             acao = r.headers.get("access-control-allow-origin", "")
             acac = r.headers.get("access-control-allow-credentials", "").lower()
             expected_acac = details.get("acac", "")
-            return acao == origin and (not expected_acac or acac == expected_acac)
+            matched = acao == origin and (not expected_acac or acac == expected_acac)
+            self._record_cors_decision(r, finding.url, matched, ProbeRole.VERIFY,
+                                      "cors_origin_reflection")
+            return matched
 
         return None
