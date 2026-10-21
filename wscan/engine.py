@@ -1714,10 +1714,67 @@ class ScanEngine:
             "check_coverage": check_coverage,
             "prerequisite_coverage": prerequisite_coverage,
             "capability_matrix": capability_matrix,
+            **({"evidence_completion": self.evidence_completion()}
+               if getattr(getattr(self, "request_logger", None), "probe_ledger", None) is not None else {}),
             **({"transport_security": list(getattr(
                 self.scanners["transport_security"], "coverage", []))}
                if "transport_security" in (getattr(self, "scanners", None) or {}) else {}),
         }
+
+    def evidence_completion(self) -> dict:
+        ledger = self.request_logger.probe_ledger
+        selected = set(getattr(self, "checks", [])) | set(getattr(self, "scanners", {}))
+        return ledger.completion_summary(
+            selected, execution_success=not (getattr(self, "scan_aborted", False)
+                or getattr(self, "_execution_failed", False) or getattr(self, "wave_errors", [])),
+        )
+
+    def _evidence_scope(self, key, check, *, rules=(), role="attack"):
+        from contextlib import nullcontext
+        ledger = getattr(getattr(self, "request_logger", None), "probe_ledger", None)
+        if ledger is None:
+            return nullcontext()
+        unit = ledger.expect(key, check, rules=rules, role=role,
+                             reason="" if rules else "uninstrumented_detector_contract")
+        return ledger.unit_scope(unit)
+
+    def _plan_evidence(self, pages) -> None:
+        """Persist expectations for the whole queue before any attack can be skipped."""
+        from .checkpoint import unit_key
+        ledger = getattr(getattr(self, "request_logger", None), "probe_ledger", None)
+        if ledger is None:
+            return
+        for check in set(getattr(self, "checks", [])) | set(self.scanners):
+            if check != "cors":
+                ledger.expect(f"unknown_paths:{check}", check,
+                              reason="uninstrumented_detector_api_chain_adaptive_multi_parameter_paths")
+            for template in getattr(self, "api_seed_requests", []):
+                ledger.expect(unit_key(template.url, "(api)", 0, check), check,
+                              reason="uninstrumented_api_template_path")
+            # A queued URL can fail during crawl and never become a CrawledPage.
+            for url in getattr(self, "visited_urls", []):
+                if url not in {page.url for page in pages} and url not in getattr(self, "reached_urls", set()):
+                    ledger.expect(unit_key(url, "(unreached)", 0, check), check,
+                                  reason="unreached_surface_unknown")
+        for page in pages:
+            page_excluded = bool(getattr(self, "exclude_urls", []) and self._is_url_excluded(page.url))
+            for check, scanner in self.scanners.items():
+                if getattr(scanner, "HAS_PAGE_LEVEL", False) or hasattr(scanner, "scan_page_context"):
+                    rules = ("cors_wildcard_credentials", "cors_origin_reflection") if check == "cors" else ()
+                    ledger.expect(unit_key(_page_check_cp_url(check, page.url), "(page)", 0, check),
+                                  check, rules=rules,
+                                  reason="excluded_by_configuration" if page_excluded
+                                  else "" if rules else "uninstrumented_detector_contract")
+                fields = [(fi, inp.get("name", "unknown"), False)
+                          for fi, form in enumerate(page.forms[:self.max_forms])
+                          for inp in form.get("inputs", [])]
+                fields += [(0, name, True) for name in page.url_params]
+                for fi, name, is_url in fields:
+                    ledger.expect(unit_key(page.url, name, fi, check, is_url), check,
+                                  reason="excluded_by_configuration"
+                                  if page_excluded or name.lower() in getattr(self, "exclude_fields", set())
+                                  else "uninstrumented_detector_contract")
+        ledger.write_manifest()
 
     def _scan_matrix_for_display(self) -> list[dict]:
         """Return the current-scope view without mutating durable matrix rows."""
@@ -3024,6 +3081,7 @@ class ScanEngine:
 
         # 再開可能スキャン: チェックポイントを初期化（resume 指定時は復元）
         self._init_checkpoint()
+        self._plan_evidence([])
 
         # U-3: Start manual payload listener if monitor active
         if self.monitor:
@@ -3211,6 +3269,7 @@ class ScanEngine:
             self._save_checkpoint()
             raise
         except Exception as _run_exc:
+            self._execution_failed = True
             console.print(f"\n[bold red]Scan error:[/bold red] {_run_exc}")
             if self.monitor:
                 await self.monitor.emit_status(f"Scan error: {_run_exc}", "error")
@@ -3291,6 +3350,7 @@ class ScanEngine:
                     "findings": self.monitor.api_findings,
                     "status": terminal_status,
                     "aborted": scan_aborted,
+                    "evidence_completion": self.evidence_completion(),
                 })
 
     # =========================================================================
@@ -4814,6 +4874,7 @@ class ScanEngine:
         Within a single page, fields are still tested sequentially so that
         form state is consistent.
         """
+        self._plan_evidence(pages)
         console.print(Rule("[bold red] Phase 3 / 4  ·  Attack [/bold red]", style="red"))
 
         if self.concurrency > 1:
@@ -5974,12 +6035,17 @@ class ScanEngine:
                     return
             try:
                 if hasattr(scanner, "scan_page_context"):
-                    page_findings = await scanner.scan_page_context(page)
+                    from .checkpoint import unit_key
+                    with ScanEngine._evidence_scope(self, unit_key(cp_url, "(page)", 0, check_name), check_name):
+                        page_findings = await scanner.scan_page_context(page)
                 else:
                     _page_gate = getattr(scanner, "may_run_page_scanner", None)
                     if callable(_page_gate) and not _page_gate(page.url):
                         continue
-                    page_findings = await scanner.scan_page(page.url)
+                    from .checkpoint import unit_key
+                    rules = ("cors_wildcard_credentials", "cors_origin_reflection") if check_name == "cors" else ()
+                    with ScanEngine._evidence_scope(self, unit_key(cp_url, "(page)", 0, check_name), check_name, rules=rules):
+                        page_findings = await scanner.scan_page(page.url)
                 page_findings = page_findings or []
                 for f in page_findings:
                     self._record_finding(f, source="page-level")
@@ -6764,7 +6830,9 @@ class ScanEngine:
             _observation_scope = _begin_observation() if callable(_begin_observation) else None
             try:
                 before_count = len(self.all_findings)
-                findings = await scanner.scan_injection_point(ip, field)
+                from .checkpoint import CheckpointState
+                with ScanEngine._evidence_scope(self, CheckpointState._candidate_unit_key(ip, check_name), check_name):
+                    findings = await scanner.scan_injection_point(ip, field)
                 if getattr(self, "enable_evolution_observation_reuse", False):
                     _get_observation = getattr(scanner, "_get_evolution_observation", None)
                     _observation = (
@@ -7603,6 +7671,16 @@ class ScanEngine:
             f for f in self.all_findings
             if f.check_type in self._VERIFIABLE_CHECKS and not f.dialog_confirmed
         ]
+        ledger = getattr(getattr(self, "request_logger", None), "probe_ledger", None)
+        if ledger is not None:
+            from .checkpoint import unit_key
+            for finding in to_verify:
+                check = finding.check_type
+                rules = (finding.evidence_type,) if check == "cors" else ()
+                ledger.expect(unit_key(finding.url, finding.field_name, 0, check)
+                              + "\x1everify:" + finding.evidence_type, check, rules=rules,
+                              role="verify", reason="" if rules else "uninstrumented_detector_contract")
+            ledger.write_manifest()
         if not to_verify:
             return
 
@@ -7818,7 +7896,11 @@ class ScanEngine:
             # unreproduced にしてしまうため。
             self._api_auth_failed = False
             self._json_probe_failed = False
-            scanner_result = await verifier(f)
+            from .checkpoint import unit_key
+            rules = (f.evidence_type,) if scanner_key == "cors" else ()
+            with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, scanner_key) + "\x1everify:" + f.evidence_type,
+                                      scanner_key, rules=rules, role="verify"):
+                scanner_result = await verifier(f)
             # 結果値(None/False/True)に関わらず、verify 中に失効/transport 失敗が起きたら
             # 判定を信頼せず terminal な "assumed" にする。scanner の verify は transport 失敗
             # 時に False を返す経路（error-based の空 body・boolean の空 baseline）があり、
@@ -8114,7 +8196,10 @@ class ScanEngine:
         }
         ledger = getattr(getattr(self, "request_logger", None), "probe_ledger", None)
         if ledger is not None:
-            ledger.write_manifest()
+            ledger.reconcile_persisted()
+            ledger.write_manifest(selected=set(self.checks) | set(self.scanners),
+                                  execution_success=self.evidence_completion()["execution_success"])
+            evidence["coverage"]["evidence_completion"] = self.evidence_completion()
         evidence_path = self.output_dir / "evidence.json"
         with open(evidence_path, "w", encoding="utf-8") as fp:
             json.dump(evidence, fp, ensure_ascii=False, indent=2)

@@ -13,6 +13,49 @@ import re
 from typing import Any, Iterable, Mapping
 
 
+def reconcile_evidence(planned: Mapping[str, dict], recorded: Mapping[str, list[dict]],
+                       selected: Iterable[str], *, logging_failed: bool = False,
+                       execution_success: bool = True) -> dict:
+    """Reconcile durable detector decisions, never HTTP counts or checkpoint bits.
+
+    An empty required-rules list means the detector contract is unknown. Failures
+    are evidence, but cannot establish successful negative coverage.
+    """
+    checks = {}
+    for check in sorted(set(selected)):
+        units = {}
+        for key, plan in planned.items():
+            if plan["check"] != check:
+                continue
+            rules = set(plan["rules"])
+            rows = [r for r in recorded.get(key, []) if r.get("check") == check
+                    and r.get("role") == plan["role"] and r.get("decision_version") == "1"]
+            covered = {r["decision_rule"] for r in rows if r.get("outcome")}
+            missing = sorted(rules - covered)
+            successful = {r["decision_rule"] for r in rows
+                          if r.get("outcome") in {"matched", "no_match"}}
+            failed = any(r.get("outcome") not in {"matched", "no_match", None} for r in rows)
+            if logging_failed or not rules or missing:
+                status = "EVIDENCE_INCOMPLETE"
+            elif not plan.get("executed") or failed or successful != rules:
+                status = "PARTIAL"
+            else:
+                status = "COMPLETE"
+            units[key] = {"status": status, "missing_rules": missing,
+                          "reason": plan.get("reason", ""), "executed": bool(plan.get("executed"))}
+        states = {u["status"] for u in units.values()}
+        status = ("EVIDENCE_INCOMPLETE" if logging_failed or not units or "EVIDENCE_INCOMPLETE" in states
+                  else "PARTIAL" if not execution_success or "PARTIAL" in states else "COMPLETE")
+        checks[check] = {"status": status, "planned": len(units), "units": units,
+                         "reason": "empty_or_unknown_plan" if not units else ""}
+    states = {c["status"] for c in checks.values()}
+    status = ("EVIDENCE_INCOMPLETE" if logging_failed or not checks or "EVIDENCE_INCOMPLETE" in states
+              else "PARTIAL" if not execution_success or "PARTIAL" in states else "COMPLETE")
+    return {"status": status, "checks": checks, "logging_failed": logging_failed,
+            "execution_success": execution_success,
+            "scope": "deterministic planned units; unknown paths remain incomplete"}
+
+
 def compute_check_coverage(
     registry_checks: Iterable[str],
     selected_checks: Iterable[str],

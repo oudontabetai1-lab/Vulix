@@ -30,6 +30,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -40,10 +42,17 @@ from wscan.probe_ledger import (
     ProbeRole,
     derive_attempt_id,
     to_jsonl_line,
+    sha256_hex,
 )
 
 LEDGER_FILENAME = "probe_attempts.jsonl"
 MANIFEST_FILENAME = "probe_attempts_manifest.json"
+_CURRENT_COMPLETION_UNIT = ContextVar("probe_completion_unit", default=None)
+
+
+def completion_identity(key: str) -> str:
+    """Keep checkpoint identity semantics without persisting URLs or field names."""
+    return sha256_hex(key)
 
 _VALID_ROLES = frozenset(r.value for r in ProbeRole)
 _VALID_OUTCOMES = frozenset(o.value for o in ProbeOutcome)
@@ -117,9 +126,75 @@ class ProbeLedger:
         self._quarantined = False
         self._manifest_write_failed = False
         self._path: Optional[Path] = None
+        self.planned: dict[str, dict] = {}
+        self.recorded: dict[str, list[dict]] = {}
         if enabled and output_dir:
             self._path = Path(output_dir) / LEDGER_FILENAME
             self._restore_from_existing()
+
+    def expect(self, key: str, check: str, *, rules=(), role="attack", reason="") -> str:
+        unit = completion_identity(key)
+        with self._lock:
+            plan = {"check": check, "rules": list(rules), "role": role,
+                    "reason": reason, "executed": False}
+            prior = self.planned.setdefault(unit, plan)
+            if any(prior[k] != plan[k] for k in ("check", "rules", "role", "reason")):
+                self.manifest.note_gap("completion_plan_changed")
+        return unit
+
+    @contextmanager
+    def unit_scope(self, unit: str):
+        """Bind only this task's observations; restore even on cancellation."""
+        token = _CURRENT_COMPLETION_UNIT.set((self, unit))
+        with self._lock:
+            self.planned[unit]["executed"] = False
+        self.write_manifest()
+        try:
+            yield
+        except BaseException:
+            raise
+        else:
+            with self._lock:
+                self.planned[unit]["executed"] = True
+        finally:
+            _CURRENT_COMPLETION_UNIT.reset(token)
+            self.write_manifest()
+
+    def current_unit(self) -> str:
+        context = _CURRENT_COMPLETION_UNIT.get()
+        return context[1] if context is not None and context[0] is self else ""
+
+    def _index_completion(self, rec: dict) -> None:
+        unit = rec.get("completion_unit")
+        if unit and (not isinstance(unit, str) or len(unit) != 64
+                     or any(c not in "0123456789abcdef" for c in unit)):
+            self.manifest.note_gap("invalid_completion_identity")
+            return
+        if unit:
+            rows = self.recorded.setdefault(unit, [])
+        if unit and rec.get("outcome"):
+            rows.append({
+                k: rec.get(k) for k in ("check", "role", "outcome", "decision_rule", "decision_version")
+            })
+
+    def reconcile_persisted(self) -> None:
+        """Re-read the source at completion so missing files/rows cannot pass on memory alone."""
+        if self._path is None or not self.enabled:
+            return
+        restored = ProbeLedger(self._path.parent, self.scan_id)
+        with self._lock:
+            self.recorded = restored.recorded
+            if restored.evidence_incomplete:
+                self.manifest.note_gap("completion_evidence_restore_failed")
+            if restored.planned != self.planned:
+                self.manifest.note_gap("completion_plan_not_persisted")
+
+    def completion_summary(self, selected, *, execution_success=True) -> dict:
+        from .check_coverage import reconcile_evidence
+        with self._lock:
+            return reconcile_evidence(self.planned, self.recorded, selected,
+                                      logging_failed=self.evidence_incomplete or not self.enabled or self._path is None,
+                                      execution_success=execution_success)
 
     @property
     def path(self) -> Optional[Path]:
@@ -223,6 +298,7 @@ class ProbeLedger:
                         else:
                             seen_seqs.add(seq)
                         restored_rows += 1
+                        self._index_completion(rec)
                         self.manifest.record(rec.get("role", ""), rec.get("outcome"), write_ok=True)
             except (OSError, UnicodeDecodeError):
                 # 読取り不能/不正バイト列＝正本を信頼できない。以後の append を止める。
@@ -242,6 +318,8 @@ class ProbeLedger:
         self._seq = max_seq
         # 前 run の manifest から「不完全だった事実」だけを継承する（内訳の再構成はしない）。
         manifest_path = self._path.with_name(MANIFEST_FILENAME)
+        if self.recorded and not manifest_path.exists():
+            self.manifest.note_gap("completion_plan_missing_on_resume")
         if manifest_path.exists():
             try:
                 prior = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -253,6 +331,20 @@ class ProbeLedger:
                 # 非 object の manifest は破損とみなす
                 self.manifest.note_gap("prior_manifest_not_object")
                 return
+            plans = prior.get("planned_units", {})
+            if isinstance(plans, dict) and all(
+                isinstance(key, str) and len(key) == 64 and all(c in "0123456789abcdef" for c in key)
+                and isinstance(plan, dict) and isinstance(plan.get("check"), str)
+                and isinstance(plan.get("rules"), list) and all(isinstance(r, str) for r in plan["rules"])
+                and plan.get("role") in _VALID_ROLES and type(plan.get("executed")) is bool
+                and isinstance(plan.get("reason", ""), str)
+                for key, plan in plans.items()
+            ):
+                self.planned = plans
+            else:
+                self.manifest.note_gap("prior_completion_plan_invalid")
+            if set(self.recorded) - set(self.planned):
+                self.manifest.note_gap("completion_units_missing_on_resume")
             # seq は前 run の発行 ID 総数（=max seq）も考慮（trailing failure/stale jsonl 対策）
             try:
                 prior_total = int(prior.get("total") or 0)
@@ -306,9 +398,10 @@ class ProbeLedger:
                                      error=f"{type(exc).__name__}: {exc}")
                 return False
             self.manifest.record(record.role, record.outcome, write_ok=True)
+            self._index_completion(json.loads(line))
             return True
 
-    def write_manifest(self) -> bool:
+    def write_manifest(self, *, selected=None, execution_success=True) -> bool:
         """manifest を JSON で原子的に書き出す（temp+os.replace）。scan 完了時に件数・欠落を残す。"""
         if not (self.enabled and self._path is not None):
             return False
@@ -325,15 +418,24 @@ class ProbeLedger:
                 data["ledger"] = LEDGER_FILENAME
                 data["quarantined"] = self._quarantined
                 data["evidence_incomplete"] = self.evidence_incomplete
-            tmp_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            os.replace(tmp_path, manifest_path)
+                data["planned_units"] = {key: dict(plan) for key, plan in self.planned.items()}
+                from .check_coverage import reconcile_evidence
+                data["completion"] = reconcile_evidence(
+                    self.planned, self.recorded,
+                    selected if selected is not None else {p["check"] for p in self.planned.values()},
+                    logging_failed=self.evidence_incomplete, execution_success=execution_success,
+                )
+                tmp_path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                os.replace(tmp_path, manifest_path)
             return True
         except (OSError, UnicodeError):
             # manifest を永続化できない（I/O or lone surrogate 等の encode 失敗）＝完了証跡が残らない。
             # gate を倒す（caller が返り値を見落としても evidence_incomplete で COMPLETE を防ぐ）。
             with self._lock:
                 self._manifest_write_failed = True
+                if self.planned:
+                    self.manifest.note_gap("completion_manifest_write_failed")
             return False

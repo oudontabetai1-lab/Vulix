@@ -165,6 +165,7 @@ class ProbeAttemptRecord:
     decision_rule: str = ""        # 判定 rule 名
     decision_version: str = ""     # 判定 rule version
     rationale: str = ""            # 判定根拠（redact 済み）
+    completion_unit: str = ""      # hashed checkpoint identity; independent of display labels
 
     @property
     def correlated(self) -> bool:

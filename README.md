@@ -34,6 +34,7 @@ Vulix のモジュール入口では `python -m vulix explore URL` を `scan` �
 | ドキュメント | 内容 |
 | --- | --- |
 | [ダッシュボード利用ガイド](docs/dashboard_usage_ja.md) | 画面操作をスクリーンショット付きで説明 |
+| [Evidence completion](docs/evidence-completion.md) | 通常スキャンでの証拠完了状態と計測範囲 |
 | [実検査運用ガイド](docs/operation_guide_ja.md) | 認証、スコープ、検査強度、証跡、再検査 |
 | [サーバー導入ガイド](docs/server_deployment_ja.md) | 常駐、イントラネット公開、トークン認証、Docker |
 | [高度機能](docs/advanced_features.md) | batch、flow、HAR などの詳細 |

@@ -113,6 +113,14 @@ Target URL を入力し、目的に近いプロファイルを選びます。
 
 ![Carrier Coverage Matrix](images/dashboard-carrier-coverage.png)
 
+### Evidence completion
+
+通常スキャンの結果では、スキャンのライフサイクル状態（`done` / `aborted`）や Finding 件数と、必須の検査判断が証跡として記録されたかを分けて表示します。`COMPLETE` は計画された単位の判断がすべて記録され実行も正常終了した状態、`PARTIAL` は判断の記録があっても timeout・blocked・skip などで実行が完了していない状態、`EVIDENCE_INCOMPLETE` は計画・検出器契約・証跡保存に不足がある状態です。
+
+![再接続後に表示された Evidence completion 状態](images/dashboard-evidence-completion.png)
+
+現在この完了ゲートが全判断を計測するのはページ単位の CORS 分析と Origin 比較、および CORS Finding の再検証です。他の detector、transport、補助経路は明示的に未完了として扱われます。詳細は [Evidence completion の仕様](evidence-completion.md) を参照してください。
+
 ### 基本設定
 
 | 項目 | 内容 | 初回の目安 |
