@@ -1,0 +1,789 @@
+# Built-in feature dependencies. Update with tests/test_feature_manifest.py.
+schema_version: 1
+scope:
+  python_sources:
+  - wscan/**/*.py
+  requirements_files:
+  - requirements.txt
+  - requirements-agent.txt
+  - requirements-mcp.txt
+  - requirements-tls.txt
+  - requirements-laya.txt
+  - requirements-qr.txt
+  feature_defaults: Omitted dependency, runtime, source and command lists mean empty; requires_features
+    adds inherited dependencies. required_pip/required_runtimes are mandatory for that feature;
+    optional_pip/optional_runtimes are conditional enhancements or provider alternatives described in note.
+  python_minimum: '3.11'
+  purpose: Authoritative built-in feature/dependency inventory; descriptive only, not a dependency resolver
+    or runtime enablement policy.
+  classification: All absolute Import/ImportFrom roots, including lazy, guarded and type-only imports,
+    are catalogued. Relative imports are internal. Standard library names follow the running Python stdlib
+    list; no third-party package is imported during verification.
+  runtime_audit: Reviewed process launch sites in mfa.py, header_manager.py and benchmark_fixtures.py,
+    browser launch sites, and optional service/model endpoints. Payload text naming target-side executables
+    is not a host dependency.
+  limits:
+  - Static import inventory does not prove package-version compatibility, installation success, browser
+    startup, model download or service availability.
+  - User-configured benchmark fixture modules and header refresh commands may introduce additional dependencies.
+  - Install commands are documentation, never executed by the manifest tests. External server and model
+    versions are not locked here.
+stdlib_imports:
+- __future__
+- abc
+- asyncio
+- base64
+- collections
+- contextlib
+- contextvars
+- copy
+- dataclasses
+- datetime
+- difflib
+- email
+- enum
+- fnmatch
+- gzip
+- hashlib
+- hmac
+- html
+- imaplib
+- importlib
+- inspect
+- io
+- ipaddress
+- itertools
+- json
+- logging
+- math
+- os
+- pathlib
+- poplib
+- posixpath
+- random
+- re
+- secrets
+- select
+- shlex
+- shutil
+- socket
+- ssl
+- string
+- struct
+- sys
+- tempfile
+- termios
+- threading
+- time
+- tty
+- types
+- typing
+- urllib
+- uuid
+- warnings
+- weakref
+- webbrowser
+- xml
+- zipfile
+- zlib
+packages:
+  aiofiles:
+    imports: []
+    requirements:
+    - requirements.txt
+    status: declared
+    note: Declared base dependency; no direct import in wscan/. Retained as an installation requirement.
+  anthropic:
+    imports:
+    - anthropic
+    requirements:
+    - requirements.txt
+    status: declared
+  browser-use:
+    imports:
+    - browser_use
+    requirements:
+    - requirements-agent.txt
+    status: declared
+  cryptography:
+    imports:
+    - cryptography
+    requirements: &id001
+    - requirements-tls.txt
+    status: declared
+    note: Optional feature dependency is explicitly declared; see resolved_gaps for the original inventory
+      finding.
+  fastapi:
+    imports:
+    - fastapi
+    requirements:
+    - requirements.txt
+    status: declared
+  httpx:
+    imports:
+    - httpx
+    requirements:
+    - requirements.txt
+    status: declared
+  jinja2:
+    imports: []
+    requirements:
+    - requirements.txt
+    status: declared
+    note: Declared base dependency; no direct import in wscan/. Retained as an installation requirement.
+  laya:
+    imports:
+    - laya
+    requirements:
+    - requirements-laya.txt
+    status: declared
+  mcp:
+    imports:
+    - mcp
+    requirements:
+    - requirements-mcp.txt
+    status: declared
+  numpy:
+    imports:
+    - numpy
+    requirements: &id003
+    - requirements-qr.txt
+    status: declared
+    note: Optional feature dependency is explicitly declared; see resolved_gaps for the original inventory
+      finding.
+  opencv-python-headless:
+    imports:
+    - cv2
+    requirements: &id002
+    - requirements-qr.txt
+    status: declared
+    note: Optional feature dependency is explicitly declared; see resolved_gaps for the original inventory
+      finding.
+  pillow:
+    imports:
+    - PIL
+    requirements: &id004
+    - requirements-qr.txt
+    status: declared
+    note: Optional feature dependency is explicitly declared; see resolved_gaps for the original inventory
+      finding.
+  playwright:
+    imports:
+    - playwright
+    requirements:
+    - requirements.txt
+    - requirements-agent.txt
+    status: declared
+  python-multipart:
+    imports: []
+    requirements:
+    - requirements.txt
+    status: declared
+    note: Declared base dependency; no direct import in wscan/. Retained as an installation requirement.
+  pyyaml:
+    imports:
+    - yaml
+    requirements:
+    - requirements.txt
+    status: declared
+  rich:
+    imports:
+    - rich
+    requirements:
+    - requirements.txt
+    status: declared
+  sslyze:
+    imports:
+    - sslyze
+    requirements:
+    - requirements-tls.txt
+    status: declared
+  starlette:
+    imports:
+    - starlette
+    requirements: []
+    status: transitive
+    note: Direct dashboard import is supplied transitively by fastapi, without a direct requirements declaration.
+    provided_by: fastapi
+    install_commands:
+    - python -m pip install starlette
+  uvicorn:
+    imports:
+    - uvicorn
+    requirements:
+    - requirements.txt
+    status: declared
+  websockets:
+    imports:
+    - websockets
+    requirements:
+    - requirements.txt
+    status: declared
+import_sources:
+  PIL:
+  - wscan/totp.py
+  anthropic:
+  - wscan/payload_gen.py
+  browser_use:
+  - wscan/llm_agent_browser.py
+  cryptography:
+  - wscan/transport_security.py
+  cv2:
+  - wscan/totp.py
+  fastapi:
+  - wscan/monitor.py
+  httpx:
+  - wscan/adaptive_payload.py
+  - wscan/attack_planner.py
+  - wscan/auto_config.py
+  - wscan/benchmark_runner.py
+  - wscan/component_intel.py
+  - wscan/engine.py
+  - wscan/llm_agent_browser.py
+  - wscan/llm_client.py
+  - wscan/llm_web_tools.py
+  - wscan/notification.py
+  - wscan/payload_gen.py
+  - wscan/payload_importer.py
+  - wscan/scanners/base.py
+  - wscan/scanners/cache_poisoning.py
+  - wscan/scanners/cms.py
+  - wscan/scanners/cors.py
+  - wscan/scanners/deserialization.py
+  - wscan/scanners/directory_artifacts.py
+  - wscan/scanners/file_upload.py
+  - wscan/scanners/graphql.py
+  - wscan/scanners/host_header.py
+  - wscan/scanners/http_methods.py
+  - wscan/scanners/info_disclosure.py
+  - wscan/scanners/jwt_scanner.py
+  - wscan/scanners/mail_header.py
+  - wscan/scanners/mass_assignment.py
+  - wscan/scanners/nosql_injection.py
+  - wscan/scanners/privesc.py
+  - wscan/scanners/prototype_pollution.py
+  - wscan/scanners/race_condition.py
+  - wscan/scanners/request_smuggling.py
+  - wscan/scanners/transport_security.py
+  - wscan/scanners/xxe.py
+  - wscan/waf_detector.py
+  laya:
+  - wscan/laya_client.py
+  mcp:
+  - wscan/mfa.py
+  - wscan/oob_email_mcp.py
+  numpy:
+  - wscan/totp.py
+  playwright:
+  - wscan/browser.py
+  - wscan/flow_recorder.py
+  - wscan/flow_runner.py
+  - wscan/manual_crawl.py
+  - wscan/triage.py
+  rich:
+  - wscan/adaptive_payload.py
+  - wscan/agent_engine.py
+  - wscan/attack_planner.py
+  - wscan/auto_config.py
+  - wscan/batch_runner.py
+  - wscan/browser.py
+  - wscan/chain_scanner.py
+  - wscan/engine.py
+  - wscan/flow_runner.py
+  - wscan/llm_agent_browser.py
+  - wscan/notification.py
+  - wscan/payload_gen.py
+  - wscan/triage.py
+  sslyze:
+  - wscan/tls_scan.py
+  starlette:
+  - wscan/monitor.py
+  uvicorn:
+  - wscan/benchmark_fixtures.py
+  websockets:
+  - wscan/browser.py
+  yaml:
+  - wscan/api_spec_importer.py
+  - wscan/batch_runner.py
+  - wscan/benchmark_model.py
+  - wscan/engine.py
+  - wscan/header_manager.py
+  - wscan/payload_importer.py
+external_runtimes:
+  python:
+    required_version: '>=3.11'
+    install_commands: []
+    setup: Install Python 3.11 or newer with pip and venv support; create and activate a virtual environment.
+      POSIX terminal helpers tty/termios are guarded on unsupported platforms.
+  chromium:
+    install_commands:
+    - python -m playwright install chromium
+    setup: Playwright browser binary, separate from the pip package. On Linux install browser OS libraries
+      with python -m playwright install --with-deps chromium. Headed sessions need a display.
+  agent_browser:
+    install_commands: []
+    setup: browser-use also needs a compatible Chrome/Chromium executable and writable configuration directory.
+      Browser provisioning is version/platform dependent; follow the pinned browser-use release instructions.
+      Not verified by static inventory.
+  llm_endpoint:
+    install_commands: []
+    setup: Configure the selected hosted or OpenAI-compatible API endpoint, model and credentials. Standard
+      scan can select provider none; Agent mode needs a supported provider.
+  ollama:
+    install_commands: []
+    setup: Install and run Ollama separately, pull a tool-capable model for Agent mode, and configure
+      its endpoint/model. Alternative to a hosted LLM endpoint.
+  mailbox:
+    install_commands: []
+    setup: Reachable IMAP/POP3 inbox, credentials and recipient domain for the OOB sink; secrets are supplied
+      at runtime.
+  totp_mcp:
+    install_commands: []
+    setup: Install Node.js and build/configure gosusnkr/mcp-totp-authenticator separately. Set WSCAN_MFA_TOTP_COMMAND
+      (default node), WSCAN_MFA_TOTP_ARGS and registered account label.
+    source: https://github.com/gosusnkr/mcp-totp-authenticator
+  email_mcp:
+    install_commands:
+    - python -m pip install uv
+    launch_command: uvx mcp-email-server@latest stdio
+    setup: External ai-zerolab/mcp-email-server and uvx (uv) runner; configure account or IMAP environment
+      before use. The default launcher resolves an unpinned external release.
+    source: https://github.com/ai-zerolab/mcp-email-server
+  http_proxy:
+    install_commands: []
+    setup: User-provided reachable HTTP proxy and optional credentials/CA. No bundled proxy server or
+      external proxy CLI is invoked.
+  header_refresh_shell:
+    install_commands: []
+    setup: Platform shell and any executables explicitly referenced by the configured header refresh command;
+      no fixed CLI dependency.
+  laya_weights:
+    install_commands: []
+    setup: Laya loads convaiinnovations/laya weights and its inference stack (including PyTorch) via laya.load.
+      Initial model download/cache and compatible hardware are separate prerequisites; WSCAN_LAYA enables
+      this default-off feature.
+  component_advisories:
+    install_commands: []
+    setup: Optional network access to OSV, NVD and configured intelligence sources; optional NVD API key.
+      No external scanner executable is invoked.
+features:
+  base_install:
+    required_pip:
+    - playwright
+    - fastapi
+    - uvicorn
+    - websockets
+    - pyyaml
+    - jinja2
+    - httpx
+    - rich
+    - aiofiles
+    - python-multipart
+    - anthropic
+    required_runtimes:
+    - python
+    install_commands:
+    - python -m pip install -r requirements.txt
+    note: Baseline installation contract. Feature requirements are additive; optional means optional for
+      this feature, not necessarily absent from the base requirements.
+  scan:
+    requires_features:
+    - base_install
+    required_runtimes:
+    - chromium
+    optional_runtimes:
+    - llm_endpoint
+    - ollama
+    sources:
+    - wscan/engine.py
+    - wscan/browser.py
+    note: Ordinary scan, deterministic scanners, report generation, adaptive payloads and chain scans.
+      LLM enrichment is provider-dependent and can be disabled.
+  agent:
+    requires_features:
+    - base_install
+    required_pip:
+    - browser-use
+    required_runtimes:
+    - chromium
+    - agent_browser
+    optional_runtimes:
+    - llm_endpoint
+    - ollama
+    sources:
+    - wscan/agent_engine.py
+    - wscan/llm_agent_browser.py
+    install_commands:
+    - python -m pip install -r requirements-agent.txt
+    note: 'Choose one configured LLM runtime: hosted/compatible endpoint or Ollama. Provider adapters
+      come from browser_use.llm; no direct openai/langchain import is present in wscan/.'
+  hybrid:
+    requires_features:
+    - scan
+    - agent
+    sources:
+    - wscan/agent_engine.py
+  dashboard:
+    requires_features:
+    - base_install
+    required_pip:
+    - starlette
+    sources:
+    - wscan/monitor.py
+    note: FastAPI routes need python-multipart for file uploads; uvicorn serves the dashboard. No browser
+      binary needed just to serve HTTP.
+  flow_record_replay:
+    requires_features:
+    - scan
+    sources:
+    - wscan/flow_recorder.py
+    - wscan/flow_runner.py
+    - wscan/manual_crawl.py
+  triage:
+    requires_features:
+    - scan
+    sources:
+    - wscan/triage.py
+  batch:
+    requires_features:
+    - scan
+    sources:
+    - wscan/batch_runner.py
+    - wscan/benchmark_model.py
+  benchmark:
+    requires_features:
+    - scan
+    sources:
+    - wscan/benchmark_runner.py
+    - wscan/benchmark_fixtures.py
+    note: Fixture module:factory is dynamically imported from benchmark configuration; dependencies of
+      user-provided fixtures are outside the built-in inventory.
+  api_payload_import:
+    requires_features:
+    - base_install
+    sources:
+    - wscan/api_spec_importer.py
+    - wscan/payload_importer.py
+  oob_email:
+    required_runtimes:
+    - mailbox
+    sources:
+    - wscan/oob_email.py
+    note: IMAP/POP3 and message parsing use the Python standard library; MCP is not required for the native
+      mail sink.
+  oob_email_mcp:
+    requires_features:
+    - oob_email
+    required_pip:
+    - mcp
+    sources:
+    - wscan/oob_email_mcp.py
+    install_commands:
+    - python -m pip install -r requirements-mcp.txt
+    - python -m wscan.oob_email_mcp
+  mfa_totp_native:
+    sources:
+    - wscan/totp.py
+    - wscan/mfa.py
+    note: Secret/otpauth URI generation uses only the standard library; no pyotp, MCP or Node.js is required.
+  mfa_totp_qr:
+    requires_features:
+    - mfa_totp_native
+    required_pip:
+    - opencv-python-headless
+    - numpy
+    optional_pip:
+    - pillow
+    sources:
+    - wscan/totp.py
+    install_commands:
+    - python -m pip install -r requirements-qr.txt
+    note: OpenCV QR decoding is required only for QR image input; Pillow rescues additional image formats.
+      URI/secret input remains available without these packages.
+  mfa_totp_mcp:
+    required_pip:
+    - mcp
+    required_runtimes:
+    - totp_mcp
+    sources:
+    - wscan/mfa.py
+    install_commands:
+    - python -m pip install -r requirements-mcp.txt
+  mfa_email_mcp:
+    required_pip:
+    - mcp
+    required_runtimes:
+    - email_mcp
+    sources:
+    - wscan/mfa.py
+    install_commands:
+    - python -m pip install -r requirements-mcp.txt
+    note: External MCP server needs IMAP credentials/account configuration, independently of the OOB mail
+      sink.
+  proxy_mtls:
+    requires_features:
+    - scan
+    optional_runtimes:
+    - http_proxy
+    sources:
+    - wscan/browser.py
+    - wscan/scanners/base.py
+    note: Proxy required only when configured; mTLS alone requires user-provided certificate/key and optional
+      CA files, with no extra pip dependency.
+  header_refresh:
+    required_runtimes:
+    - header_refresh_shell
+    sources:
+    - wscan/header_manager.py
+  laya:
+    required_pip:
+    - laya
+    required_runtimes:
+    - laya_weights
+    sources:
+    - wscan/laya_client.py
+    install_commands:
+    - python -m pip install -r requirements-laya.txt
+  component_intelligence:
+    requires_features:
+    - base_install
+    optional_runtimes:
+    - component_advisories
+    sources:
+    - wscan/component_intel.py
+  scanner.sqli:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/sqli.py
+  scanner.xss:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/xss.py
+  scanner.dom_xss:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/dom_xss.py
+  scanner.os:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/os_injection.py
+  scanner.ssti:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/ssti.py
+  scanner.path_traversal:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/path_traversal.py
+  scanner.csrf:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/csrf.py
+  scanner.header_injection:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/header_injection.py
+  scanner.mail_header:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/mail_header.py
+    note: Optional OOB mail confirmation uses feature oob_email; baseline heuristics do not require a
+      mail sink.
+  scanner.open_redirect:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/open_redirect.py
+  scanner.clickjacking:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/clickjacking.py
+  scanner.session:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/session.py
+  scanner.privesc:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/privesc.py
+  scanner.stored_xss:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/stored_xss.py
+  scanner.cors:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/cors.py
+  scanner.info_disclosure:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/info_disclosure.py
+  scanner.directory_artifacts:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/directory_artifacts.py
+  scanner.host_header:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/host_header.py
+  scanner.security_headers:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/security_headers.py
+  scanner.nosql:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/nosql_injection.py
+  scanner.deserialization:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/deserialization.py
+  scanner.request_smuggling:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/request_smuggling.py
+  scanner.ssrf:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/ssrf.py
+  scanner.graphql:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/graphql.py
+  scanner.jwt:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/jwt_scanner.py
+  scanner.cms:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/cms.py
+  scanner.xxe:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/xxe.py
+  scanner.ldap:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/ldap_injection.py
+  scanner.file_upload:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/file_upload.py
+  scanner.race_condition:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/race_condition.py
+  scanner.websocket:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/websocket.py
+  scanner.secret_leak:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/secret_leak.py
+  scanner.sri:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/sri.py
+  scanner.js_static:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/js_static.py
+  scanner.prototype_pollution:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/prototype_pollution.py
+  scanner.cache_poisoning:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/cache_poisoning.py
+  scanner.mass_assignment:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/mass_assignment.py
+  scanner.outdated_components:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/outdated_components.py
+  scanner.http_methods:
+    requires_features:
+    - scan
+    sources:
+    - wscan/scanners/http_methods.py
+  scanner.tls_scan:
+    requires_features:
+    - scan
+    required_pip:
+    - sslyze
+    sources:
+    - wscan/scanners/tls_config_scan.py
+    install_commands:
+    - python -m pip install -r requirements-tls.txt
+    note: Install sslyze to execute this opt-in scanner; missing analyzer is incomplete coverage.
+  scanner.transport_security:
+    requires_features:
+    - scan
+    optional_pip:
+    - cryptography
+    sources:
+    - wscan/scanners/transport_security.py
+    note: Certificate parsing needs cryptography; unavailable parsing is incomplete coverage.
+gaps:
+- package: starlette
+  reason: Direct dashboard import is supplied transitively by fastapi, without a direct requirements declaration.
+  follow_up: 'No missing-install gap: FastAPI provides Starlette. Consider a direct declaration if independent
+    version constraints become necessary.'
+resolved_gaps:
+- package: cryptography
+  original_gap: Direct optional certificate-parser import is undeclared. sslyze may install it transitively,
+    but the base install does not guarantee it.
+  resolution: *id001
+- package: opencv-python-headless
+  original_gap: QR decoding imports cv2 lazily, but no requirements file declares an OpenCV distribution.
+    opencv-python is an alternative; install only one OpenCV distribution.
+  resolution: *id002
+- package: numpy
+  original_gap: QR image conversion imports numpy lazily; currently undeclared, even though OpenCV may
+    install it transitively.
+  resolution: *id003
+- package: pillow
+  original_gap: Optional image-format fallback imports PIL lazily; currently undeclared.
+  resolution: *id004

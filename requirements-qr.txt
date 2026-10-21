@@ -1,0 +1,7 @@
+# Optional native TOTP QR image decoding; secret/URI input needs no extra packages.
+# Install in addition to requirements.txt:
+#   python -m pip install -r requirements-qr.txt
+# Use only one OpenCV distribution; opencv-python is an alternative to headless.
+opencv-python-headless
+numpy
+Pillow
