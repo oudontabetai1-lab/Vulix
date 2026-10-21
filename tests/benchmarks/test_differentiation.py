@@ -130,6 +130,7 @@ def test_fixture_ground_truth_and_safe_twins():
         assert client.get("/api/invoice", params={"id": "2"}).json()["owner"] == "bob"
         assert client.get("/api/invoice-safe", params={"id": "2", "user": "bob"}).status_code == 403
         assert client.get("/api/invoice-safe", params={"id": "1"}).status_code == 200
+        client.cookies.clear()
         client.cookies.set("session", "bob-session")
         assert client.get("/api/invoice-safe", params={"id": "2"}).status_code == 401
         payload = "' OR 1=1 -- "

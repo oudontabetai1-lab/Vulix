@@ -11,6 +11,18 @@ from fastapi.testclient import TestClient
 from wscan.monitor import MonitorServer
 
 
+def _chromium_available() -> bool:
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:
+        return False
+
+
 class ScanSnapshotTests(unittest.TestCase):
     def test_progress_metadata_matches_live_event_and_snapshot(self):
         monitor = MonitorServer(port=0)
@@ -351,6 +363,7 @@ class ScanSnapshotTests(unittest.TestCase):
         self.assertEqual(monitor._scan_snapshot_event()["data"]["url_statuses"][url], "vuln")
 
 
+@unittest.skipUnless(_chromium_available(), "Playwright Chromium is not available")
 class DashboardResyncChromiumTests(unittest.TestCase):
     """Exercise the production dashboard and WebSocket against a loopback fixture only."""
 
