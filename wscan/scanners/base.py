@@ -16,6 +16,7 @@ import httpx
 
 from wscan.injection_point import (
     InjectionPoint,
+    mutate_xml_payload,
     pointer_set_copy,
     redact_body_except,
     redact_known_secrets,
@@ -673,6 +674,7 @@ class BaseScanner(ABC):
     CHECK_TYPE = "base"
     SEVERITY = "medium"
     SUPPORTS_JSON_BODY = False
+    SUPPORTS_XML_BODY = False
     # 送信先の宣言メソッドに関わらず常に状態変更 HTTP（POST 等）を出すスキャナ。
     # 独自 transport（_test_raw_post/_test_json_body/graphql/mass_assignment 等）を持つため、
     # state profile gate は ip の宣言メソッドでなく POST として扱う（read-only で確実に skip）。
@@ -902,6 +904,10 @@ class BaseScanner(ABC):
             if not self.SUPPORTS_JSON_BODY:
                 return "", {}
             source, pair = await self._apply_json_payload(ip, payload)
+        elif ip.location == "xml_body":
+            if not self.SUPPORTS_XML_BODY:
+                return "", {}
+            source, pair = await self._apply_xml_payload(ip, payload)
         else:
             source, pair = await self._apply_payload(
                 ip.url,
@@ -997,6 +1003,8 @@ class BaseScanner(ABC):
         # 標準 _apply_payload の実装が必要。
         if ip.location == "json_body":
             return bool(self.SUPPORTS_JSON_BODY)
+        if ip.location == "xml_body":
+            return bool(self.SUPPORTS_XML_BODY)
         return callable(getattr(self, "_apply_payload", None))
 
     async def _dispatch_send(self, ip: "InjectionPoint", payload) -> tuple[str, dict]:
@@ -1460,6 +1468,108 @@ class BaseScanner(ABC):
             # 点を resume 恒久スキップしないよう、失敗を engine に記録する。
             try:
                 self.engine._json_probe_failed = True
+            except Exception:
+                pass
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
+            return "", {}
+
+    async def _apply_xml_payload(
+        self,
+        ip: InjectionPoint,
+        payload,
+    ) -> tuple[str, dict]:
+        """XML body 注入点へ payload を送信し、応答本文と通信記録を返す。"""
+        template = (
+            getattr(self.engine, "injection_templates", {}) or {}
+        ).get(ip.template_id)
+        if not isinstance(template, dict):
+            try:
+                self.engine._xml_probe_failed = True
+            except Exception:
+                pass
+            self._record_scan_note(f"unexecutable_template:{self.CHECK_TYPE}")
+            return "", {}
+
+        try:
+            url = template.get("url") or ip.url
+            method = (template.get("method") or ip.method or "POST").upper()
+            xml_raw = template.get("xml_body") or ""
+            post_data = mutate_xml_payload(
+                xml_raw,
+                ip.parameter_id,
+                payload,
+            )
+            content_type = template.get("content_type") or "application/xml"
+            headers = self.auth_headers_for_url(
+                url,
+                {"Content-Type": content_type},
+            )
+            headers = merge_template_headers(
+                headers,
+                template.get("headers") or {},
+            )
+            headers = refresh_idempotency_headers(headers)
+            kwargs = {
+                "timeout": getattr(self.engine, "timeout", 15),
+                "follow_redirects": True,
+                "headers": headers,
+            }
+            if hasattr(self.engine, "httpx_client_kwargs"):
+                kwargs = self.engine.httpx_client_kwargs(**kwargs)
+            elif getattr(self.engine, "proxy", ""):
+                kwargs["proxy"] = self.engine.proxy
+        except Exception as exc:
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
+            return "", {}
+
+        request_timestamp = time.time()
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                response = await client.request(method, url, content=post_data)
+                self._record_probe_status(response)
+            response_timestamp = time.time()
+            try:
+                self.engine._xml_probe_sent = True
+            except Exception:
+                pass
+            pair = {
+                "request": {
+                    "url": url,
+                    "method": method,
+                    "headers": headers,
+                    "post_data": post_data,
+                    "timestamp": request_timestamp,
+                },
+                "response": {
+                    "url": str(response.url),
+                    "status": response.status_code,
+                    "headers": dict(response.headers),
+                    "body": response.text,
+                    "timestamp": response_timestamp,
+                },
+            }
+            if response.history:
+                pair["response"]["redirect_status"] = response.history[0].status_code
+            try:
+                from wscan import session_guard
+                if session_guard.looks_logged_out(
+                    status=response.status_code,
+                    final_url=str(response.url),
+                    body=response.text,
+                    login_url=getattr(self.engine, "login_url", ""),
+                    logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
+                ):
+                    self.engine._api_auth_failed = True
+            except Exception:
+                pass
+            return response.text, pair
+        except Exception as exc:
+            try:
+                self.engine._xml_probe_failed = True
             except Exception:
                 pass
             self._record_scan_note(

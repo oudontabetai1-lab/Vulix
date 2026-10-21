@@ -124,9 +124,10 @@ class XSSScanner(BaseScanner):
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
-                carrier=Carrier.XML, state=CapabilityState.PLANNED,
-                reason="carrier 別 dispatcher は未接続",
-                task="0035-D",
+                carrier=Carrier.XML, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.MULTIPART, state=CapabilityState.PLANNED,
@@ -163,6 +164,7 @@ class XSSScanner(BaseScanner):
 
     SEVERITY = "high"
     SUPPORTS_JSON_BODY = True
+    SUPPORTS_XML_BODY = True
 
     async def scan_injection_point(
         self,
@@ -170,8 +172,8 @@ class XSSScanner(BaseScanner):
         field: dict,
     ) -> list[Finding]:
         """Scan a form field or URL parameter for XSS vulnerabilities."""
-        # JSON 注入はブラウザ遷移しない（dialog 確証なし）。HTML 応答への生反射だけを検出する。
-        if ip.location == "json_body":
+        # JSON / XML 注入はブラウザ遷移しない（dialog 確証なし）。HTML 応答への生反射だけを検出する。
+        if ip.location in ("json_body", "xml_body"):
             return await self._scan_json_reflection(ip, field)
 
         # baseline も browser を直叩きする（_apply_ip 非経由）ため時間ボックス gate を先に通す。
