@@ -221,9 +221,10 @@ class SQLiScanner(BaseScanner):
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
-                carrier=Carrier.XML, state=CapabilityState.PLANNED,
-                reason="carrier 別 dispatcher は未接続",
-                task="0035-D",
+                carrier=Carrier.XML, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.MULTIPART, state=CapabilityState.PLANNED,
@@ -260,6 +261,7 @@ class SQLiScanner(BaseScanner):
 
     SEVERITY = "critical"
     SUPPORTS_JSON_BODY = True
+    SUPPORTS_XML_BODY = True
 
     # ------------------------------------------------------------------
     # Auth-bypass helpers
@@ -547,8 +549,8 @@ class SQLiScanner(BaseScanner):
             if await _test_payload(payload):
                 break  # Found vulnerability, move to next field
 
-        # evolution wave は legacy browser transport 専用なので JSON では実行しない。
-        if not findings and ip.location != "json_body":
+        # evolution wave は legacy browser transport 専用なので JSON/XML では実行しない。
+        if not findings and ip.location not in ("json_body", "xml_body"):
             extra_payloads = await self.evolved_payloads(
                 ip.url,
                 ip.form_index,
@@ -572,8 +574,8 @@ class SQLiScanner(BaseScanner):
         # filter- and error-independent concatenation-equivalence probe
         # (e.g. AA' 'BB collapsing to AABB), which confirms the quote was
         # interpreted as SQL syntax rather than reflected as data.
-        # 等価性 probe も legacy browser transport 専用なので JSON では実行しない。
-        if not findings and ip.location != "json_body":
+        # 等価性 probe も legacy browser transport 専用なので JSON/XML では実行しない。
+        if not findings and ip.location not in ("json_body", "xml_body"):
             probe = await self.run_equivalence_probe(
                 ip.url,
                 ip.form_index,

@@ -148,6 +148,8 @@ LOCATION_TO_CARRIER: dict[str, Carrier] = {
     "form": Carrier.FORM,
     "json_body": Carrier.JSON,
     "json": Carrier.JSON,
+    "xml_body": Carrier.XML,
+    "xml": Carrier.XML,
 }
 
 

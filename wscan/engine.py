@@ -280,6 +280,7 @@ _VERIFY_ONE_TIMEOUT_S = 180.0
 # SPA 収穫の JSON body を実攻撃するチェック。capability 判定に加えて明示的な
 # ホワイトリストを置き、将来の対応拡大が意図せず攻撃範囲を広げるのを防ぐ。
 _JSON_INJECTION_CHECKS = ("sqli", "os", "nosql", "xss")
+_XML_INJECTION_CHECKS = ("sqli", "xss", "xxe")
 
 
 def _api_plan_field_name(method: str, url: str, pointer: str) -> str:
@@ -988,6 +989,7 @@ class ScanEngine:
         # PR-b2 で消費する非永続キュー。
         self._spa_json_harvest_seen: dict = {}
         self.json_injection_points: list[InjectionPoint] = []
+        self.xml_injection_points: list[InjectionPoint] = []
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
         self.additional_report_findings: list[Finding] = list(
@@ -1042,6 +1044,8 @@ class ScanEngine:
         # へ倒すのに使う（_json_probe_sent だけでは baseline 成功で誤 mark／None だけでは verify が
         # 汎用フォールバックへ落ち unreproduced 誤格下げ、を防ぐ）。
         self._json_probe_failed: bool = False
+        self._xml_probe_sent: bool = False
+        self._xml_probe_failed: bool = False
         # 再開可能スキャン
         self.resume_dir: str = resume_dir
         self.enable_checkpoint: bool = enable_checkpoint
@@ -2540,6 +2544,96 @@ class ScanEngine:
                         self._checkpoint_mark_done_ip(ip, check_name)
             self._save_checkpoint()
 
+    async def _run_xml_injection_checks(self, plans: dict | None = None) -> None:
+        """XML body 注入点を対応スキャナで実スキャンする。"""
+        if not self.xml_injection_points:
+            return
+        skipped_urls: set[str] = set()
+        for ip in self.xml_injection_points:
+            if ip.url in skipped_urls:
+                continue
+            plan = (plans or {}).get(ip.url)
+            field_name = _api_plan_field_name(ip.method, ip.url, ip.parameter_id)
+            check_names = _prioritized_checks(
+                _XML_INJECTION_CHECKS, plan, [field_name]
+            )
+            for check_name in check_names:
+                scanner = self.scanners.get(check_name)
+                if scanner is None or not getattr(scanner, "SUPPORTS_XML_BODY", False):
+                    continue
+                try:
+                    await self.controller.checkpoint()
+                except SkipField:
+                    continue
+                except SkipPage:
+                    skipped_urls.add(ip.url)
+                    break
+                if self._checkpoint_is_done_ip(ip, check_name):
+                    continue
+                await self._maybe_relogin_for_page(ip.url)
+                try:
+                    await self._sync_cookies_from_browser(self.browser, for_url=ip.url)
+                except Exception:
+                    pass
+                auth_failed = False
+                if await self._api_session_looks_expired(ip.url):
+                    if not await self._force_relogin(for_url=ip.url):
+                        auth_failed = True
+                field = {"name": ip.display_name or ip.parameter_id}
+                self._api_auth_failed = False
+                self._xml_probe_sent = False
+                self._xml_probe_failed = False
+                before_count = len(self.all_findings)
+                try:
+                    findings = await scanner.scan_injection_point(ip, field)
+                    for finding in findings or []:
+                        self._record_finding(finding, source="xml-body")
+                except AbortScan:
+                    self._save_checkpoint()
+                    raise
+                except Exception as exc:
+                    console.print(
+                        f"  [yellow]XML injection ({check_name}) on {ip.url}: {exc}[/yellow]"
+                    )
+                    self._record_scan_matrix(
+                        url=ip.url,
+                        field_name="(xml-body)",
+                        check_name=check_name,
+                        status="error",
+                        location="xml-body",
+                        note=f"xml-body scan raised: {type(exc).__name__}: {exc}",
+                    )
+                else:
+                    template_available = ip.template_id in (
+                        getattr(self, "injection_templates", {}) or {}
+                    )
+                    if template_available and (
+                        self._xml_probe_failed
+                        or auth_failed
+                        or self._api_auth_failed
+                    ):
+                        self._record_scan_matrix(
+                            url=ip.url,
+                            field_name="(xml-body)",
+                            check_name=check_name,
+                            status="error",
+                            location="xml-body",
+                            note="XML-body probe transport/authentication failure.",
+                        )
+                    elif template_available and self._xml_probe_sent:
+                        new_findings = self.all_findings[before_count:]
+                        self._record_scan_matrix(
+                            url=ip.url,
+                            field_name="(xml-body)",
+                            check_name=check_name,
+                            status="finding" if new_findings else "tested",
+                            location="xml-body",
+                            severity=_top_severity(new_findings),
+                            finding_count=len(new_findings),
+                        )
+                        self._checkpoint_mark_done_ip(ip, check_name)
+            self._save_checkpoint()
+
     def _check_type_in_scope(self, check_type: str) -> bool:
         """Finding の check_type が今回有効なチェック集合に属するか。
 
@@ -3069,6 +3163,8 @@ class ScanEngine:
                     await self._run_api_template_checks(plans)
                     self._profile("phase3b json-injection: start")
                     await self._run_json_injection_checks(plans)
+                    self._profile("phase3b xml-injection: start")
+                    await self._run_xml_injection_checks(plans)
                     self._profile("phase3b tls-seed: start")
                     # crawl が到達できない弱プロトコル origin を取りこぼさないため、
                     # seed origin に対して TLS 検査を直接走らせる。

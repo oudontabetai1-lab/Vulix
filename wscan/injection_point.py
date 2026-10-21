@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import xml.etree.ElementTree as ET
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -12,13 +14,14 @@ from .url_normalize import normalize_url_for_key
 
 # InjectionPoint.location の canonical 値だけを carrier へ写す。scanner_contract の
 # LOCATION_TO_CARRIER は "query"/"json" 等の alias も含むが、InjectionPoint の他メソッド
-# （stable_key_parts / legacy_is_url_param）は canonical な url_param/form/json_body しか
+# （stable_key_parts / legacy_is_url_param）は canonical な url_param/form/json_body/xml_body しか
 # 認識しない。carrier だけが alias を受理すると 3 者が食い違う（query 点を JSON として
-# checkpoint する等）ため、ここでは canonical 3 種のみを許可し alias は拒否する。
+# checkpoint する等）ため、ここでは canonical 4 種のみを許可し alias は拒否する。
 _CANONICAL_LOCATION_CARRIER: dict[str, Carrier] = {
     "url_param": Carrier.QUERY,
     "form": Carrier.FORM,
     "json_body": Carrier.JSON,
+    "xml_body": Carrier.XML,
 }
 
 
@@ -201,6 +204,122 @@ def pointer_set_copy(doc: Any, pointer: str, value: Any) -> Any:
     return copied
 
 
+def mutate_xml_payload(xml_str: str, field_path: str, payload: Any) -> str:
+    """XML 文字列の指定 field_path（element text または @attribute）へ payload を挿入した新しい XML を返す（純粋）。
+
+    - field_path 例: ``/root/user/bio``, ``/root/user/@id``, ``item[0]``, ``@attr``
+    - field_path が空の場合はルート要素の text を置換する。
+    - XML 宣言（``<?xml ...?>``）が存在する場合は保持する。
+    """
+    clean_xml = str(xml_str or "").strip()
+    if not clean_xml:
+        return str(payload)
+
+    decl = ""
+    m = re.match(r"^\s*(<\?xml[^>]*\?>)", clean_xml)
+    if m:
+        decl = m.group(1) + "\n"
+
+    try:
+        root = ET.fromstring(clean_xml)
+    except Exception as exc:
+        raise ValueError(f"XML のパースに失敗しました: {exc}") from exc
+
+    parts = [p for p in str(field_path or "").strip("/").split("/") if p]
+    current = root
+    # パスの先頭がルート要素名または '*' の場合はスキップ
+    if parts and (parts[0] == root.tag or parts[0] == "*"):
+        parts = parts[1:]
+
+    for p in parts[:-1]:
+        if "[" in p and p.endswith("]"):
+            tag, idx_s = p[:-1].split("[")
+            idx = int(idx_s)
+            matching = [c for c in current if c.tag == tag]
+            if not matching or idx >= len(matching):
+                raise KeyError(f"XML 要素 {p!r} が見つかりません")
+            current = matching[idx]
+        else:
+            matching = [c for c in current if c.tag == p]
+            if not matching:
+                raise KeyError(f"XML 要素 {p!r} が見つかりません")
+            current = matching[0]
+
+    last = parts[-1] if parts else ""
+    if last.startswith("@"):
+        attr_name = last[1:]
+        current.attrib[attr_name] = str(payload)
+    else:
+        if "[" in last and last.endswith("]"):
+            tag, idx_s = last[:-1].split("[")
+            idx = int(idx_s)
+            matching = [c for c in current if c.tag == tag]
+            if not matching or idx >= len(matching):
+                raise KeyError(f"XML 要素 {last!r} が見つかりません")
+            target = matching[idx]
+        elif last:
+            matching = [c for c in current if c.tag == last]
+            if not matching:
+                raise KeyError(f"XML 要素 {last!r} が見つかりません")
+            target = matching[0]
+        else:
+            target = current
+        target.text = str(payload)
+
+    body = ET.tostring(root, encoding="utf-8").decode("utf-8")
+    return decl + body
+
+
+def enumerate_xml_leaf_paths(
+    xml_str: str,
+    *,
+    max_paths: int = 200,
+    max_depth: int = 8,
+) -> list[str]:
+    """XML 文字列の全スカラ葉および属性へのパスを列挙する（純粋）。"""
+    clean_xml = str(xml_str or "").strip()
+    if not clean_xml:
+        return []
+    try:
+        root = ET.fromstring(clean_xml)
+    except Exception:
+        return []
+
+    paths: list[str] = []
+    path_cap = max(0, int(max_paths))
+    depth_cap = max(0, int(max_depth))
+
+    def _walk(elem: ET.Element, current_path: str, depth: int) -> None:
+        if len(paths) >= path_cap or depth > depth_cap:
+            return
+        # 属性を列挙
+        for attr in sorted(elem.attrib.keys()):
+            paths.append(f"{current_path}/@{attr}")
+            if len(paths) >= path_cap:
+                return
+
+        children = list(elem)
+        if not children:
+            paths.append(current_path)
+            return
+
+        tag_counts: dict[str, int] = {}
+        for c in children:
+            tag_counts[c.tag] = tag_counts.get(c.tag, 0) + 1
+        tag_seen: dict[str, int] = {}
+        for c in children:
+            idx = tag_seen.get(c.tag, 0)
+            tag_seen[c.tag] = idx + 1
+            if tag_counts[c.tag] > 1:
+                child_path = f"{current_path}/{c.tag}[{idx}]"
+            else:
+                child_path = f"{current_path}/{c.tag}"
+            _walk(c, child_path, depth + 1)
+
+    _walk(root, f"/{root.tag}", 1)
+    return paths
+
+
 def redact_body_except(doc: Any, keep_pointer: str, mask: str = "***") -> Any:
     """注入 pointer の葉だけ残し、他の全ての葉を mask で伏せた複製を返す（純粋）。
 
@@ -336,13 +455,13 @@ class InjectionPoint:
         return self.dom_index if self.dom_index >= 0 else self.form_index
 
     def legacy_is_url_param(self) -> bool:
-        """form/url_param のみ bool を返す。json_body は例外（form 経路への暗黙落ちを封じる）。"""
+        """form/url_param のみ bool を返す。json_body/xml_body は例外（form 経路への暗黙落ちを封じる）。"""
         if self.location == "url_param":
             return True
         if self.location == "form":
             return False
         raise ValueError(
-            "legacy_is_url_param() は json_body に使えない: "
+            f"legacy_is_url_param() は {self.location} に使えない: "
             f"location={self.location!r}"
         )
 
@@ -356,6 +475,9 @@ class InjectionPoint:
             location_token, pointer = "f", ""
         elif self.location == "url_param":
             location_token, pointer = "u", ""
+        elif self.location == "xml_body":
+            location_token = f"x:{self.method.upper()}"
+            pointer = self.parameter_id
         else:
             location_token = f"j:{self.method.upper()}"
             # operation identity(template_id/body_signature)は checkpoint キーに含めない。
@@ -450,6 +572,39 @@ class InjectionPoint:
             location="json_body",
             url=url,
             parameter_id=pointer,
+            display_name=resolved_name,
+            method=method.upper(),
+            template_id=template_id,
+            source=source,
+            value_kind=value_kind,
+            operation_id=operation_id,
+            template_source=template_source,
+            template_digest=template_digest,
+        )
+
+    @classmethod
+    def for_xml_body(
+        cls,
+        method: str,
+        url: str,
+        field_path: str,
+        *,
+        display_name: str = "",
+        template_id: str = "",
+        source: str = "seed",
+        value_kind: ValueKind = ValueKind.STRING,
+        operation_id: str = "",
+        template_source: str = "",
+        template_digest: str = "",
+    ) -> "InjectionPoint":
+        """XML body 用の注入点を作る。"""
+        clean_path = str(field_path or "").strip()
+        last_segment = clean_path.rstrip("/").split("/")[-1] if clean_path else clean_path
+        resolved_name = display_name or (last_segment.lstrip("@") if last_segment else "xml")
+        return cls(
+            location="xml_body",
+            url=url,
+            parameter_id=clean_path,
             display_name=resolved_name,
             method=method.upper(),
             template_id=template_id,
