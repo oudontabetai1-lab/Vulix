@@ -3,3 +3,6 @@
 #   pip install -r requirements-tls.txt
 # 注意: sslyze は cryptography/nassl を要求し、環境の cryptography 版を変更する場合があります。
 sslyze>=6.0,<7.0
+# Certificate parsing in the transport_security scanner imports cryptography directly.
+# sslyze already brings it transitively; declare it explicitly for this feature.
+cryptography
