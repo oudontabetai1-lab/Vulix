@@ -48,7 +48,7 @@ def test_dispatch_result_is_frozen_and_pair_defaults_are_independent():
         (Carrier.QUERY, TransportKind.PLAYWRIGHT),
         (Carrier.FORM, TransportKind.PLAYWRIGHT),
         (Carrier.JSON, TransportKind.HTTPX),
-        (Carrier.XML, None),
+        (Carrier.XML, TransportKind.HTTPX),
     ],
 )
 def test_transport_hint_for(carrier, expected):

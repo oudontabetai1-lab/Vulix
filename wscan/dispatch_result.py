@@ -40,6 +40,7 @@ _CARRIER_TRANSPORT_HINT: dict[Carrier, TransportKind] = {
     Carrier.QUERY: TransportKind.PLAYWRIGHT,
     Carrier.FORM: TransportKind.PLAYWRIGHT,
     Carrier.JSON: TransportKind.HTTPX,
+    Carrier.XML: TransportKind.HTTPX,
 }
 
 
