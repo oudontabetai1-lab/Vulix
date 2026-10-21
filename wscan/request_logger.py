@@ -100,8 +100,8 @@ def is_sensitive_header(name) -> bool:
 _SENSITIVE_BODY_KEYS = url_scope.SENSITIVE_KEY_TOKENS
 _KEYS_ALT = url_scope.KEYS_ALT
 
-# Match through the last @ in an authority, including URLs embedded in header values.
-_URL_USERINFO = re.compile(r"(?i)((?:[a-z][a-z0-9+.\-]*:)?//)[^/?#\s]*@")
+# RFC 3986 userinfo plus @ handles malformed credentials without crossing header structure.
+_URL_USERINFO = re.compile(r"(?i)((?:[a-z][a-z0-9+.\-]*:)?//)([A-Za-z0-9._~%!$&'()*+,;=:@\-]*)@")
 
 
 def _redact_url_userinfo(text):

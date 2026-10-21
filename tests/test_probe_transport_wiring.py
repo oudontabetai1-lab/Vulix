@@ -48,12 +48,14 @@ async def test_httpx_capture_redacts_url_userinfo_in_request_and_response(tmp_pa
     ("https://carol:response-secret@t.test/next", "https://<redacted>@t.test/next"),
     ("//alice:relative-secret@t.test/next", "//<redacted>@t.test/next"),
     ("https://alice:quote'secret@t.test/next", "https://<redacted>@t.test/next"),
-    ('https://alice:quote"secret@t.test/next', "https://<redacted>@t.test/next"),
+    ("https://alice:multi@secret@t.test/next", "https://<redacted>@t.test/next"),
 ])
 def test_browser_http_logs_redact_userinfo_in_request_and_response_headers(tmp_path, location, expected):
     logger = RequestLogger(tmp_path)
     headers = {"Location": location, "X-Next": "//t.test/next", "From": "user@host",
-               "Accept": "*/*"}
+               "Accept": "*/*", "Link": '<https://t.test>;title="user@host"',
+               "X-Relative-Link": "<//t.test>", "X-Mailto": "<mailto:user@host>",
+               "X-Quoted": 'https://host"user@host'}
     logger.log_http({
         "request": {"url": "https://alice:url-secret@t.test/", "method": "GET",
                     "headers": {"Referer": "https://bob:request-secret@t.test/", **headers}},
@@ -67,7 +69,7 @@ def test_browser_http_logs_redact_userinfo_in_request_and_response_headers(tmp_p
     for side in ("request", "response"):
         assert legacy[f"{side}_headers"]["Location"] == expected
         assert f"Location: {expected}" in observed[side]["headers_excerpt"]
-        for name in ("X-Next", "From", "Accept"):
+        for name in ("X-Next", "From", "Accept", "Link", "X-Relative-Link", "X-Mailto", "X-Quoted"):
             assert legacy[f"{side}_headers"][name] == headers[name]
             assert f"{name}: {headers[name]}" in observed[side]["headers_excerpt"]
     assert observed["outcome"] is None
