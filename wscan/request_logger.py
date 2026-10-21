@@ -154,6 +154,67 @@ class RequestLogger:
         self.http_count = _count_existing_records(self.http_path)
         self.payload_count = _count_existing_records(self.payload_path)
         self.llm_call_count = _count_existing_records(self.llm_path)
+        # Import lazily: the ledger schema shares this module's redaction helpers.
+        from wscan.probe_recorder import ProbeLedger
+        self.probe_ledger = ProbeLedger(self.output_dir, self.output_dir.name, enabled=enabled)
+
+    def log_probe(self, *, role, pair=None, transport=None, check="", field="",
+                  payload=None, url="", sent=False, actor="", rationale="") -> None:
+        """Append observation only; unknown delivery/outcome stays unknown."""
+        # shortcut: transport captures use discover; add an observation-only role before phase accounting.
+        if not self.enabled:
+            return
+        try:
+            from wscan.probe_ledger import (
+                ProbeAttemptRecord, RequestRecord, ResponseRecord,
+                body_length, redact_excerpt, sha256_hex,
+            )
+            req = (pair or {}).get("request") or {}
+            resp = (pair or {}).get("response") or {}
+            request = None
+            if transport is not None:
+                body = req.get("post_data")
+                request = RequestRecord(
+                    method=req.get("method", ""), url=req.get("url", url),
+                    transport=transport, sent=sent,
+                    headers_excerpt=redact_excerpt("\n".join(
+                        f"{k}: {v}" for k, v in (req.get("headers") or {}).items())),
+                    # Hash metadata avoids retaining arbitrary captured body secrets.
+                    body_hash=sha256_hex(body), body_length=body_length(body),
+                )
+            response = None
+            if resp:
+                body = resp.get("body")
+                response = ResponseRecord(
+                    status=resp.get("status"), final_url=resp.get("url", ""),
+                    headers_excerpt=redact_excerpt("\n".join(
+                        f"{k}: {v}" for k, v in (resp.get("headers") or {}).items())),
+                    body_hash=sha256_hex(body), body_length=body_length(body),
+                )
+            # Submission payloads have no known carrier or sent request yet.
+            if payload is not None:
+                rationale = f"payload_sha256={sha256_hex(payload)}; bytes={body_length(payload)}; {rationale}"
+            record = ProbeAttemptRecord(
+                scan_id=self.probe_ledger.scan_id,
+                attempt_id=self.probe_ledger.next_attempt_id(), role=role,
+                check=check, injection_key=redact_excerpt(field), actor=actor,
+                started_at=req.get("timestamp") or time.time(),
+                ended_at=resp.get("timestamp"), request=request, response=response,
+                rationale=redact_excerpt(rationale),
+            )
+            self.probe_ledger.append(record)
+        except Exception as exc:
+            self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
+
+    async def log_httpx_submission(self, request) -> None:
+        """HTTPX event hook; never consume a streaming request body."""
+        from wscan.probe_ledger import ProbeRole, Transport
+        self.log_probe(
+            role=ProbeRole.DISCOVER, transport=Transport.HTTPX, actor="transport_capture",
+            pair={"request": {"method": request.method, "url": str(request.url),
+                              "headers": dict(request.headers)}},
+            rationale="transport submission; detector role and delivery unknown",
+        )
 
     def _append(self, path: Path, record: dict) -> bool:
         """1 行追記する。実際に永続化できたら True（カウンタ整合の判定に使う）。"""
@@ -208,6 +269,10 @@ class RequestLogger:
         }
         self._append(self.http_path, record)
         self.http_count += 1
+        from wscan.probe_ledger import ProbeRole, Transport
+        self.log_probe(role=ProbeRole.DISCOVER, pair=pair, transport=Transport.PLAYWRIGHT,
+                       sent=True, actor="transport_capture",
+                       rationale="HTTP response observed; detector role and outcome unknown")
 
     def log_payload(self, field: str, payload: str, check_type: str, url: str = "") -> None:
         """フィールドへ投入したペイロードを記録する。"""
@@ -222,6 +287,15 @@ class RequestLogger:
         }
         self._append(self.payload_path, record)
         self.payload_count += 1
+        from wscan.probe_ledger import ProbeRole
+        labels = check_type.split("_")
+        role = next((role for token, role in (
+            ("baseline", ProbeRole.BASELINE), ("control", ProbeRole.CONTROL),
+            ("verify", ProbeRole.VERIFY), ("cleanup", ProbeRole.CLEANUP),
+        ) if token in labels), ProbeRole.ATTACK)
+        self.log_probe(role=role, check=check_type, field=field, payload=payload,
+                       url=url, actor="payload_submission",
+                       rationale=f"url={redact_url(url)}; payload prepared; transport, delivery and outcome unknown")
 
     def log_llm_call(
         self, *, provider: str = "", role: str = "", model: str = "",

@@ -784,6 +784,15 @@ class BaseScanner(ABC):
         except Exception:
             pass
 
+    def _record_probe_evidence(self, **observation) -> None:
+        """Evidence failures must not change transport results or exception flow."""
+        try:
+            record = getattr(getattr(self.engine, "request_logger", None), "log_probe", None)
+            if callable(record):
+                record(**observation)
+        except Exception as exc:
+            self._record_scan_note(f"probe_evidence_error:{type(exc).__name__}")
+
     def _note_wave_degradation(self, wave: str, exc: Exception) -> None:
         """payload 強化 wave（evolution/mutation）の失敗を *観測可能* にする。
 
@@ -1893,6 +1902,15 @@ class BaseScanner(ABC):
                 body_unavailable=body_unavailable,
             )
             self._record_probe_status(direct)
+            from wscan.probe_ledger import ProbeRole, Transport
+            self._record_probe_evidence(
+                role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT,
+                actor="api_get_capture", sent=True,
+                pair={"request": {"method": "GET", "url": current},
+                      "response": {"status": direct.status_code,
+                                   "url": direct.url, "headers": direct.headers}},
+                rationale="API GET response observed; detector role and outcome unknown",
+            )
             return direct
         finally:
             # 監査 GET が Playwright context の Cookie を rotation/削除させた可能性があるため、

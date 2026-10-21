@@ -258,7 +258,14 @@ class WebSocketScanner(BaseScanner):
     def _response_matches(self, response: str, pattern: str) -> bool:
         return bool(re.search(pattern, response or ""))
 
-    async def _send_ws_message(self, ws_url: str, message: str) -> list[str]:
+    async def _send_ws_message(self, ws_url: str, message: str, *, role=None) -> list[str]:
+        from wscan.probe_ledger import ProbeRole, Transport
+        self._record_probe_evidence(
+            role=role or ProbeRole.ATTACK, transport=Transport.WEBSOCKET,
+            check=self.CHECK_TYPE, actor=self.__class__.__name__,
+            pair={"request": {"method": "SEND", "url": ws_url}},
+            payload=message, rationale="WebSocket submission; delivery and outcome unknown",
+        )
         wait_ms = max(250, int(1000 * self.sleep_factor))
         try:
             result = await self.browser.page.evaluate(
@@ -291,7 +298,8 @@ class WebSocketScanner(BaseScanner):
                 {"wsUrl": ws_url, "message": message, "waitMs": wait_ms},
             )
             return [str(item) for item in (result or [])]
-        except Exception:
+        except Exception as exc:
+            self._record_scan_note(f"websocket_observation_error:{type(exc).__name__}")
             return []
 
     async def verify_finding(self, finding: Finding) -> bool | None:
@@ -301,7 +309,8 @@ class WebSocketScanner(BaseScanner):
         sent = details.get("sent") or finding.payload
         if not ws_url or not pattern or not sent:
             return None
-        responses = await self._send_ws_message(ws_url, sent)
+        from wscan.probe_ledger import ProbeRole
+        responses = await self._send_ws_message(ws_url, sent, role=ProbeRole.VERIFY)
         return any(self._response_matches(resp, pattern) for resp in responses)
 
     def _build_inject_messages(
