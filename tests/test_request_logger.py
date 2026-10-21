@@ -25,6 +25,15 @@ class RedactionTests(unittest.TestCase):
     def tearDown(self):
         clear_sensitive_headers()
 
+    def test_url_userinfo_in_headers_is_redacted_without_mutating_input(self):
+        headers = {"Location": "https://alice:secret-password@t.test/next",
+                   "X-Next": "https://bob:other@t.test/", "Accept": "*/*"}
+        self.assertEqual(_redact_headers(headers), {
+            "Location": "https://<redacted>@t.test/next",
+            "X-Next": "https://<redacted>@t.test/", "Accept": "*/*",
+        })
+        self.assertIn("secret-password", headers["Location"])
+
     def test_runtime_sensitive_headers_are_case_insensitive_and_clearable(self):
         register_sensitive_headers(["X-Company-Auth"])
 

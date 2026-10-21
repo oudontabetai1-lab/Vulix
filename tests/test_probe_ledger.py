@@ -64,6 +64,39 @@ def test_redact_truncates_to_cap():
     assert len(out) <= 101 and out.endswith("…")
 
 
+@pytest.mark.parametrize("raw,expected", [
+    ("Location: https://alice:secret-password@t.test/next",
+     "Location: https://<redacted>@t.test/next"),
+    ('Link: <HTTPS://alice:p%40ss@t.test/a>; rel="next", <http://bob:other@h/b>',
+     'Link: <HTTPS://<redacted>@t.test/a>; rel="next", <http://<redacted>@h/b>'),
+    ("Referer: https://alice@t.test/", "Referer: https://<redacted>@t.test/"),
+    ("Location: https://user:pass@host", "Location: https://<redacted>@host"),
+    ("Location: //alice:relative-secret@host", "Location: //<redacted>@host"),
+    ("Location: https://alice:quote'secret@host", "Location: https://<redacted>@host"),
+    ("X-Next: https://AZaz09-._~%!$&'()*+,;=:@host/", "X-Next: https://<redacted>@host/"),
+    ("X-Next: https://alice:a@b@t.test/", "X-Next: https://<redacted>@t.test/"),
+    ("X-Next: https://t.test/path/a@b?q=ok", "X-Next: https://t.test/path/a@b?q=ok"),
+])
+def test_redact_url_userinfo_in_arbitrary_header_values(raw, expected):
+    assert redact_excerpt(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    'Link: <https://t.test>;title="user@host"',
+    "X-Next: //host/path",
+    "From: user@host",
+    "Link: <//t.test>",
+    "Link: <mailto:user@host>",
+    'X-Next: https://host"user@host',
+    "X-Next: https://host<user@host",
+    "X-Next: https://host user@host",
+    "X-Next: https://host?user@host",
+    "X-Next: https://host#user@host",
+])
+def test_redact_preserves_headers_without_url_userinfo(raw):
+    assert redact_excerpt(raw) == raw
+
+
 def test_redact_empty_is_empty():
     assert redact_excerpt("") == "" and redact_excerpt(None) == ""
 
