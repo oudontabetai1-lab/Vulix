@@ -12,6 +12,7 @@
 妨げないよう、失敗しても例外を握りつぶす（ベストエフォート）。
 """
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -99,19 +100,29 @@ def is_sensitive_header(name) -> bool:
 _SENSITIVE_BODY_KEYS = url_scope.SENSITIVE_KEY_TOKENS
 _KEYS_ALT = url_scope.KEYS_ALT
 
+# Match through the last @ in an authority, including URLs embedded in header values.
+_URL_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.\-]*://)[^/?#\s<>\"']*@")
+
+
+def _redact_url_userinfo(text):
+    """Mask embedded URL credentials without changing the original value."""
+    if not isinstance(text, str):
+        return text
+    return _URL_USERINFO.sub(lambda match: f"{match.group(1)}{_REDACTED}@", text)
+
 
 def _redact_headers(headers: dict) -> dict:
     if not isinstance(headers, dict):
         return headers
     return {
-        k: (_REDACTED if _is_sensitive_header(k) else v)
+        k: (_REDACTED if _is_sensitive_header(k) else _redact_text(v))
         for k, v in headers.items()
     }
 
 
 def _redact_text(text):
     """urlencoded ボディ / JSON ボディ中の機微フィールド値をマスクする（url_scope へ委譲）。"""
-    return url_scope.redact_kv_values(text)
+    return url_scope.redact_kv_values(_redact_url_userinfo(text))
 
 
 def _redact_url(url):

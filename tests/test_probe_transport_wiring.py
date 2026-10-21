@@ -19,6 +19,44 @@ def rows(logger):
     return [json.loads(line) for line in logger.probe_ledger.path.read_text().splitlines()]
 
 
+@pytest.mark.asyncio
+async def test_httpx_capture_redacts_url_userinfo_in_request_and_response(tmp_path):
+    logger = RequestLogger(tmp_path)
+    location = "https://alice:secret-password@t.test/next"
+    request = httpx.Request("GET", "https://bob:request-password@t.test/", headers={
+        "Referer": "https://carol:header-password@t.test/",
+        "Authorization": "Bearer auth-secret", "Cookie": "sid=cookie-secret",
+    })
+    response = httpx.Response(302, request=request, headers={
+        "Location": location, "X-Next": "https://dave:custom-password@t.test/",
+        "Set-Cookie": "sid=response-cookie-secret",
+    })
+    await logger.log_httpx_submission(request)
+    await logger.log_httpx_response(response)
+    submission, observed = rows(logger)
+    assert "https://<redacted>@t.test/next" in observed["response"]["headers_excerpt"]
+    for secret in ("alice", "bob", "carol", "dave", "secret-password", "request-password",
+                   "header-password", "custom-password", "auth-secret", "cookie-secret"):
+        assert secret not in logger.probe_ledger.path.read_text()
+    assert observed["parent_id"] == submission["attempt_id"]
+    assert submission["outcome"] is observed["outcome"] is None
+    assert response.headers["Location"] == location
+    assert request.headers["Authorization"] == "Bearer auth-secret"
+
+
+def test_browser_http_logs_redact_userinfo_in_request_and_response_headers(tmp_path):
+    logger = RequestLogger(tmp_path)
+    logger.log_http({
+        "request": {"url": "https://alice:url-secret@t.test/", "method": "GET",
+                    "headers": {"Referer": "https://bob:request-secret@t.test/"}},
+        "response": {"status": 302, "headers": {
+            "Location": "https://carol:response-secret@t.test/next"}},
+    })
+    for path in (logger.http_path, logger.probe_ledger.path):
+        assert "secret" not in path.read_text()
+        assert "<redacted>@t.test" in path.read_text()
+
+
 def test_browser_pairs_preserve_old_log_and_do_not_infer_outcome(tmp_path):
     logger = RequestLogger(tmp_path)
     pair = {
