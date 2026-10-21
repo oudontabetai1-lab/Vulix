@@ -1998,6 +1998,7 @@ class MonitorServer:
             for optional_key in (
                 "status", "aborted", "total_findings_count",
                 "confirmed_findings_count", "hypothesis_count",
+                "evidence_completion",
             ):
                 if optional_key in event_data:
                     keys_to_copy.append(optional_key)

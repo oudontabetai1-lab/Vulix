@@ -1664,6 +1664,21 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         # check レベル coverage: in-scope の scanner 数と未実行（未選択）の検査を出す。
         # 「in-scope＝実行対象」であって「実行済み」ではない点をラベルで明確にする。
         cc = coverage.get("check_coverage", {}) or {}
+        completion = coverage.get("evidence_completion") or {}
+        completion_html = ""
+        if completion:
+            entries = ", ".join(
+                f'{self._escape(check)}: {self._escape(item.get("status", "EVIDENCE_INCOMPLETE"))}'
+                for check, item in completion.get("checks", {}).items()
+            )
+            completion_html = (
+                '<h3>Evidence completion</h3>'
+                f'<p><strong>{self._escape(completion.get("status", "EVIDENCE_INCOMPLETE"))}</strong></p>'
+                f'<p>{entries}</p>'
+                '<p>Missing evidence, unknown plans and uninstrumented paths are incomplete. '
+                'Timeout, blocked and skipped outcomes are not successful negative coverage. '
+                'Finding counts and check selection are separate.</p>'
+            )
         check_coverage_html = ""
         if cc:
             cc_status = self._escape(cc.get("coverage_status", ""))
@@ -1768,6 +1783,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             <h2>{t('report.coverage.heading')}</h2>
             <p>{t('report.coverage.summary', reached=reached_count, attempts=attempts, findings=findings_total)}</p>
             {check_coverage_html}
+            {completion_html}
             {prereq_html}
             {capability_matrix_html}{transport_html}
             <h3 style="margin-top:14px">{t('report.coverage.by_status')}</h3>

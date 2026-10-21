@@ -125,6 +125,16 @@ class CORSScanner(BaseScanner):
         acao = resp_headers.get("access-control-allow-origin", "")
         acac = resp_headers.get("access-control-allow-credentials", "").lower()
 
+        # The passive comparison needs its own decision; an Origin probe cannot prove it ran.
+        if pair.get("response", {}).get("status") is not None:
+            self._record_probe_evidence(
+                role=ProbeRole.ATTACK, transport=Transport.PLAYWRIGHT, check=self.CHECK_TYPE,
+                actor=self.__class__.__name__, pair=pair, sent=True,
+                outcome=ProbeOutcome.MATCHED if acao == "*" and acac == "true" else ProbeOutcome.NO_MATCH,
+                decision_rule="cors_wildcard_credentials", decision_version="1",
+                rationale="CORS captured response header comparison completed",
+            )
+
         if acao == "*" and acac == "true":
             finding = await self.record_finding(
                 url=url,

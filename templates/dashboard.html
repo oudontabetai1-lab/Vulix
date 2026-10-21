@@ -4547,6 +4547,10 @@ function handleEvent(event) {
       if (data.report_path) {
         addEventLog('status', `成果物保存先: ${data.report_path.replace(/\/report\.html$/, '')}`);
       }
+      const evidenceCompletion = data.evidence_completion;
+      if (evidenceCompletion) {
+        addEventLog('status', `Evidence completion: ${evidenceCompletion.status}`);
+      }
       // Only offer in-browser report/zip links when the server reports a
       // portal-servable scan id (output folder under OUTPUT_BASE). A custom
       // output_dir elsewhere is not served by /reports, so links would 404.
@@ -4565,7 +4569,8 @@ function handleEvent(event) {
         addEventLog('status', `Scan aborted (partial report). Report: ${data.report_path || ''}`);
         document.getElementById('statRemain').textContent = '中断';
       } else {
-        setStatus(`Scan complete — ${data.total_findings} finding(s)`, 'done');
+        const evidenceLabel = evidenceCompletion ? ` / evidence ${evidenceCompletion.status}` : '';
+        setStatus(`Scan complete${evidenceLabel} — ${data.total_findings} finding(s)`, 'done');
         document.getElementById('progressBar').style.width = '100%';
         document.getElementById('statPct').textContent = '100%';
         addEventLog('status', `Scan complete. Report: ${data.report_path}`);

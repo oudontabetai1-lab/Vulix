@@ -213,6 +213,7 @@ class RequestLogger:
                 started_at=req.get("timestamp") or time.time(),
                 ended_at=resp.get("timestamp"), request=request, response=response,
                 outcome=outcome, decision_rule=decision_rule, decision_version=decision_version,
+                completion_unit=self.probe_ledger.current_unit(),
                 rationale=redact_excerpt(rationale),
             )
             if self.probe_ledger.append(record):
