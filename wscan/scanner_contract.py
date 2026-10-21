@@ -263,7 +263,7 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
     """capability matrix（build_capability_matrix の出力）を人間向け Markdown へ整形（純粋）。
 
     行=scanner・列=carrier のセル記号表（s=supported/E2E 未接続, P=planned, U=unsupported,
-    ?=未分類）＋凡例＋planned の task 別一覧を出す。JSON dict だけから生成し再計算しない。
+    ?=未分類）＋凡例＋planned の技術的な理由を出す。JSON dict だけから生成し再計算しない。
     """
     carriers = list(matrix.get("carriers", []))
     scanners = matrix.get("scanners", {})
@@ -278,7 +278,7 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
     ]
     # 集計・planned 収集・非対応/予定の理由収集（primary use case = 「なぜ検査できないか」）
     counts: dict[str, int] = {}
-    planned_by_task: dict[str, list[str]] = {}
+    planned_cells: list[str] = []
     reasons_by_scanner: dict[str, list[str]] = {}
     for check in sorted(scanners):
         row = scanners[check]
@@ -291,11 +291,10 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
             counts[sym] = counts.get(sym, 0) + 1
             state = cell.get("state")
             if state == "planned":
-                task = cell.get("task") or "(no task)"
-                planned_by_task.setdefault(task, []).append(f"{check}.{carrier}")
+                planned_cells.append(f"{check}.{carrier}")
             if state in ("planned", "unsupported"):
                 reason = cell.get("reason") or ""
-                suffix = f"（planned: {cell.get('task') or 'no task'}）" if state == "planned" else ""
+                suffix = "（planned）" if state == "planned" else ""
                 if reason:
                     reasons_by_scanner.setdefault(check, []).append(
                         f"- `{carrier}` — {reason}{suffix}"
@@ -315,11 +314,8 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
     ]
     if counts.get("?"):
         lines.append(f"| ? | 未分類 | {counts['?']} |")
-    if planned_by_task:
-        lines += ["", "## Planned（task 別）", ""]
-        for task in sorted(planned_by_task):
-            cells = ", ".join(sorted(planned_by_task[task]))
-            lines.append(f"- **{task}**: {cells}")
+    if planned_cells:
+        lines += ["", "## Planned", "", ", ".join(sorted(planned_cells))]
     if reasons_by_scanner:
         lines += [
             "",
@@ -378,12 +374,9 @@ def render_capability_matrix_html(matrix: dict, lang: str = "ja") -> str:
             vks = ", ".join(cell.get("value_kinds", []) or []) or "-"
             trs = ", ".join(cell.get("transports", []) or []) or "-"
             reason = cell.get("reason", "") or ""
-            task = cell.get("task", "") or ""
             title = f"{cell.get('state', '')}; value_kinds={vks}; transports={trs}"
             if reason:
                 title += f"; reason={reason}"
-            if task:
-                title += f"; task={task}"
             tds.append(
                 f'<td title="{esc(title)}" '
                 f'style="background:{bg};color:{fg};text-align:center;font-weight:600">'

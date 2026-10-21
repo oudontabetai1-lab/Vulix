@@ -103,6 +103,17 @@ def test_render_capability_matrix_markdown():
     assert md.count("| " + next(iter(SCANNERS)) + " |") >= 0
 
 
+def test_human_readable_matrix_omits_internal_planning_ids():
+    matrix = build_capability_matrix({"sqli": SCANNERS["sqli"].CONTRACT})
+    md = render_capability_matrix_markdown(matrix)
+    html = render_capability_matrix_html(matrix)
+    assert "task 別" not in md
+    assert "0035-D" not in md
+    assert "planned" in md and "carrier 別 dispatcher は未接続" in md
+    assert "0035-D" not in html
+    assert "reason=carrier 別 dispatcher は未接続" in _unescape_titles(html)
+
+
 def test_render_capability_matrix_html():
     matrix = build_capability_matrix(_contracts())
     out = render_capability_matrix_html(matrix)
