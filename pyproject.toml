@@ -11,7 +11,7 @@ readme = "README.md"
 # MIT（リポジトリ直下の LICENSE）。setuptools>=64 で解釈できる table 形式。
 license = { text = "MIT" }
 requires-python = ">=3.11"
-dynamic = ["version", "dependencies"]
+dynamic = ["version", "dependencies", "optional-dependencies"]
 
 # `vulix <subcommand> ...` = `python -m vulix <subcommand> ...`。
 # 中身は vulix/__main__.py:main（explore→scan の別名変換後に main.py へ委譲）。
@@ -34,3 +34,11 @@ templates = ["*.html"]
 [tool.setuptools.dynamic]
 version = { attr = "wscan.__version__" }
 dependencies = { file = ["requirements.txt"] }
+
+# Keep pip requirements files and package extras on the same dependency source.
+[tool.setuptools.dynamic.optional-dependencies]
+agent = { file = ["requirements-agent.txt"] }
+mcp = { file = ["requirements-mcp.txt"] }
+tls = { file = ["requirements-tls.txt"] }
+laya = { file = ["requirements-laya.txt"] }
+qr = { file = ["requirements-qr.txt"] }

@@ -213,7 +213,7 @@ python3 -m pip install -r requirements.txt
 playwright install chromium
 ```
 
-`vulix` コマンドとして使いたい場合は、依存導入後にパッケージをインストールします（`python -m vulix` と同等の入口です）。
+`vulix` コマンドとして使いたい場合は、パッケージをインストールします。base 依存（`requirements.txt`）も同時に入るため、上の `pip install -r requirements.txt` は省略できます（`python -m vulix` と同等の入口です）。
 
 ```bash
 python3 -m pip install .     # `vulix <subcommand> ...` が使えるようになる
@@ -221,6 +221,27 @@ python3 -m pip install .     # `vulix <subcommand> ...` が使えるようにな
 ```
 
 通常インストールにも既定設定・ペイロード・ダッシュボード/レポート HTML を同梱します。設定はインストール先の `config/wscan.yaml`（editable インストールではソース側）を読みます。通常・Agent スキャンとポータルの既定保存先は、起動時の作業ディレクトリ配下 `output/` です。書込み可能なディレクトリで起動してください。CLI の `--output DIR` はスキャン出力先を明示指定できます。
+
+### Optional extras
+
+fresh clone のルートで、必要な機能の extra を指定できます。extras は base 依存に加算され、既存の `requirements-*.txt` と同じ依存・バージョン指定を使います。
+
+| Extra | 機能 | 依存の正本 |
+| --- | --- | --- |
+| `agent` | Agent / Hybrid（browser-use） | `requirements-agent.txt` |
+| `mcp` | MCP による MFA 取得・OOB メールサーバー | `requirements-mcp.txt` |
+| `tls` | TLS 設定検査・証明書解析（sslyze / cryptography） | `requirements-tls.txt` |
+| `qr` | TOTP の QR 画像読取（OpenCV / NumPy / Pillow） | `requirements-qr.txt` |
+| `laya` | 任意の Laya ローカル推論 | `requirements-laya.txt` |
+
+```bash
+python3 -m pip install '.[qr,tls]'                # 必要な機能だけ
+python3 -m pip install '.[agent,mcp,tls,qr,laya]' # 全 optional Python 依存
+# editable の場合: python3 -m pip install -e '.[agent,mcp,tls,qr,laya]'
+python3 -m playwright install chromium
+```
+
+extras は Python 依存を導入します。ブラウザ実行環境、LLM の認証・接続設定、外部 MCP サーバーと Node.js/uvx、メール受信箱、Laya の重み・推論環境は別途準備してください。導入だけでは optional 機能は有効になりません。Laya は `WSCAN_LAYA` で有効化する既定 OFF の機能で、モデル取得と PyTorch による容量・実行資源が必要です。`tls` は既存の cryptography 版を変更する場合があります。`qr` の headless OpenCV と他の OpenCV distribution は併用しないでください。既存の `pip install -r requirements-*.txt` も引き続き使えます。
 
 ### Agent / Hybrid の追加依存
 
@@ -925,7 +946,7 @@ python3 main.py scan https://example.com \
   --mfa-type totp --mfa-totp-uri "$WSCAN_MFA_TOTP_URI" --mfa-field otp
 ```
 
-URI の代わりに `--mfa-totp-secret BASE32` または `--mfa-totp-qr code.png` も使えます。QR 読み取りだけは任意依存の opencv が必要です（`pip install opencv-python-headless`）。シークレットや URI は保存されないため、毎回 CLI または `WSCAN_MFA_TOTP_URI` / `WSCAN_MFA_TOTP_SECRET` / `WSCAN_MFA_TOTP_QR` で渡してください。
+URI の代わりに `--mfa-totp-secret BASE32` または `--mfa-totp-qr code.png` も使えます。QR 読み取りには `qr` extra が必要です（checkout のルートで `python3 -m pip install '.[qr]'`）。シークレットや URI は保存されないため、毎回 CLI または `WSCAN_MFA_TOTP_URI` / `WSCAN_MFA_TOTP_SECRET` / `WSCAN_MFA_TOTP_QR` で渡してください。
 
 ダッシュボードの「認証・Cookie」で QR 画像を選ぶと、TOTP 登録情報として検証し、発行者・アカウント・桁数・周期・アルゴリズムを表示します。成功時は Base32 シークレット（マスク表示）と生成条件を自動入力し、前の URI / QR パスを解除します。画像はこの読取機能では保存されず、シークレットは設定 export・ブラウザ保存・イベント履歴にも残りません。読取中や失敗後は、画像を選び直すか URI / Base32 / サーバ側パスを入力してからスキャンを開始してください。MFAを使わない場合は「無効」に切り替えられます。「読取済み」は登録情報が有効という意味で、対象システムへのログイン成功は実行時に確認します。
 

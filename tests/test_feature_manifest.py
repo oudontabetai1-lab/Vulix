@@ -4,6 +4,7 @@ import copy
 from pathlib import Path
 import re
 import sys
+import tomllib
 
 import yaml
 
@@ -183,3 +184,22 @@ def test_optional_feature_boundaries():
         assert entry['original_gap']
         assert entry['resolution'] == manifest['packages'][entry['package']]['requirements']
     assert all(entry['setup'] for entry in manifest['external_runtimes'].values())
+
+
+def test_packaging_extras_cover_manifest_requirements():
+    project = tomllib.loads((ROOT / 'pyproject.toml').read_text())
+    manifest = yaml.safe_load((ROOT / 'config/feature_manifest.yaml').read_text())
+    dynamic = project['tool']['setuptools']['dynamic']
+    assert 'optional-dependencies' in project['project']['dynamic']
+    assert dynamic['dependencies'] == {'file': ['requirements.txt']}
+    extras = dynamic['optional-dependencies']
+    optional_files = set(manifest['scope']['requirements_files']) - {'requirements.txt'}
+    assert optional_files == {p.name for p in ROOT.glob('requirements-*.txt')}
+    assert set(extras) == {name.removeprefix('requirements-').removesuffix('.txt')
+                           for name in optional_files}
+    for extra, source in extras.items():
+        filename = f'requirements-{extra}.txt'
+        assert source == {'file': [filename]}
+        declared = {name for name, entry in manifest['packages'].items()
+                    if filename in entry['requirements']}
+        assert declared == requirement_names((ROOT / filename).read_text()), extra
