@@ -24,6 +24,15 @@ if TYPE_CHECKING:
 _CANARY_ORIGIN = "https://evil.wscan-test.example.com"
 
 
+def _normalize_probe_exception(exc: BaseException) -> ProbeOutcome:
+    """Classify request failures without retaining their potentially sensitive messages."""
+    if isinstance(exc, httpx.TimeoutException):
+        return ProbeOutcome.TIMEOUT
+    if isinstance(exc, httpx.TransportError):
+        return ProbeOutcome.TRANSPORT_ERROR
+    return ProbeOutcome.VERIFICATION_ERROR
+
+
 class CORSScanner(BaseScanner):
     """CORS misconfiguration scanner."""
 
@@ -176,6 +185,7 @@ class CORSScanner(BaseScanner):
                 findings.append(finding)
 
         except Exception as exc:
+            self._record_cors_error(exc, url, ProbeRole.ATTACK, "cors_origin_reflection")
             self._record_scan_note(f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}")
             if self.monitor:
                 await self.monitor.emit_status(
@@ -236,12 +246,30 @@ class CORSScanner(BaseScanner):
         except Exception as exc:
             self._record_scan_note(f"probe_evidence_error:{type(exc).__name__}")
 
+    def _record_cors_error(self, exc: Exception, url: str, role: ProbeRole, rule: str) -> None:
+        request = getattr(exc, "request", None)
+        extensions = getattr(request, "extensions", {}) or {}
+        owner, parent_id = extensions.get("vulix_probe_submission", (None, None))
+        logger = getattr(self.engine, "request_logger", None)
+        self._record_probe_evidence(
+            role=role, transport=Transport.HTTPX, check=self.CHECK_TYPE,
+            actor=self.__class__.__name__, sent=False,
+            parent_id=parent_id if owner is logger and parent_id else "",
+            pair={"request": {"method": getattr(request, "method", "GET"),
+                              "url": str(getattr(request, "url", url)),
+                              "headers": dict(getattr(request, "headers", {}))}},
+            outcome=_normalize_probe_exception(exc), decision_rule=rule,
+            decision_version="1", rationale="probe request failed before response",
+        )
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         details = getattr(finding, "evidence_details", {}) or {}
         if finding.evidence_type == "cors_wildcard_credentials":
             try:
                 r = await self._get_with_origin(finding.url, _CANARY_ORIGIN)
             except Exception as exc:
+                self._record_cors_error(exc, finding.url, ProbeRole.VERIFY,
+                                        "cors_wildcard_credentials")
                 self._record_scan_note(f"verification_error:{self.CHECK_TYPE}:{type(exc).__name__}")
                 return None
             acao = r.headers.get("access-control-allow-origin", "")
@@ -256,6 +284,8 @@ class CORSScanner(BaseScanner):
             try:
                 r = await self._get_with_origin(finding.url, origin)
             except Exception as exc:
+                self._record_cors_error(exc, finding.url, ProbeRole.VERIFY,
+                                        "cors_origin_reflection")
                 self._record_scan_note(f"verification_error:{self.CHECK_TYPE}:{type(exc).__name__}")
                 return None
             acao = r.headers.get("access-control-allow-origin", "")

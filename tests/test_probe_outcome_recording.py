@@ -100,8 +100,12 @@ async def test_failed_probe_has_no_detector_outcome_and_is_observable(tmp_path, 
         assert await scanner.verify_finding(finding) is None
     else:
         assert await scanner.scan_page("https://t.test/") == []
-    submission, = records(logger)
+    submission, decision = records(logger)
     assert submission["outcome"] is None and submission["response"] is None
+    assert decision["outcome"] == "timeout"
+    assert decision["decision_rule"] == "cors_origin_reflection"
+    assert decision["decision_version"] == "1"
+    assert decision["rationale"] == "probe request failed before response"
     assert len(calls) == 1
     assert any("ReadTimeout" in note for note in scanner.engine.wave_errors)
     assert "private-error" not in str(scanner.engine.wave_errors)
@@ -128,6 +132,15 @@ async def test_disabled_ledger_preserves_detector_result(tmp_path):
     scanner, logger, calls = scanner_for(tmp_path, {}, enabled=False)
     assert await scanner.scan_page("https://t.test/") == []
     assert len(calls) == 1 and not list(tmp_path.iterdir())
+
+
+def test_probe_exception_normalization_is_pure_and_message_free():
+    from wscan.probe_ledger import ProbeOutcome
+    from wscan.scanners.cors import _normalize_probe_exception
+
+    assert _normalize_probe_exception(httpx.ReadTimeout("private-token")) is ProbeOutcome.TIMEOUT
+    assert _normalize_probe_exception(httpx.ConnectError("private-token")) is ProbeOutcome.TRANSPORT_ERROR
+    assert _normalize_probe_exception(ValueError("private-token")) is ProbeOutcome.VERIFICATION_ERROR
 
 
 def test_foreign_logger_observation_is_not_linked(tmp_path):
