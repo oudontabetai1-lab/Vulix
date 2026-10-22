@@ -2551,7 +2551,7 @@ class ScanEngine:
                 before_count = len(self.all_findings)
                 try:
                     from .checkpoint import CheckpointState
-                    with self._evidence_scope(CheckpointState._candidate_unit_key(ip, check_name), check_name,
+                    with ScanEngine._evidence_scope(self, CheckpointState._candidate_unit_key(ip, check_name), check_name,
                                               rules=(f"{check_name}_payload_oracle",) if check_name in {"sqli", "xss"} else ()):
                         findings = await scanner.scan_injection_point(ip, field)
                     for finding in findings or []:
