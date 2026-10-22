@@ -166,6 +166,8 @@ class ProbeAttemptRecord:
     decision_version: str = ""     # 判定 rule version
     rationale: str = ""            # 判定根拠（redact 済み）
     completion_unit: str = ""      # hashed checkpoint identity; independent of display labels
+    record_kind: str = "legacy"    # request / observation / decision / payload; legacy rows retain their meaning
+    request_attempt_id: str = ""   # one outgoing request, independent of append-only event IDs
 
     @property
     def correlated(self) -> bool:

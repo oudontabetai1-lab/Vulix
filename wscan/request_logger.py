@@ -12,9 +12,12 @@
 妨げないよう、失敗しても例外を握りつぶす（ベストエフォート）。
 """
 import json
+import httpx
 import re
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +25,12 @@ from wscan import url_scope
 
 # 巨大な post_data でログが肥大化するのを防ぐための上限（文字数）
 _MAX_POST_DATA = 20000
+_CURRENT_PROBE = ContextVar("outgoing_probe", default=None)
+
+
+def current_probe(logger):
+    context = _CURRENT_PROBE.get()
+    return context if context is not None and context["logger"] is logger else None
 
 
 def _count_existing_records(path: Path) -> int:
@@ -171,9 +180,10 @@ class RequestLogger:
 
     def log_probe(self, *, role, pair=None, transport=None, check="", field="",
                   payload=None, url="", sent=False, actor="", rationale="",
-                  parent_id="", outcome=None, decision_rule="", decision_version="") -> Optional[str]:
+                  parent_id="", outcome=None, decision_rule="", decision_version="",
+                  record_kind="legacy", request_attempt_id="", completion_unit=None,
+                  wave="", baseline_attempt_ids=(), control_attempt_ids=()) -> Optional[str]:
         """Append observation only; return its ID only after a successful write."""
-        # shortcut: transport captures use discover; add an observation-only role before phase accounting.
         if not self.enabled:
             return
         try:
@@ -202,6 +212,8 @@ class RequestLogger:
                     headers_excerpt=redact_excerpt("\n".join(
                         f"{k}: {v}" for k, v in (resp.get("headers") or {}).items())),
                     body_hash=sha256_hex(body), body_length=body_length(body),
+                    elapsed_ms=((resp["timestamp"] - req["timestamp"]) * 1000
+                                if resp.get("timestamp") and req.get("timestamp") else None),
                 )
             # Submission payloads have no known carrier or sent request yet.
             if payload is not None:
@@ -213,7 +225,9 @@ class RequestLogger:
                 started_at=req.get("timestamp") or time.time(),
                 ended_at=resp.get("timestamp"), request=request, response=response,
                 outcome=outcome, decision_rule=decision_rule, decision_version=decision_version,
-                completion_unit=self.probe_ledger.current_unit(),
+                completion_unit=self.probe_ledger.current_unit() if completion_unit is None else completion_unit,
+                record_kind=record_kind, request_attempt_id=request_attempt_id, wave=wave,
+                baseline_attempt_ids=tuple(baseline_attempt_ids), control_attempt_ids=tuple(control_attempt_ids),
                 rationale=redact_excerpt(rationale),
             )
             if self.probe_ledger.append(record):
@@ -221,10 +235,65 @@ class RequestLogger:
         except Exception as exc:
             self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
 
+    @contextmanager
+    def probe_scope(self, ip, check, *, role="attack", wave="standard",
+                    baseline_attempt_ids=(), control_attempt_ids=(), parent_id=""):
+        from wscan.probe_ledger import sha256_hex
+        context = dict(logger=self, requests=[], role=role, check=check, wave=wave, parent_id=parent_id,
+                       field=sha256_hex(json.dumps([ip.stable_key_parts(), ip.parameter_id,
+                                                   ip.operation_id, ip.template_digest])),
+                       completion_unit=self.probe_ledger.current_unit(),
+                       baseline_attempt_ids=tuple(baseline_attempt_ids),
+                       control_attempt_ids=tuple(control_attempt_ids))
+        token = _CURRENT_PROBE.set(context)
+        try:
+            yield context
+        finally:
+            _CURRENT_PROBE.reset(token)
+
+    def scoped_probe(self, context, **kwargs):
+        metadata = {key: context[key] for key in (
+            "role", "check", "field", "wave", "completion_unit",
+            "baseline_attempt_ids", "control_attempt_ids")}
+        try:
+            return self.log_probe(**metadata, actor="scanner_transport", **kwargs)
+        except Exception as exc:
+            self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
+
+    def begin_request(self, context, request, transport):
+        attempt = self.scoped_probe(context, pair={"request": request}, transport=transport,
+                                    record_kind="request", parent_id=context.get("parent_id", ""))
+        if attempt:
+            context["requests"].append(attempt)
+        return attempt
+
+    def observe_request(self, context, attempt, pair, transport):
+        return self.scoped_probe(context, pair=pair, transport=transport, sent=True,
+                                 parent_id=attempt or "", request_attempt_id=attempt or "",
+                                 record_kind="observation")
+
     async def log_httpx_submission(self, request) -> None:
         """HTTPX event hook; never consume a streaming request body."""
         from wscan.probe_ledger import ProbeRole, Transport
         try:
+            if (request.extensions.get("vulix_probe_request_identity") == (self, id(request))
+                    and request.extensions.get("vulix_probe_request_open")):
+                return
+            request.extensions["vulix_probe_request_identity"] = (self, id(request))
+            request.extensions["vulix_probe_request_open"] = True
+            context = current_probe(self)
+            if context is not None:
+                try:
+                    body = request.content
+                except httpx.RequestNotRead:
+                    body = None
+                req = {"method": request.method, "url": str(request.url),
+                       "headers": dict(request.headers), "post_data": body, "timestamp": time.time()}
+                attempt_id = self.begin_request(context, req, Transport.HTTPX)
+                request.extensions["vulix_probe_context"] = (context, req)
+                request.extensions["vulix_probe_submission"] = (self, attempt_id)
+                return
+            request.extensions.pop("vulix_probe_context", None)
             attempt_id = self.log_probe(
                 role=ProbeRole.DISCOVER, transport=Transport.HTTPX, actor="transport_capture",
                 pair={"request": {"method": request.method, "url": str(request.url),
@@ -241,6 +310,18 @@ class RequestLogger:
         try:
             request = response.request
             owner, attempt_id = request.extensions.get("vulix_probe_submission", (None, None))
+            request.extensions["vulix_probe_request_open"] = False
+            if response.extensions.get("vulix_probe_observation", (None,))[0] is self:
+                return
+            bound = request.extensions.get("vulix_probe_context")
+            if owner is self and bound is not None:
+                context, req = bound
+                observation_id = self.observe_request(context, attempt_id, {
+                    "request": req, "response": {"status": response.status_code,
+                    "url": str(response.url), "headers": dict(response.headers), "timestamp": time.time()}},
+                    Transport.HTTPX)
+                response.extensions["vulix_probe_observation"] = (self, observation_id)
+                return
             observation_id = self.log_probe(
                 role=ProbeRole.DISCOVER, transport=Transport.HTTPX, actor="transport_capture",
                 parent_id=attempt_id if owner is self and attempt_id else "", sent=True,
@@ -256,6 +337,9 @@ class RequestLogger:
 
     def log_browser_submission(self, request: dict) -> Optional[str]:
         from wscan.probe_ledger import ProbeRole, Transport
+        context = request.get("_probe_context")
+        if context is not None and context["logger"] is self:
+            return self.begin_request(context, request, Transport.PLAYWRIGHT)
         return self.log_probe(
             role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT, actor="transport_capture",
             pair={"request": request},
@@ -316,6 +400,11 @@ class RequestLogger:
         self._append(self.http_path, record)
         self.http_count += 1
         from wscan.probe_ledger import ProbeRole, Transport
+        context = req.get("_probe_context")
+        if context is not None and context["logger"] is self:
+            if req.get("_req_id") == resp.get("_req_id"):
+                self.observe_request(context, req.get("_probe_attempt_id"), pair, Transport.PLAYWRIGHT)
+            return
         self.log_probe(role=ProbeRole.DISCOVER, pair=pair, transport=Transport.PLAYWRIGHT,
                        sent=True, actor="transport_capture",
                        parent_id=(req.get("_probe_attempt_id") or "")
@@ -337,6 +426,7 @@ class RequestLogger:
             role=role, check=check_type, field=field, payload=payload,
             url=url, actor="payload_submission",
             rationale=f"url={redact_url(url)}; payload prepared; transport, delivery and outcome unknown",
+            record_kind="payload",
         )
         record = {
             "ts": time.time(),

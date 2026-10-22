@@ -5,6 +5,7 @@ Detects reflected and DOM-based XSS vulnerabilities.
 import asyncio
 import re
 import uuid
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 from wscan.injection_point import InjectionPoint
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
 # 発火トリガの baseline 用の中立値（英数字のみ・payload とも既存ハンドラ値とも一致
 # しない）。この値を payload と同じ経路（URL パラメータ／フォーム action）で投入した
 # 応答 DOM からダイアログハンドラを採取し、「新規に増えたハンドラ」判定の基準にする。
+_XSS_BASELINE = ContextVar("xss_baseline_attempt", default=None)
+
 _HANDLER_BASELINE_VALUE = "wscanxssbaseline"
 
 # 型付き入力（HTML5 validation）で中立値がフォームに弾かれると、baseline 送信が
@@ -212,10 +215,15 @@ class XSSScanner(BaseScanner):
         # 開いた応答」から採る。フォームは pre-submit のフォームページと action 応答で
         # 構成が異なるため、中立投入の応答本文を baseline にしないと、結果ページ固有の
         # onclick="alert(1)" 等を新規注入と誤認してリフレクション・発火の双方で誤検知する。
-        baseline_handlers, baseline_path, baseline_submit_source = await self._baseline_handlers(
-            ip,
-            neutral_value=_neutral_baseline_value(field.get("type", "text")),
-        )
+        token = _XSS_BASELINE.set((self, ""))
+        try:
+            baseline_handlers, baseline_path, baseline_submit_source = await self._baseline_handlers(
+                ip,
+                neutral_value=_neutral_baseline_value(field.get("type", "text")),
+            )
+            baseline_ids = (_XSS_BASELINE.get()[1],)
+        finally:
+            _XSS_BASELINE.reset(token)
         if baseline_submit_source:
             baseline_source = baseline_submit_source
 
@@ -231,7 +239,9 @@ class XSSScanner(BaseScanner):
             self.browser.reset_dialog()
 
             # Apply payload
-            source, pair = await self._apply_ip(ip, payload)
+            source, pair = await self._apply_ip(
+                ip, payload, baseline_attempt_ids=baseline_ids,
+                probe_wave={"xss": "standard", "xss_evolved": "evolution"}.get(check_label, "auxiliary"))
 
             await asyncio.sleep(0.5 * self.sleep_factor)  # Wait for any JS execution
 
@@ -259,6 +269,8 @@ class XSSScanner(BaseScanner):
             if self.browser.dialog_fired and (
                 not expect_token or expect_token in (self.browser.dialog_message or "")
             ):
+                self._probe_decision(pair, True, "xss_payload_oracle", baseline_attempt_ids=baseline_ids,
+                                     rationale="existing browser dialog attribution oracle matched")
                 finding = await self.record_finding(
                     url=ip.url,
                     field_name=field_name,
@@ -308,6 +320,8 @@ class XSSScanner(BaseScanner):
                     context = reflection.get("context", "unknown")
                     confidence = reflection.get("confidence", "tentative")
                     severity = "high" if confidence == "likely" else "medium"
+                    self._probe_decision(pair, True, "xss_payload_oracle", baseline_attempt_ids=baseline_ids,
+                                         rationale="unencoded reflection compared with neutral baseline")
                     finding = await self.record_finding(
                         url=ip.url,
                         field_name=field_name,
@@ -333,6 +347,8 @@ class XSSScanner(BaseScanner):
                         findings.append(finding)
                     return True
 
+            self._probe_decision(pair, False, "xss_payload_oracle", baseline_attempt_ids=baseline_ids,
+                                 rationale="no attributed dialog or unencoded reflection signal")
             await asyncio.sleep(0.2 * self.sleep_factor)
             return False
 
@@ -438,7 +454,7 @@ class XSSScanner(BaseScanner):
         field_name = field.get("name") or ip.display_name or ip.parameter_id
         await self.log_payload_test(field_name, "baseline_value_wscan", "xss_baseline", ip.url)
         try:
-            baseline_source, baseline_pair = await self._apply_ip(ip, "baseline_value_wscan")
+            baseline_source, baseline_pair = await self._apply_ip(ip, "baseline_value_wscan", probe_role="baseline")
         except Exception as exc:
             self._record_scan_note(f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}")
             return []
@@ -446,10 +462,11 @@ class XSSScanner(BaseScanner):
             return []  # 送信不能（flag は transport 側が立てる）。比較対象が無いので陰性。
         baseline_body = (baseline_pair.get("response") or {}).get("body") or baseline_source or ""
 
+        baseline_ids = (self._probe_id(baseline_pair),)
         for payload in await self.get_payloads(field_name, ip.url, ip=ip):
             await self.log_payload_test(field_name, payload, "xss", ip.url)
             try:
-                _source, pair = await self._apply_ip(ip, payload)
+                _source, pair = await self._apply_ip(ip, payload, baseline_attempt_ids=baseline_ids)
             except Exception as exc:
                 self._record_scan_note(
                     f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
@@ -457,6 +474,8 @@ class XSSScanner(BaseScanner):
                 continue
             body = renderable_html_body(pair)
             reflection = self._analyze_reflection(body, payload, baseline_body) if body else {}
+            self._probe_decision(pair, bool(reflection), "xss_payload_oracle", baseline_attempt_ids=baseline_ids,
+                                 rationale="HTML-renderable JSON response reflection comparison")
             if reflection:
                 context = reflection.get("context", "unknown")
                 confidence = reflection.get("confidence", "tentative")
@@ -514,22 +533,38 @@ class XSSScanner(BaseScanner):
         probe_set = builder()
         responses: dict[str, str] = {}
         pairs: dict[str, dict] = {}
+        baseline_ids = ()
         for probe in probe_set.probes:
             await self.log_payload_test(
                 field_name, probe.value, f"{self.CHECK_TYPE}_equiv", url
             )
             try:
-                source, pair = await self._apply_ip(ip, probe.value)
+                source, pair = await self._apply_ip(
+                    ip, probe.value, probe_role={"baseline": "baseline", "broken": "control", "equivalent": "attack"}[probe.role],
+                    probe_wave=f"equivalence:{context}", baseline_attempt_ids=baseline_ids,
+                    parent_attempt_id=baseline_ids[0] if baseline_ids else "")
             except Exception as exc:
                 self._record_scan_note(
                     f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
                 )
                 continue
             pairs[probe.name] = pair or {}
+            if probe.role == "baseline":
+                baseline_ids = (self._probe_id(pair),)
             body = (pair.get("response", {}) or {}).get("body") or source or ""
             responses[probe.name] = body
 
         verdict = eqp.evaluate(probe_set, responses)
+        control_ids = tuple(self._probe_id(pairs.get(p.name)) for p in probe_set.by_role("broken"))
+        applicable = bool(probe_set.baseline and probe_set.marker in responses.get(probe_set.baseline.name, ""))
+        for probe in probe_set.by_role("equivalent"):
+            comparison = {p.name: responses[p.name] for p in probe_set.probes
+                          if p.name in responses and (p.role in {"baseline", "broken"} or p is probe)}
+            result = eqp.evaluate(probe_set, comparison)
+            self._probe_decision(pairs.get(probe.name), result.injectable, "xss_payload_oracle",
+                                 baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
+                                 outcome=None if applicable else "skipped",
+                                 rationale=f"equivalence:{context}; {result.rationale}")
         if verdict.injectable:
             return verdict, pairs.get(verdict.matched_probe, {})
         return None
@@ -647,7 +682,10 @@ class XSSScanner(BaseScanner):
                 ip.parameter_id, neutral_value, "xss_handler_baseline", ip.url
             )
             self.browser.reset_dialog()
-            src, pair = await self._apply_ip(ip, neutral_value)
+            src, pair = await self._apply_ip(ip, neutral_value, probe_role="baseline")
+            context = _XSS_BASELINE.get()
+            if context is not None and context[0] is self:
+                _XSS_BASELINE.set((self, self._probe_id(pair)))
             await asyncio.sleep(0.2 * self.sleep_factor)
             handlers = await self.browser.snapshot_dialog_handlers()
             landing_path = urlparse(self.browser.page.url).path
@@ -801,6 +839,7 @@ class XSSScanner(BaseScanner):
                     form_index, field_name, payload
                 )
         except Exception as exc:
+            self._probe_failure(self._probe_exception_outcome(exc))
             self._record_scan_note(
                 f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
             )

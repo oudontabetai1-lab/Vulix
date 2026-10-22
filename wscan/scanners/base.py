@@ -878,6 +878,88 @@ class BaseScanner(ABC):
             return base
 
     async def _apply_ip(
+        self, ip: InjectionPoint, payload, *, probe_role="attack", probe_wave="standard",
+        baseline_attempt_ids=(), control_attempt_ids=(), parent_attempt_id="",
+    ) -> tuple[str, dict]:
+        return await self._send_probe(
+            ip, lambda: self._apply_ip_unrecorded(ip, payload), role=probe_role, wave=probe_wave,
+            baseline_attempt_ids=baseline_attempt_ids, control_attempt_ids=control_attempt_ids,
+            parent_id=parent_attempt_id)
+
+    async def _send_probe(self, ip, send, *, role="attack", wave="standard",
+                          baseline_attempt_ids=(), control_attempt_ids=(), parent_id=""):
+        from wscan.probe_ledger import Transport
+        logger = getattr(getattr(self, "engine", None), "request_logger", None)
+        if logger is None or not callable(getattr(logger, "probe_scope", None)):
+            return await send()
+        with logger.probe_scope(ip, self.CHECK_TYPE, role=role, wave=wave,
+                                baseline_attempt_ids=baseline_attempt_ids,
+                                control_attempt_ids=control_attempt_ids, parent_id=parent_id) as context:
+            try:
+                source, pair = await send()
+            except BaseException as exc:
+                outcome = self._probe_exception_outcome(exc)
+                logger.scoped_probe(context, record_kind="decision", outcome=outcome,
+                                    request_attempt_id=context["requests"][-1] if context["requests"] else "",
+                                    rationale="request did not finish", decision_version="1")
+                raise
+            req = (pair or {}).get("request") or {}
+            attempt = req.get("_probe_attempt_id")
+            if (attempt in context["requests"] and req.get("_probe_context") is context
+                    and (pair.get("response") or {}).get("status") is not None):
+                evidence_pair = {"request": req.get("_probe_request", req), "response": pair["response"]}
+                observed = logger.observe_request(context, attempt, evidence_pair,
+                    Transport.HTTPX if ip.location == "json_body" else Transport.PLAYWRIGHT)
+                pair["_probe_evidence"] = (context, attempt, observed)
+            else:
+                logger.scoped_probe(context, record_kind="decision",
+                                    outcome=context.get("failure", "verification_error" if context["requests"] else "unexecutable"),
+                                    request_attempt_id=context["requests"][-1] if context["requests"] else "",
+                                    rationale="no correlated outgoing response", decision_version="1")
+            return source, pair
+
+    def _probe_failure(self, outcome):
+        from wscan.request_logger import current_probe
+        context = current_probe(getattr(getattr(self, "engine", None), "request_logger", None))
+        if context is not None:
+            context["failure"] = outcome
+
+    def _unexecuted_probe(self, ip, outcome):
+        logger = getattr(getattr(self, "engine", None), "request_logger", None)
+        if logger is not None and callable(getattr(logger, "probe_scope", None)):
+            with logger.probe_scope(ip, self.CHECK_TYPE) as context:
+                logger.scoped_probe(context, record_kind="decision", outcome=outcome,
+                                    rationale="dispatcher did not send this carrier")
+
+    @staticmethod
+    def _probe_exception_outcome(exc):
+        if isinstance(exc, (TimeoutError, httpx.TimeoutException)) or type(exc).__name__ == "TimeoutError":
+            return "timeout"
+        if isinstance(exc, (httpx.TransportError, OSError)):
+            return "transport_error"
+        return "verification_error"
+
+    def _probe_decision(self, pair, matched, rule, *, baseline_attempt_ids=(), control_attempt_ids=(),
+                        outcome=None, rationale="deterministic scanner oracle"):
+        logger = getattr(getattr(self, "engine", None), "request_logger", None)
+        bound = (pair or {}).get("_probe_evidence")
+        if logger is None or bound is None:
+            return None
+        context, attempt, observed = bound
+        if context["logger"] is not logger or not observed:
+            return None
+        context = dict(context, baseline_attempt_ids=tuple(baseline_attempt_ids),
+                       control_attempt_ids=tuple(control_attempt_ids))
+        return logger.scoped_probe(context, record_kind="decision", parent_id=observed,
+                                   request_attempt_id=attempt, outcome=outcome or ("matched" if matched else "no_match"),
+                                   decision_rule=rule, decision_version="1",
+                                   rationale=rationale)
+
+    @staticmethod
+    def _probe_id(pair):
+        return ((pair or {}).get("request") or {}).get("_probe_attempt_id", "")
+
+    async def _apply_ip_unrecorded(
         self,
         ip: InjectionPoint,
         payload,
@@ -895,10 +977,12 @@ class BaseScanner(ABC):
         # 脱落記録は `_apply_json_payload` の**既存**の swallow 点（transport_error/unexecutable_template）
         # に限る。form/url の例外は従来どおりスキャナ側（baseline_unavailable 等）へ伝播させる。
         if not self.may_scan_injection_point(ip):
+            self._probe_failure("skipped")
             return "", {}
         # フィールド単位 attack 時間ボックス。超過後は追加注入を止める（SQLi baseline の
         # 独自 browser 送信分岐も同じ gate を通すため共通ヘルパに切り出し）。
         if self._field_budget_gate():
+            self._probe_failure("skipped")
             return "", {}
         if ip.location == "json_body":
             if not self.SUPPORTS_JSON_BODY:
@@ -948,6 +1032,7 @@ class BaseScanner(ABC):
         # いた旧版は query/form で _apply_ip→AttributeError になった。capability を正本に判定する。
         cap = self.CONTRACT.capability(carrier)
         if cap is None or cap.state != CapabilityState.SUPPORTED:
+            self._unexecuted_probe(ip, "unexecutable")
             reason = (cap.reason if cap and cap.reason else "carrier capability not supported")
             param = getattr(ip, "parameter_id", "") or "(none)"
             self._record_scan_note(f"carrier_unsupported:{self.CHECK_TYPE}:{carrier.value}:{param}:{reason}")
@@ -970,6 +1055,7 @@ class BaseScanner(ABC):
         # （record_skip 既定=True）。pass 時は may_scan が True を返し記録しないので、後続
         # _apply_ip の再評価と合わせても二重記録は起きない。
         if not self.may_scan_injection_point(ip):
+            self._unexecuted_probe(ip, "blocked")
             return DispatchResult(state=DispatchState.BLOCKED, carrier=carrier)
         # capability は supported でも、facade がこの scanner でこの carrier を送信できる
         # driver を持つとは限らない（例: race_condition/stored_xss は FORM supported だが
@@ -977,6 +1063,7 @@ class BaseScanner(ABC):
         # SUPPORTS_JSON_BODY=False で base json 経路が無い）。crash させず UNEXECUTABLE で
         # 明示する（各 scanner の _dispatch_send adapter 追加＝driver 化は）。
         if not self._dispatch_driver_available(ip):
+            self._unexecuted_probe(ip, "unexecutable")
             return DispatchResult(
                 state=DispatchState.UNEXECUTABLE,
                 carrier=carrier,
@@ -1399,6 +1486,7 @@ class BaseScanner(ABC):
             elif getattr(self.engine, "proxy", ""):
                 kwargs["proxy"] = self.engine.proxy
         except Exception as exc:
+            self._probe_failure(self._probe_exception_outcome(exc))
             self._record_scan_note(
                 f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
             )
@@ -1441,6 +1529,11 @@ class BaseScanner(ABC):
                     "timestamp": response_timestamp,
                 },
             }
+            owner, attempt = response.request.extensions.get("vulix_probe_submission", (None, None))
+            bound = response.request.extensions.get("vulix_probe_context")
+            if owner is getattr(self.engine, "request_logger", None) and bound is not None:
+                pair["request"].update(_probe_attempt_id=attempt, _probe_context=bound[0],
+                                       _probe_request=bound[1])
             # follow_redirects=True の最終 status は redirect 先のもの。boolean-blind 判定が
             # 「redirect 経由の応答」を 2xx と誤認しないよう、最初の hop の status を残す。
             if response.history:
@@ -1463,6 +1556,7 @@ class BaseScanner(ABC):
                 pass
             return response.text, pair
         except Exception as exc:
+            self._probe_failure(self._probe_exception_outcome(exc))
             # 通信失敗（timeout/TLS/DNS/proxy 等）。baseline が通った後に個々の攻撃
             # payload が落ちたケースでも、呼び出し側が「済み」記録して attack 未実行の
             # 点を resume 恒久スキップしないよう、失敗を engine に記録する。
@@ -2426,7 +2520,7 @@ class BaseScanner(ABC):
             field_name=field_name,
             payload=payload,
             evidence=evidence,
-            request=pair.get("request", {}),
+            request={k: v for k, v in pair.get("request", {}).items() if not k.startswith("_")},
             response=pair.get("response", {}),
             screenshot_b64=screenshot_b64,
             dialog_confirmed=dialog_confirmed,

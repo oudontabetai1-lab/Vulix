@@ -43,6 +43,7 @@ stdlib_imports:
 - email
 - enum
 - fnmatch
+- functools
 - gzip
 - hashlib
 - hmac
@@ -245,6 +246,7 @@ import_sources:
   - wscan/notification.py
   - wscan/payload_gen.py
   - wscan/payload_importer.py
+  - wscan/request_logger.py
   - wscan/scanners/base.py
   - wscan/scanners/cache_poisoning.py
   - wscan/scanners/cms.py
