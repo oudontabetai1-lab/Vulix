@@ -182,7 +182,7 @@ class RequestLogger:
                   payload=None, url="", sent=False, actor="", rationale="",
                   parent_id="", outcome=None, decision_rule="", decision_version="",
                   record_kind="legacy", request_attempt_id="", completion_unit=None,
-                  wave="", baseline_attempt_ids=(), control_attempt_ids=()) -> Optional[str]:
+                  wave="", baseline_attempt_ids=(), control_attempt_ids=(), browser=None) -> Optional[str]:
         """Append observation only; return its ID only after a successful write."""
         if not self.enabled:
             return
@@ -228,12 +228,23 @@ class RequestLogger:
                 completion_unit=self.probe_ledger.current_unit() if completion_unit is None else completion_unit,
                 record_kind=record_kind, request_attempt_id=request_attempt_id, wave=wave,
                 baseline_attempt_ids=tuple(baseline_attempt_ids), control_attempt_ids=tuple(control_attempt_ids),
-                rationale=redact_excerpt(rationale),
+                rationale=redact_excerpt(rationale), browser=browser,
             )
             if self.probe_ledger.append(record):
                 return record.attempt_id
         except Exception as exc:
             self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
+
+    def browser_event(self, kind, *, parent_id="", check="", role="discover",
+                      outcome=None, rule="", context=None, request_attempt_id="", **data):
+        from .probe_ledger import BrowserEvidence
+        identity = {k: v for k, v in (context or {}).items() if k in
+                    {"page_id", "frame_id", "generation", "operation_id", "snapshot_id"}}
+        identity.update(data)
+        return self.log_probe(role=role, check=check, parent_id=parent_id or "",
+                              outcome=outcome, decision_rule=rule, decision_version="1",
+                              record_kind="browser", request_attempt_id=request_attempt_id,
+                              browser=BrowserEvidence(kind, **identity))
 
     @contextmanager
     def probe_scope(self, ip, check, *, role="attack", wave="standard",
@@ -241,7 +252,7 @@ class RequestLogger:
         from wscan.probe_ledger import sha256_hex
         context = dict(logger=self, requests=[], role=role, check=check, wave=wave, parent_id=parent_id,
                        field=sha256_hex(json.dumps([ip.stable_key_parts(), ip.parameter_id,
-                                                   ip.operation_id, ip.template_digest])),
+                                                   ip.operation_id, ip.template_digest])) if ip is not None else "",
                        completion_unit=self.probe_ledger.current_unit(),
                        baseline_attempt_ids=tuple(baseline_attempt_ids),
                        control_attempt_ids=tuple(control_attempt_ids))

@@ -111,3 +111,49 @@ These exercise the production callers with vulnerable/safe twins, explicit compa
 controls, failures, duplicate hooks, concurrent equal names, missing/wrong/late evidence,
 and separate-process restart/resume. Candidate and confirmed counts are recorded separately;
 only complete common units qualify as successful safe-negative evidence.
+
+### Browser page and flow operations
+
+The ordinary page scheduler now persists a bounded browser chain for `dom_xss`
+query/form attacks and `js_static` snapshot analysis. Typed `browser` rows share
+`probe_attempts.jsonl`, its append-only IDs, manifest and quarantine behavior.
+They contain hashed input manifests and explicit page, operation, snapshot and
+parent identities. They do not create HTTP requests or increase `logical_requests`.
+Actual prerequisite-flow and restore navigations retain separate concrete request
+rows with `discover` and `cleanup` roles.
+
+Browser completeness uses its own persisted predicate. Static analysis requires
+its HTML snapshot and every referenced external script body: no referenced scripts
+is a known empty input set, whereas a missing body is incomplete. Existing network
+fallbacks still serve detection, but cannot establish snapshot completeness.
+Duplicate analysis and skipped flow actions likewise cannot establish a negative.
+DOM decisions require a captured operation, a complete parent snapshot, a concrete
+request/response, the installed sink hook, and the scanner's existing marker oracle.
+Verification additionally refers to the matched attack decision. `None`, exceptions,
+missing bodies/parents, scope refusal and recorder errors cannot become complete
+negative decisions. Candidate and confirmed Finding policy is unchanged.
+
+Dialog callbacks capture their originating page and operation before awaiting;
+replayed callback objects do not add another dialog event. Recovery records link
+the triggering dialog, page replacement and actual restore navigation. A replacement
+page cannot borrow an old page's snapshot to complete verification. Completed
+checkpoint markers alone remain insufficient evidence, and missing historical proof
+does not trigger a replay of an otherwise fully checkpointed state-changing flow.
+
+This covers the first ordinary page/flow slice. API-template and TLS-seed calls,
+other page scanners, auxiliary/adaptive/context probes, protocol internals and
+artifact/LLM grounding retain explicit incomplete contracts. It does not establish
+whole-check, whole-browser or all-transport completion.
+
+Run the focused persisted-causality tests and opt-in production Chromium acceptance:
+
+```sh
+python -m pytest -q tests/test_browser_operation_evidence.py
+WSCAN_E2E=1 WSCAN_BROWSER_ACCEPTANCE_DIR=/path/to/new-empty-directory \
+  python -m pytest -q tests/test_browser_operation_evidence_e2e.py
+```
+
+The Chromium fixture exercises vulnerable/safe query and form twins, successful and
+intermediate-failure prerequisites, actual dialog-flood recovery, and separate-process
+checkpoint resume with and without retained evidence. Every rerun needs a fresh
+acceptance directory; previous failed artifacts remain separate.
