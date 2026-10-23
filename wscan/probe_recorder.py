@@ -256,6 +256,9 @@ class ProbeLedger:
                              for r in requests):
                 accepted = [r for r in accepted if r.get("record_kind", "legacy") == "legacy"]
             result[unit] = accepted
+        from .browser_evidence import accepted_decisions
+        for unit, decisions in accepted_decisions(self.events).items():
+            result[unit] = decisions
         return result
 
     def reconcile_persisted(self) -> None:
@@ -336,8 +339,27 @@ class ProbeLedger:
         outcome = rec.get("outcome")
         if outcome is not None and outcome not in _VALID_OUTCOMES:
             return False  # 語彙外の outcome（null は未記録として許容）
-        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision"}:
+        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision", "browser"}:
             return False
+        if rec.get("record_kind") == "browser":
+            from .probe_ledger import BrowserEvidence
+            import dataclasses
+            b = rec.get("browser")
+            fields = {f.name for f in dataclasses.fields(BrowserEvidence)}
+            if not isinstance(b, dict) or set(b) != fields:
+                return False
+            if (any(not isinstance(v, str) for k, v in b.items()
+                    if k not in {"index", "total", "input_length", "complete", "inputs", "required_inputs"})
+                    or any(type(b[k]) is not int or b[k] < 0 for k in ("index", "total", "input_length", "required_inputs"))
+                    or type(b["complete"]) is not bool
+                    or not isinstance(b["inputs"], list)
+                    or any(not isinstance(i, dict) or set(i) != {"source_id", "body_hash", "body_length", "captured"}
+                           or not isinstance(i["source_id"], str) or not isinstance(i["body_hash"], str)
+                           or type(i["body_length"]) is not int or i["body_length"] < 0
+                           or type(i["captured"]) is not bool for i in b["inputs"])
+                    or rec.get("request") is not None
+                    or rec.get("response") is not None):
+                return False
         if rec.get("record_kind", "legacy") != "legacy":
             if any(not isinstance(rec.get(k, ""), str) for k in
                    ("parent_id", "request_attempt_id", "check", "wave", "injection_key")):

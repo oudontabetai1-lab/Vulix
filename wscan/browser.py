@@ -333,9 +333,12 @@ class NetworkCapture:
         # log is the only place a complete request history survives.
         self.logger = logger
         self.authentication_active = False
+        self._probe_pending = {}
 
     def on_request(self, request: Request):
         key = (request.url, id(request))
+        if getattr(request, "_vulix_probe_capture", None) is self:
+            return
         if key in self._pending:
             return
         self._pending[key] = {
@@ -362,6 +365,10 @@ class NetworkCapture:
               and getattr(request, "frame", None) is getattr(self, "probe_frame", None)):
             # Only navigation requests have an authoritative common browser send boundary.
             self._pending[key]["_probe_context"] = self.probe_context
+        if "_probe_context" in self._pending[key]:
+            self._pending[key]["_probe_request_object"] = request
+            self._probe_pending[key] = self._pending[key]
+            request._vulix_probe_capture = self
         self._requests_since_clear += 1
         record = getattr(self.logger, "log_browser_submission", None)
         if callable(record):
@@ -374,12 +381,17 @@ class NetworkCapture:
         # Match by (url, id(response.request)) so concurrent requests to the same URL
         # are kept separate and don't overwrite each other.
         req_id = id(response.request) if response.request else None
+        if getattr(response.request, "_vulix_probe_response_capture", None) is self:
+            return
         key = (response.url, req_id)
-        req = self._pending.pop(key, None)
+        bound = self._probe_pending.pop(key, None)
+        req = self._pending.pop(key, None) or bound
+        if bound is not None and bound.get("_probe_request_object") is response.request:
+            response.request._vulix_probe_response_capture = self
         if req is None:
             # Fallback: try matching by URL alone (older Playwright versions)
             for k in list(self._pending):
-                if k[0] == response.url:
+                if k[0] == response.url and "_probe_context" not in self._pending[k]:
                     req = self._pending.pop(k)
                     break
         if req is None:
@@ -443,6 +455,10 @@ class NetworkCapture:
                         and pair["response"].get("_req_id") == id(response.request)
                         and pair["response"]["url"] == response.url):
                     pair["response"]["body"] = body[:50000]  # cap at 50KB
+                    context = pair["request"].get("_probe_context")
+                    if context and context.get("check") in {"browser_flow", "browser_recovery"} and self.logger:
+                        from .probe_ledger import Transport
+                        self.logger.observe_request(context, pair["request"].get("_probe_attempt_id"), pair, Transport.PLAYWRIGHT)
                     break
         except Exception:
             pass
@@ -841,7 +857,7 @@ class BrowserManager:
         self.page.on("response", self._on_response)
 
         # Set up dialog handler (for XSS detection)
-        self.page.on("dialog", self._on_dialog)
+        self.page.on("dialog", lambda dialog, page=self.page: self._capture_dialog(dialog, page))
 
     async def _on_response(self, response: Response):
         self.network.on_response(response)
@@ -1367,8 +1383,29 @@ class BrowserManager:
                 # still must not propagate an exception into Playwright.
                 pass
 
-    async def _on_dialog(self, dialog):
+    def _capture_dialog(self, dialog, page):
+        # Capture synchronously at emission, before Playwright schedules the coroutine.
+        context = getattr(self, "_evidence_operation", None)
+        if context is not None and (context["page"] is not page or self.page is not page
+                                    or getattr(dialog, "page", None) is not page):
+            context = None
+        return self._on_dialog(dialog, context)
+
+    async def _on_dialog(self, dialog, evidence_context=None):
         """Capture alert dialogs (XSS indicator)."""
+        if evidence_context is not None:
+            from .browser_evidence import emit
+            dialogs = evidence_context["dialogs"]
+            if dialog not in dialogs:
+                dialogs[dialog] = dialog.message
+                eid = emit(self, "dialog", context=evidence_context,
+                           parent_id=evidence_context["operation_id"],
+                           check=evidence_context["check"], role=evidence_context["role"],
+                           input_hash=__import__("hashlib").sha256(dialog.message.encode()).hexdigest(),
+                           input_length=len(dialog.message.encode()), complete=True)
+                # Recovery uses the originating event, even after the operation scope closes.
+                if evidence_context["page"] is self.page:
+                    self._evidence_dialog_trigger = eid or ""
         # A queued callback may belong to a page replaced before it starts.
         # Legacy dialog doubles without a page attribute use the current page.
         page = getattr(dialog, "page", self.page)
@@ -1511,6 +1548,20 @@ class BrowserManager:
             pass
 
     async def recreate_page(self) -> bool:
+        from .browser_evidence import emit
+        parent = getattr(self, "_evidence_dialog_trigger", "")
+        begin = emit(self, "recovery", parent_id=parent, role="cleanup")
+        try:
+            result = await self._recreate_page()
+        except BaseException:
+            emit(self, "lifecycle", parent_id=begin, role="cleanup", outcome="verification_error")
+            raise
+        self._evidence_recovery_parent = emit(self, "lifecycle", parent_id=begin, role="cleanup",
+                                              outcome="no_match" if result else "unexecutable",
+                                              complete=bool(result)) or ""
+        return result
+
+    async def _recreate_page(self) -> bool:
         """現在の page を捨てて context から新しい page を張り直す。
 
         stored-XSS の alert flood は未解消ダイアログで page を wedge させ、以降の
@@ -2997,7 +3048,7 @@ class BrowserManager:
         page.set_default_timeout(self.timeout)
         page.on("request", worker.network.on_request)
         page.on("response", worker._on_response)
-        page.on("dialog", worker._on_dialog)
+        page.on("dialog", lambda dialog, page=page: worker._capture_dialog(dialog, page))
         self._register_worker(worker)
         return worker
 
@@ -3389,6 +3440,8 @@ class BrowserManager:
 
     async def close(self):
         """Close browser and playwright."""
+        from .browser_evidence import emit
+        emit(self, "lifecycle", role="cleanup", outcome="skipped")
         try:
             await self._deactivate_header_target_auto_attach()
             self._header_interception_closing = True

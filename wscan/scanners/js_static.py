@@ -126,11 +126,28 @@ class JsStaticScanner(BaseScanner):
         ``page.external_scripts``（{絶対URL: body}）を優先して使う（navigate で
         network 捕捉が消えても外部 JS を解析できる）。
         """
-        return await self._scan(
-            getattr(page, "url", "") or "",
-            getattr(page, "html", "") or "",
-            getattr(page, "external_scripts", None) or {},
-        )
+        from wscan.browser_evidence import operation, decision
+        from urllib.parse import urljoin
+        import json
+        from wscan.probe_ledger import BrowserInput, sha256_hex, body_length
+        url = getattr(page, "url", "") or ""
+        html = getattr(page, "html", "") or ""
+        scripts = getattr(page, "external_scripts", None) or {}
+        duplicate = (url, _fingerprint(html)) in self._checked_pages
+        with operation(self.browser, "js_static") as context:
+            findings = await self._scan(url, html, scripts)
+            # Only exact snapshot bodies establish completeness; fallback caches still serve detection.
+            bodies = [scripts.get(urljoin(url, src)) for src in js_analysis.extract_external_script_srcs(html)]
+            complete = bool(html) and not duplicate and all(isinstance(b, str) and bool(b.strip()) for b in bodies)
+            inputs = [BrowserInput(sha256_hex(url), sha256_hex(html), body_length(html), bool(html))]
+            inputs += [BrowserInput(sha256_hex(urljoin(url, src)), sha256_hex(body), body_length(body),
+                                    isinstance(body, str) and bool(body.strip()))
+                       for src, body in zip(js_analysis.extract_external_script_srcs(html), bodies)]
+            decision(self.browser, context, matched=bool(findings), complete=complete,
+                     outcome="skipped" if duplicate else None, rule="js_static_snapshot",
+                     material=json.dumps([_fingerprint(html), *[_fingerprint(b) for b in bodies]]),
+                     inputs=tuple(inputs), required_inputs=1 + len(bodies))
+            return findings
 
     async def scan_page(self, url: str) -> list[Finding]:
         # scan_page_context が使えない経路向けのフォールバック（現在タブの DOM）。

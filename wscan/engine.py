@@ -1760,7 +1760,8 @@ class ScanEngine:
             page_excluded = bool(getattr(self, "exclude_urls", []) and self._is_url_excluded(page.url))
             for check, scanner in self.scanners.items():
                 if getattr(scanner, "HAS_PAGE_LEVEL", False) or hasattr(scanner, "scan_page_context"):
-                    rules = ("cors_wildcard_credentials", "cors_origin_reflection") if check == "cors" else ()
+                    rules = (("cors_wildcard_credentials", "cors_origin_reflection") if check == "cors"
+                             else ("js_static_snapshot",) if check == "js_static" else ())
                     ledger.expect(unit_key(_page_check_cp_url(check, page.url), "(page)", 0, check),
                                   check, rules=rules,
                                   reason="excluded_by_configuration" if page_excluded
@@ -1771,10 +1772,10 @@ class ScanEngine:
                 fields += [(0, name, True) for name in page.url_params]
                 for fi, name, is_url in fields:
                     ledger.expect(unit_key(page.url, name, fi, check, is_url), check,
-                                  rules=(f"{check}_payload_oracle",) if check in {"sqli", "xss"} else (),
+                                  rules=(f"{check}_payload_oracle",) if check in {"sqli", "xss", "dom_xss"} else (),
                                   reason="excluded_by_configuration"
                                   if page_excluded or name.lower() in getattr(self, "exclude_fields", set())
-                                  else "" if check in {"sqli", "xss"} else "uninstrumented_detector_contract")
+                                  else "" if check in {"sqli", "xss", "dom_xss"} else "uninstrumented_detector_contract")
         ledger.write_manifest()
 
     def _scan_matrix_for_display(self) -> list[dict]:
@@ -2334,7 +2335,8 @@ class ScanEngine:
             except (SkipField, SkipPage):
                 continue
             try:
-                findings = await scanner.scan_page(origin)
+                with ScanEngine._evidence_scope(self, f"tls_seed:{origin}", "tls_scan"):
+                    findings = await scanner.scan_page(origin)
             except Exception as exc:
                 self.wave_errors.append(f"tls_seed_scan: {type(exc).__name__}: {exc}")
                 continue
@@ -2441,7 +2443,9 @@ class ScanEngine:
                 try:
                     self._api_auth_failed = url_auth_failed
                     before_count = len(self.all_findings)
-                    findings = await scanner.scan_page(url)
+                    from .checkpoint import unit_key
+                    with ScanEngine._evidence_scope(self, unit_key(url, "(api)", 0, check_name), check_name):
+                        findings = await scanner.scan_page(url)
                     # 実テンプレ要求で認証失効を観測したら、再ログイン+1回だけ再試行。
                     # GET プレフライトでは検知できないメソッド限定保護(POST=401)を救済。
                     # 失効は既知なので _force_relogin（検知を介さず直接 auto_login）を使う。
@@ -2453,7 +2457,8 @@ class ScanEngine:
                             # 登録済みのことがあり、そのまま再実行すると [] を返す。
                             # 再試行が実際に走るようガードからこの url を外す。
                             _reset_scanner_url_guard(scanner, url)
-                            findings = await scanner.scan_page(url)
+                            with ScanEngine._evidence_scope(self, unit_key(url, "(api)", 0, check_name), check_name):
+                                findings = await scanner.scan_page(url)
                     for f in (findings or []):
                         self._record_finding(f, source="api-spec")
                 except AbortScan:
@@ -2552,7 +2557,7 @@ class ScanEngine:
                 try:
                     from .checkpoint import CheckpointState
                     with ScanEngine._evidence_scope(self, CheckpointState._candidate_unit_key(ip, check_name), check_name,
-                                              rules=(f"{check_name}_payload_oracle",) if check_name in {"sqli", "xss"} else ()):
+                                              rules=(f"{check_name}_payload_oracle",) if check_name in {"sqli", "xss", "dom_xss"} else ()):
                         findings = await scanner.scan_injection_point(ip, field)
                     for finding in findings or []:
                         self._record_finding(finding, source="json-body")
@@ -5710,6 +5715,7 @@ class ScanEngine:
         # 相対 script の解決基点は **ブラウザの実 URL**（page.url は crawl 時の値で、末尾
         # スラッシュ等価な遷移先だと `/app` vs `/app/` がずれ `src="bundle.js"` を `/bundle.js`
         # と誤解決して external_scripts を空にする）。現在 URL が取れなければ page.url へ退避。
+        self.browser._evidence_refresh_ok = False
         try:
             fresh_html = await self.browser.get_page_source()
             if fresh_html:
@@ -5717,6 +5723,7 @@ class ScanEngine:
                     base_url = self.browser.page.url or page.url
                 except Exception:
                     base_url = page.url
+                self.browser._evidence_refresh_ok = True
                 page.html = fresh_html
                 page.external_scripts = self._snapshot_external_scripts(fresh_html, base_url)
         except Exception:
@@ -5861,6 +5868,13 @@ class ScanEngine:
         # 失敗時は coverage gap を記録し、以降の全検査を skip する。
         # ただし認証前のログインフォーム検査（_scan_login_form_preauth）から呼ばれた場合は、
         # auto-login 前の pre-auth 検査を汚染しないよう flow を実行しない。
+        from .browser_evidence import emit, snapshot, network_scope
+        from .probe_ledger import sha256_hex, body_length
+        if self.browser is not None:
+            self.browser._evidence_refresh_ok = True
+        _evidence_parent = emit(self.browser, "page_source", input_hash=sha256_hex(getattr(page, "html", "")),
+                                input_length=body_length(getattr(page, "html", "")),
+                                complete=bool(getattr(page, "html", "")))
         matched_flows = self._match_pre_attack_flows(page) if run_pre_attack_flows else []
         # 再開時、フォーム/URLパラメータの無いページで page-level 単位が全て checkpoint 済みなら
         # pre-attack flow を再生しない。state 変更を伴う前提 flow（add-to-cart 等）を
@@ -5881,11 +5895,27 @@ class ScanEngine:
                 f"  [dim][Flow] Skip pre-attack flow (page fully checkpointed): "
                 f"{escape(matched_flows[0].name)} @ {escape(page.url)}[/dim]"
             )
+            # The checkpoint marker is execution history, never proof of prerequisite evidence.
+            emit(self.browser, "flow_resume", parent_id=_evidence_parent, outcome="skipped")
+            _evidence_parent = ""
             matched_flows = []
         if matched_flows:
             # 同一遷移先に一致する flow を **file 順に全て順次再生** する（1つでも失敗したら
             # そのページの検査を skip）。以前は最初の1つしか再生せず残りを黙って無視していた。
             for matched_flow in matched_flows:
+                _flow_id = emit(self.browser, "flow", parent_id=_evidence_parent,
+                                input_hash=sha256_hex(self._flow_fingerprint(matched_flow)),
+                                total=len(matched_flow.steps))
+                _flow_tail = _flow_id
+                def _record_flow_step(index, total, outcome):
+                    nonlocal _flow_tail
+                    if outcome == "started":
+                        _flow_tail = emit(self.browser, "flow_action", parent_id=_flow_tail,
+                                          flow_id=_flow_id or "", index=index, total=total)
+                        return network_scope(self.browser, _flow_tail, check="browser_flow", role="discover")
+                    _flow_tail = emit(self.browser, "flow_step", parent_id=_flow_tail,
+                                      flow_id=_flow_id or "", index=index, total=total,
+                                      outcome=outcome, complete=outcome in {"matched", "no_match"})
                 # scope 外/除外 URL への navigate を含む flow は実行しない。最終遷移が target へ
                 # 戻っても、記録された flow が中間 navigate で scope 設定を迂回して未認可の外部/
                 # 除外アプリを訪問・操作しうる。access_urls（login 等の訪問許可）は
@@ -5902,6 +5932,7 @@ class ScanEngine:
                     None,
                 )
                 if _bad_nav:
+                    emit(self.browser, "flow_end", parent_id=_flow_id, flow_id=_flow_id or "", outcome="blocked")
                     console.print(
                         f"  [yellow][Flow] Skip '{escape(matched_flow.name)}': "
                         f"navigate to out-of-scope/excluded URL {_bad_nav} — "
@@ -5922,7 +5953,8 @@ class ScanEngine:
                 _flow_scope_ok = lambda u: (
                     self._is_access_allowed_url(u) and not self._is_url_excluded(u)
                 )
-                if not await FlowRunner(self.browser, scope_check=_flow_scope_ok).run(matched_flow):
+                if not await FlowRunner(self.browser, scope_check=_flow_scope_ok, recorder=_record_flow_step).run(matched_flow):
+                    emit(self.browser, "flow_end", parent_id=_flow_tail, flow_id=_flow_id or "", outcome="unexecutable")
                     console.print(
                         f"  [yellow][Flow] Pre-attack flow failed: {escape(matched_flow.name)} — "
                         f"skipping all checks on {page.url}[/yellow]"
@@ -5935,6 +5967,8 @@ class ScanEngine:
                         ),
                     )
                     return
+                _evidence_parent = emit(self.browser, "flow_end", parent_id=_flow_tail,
+                                        flow_id=_flow_id or "", outcome="no_match", complete=True)
             # flow の最終遷移が login/error ページへ redirect（200）されると navigate は True でも
             # target に居ない。page-level 検査の前に着地先 URL を検証し、復帰できなければ未認証/
             # 誤ページを "tested" と誤記録しないよう記録して skip する。
@@ -5994,6 +6028,8 @@ class ScanEngine:
             self._save_checkpoint()
             return
 
+        snapshot(self.browser, page, _evidence_parent)
+
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         # 入力の無い stored-XSS 観測ページは scan_page 中に alert flood/wedge しうる。
         # ここで dialog_total を控え、page-level 区間末で回復して field 攻撃へ劣化を持ち越さない。
@@ -6040,7 +6076,8 @@ class ScanEngine:
             try:
                 if hasattr(scanner, "scan_page_context"):
                     from .checkpoint import unit_key
-                    with ScanEngine._evidence_scope(self, unit_key(cp_url, "(page)", 0, check_name), check_name):
+                    with ScanEngine._evidence_scope(self, unit_key(cp_url, "(page)", 0, check_name), check_name,
+                                                    rules=("js_static_snapshot",) if check_name == "js_static" else ()):
                         page_findings = await scanner.scan_page_context(page)
                 else:
                     _page_gate = getattr(scanner, "may_run_page_scanner", None)
@@ -6337,7 +6374,7 @@ class ScanEngine:
                 # restore の直前で baseline を取り直し、restore 後にも回復して次 field を健全 page で走らせる。
                 _was_recreated = getattr(self.browser, "_page_recreated", False)
                 _dlg_restore = getattr(self.browser, "dialog_total", 0)
-                _restored = await self.browser.navigate(page.url, retries=self.navigation_retries)
+                _restored = await ScanEngine._restore_page_evidence(self, page)
                 if not _restored:
                     self._record_unscannable_url(
                         page.url,
@@ -6389,6 +6426,23 @@ class ScanEngine:
                 pass
         return getattr(br, "dialog_total", 0)
 
+    async def _restore_page_evidence(self, page):
+        from .browser_evidence import emit, network_scope
+        br = self.browser
+        parent = (getattr(br, "_evidence_recovery_parent", "") if getattr(br, "_page_recreated", False)
+                  else getattr(br, "_evidence_last_decision", ""))
+        try:
+            with network_scope(br, parent, check="browser_recovery", role="cleanup") as requests:
+                result = await br.navigate(page.url, retries=self.navigation_retries)
+        except BaseException:
+            emit(br, "restore", parent_id=parent, role="cleanup", outcome="verification_error")
+            raise
+        emit(br, "restore", parent_id=parent, role="cleanup",
+             request_attempt_id=requests[-1] if requests else "",
+             outcome="no_match" if result and self._landed_on_target(page) else "unexecutable",
+             complete=bool(result and self._landed_on_target(page)))
+        return result
+
     async def _recovered_page_healthy(self, page) -> bool:
         """直前の復旧後、次の browser 依存 page-level scanner を走らせてよいか。
 
@@ -6400,7 +6454,8 @@ class ScanEngine:
             self.browser._recovery_failed = True
             return False
         if getattr(self.browser, "_page_recreated", False):
-            if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+            _restored = await ScanEngine._restore_page_evidence(self, page)
+            if not _restored:
                 self.wave_errors.append(f"page_recreate_failed:{page.url}:navigate")
                 self.browser._recovery_failed = True
                 return False
@@ -6836,7 +6891,7 @@ class ScanEngine:
                 before_count = len(self.all_findings)
                 from .checkpoint import CheckpointState
                 with ScanEngine._evidence_scope(self, CheckpointState._candidate_unit_key(ip, check_name), check_name,
-                                                rules=(f"{check_name}_payload_oracle",) if check_name in {"sqli", "xss"} else ()):
+                                                rules=(f"{check_name}_payload_oracle",) if check_name in {"sqli", "xss", "dom_xss"} else ()):
                     findings = await scanner.scan_injection_point(ip, field)
                 if getattr(self, "enable_evolution_observation_reuse", False):
                     _get_observation = getattr(scanner, "_get_evolution_observation", None)
@@ -7681,7 +7736,8 @@ class ScanEngine:
             from .checkpoint import unit_key
             for finding in to_verify:
                 check = finding.check_type
-                rules = (finding.evidence_type,) if check == "cors" else ()
+                rules = ((finding.evidence_type,) if check == "cors" else
+                         ("dom_xss_verify",) if check == "dom_xss" else ())
                 ledger.expect(unit_key(finding.url, finding.field_name, 0, check)
                               + "\x1everify:" + finding.evidence_type, check, rules=rules,
                               role="verify", reason="" if rules else "uninstrumented_detector_contract")
@@ -7902,7 +7958,8 @@ class ScanEngine:
             self._api_auth_failed = False
             self._json_probe_failed = False
             from .checkpoint import unit_key
-            rules = (f.evidence_type,) if scanner_key == "cors" else ()
+            rules = ((f.evidence_type,) if scanner_key == "cors" else
+                     ("dom_xss_verify",) if scanner_key == "dom_xss" else ())
             with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, scanner_key) + "\x1everify:" + f.evidence_type,
                                       scanner_key, rules=rules, role="verify"):
                 scanner_result = await verifier(f)

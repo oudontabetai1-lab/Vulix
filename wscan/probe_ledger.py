@@ -139,6 +139,34 @@ class ResponseRecord:
 
 
 @dataclass(frozen=True)
+class BrowserInput:
+    source_id: str
+    body_hash: str
+    body_length: int
+    captured: bool
+
+
+@dataclass(frozen=True)
+class BrowserEvidence:
+    """Non-network input/operation identity; content is hashes and lengths only."""
+
+    kind: str
+    page_id: str = ""
+    frame_id: str = ""
+    generation: str = ""
+    operation_id: str = ""
+    snapshot_id: str = ""
+    flow_id: str = ""
+    index: int = 0
+    total: int = 0
+    input_hash: str = ""
+    input_length: int = 0
+    complete: bool = False
+    inputs: tuple[BrowserInput, ...] = ()
+    required_inputs: int = 0
+
+
+@dataclass(frozen=True)
 class ProbeAttemptRecord:
     """append-only な probe 試行の台帳レコード（正本）。純粋・不変・JSON 直列化可。
 
@@ -168,6 +196,7 @@ class ProbeAttemptRecord:
     completion_unit: str = ""      # hashed checkpoint identity; independent of display labels
     record_kind: str = "legacy"    # request / observation / decision / payload; legacy rows retain their meaning
     request_attempt_id: str = ""   # one outgoing request, independent of append-only event IDs
+    browser: Optional[BrowserEvidence] = None
 
     @property
     def correlated(self) -> bool:

@@ -230,32 +230,7 @@ class DOMXSSScanner(BaseScanner):
         await self.log_payload_test(field_name, payload, "dom_xss", ip.url)
 
         try:
-            # Install DOM hook before the page loads (once per page)
-            await self._ensure_hook()
-
-            source, pair = await self._apply_payload(
-                ip.url, ip.parameter_id, payload,
-                ip.submit_index, ip.legacy_is_url_param(),
-            )
-            # DOMXSS は独自シグネチャの _apply_payload 直送で _apply_ip を通らないため、
-            # ここで試行台帳へ記録する（adaptive 履歴の欠落防止）。
-            self._record_attempt(ip, payload, source, pair)
-
-            await asyncio.sleep(2.0 * self.sleep_factor)  # Allow JS to settle
-
-            # インタラクション必須ハンドラ（onmouseover 等）や javascript: URL は
-            # 自動発火しないため、能動的に発火させてから sink ログ／dialog を読む。
-            if not self.browser.dialog_fired:
-                try:
-                    if await self.browser.trigger_injected_handlers(payload):
-                        await asyncio.sleep(0.3 * self.sleep_factor)
-                except Exception:
-                    pass
-
-            # Read what the sink hooks captured
-            log = await self.browser.page.evaluate(
-                "() => window.__wscan_domxss_log || []"
-            )
+            source, pair, log, decision_id = await self._observe_payload(ip, payload, marker, trigger=True)
         except Exception:
             return []
 
@@ -278,6 +253,7 @@ class DOMXSSScanner(BaseScanner):
                     evidence_details={
                         "sink": sink,
                         "marker": marker,
+                        "browser_decision_id": decision_id or "",
                         "data_excerpt": data[:200],
                     },
                     reproduction_steps=[
@@ -305,6 +281,7 @@ class DOMXSSScanner(BaseScanner):
                 evidence_type="dom_xss_dialog",
                 evidence_details={
                     "marker": marker,
+                        "browser_decision_id": decision_id or "",
                     "dialog_message": self.browser.dialog_message,
                 },
                 reproduction_steps=[
@@ -335,16 +312,7 @@ class DOMXSSScanner(BaseScanner):
                 )
                 try:
                     self.browser.reset_dialog()
-                    await self.browser.page.add_init_script(_HOOK_SCRIPT)
-                    source, pair = await self._apply_payload(
-                        ip.url, ip.parameter_id, payload,
-                        ip.submit_index, ip.legacy_is_url_param(),
-                    )
-                    self._record_attempt(ip, payload, source, pair)
-                    await asyncio.sleep(2.0 * self.sleep_factor)
-                    log = await self.browser.page.evaluate(
-                        "() => window.__wscan_domxss_log || []"
-                    )
+                    source, pair, log, decision_id = await self._observe_payload(ip, payload, marker, evolved=True)
                 except Exception:
                     continue
 
@@ -367,6 +335,7 @@ class DOMXSSScanner(BaseScanner):
                             evidence_details={
                                 "sink": sink,
                                 "marker": marker,
+                        "browser_decision_id": decision_id or "",
                                 "data_excerpt": data[:200],
                             },
                             reproduction_steps=[
@@ -382,6 +351,57 @@ class DOMXSSScanner(BaseScanner):
                     break
 
         return findings
+
+    async def _observe_payload(self, ip, payload, marker, *, trigger=False, evolved=False,
+                               verify=False, parent=None):
+        from wscan.browser_evidence import operation, decision
+        from wscan.request_logger import current_probe
+        from wscan.probe_ledger import Transport
+        br = self.browser
+        logger = getattr(self.engine, "request_logger", None)
+        with operation(br, "dom_xss", role="verify" if verify else "attack", ip=ip, parent=parent) as context:
+            if evolved:
+                await br.page.add_init_script(_HOOK_SCRIPT)
+            else:
+                await self._ensure_hook()
+            source, pair = await self._apply_payload(ip.url, ip.parameter_id, payload,
+                                                      ip.submit_index, ip.legacy_is_url_param())
+            if not verify:
+                self._record_attempt(ip, payload, source, pair)
+            await asyncio.sleep((0.5 if verify else 2.0) * self.sleep_factor)
+            trigger_ok = True
+            if trigger and not br.dialog_fired:
+                try:
+                    if await br.trigger_injected_handlers(payload):
+                        await asyncio.sleep(0.3 * self.sleep_factor)
+                except Exception:
+                    trigger_ok = False
+            log = await br.page.evaluate("() => window.__wscan_domxss_log || []")
+            hook_observed = True
+            if context is not None:
+                try:
+                    hook_observed = await br.page.evaluate("() => Array.isArray(window.__wscan_domxss_log)") is True
+                except Exception:
+                    hook_observed = False
+            matched = any(marker in (e.get("data", "") or "") for e in log or [])
+            # The legacy oracle below is unchanged; evidence accepts only an explicitly bound dialog.
+            dialog_match = context and any(marker in message for message in context["dialogs"].values())
+            req = (pair or {}).get("request") or {}
+            probe = current_probe(logger)
+            correlated = bool(probe and req.get("_probe_context") is probe
+                              and req.get("_probe_attempt_id") in probe["requests"]
+                              and (pair.get("response") or {}).get("status") is not None)
+            if correlated:
+                logger.observe_request(probe, req["_probe_attempt_id"],
+                                       {"request": req, "response": pair["response"]}, Transport.PLAYWRIGHT)
+            status = (pair.get("response") or {}).get("status")
+            failure = ("blocked" if status in {403, 429} else "transport_error" if isinstance(status, int) and status >= 500
+                       else "unexecutable" if isinstance(status, int) and status >= 400 else None)
+            did = decision(br, context, matched=matched or bool(dialog_match), outcome=failure,
+                           complete=bool(source) and isinstance(log, list) and trigger_ok and correlated and hook_observed and not failure,
+                           rule="dom_xss_verify" if verify else "dom_xss_payload_oracle",
+                           material=str(log), request_attempt_id=req.get("_probe_attempt_id") or "")
+            return source, pair, log, did
 
     async def _evolution_probe(
         self,
@@ -442,12 +462,19 @@ class DOMXSSScanner(BaseScanner):
         )
         return await self.scan_injection_point(ip, field)
 
+    def _verify_unavailable(self):
+        from wscan.browser_evidence import emit
+        emit(self.browser, "decision", check="dom_xss", role="verify",
+             outcome="unexecutable", rule="dom_xss_verify")
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         if finding.evidence_type not in {"dom_xss_sink", "dom_xss_dialog"}:
+            self._verify_unavailable()
             return None
 
         marker = self._marker_for_finding(finding)
         if not marker:
+            self._verify_unavailable()
             return None
 
         # 注入点種別は provenance(injection_location) を優先し、無い旧 Finding のみ
@@ -462,23 +489,15 @@ class DOMXSSScanner(BaseScanner):
             )
         try:
             self.browser.reset_dialog()
-            await self._ensure_hook()
             await self.log_payload_test(
                 finding.field_name, finding.payload, "dom_xss_verify", finding.url
             )
-            # provenance に dom_index があれば実 DOM 位置で再送する（未指定は form_index に
-            # フォールバック＝submit_index と同じ意味論）。これが無いと入力欄なしフォーム先行時に
-            # 別 DOM フォームへ再送し、本物の DOM-XSS を「未再現」と誤判定する。
             _dom = getattr(finding, "injection_dom_index", -1)
             _submit_index = _dom if _dom >= 0 else finding.injection_form_index
-            await self._apply_payload(
-                finding.url, finding.field_name, finding.payload,
-                _submit_index, is_url_param,
-            )
-            await asyncio.sleep(0.5 * self.sleep_factor)
-            log = await self.browser.page.evaluate(
-                "() => window.__wscan_domxss_log || []"
-            )
+            ip = (InjectionPoint.for_url_param(finding.url, finding.field_name) if is_url_param
+                  else InjectionPoint.for_form(finding.url, finding.field_name, _submit_index))
+            parent = (finding.evidence_details or {}).get("browser_decision_id", "")
+            _, _, log, _ = await self._observe_payload(ip, finding.payload, marker, verify=True, parent=parent)
         except Exception:
             return None
 

@@ -156,12 +156,24 @@ class FlowRunner:
         # browser is now on the last page of the flow
     """
 
-    def __init__(self, browser: "BrowserManager", *, scope_check=None):
+    def __init__(self, browser: "BrowserManager", *, scope_check=None, recorder=None):
         self.browser = browser
+        self._recorder = recorder
         # navigate 後の実着地 URL を検証するコールバック（url->bool、in-scope なら True）。
         # browser.navigate は redirect を追従し最終応答で成功を返すため、静的な step-URL 検査だけ
         # では scope 外へ redirect した先で fill/click が走るのを防げない。
         self._scope_check = scope_check
+
+    def _record(self, index, total, outcome):
+        if self._recorder is not None:
+            try:
+                return self._recorder(index, total, outcome)
+            except Exception as exc:
+                # Evidence failure must not replay state-changing steps or stop existing execution.
+                from .browser_evidence import logger_for
+                logger = logger_for(self.browser)
+                if logger:
+                    logger.probe_ledger.manifest.note_gap("flow_recorder_error:" + type(exc).__name__)
 
     def _assert_landing_in_scope(self) -> None:
         """直近の action 後の実着地 URL を scope 検証する（navigate/submit/click 共通）。
@@ -191,8 +203,16 @@ class FlowRunner:
         console.print(f"  [cyan][Flow][/cyan] {escape(flow.name)} ({len(flow.steps)} steps)")
         for i, step in enumerate(flow.steps, 1):
             try:
-                await self._execute(step, i, len(flow.steps))
+                from contextlib import nullcontext
+                scope = self._record(i, len(flow.steps), "started")
+                with scope if hasattr(scope, "__enter__") else nullcontext():
+                    status = await self._execute(step, i, len(flow.steps))
+                self._record(i, len(flow.steps), status or "no_match")
             except Exception as exc:
+                outcome = "timeout" if type(exc).__name__ == "TimeoutError" else "unexecutable"
+                if "out-of-scope/excluded" in str(exc):
+                    outcome = "blocked"
+                self._record(i, len(flow.steps), outcome)
                 console.print(
                     f"  [yellow][Flow] Step {i}/{len(flow.steps)} "
                     f"({escape(str(step.action))}) failed: {escape(str(exc))}[/yellow]"
@@ -387,7 +407,7 @@ class FlowRunner:
                         f"  [yellow]{label} click \\[{escape(sel)}] skip"
                         f"（クリック不能: {escape(str(exc))}）[/yellow]"
                     )
-                    return
+                    return "skipped"
             try:
                 await self.browser.page.wait_for_load_state(
                     "domcontentloaded", timeout=10_000
