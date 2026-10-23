@@ -893,9 +893,12 @@ output/<timestamp>/
 | `report.sarif` | SARIF 2.1.0。全 Finding を result 化し、未確証は `level: note`。`properties.source` 等を含む |
 | `remediation_plan.md`, `remediation_tasks.json` | 修正計画とタスク |
 | `http_requests.jsonl`, `payloads.jsonl` | 通信・投入ペイロード監査ログ。秘匿ヘッダ等はマスク |
+| `probe_attempts.jsonl`, `probe_attempts_manifest.json` | 相関付きの送信・観測・判定と、計画した検査単位ごとの証跡完了状態 |
 | `scan_config.json` | 実行設定スナップショット。秘匿値は伏字 |
 
 確実性を重視する通常層では、HTML レポートの Observability の直後に Coverage を表示します。`reached`、`attempts`、`by_status`、HTTP 403/429、未到達 URL と理由を Finding と分けて確認し、0 findings の場合も検査範囲と通信ブロックの有無を合わせて判断してください。これらは記録・集計用で、既存の検出判定やスキャン挙動は変更しません。
+
+通常スキャンの共通 Playwright query/form と direct HTTPX JSON 送信は、明示的な baseline・control・attack の役割と実リクエスト ID を記録します。SQLi の通常判定と XSS の dialog/reflection・等価性比較では、その ID と比較対象から判定を追跡できます。manifest の `logical_requests` はこの共通経路の送信試行数で、応答フックや判定行の数ではありません。詳細と未対応経路は [Evidence completion](docs/evidence-completion.md) を参照してください。0 Finding・HTTP 成功・checkpoint 完了だけでは証跡完了や安全を意味しません。
 
 ### Webhook
 

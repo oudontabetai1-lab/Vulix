@@ -10,6 +10,7 @@ import logging
 import re
 import socket
 import time
+from functools import wraps
 import urllib.request
 from collections.abc import Mapping
 from urllib.parse import urlparse as _urlparse
@@ -35,6 +36,27 @@ from .url_extraction import (
 
 
 console = Console()
+
+
+def _bind_probe_capture(send):
+    @wraps(send)
+    async def bound(self, *args, **kwargs):
+        from .request_logger import current_probe
+        capture = self.network
+        previous = getattr(capture, "probe_context", None)
+        previous_pending = getattr(capture, "pending_probe_context", None)
+        context = current_probe(getattr(capture, "logger", None))
+        previous_frame = getattr(capture, "probe_frame", None)
+        capture.pending_probe_context = context
+        capture.probe_context = context if send.__name__ == "test_url_param" else None
+        capture.probe_frame = getattr(getattr(self, "page", None), "main_frame", None)
+        try:
+            return await send(self, *args, **kwargs)
+        finally:
+            capture.probe_context = previous
+            capture.pending_probe_context = previous_pending
+            capture.probe_frame = previous_frame
+    return bound
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
@@ -314,6 +336,8 @@ class NetworkCapture:
 
     def on_request(self, request: Request):
         key = (request.url, id(request))
+        if key in self._pending:
+            return
         self._pending[key] = {
             "url": request.url,
             "method": request.method,
@@ -332,6 +356,12 @@ class NetworkCapture:
             # 認証欄の名前に依存せず、秘密値を捕捉・永続化しない。
             self._pending[key].update(url="[authentication]", headers={}, post_data="[REDACTED]",
                                       _authentication=True)
+        elif (getattr(self, "probe_context", None) is not None
+              and getattr(request, "resource_type", "") == "document"
+              and getattr(request, "redirected_from", None) is None
+              and getattr(request, "frame", None) is getattr(self, "probe_frame", None)):
+            # Only navigation requests have an authoritative common browser send boundary.
+            self._pending[key]["_probe_context"] = self.probe_context
         self._requests_since_clear += 1
         record = getattr(self.logger, "log_browser_submission", None)
         if callable(record):
@@ -1805,6 +1835,9 @@ class BrowserManager:
                 await self._snapshot_session_storage()
                 return True
             except Exception as e:
+                context = getattr(self.network, "probe_context", None)
+                if context is not None:
+                    context["failure"] = "timeout" if type(e).__name__ == "TimeoutError" else "transport_error"
                 self.last_navigation_error = f"{type(e).__name__}: {e}"
                 if attempt + 1 >= attempts:
                     return False
@@ -1949,6 +1982,7 @@ class BrowserManager:
         except Exception:
             return False
 
+    @_bind_probe_capture
     async def fill_and_submit_form(
         self,
         form_index: int,
@@ -2084,6 +2118,7 @@ class BrowserManager:
             # submit 直前の送信済みリクエスト数を記録し、送達判定は「submit 後に増えたか」の差分で
             # 見る。fill script の validation XHR や背景 polling を submit のリクエストと取り違えない。
             net_before_submit = self.network.request_count()
+            self.network.probe_context = getattr(self.network, "pending_probe_context", None)
             if submit_btn:
                 await submit_btn.click()
             else:
@@ -2106,6 +2141,9 @@ class BrowserManager:
             pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             return source, pair
         except Exception as e:
+            context = getattr(self.network, "probe_context", None)
+            if context is not None:
+                context["failure"] = "timeout" if isinstance(e, (asyncio.TimeoutError,)) or type(e).__name__ == "TimeoutError" else "transport_error"
             # 例外を握りつぶし空 pair を返す。送達判定: submit を dispatch
             # 済みなら送達成功を維持。未 dispatch でも、Playwright の click() は post-dispatch の
             # navigation 待ちを含むため、リクエスト送信後に slow/interrupted navigation で click() 自体が
@@ -2244,6 +2282,7 @@ class BrowserManager:
             source = await self.get_page_source()
             return source, {}
 
+    @_bind_probe_capture
     async def test_url_param(self, base_url: str, param: str, payload: str) -> tuple[str, dict]:
         """Test a URL parameter with a payload."""
         self.reset_dialog()

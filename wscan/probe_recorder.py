@@ -128,6 +128,7 @@ class ProbeLedger:
         self._path: Optional[Path] = None
         self.planned: dict[str, dict] = {}
         self.recorded: dict[str, list[dict]] = {}
+        self.events: dict[str, dict] = {}
         if enabled and output_dir:
             self._path = Path(output_dir) / LEDGER_FILENAME
             self._restore_from_existing()
@@ -165,6 +166,8 @@ class ProbeLedger:
         return context[1] if context is not None and context[0] is self else ""
 
     def _index_completion(self, rec: dict) -> None:
+        if rec.get("record_kind", "legacy") != "legacy":
+            self.events[rec["attempt_id"]] = rec
         unit = rec.get("completion_unit")
         if unit and (not isinstance(unit, str) or len(unit) != 64
                      or any(c not in "0123456789abcdef" for c in unit)):
@@ -173,9 +176,87 @@ class ProbeLedger:
         if unit:
             rows = self.recorded.setdefault(unit, [])
         if unit and rec.get("outcome"):
-            rows.append({
-                k: rec.get(k) for k in ("check", "role", "outcome", "decision_rule", "decision_version")
-            })
+            rows.append(rec)
+
+    def _correlated_decisions(self):
+        """Validate event causality from persisted rows, including comparison prerequisites."""
+        def sequence(row):
+            return int(row["attempt_id"].rpartition(":")[2])
+
+        delivered_ids = {r.get("request_attempt_id") for r in self.events.values()
+                         if r.get("record_kind") == "observation"
+                         and (r.get("response") or {}).get("body_hash")
+                         and (r.get("request") or {}).get("sent")
+                         and r.get("parent_id") == r.get("request_attempt_id")
+                         and all(r.get(k) == self.events.get(r.get("request_attempt_id"), {}).get(k)
+                                 for k in ("scan_id", "check", "completion_unit", "injection_key", "role", "wave"))
+                         and all((r.get("request") or {}).get(k) ==
+                                 (self.events.get(r.get("request_attempt_id"), {}).get("request") or {}).get(k)
+                                 for k in ("method", "url", "transport", "body_hash", "body_length"))}
+        requests_by_unit = {}
+        controls_by_parent = {}
+        for event in self.events.values():
+            if event.get("record_kind") == "request":
+                requests_by_unit.setdefault(event.get("completion_unit"), []).append(event)
+                if event.get("role") == "control":
+                    controls_by_parent.setdefault(event.get("parent_id"), []).append(event)
+
+        def same_unit(a, b):
+            return all(a.get(k) == b.get(k) for k in ("scan_id", "check", "completion_unit", "injection_key"))
+
+        def delivered(request_id, decision):
+            request = self.events.get(request_id, {})
+            return (request.get("record_kind") == "request" and same_unit(request, decision)
+                    and request_id in delivered_ids)
+
+        result = {}
+        for unit, rows in self.recorded.items():
+            accepted = []
+            invalid_decision = False
+            for row in rows:
+                if row.get("record_kind", "legacy") == "legacy":
+                    if row.get("check") not in {"sqli", "xss"}:
+                        accepted.append(row)
+                    continue
+                if row.get("record_kind") != "decision":
+                    continue
+                request_id = row.get("request_attempt_id")
+                observation = self.events.get(row.get("parent_id"), {})
+                baselines = row.get("baseline_attempt_ids", [])
+                controls = row.get("control_attempt_ids", [])
+                required_controls = {r["attempt_id"] for parent in [request_id, *baselines]
+                                     for r in controls_by_parent.get(parent, ()) if same_unit(r, row)}
+                if (observation.get("record_kind") != "observation"
+                        or observation.get("request_attempt_id") != request_id
+                        or not same_unit(row, observation) or not delivered(request_id, row)
+                        or observation.get("role") != row.get("role")
+                        or observation.get("wave") != row.get("wave")
+                        or len(baselines) < (2 if row.get("check") == "sqli" else 1)
+                        or len(set(baselines)) != len(baselines)
+                        or not baselines or any(not delivered(ref, row) for ref in baselines + controls)
+                        or not required_controls.issubset(controls)
+                        or sequence(self.events[request_id]) >= sequence(observation)
+                        or sequence(observation) >= sequence(row)
+                        or any(sequence(self.events[ref]) >= sequence(self.events[request_id]) for ref in baselines)
+                        or any(sequence(self.events[ref]) >= sequence(row) for ref in controls)
+                        or any(self.events.get(ref, {}).get("role") != "baseline" for ref in baselines)
+                        or any(self.events.get(ref, {}).get("role") != "control"
+                               or not (self.events[ref].get("parent_id") == request_id
+                                       or self.events[ref].get("parent_id") in baselines
+                                       and self.events.get(request_id, {}).get("parent_id") == self.events[ref].get("parent_id"))
+                               for ref in controls)):
+                    invalid_decision = True
+                    continue
+                accepted.append(row)
+            requests = requests_by_unit.get(unit, ())
+            decided = {r.get("request_attempt_id") for r in accepted}
+            failed = any(r.get("record_kind") == "decision" and not r.get("request_attempt_id") for r in rows)
+            if failed or invalid_decision or any(r["attempt_id"] not in delivered_ids or
+                             (r.get("role") == "attack" and r["attempt_id"] not in decided)
+                             for r in requests):
+                accepted = [r for r in accepted if r.get("record_kind", "legacy") == "legacy"]
+            result[unit] = accepted
+        return result
 
     def reconcile_persisted(self) -> None:
         """Re-read the source at completion so missing files/rows cannot pass on memory alone."""
@@ -184,6 +265,7 @@ class ProbeLedger:
         restored = ProbeLedger(self._path.parent, self.scan_id)
         with self._lock:
             self.recorded = restored.recorded
+            self.events = restored.events
             if restored.evidence_incomplete:
                 self.manifest.note_gap("completion_evidence_restore_failed")
             if restored.planned != self.planned:
@@ -192,7 +274,7 @@ class ProbeLedger:
     def completion_summary(self, selected, *, execution_success=True) -> dict:
         from .check_coverage import reconcile_evidence
         with self._lock:
-            return reconcile_evidence(self.planned, self.recorded, selected,
+            return reconcile_evidence(self.planned, self._correlated_decisions(), selected,
                                       logging_failed=self.evidence_incomplete or not self.enabled or self._path is None,
                                       execution_success=execution_success)
 
@@ -254,6 +336,18 @@ class ProbeLedger:
         outcome = rec.get("outcome")
         if outcome is not None and outcome not in _VALID_OUTCOMES:
             return False  # 語彙外の outcome（null は未記録として許容）
+        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision"}:
+            return False
+        if rec.get("record_kind", "legacy") != "legacy":
+            if any(not isinstance(rec.get(k, ""), str) for k in
+                   ("parent_id", "request_attempt_id", "check", "wave", "injection_key")):
+                return False
+            if any(not isinstance(rec.get(k, []), list) or
+                   any(not isinstance(ref, str) for ref in rec.get(k, []))
+                   for k in ("baseline_attempt_ids", "control_attempt_ids")):
+                return False
+            if any(rec.get(k) is not None and not isinstance(rec.get(k), dict) for k in ("request", "response")):
+                return False
         return True
 
     def _restore_from_existing(self) -> None:
@@ -415,13 +509,14 @@ class ProbeLedger:
                 self._manifest_write_failed = False
                 data = self.manifest.to_dict()
                 data["scan_id"] = self.scan_id
+                data["logical_requests"] = sum(r.get("record_kind") == "request" for r in self.events.values())
                 data["ledger"] = LEDGER_FILENAME
                 data["quarantined"] = self._quarantined
                 data["evidence_incomplete"] = self.evidence_incomplete
                 data["planned_units"] = {key: dict(plan) for key, plan in self.planned.items()}
                 from .check_coverage import reconcile_evidence
                 data["completion"] = reconcile_evidence(
-                    self.planned, self.recorded,
+                    self.planned, self._correlated_decisions(),
                     selected if selected is not None else {p["check"] for p in self.planned.values()},
                     logging_failed=self.evidence_incomplete, execution_success=execution_success,
                 )

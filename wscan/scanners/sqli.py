@@ -340,7 +340,8 @@ class SQLiScanner(BaseScanner):
 
         # Second baseline to measure natural response length variance
         # (dynamic content like ads/timestamps can shift length by hundreds of bytes)
-        baseline_source2, _ = await self._get_baseline(ip)
+        baseline_source2, baseline_pair2 = await self._get_baseline(ip)
+        baseline_ids = tuple(self._probe_id(p) for p in (baseline_pair, baseline_pair2))
         baseline_variance = abs(len(baseline_source) - len(baseline_source2))
 
         # Measure baseline response time for dynamic time-based threshold
@@ -360,7 +361,10 @@ class SQLiScanner(BaseScanner):
             await self.log_payload_test(field_name, payload, check_label, ip.url)
 
             # Apply payload
-            source, pair = await self._apply_ip(ip, payload)
+            wave = {"sqli": "standard", "sqli_evolved": "evolution", "sqli_mutation": "mutation"}.get(check_label, "auxiliary")
+            source, pair = await self._apply_ip(
+                ip, payload, baseline_attempt_ids=baseline_ids, probe_wave=wave)
+            control_ids = ()
 
             # --- Check 1: Error-based SQLi ---
             # baseline に既に同じエラー文字列が出ているなら、それはページ本来の
@@ -370,6 +374,9 @@ class SQLiScanner(BaseScanner):
             if match and match.lower() in baseline_lower:
                 match = None
             if match:
+                self._probe_decision(pair, True, "sqli_payload_oracle",
+                                     baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
+                                     rationale="new SQL error absent from measured baseline")
                 finding = await self.record_finding(
                     url=ip.url,
                     field_name=field_name,
@@ -404,7 +411,10 @@ class SQLiScanner(BaseScanner):
                 await self.log_payload_test(
                     field_name, partner, "sqli_boolean_partner", ip.url
                 )
-                partner_source, partner_pair = await self._apply_ip(ip, partner)
+                partner_source, partner_pair = await self._apply_ip(
+                    ip, partner, probe_role="control", baseline_attempt_ids=baseline_ids,
+                    parent_attempt_id=self._probe_id(pair), probe_wave=wave)
+                control_ids = (self._probe_id(partner_pair),)
                 true_src = source if payload == true_payload else partner_source
                 false_src = partner_source if payload == true_payload else source
                 true_pair = pair if payload == true_payload else partner_pair
@@ -434,6 +444,9 @@ class SQLiScanner(BaseScanner):
                     _pair_status(true_pair),
                     _pair_status(false_pair),
                 ):
+                    self._probe_decision(pair, True, "sqli_payload_oracle",
+                                         baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
+                                     rationale="boolean response divergence against baseline and partner")
                     finding = await self.record_finding(
                         url=ip.url,
                         field_name=field_name,
@@ -473,6 +486,9 @@ class SQLiScanner(BaseScanner):
             # ペイロード（進化wave・community 由来の方言）でも遅延判定を行う。
             if payload in TIME_BASED_PAYLOADS or _is_time_based_sql(payload):
                 if self.response_time_exceeded(pair, threshold=time_threshold):
+                    self._probe_decision(pair, True, "sqli_payload_oracle",
+                                         baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
+                                     rationale="response delay exceeded measured baseline threshold")
                     finding = await self.record_finding(
                         url=ip.url,
                         field_name=field_name,
@@ -512,6 +528,9 @@ class SQLiScanner(BaseScanner):
             ):
                 bypassed, post_url = self._detect_auth_bypass(ip.url, source)
                 if bypassed:
+                    self._probe_decision(pair, True, "sqli_payload_oracle",
+                                         baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
+                                     rationale="existing authentication-bypass oracle matched")
                     finding = await self.record_finding(
                         url=ip.url,
                         field_name=field_name,
@@ -541,6 +560,9 @@ class SQLiScanner(BaseScanner):
                         self.engine.signal_auth_bypass(ip.url, payload, post_url)
                     return True
 
+            self._probe_decision(pair, False, "sqli_payload_oracle",
+                                 baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
+                                     rationale="no SQL error, boolean, timing or applicable authentication-bypass signal")
             # Small delay to avoid overwhelming the server
             await asyncio.sleep(0.2 * self.sleep_factor)
             return False
@@ -674,6 +696,7 @@ class SQLiScanner(BaseScanner):
         payload,
         *,
         baseline: bool = False,
+        **probe_context,
     ) -> tuple[str, dict]:
         """SQLi baseline の既存 browser 呼出し列を保って注入点 dispatch する。
 
@@ -690,13 +713,13 @@ class SQLiScanner(BaseScanner):
             if self._field_budget_gate():
                 return "", {}
             if ip.location == "url_param":
-                return await self.browser.test_url_param(
-                    ip.url, ip.parameter_id, payload
-                )
-            return await self.browser.fill_and_submit_form(
-                ip.submit_index, ip.parameter_id, payload
-            )
-        return await super()._apply_ip(ip, payload)
+                send = lambda: self.browser.test_url_param(ip.url, ip.parameter_id, payload)
+            else:
+                send = lambda: self.browser.fill_and_submit_form(ip.submit_index, ip.parameter_id, payload)
+            return await self._send_probe(ip, send, role="baseline")
+        if baseline:
+            probe_context["probe_role"] = "baseline"
+        return await super()._apply_ip(ip, payload, **probe_context)
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         from urllib.parse import parse_qs, urlparse
@@ -873,6 +896,7 @@ class SQLiScanner(BaseScanner):
                     form_index, field_name, payload
                 )
         except Exception as exc:
+            self._probe_failure(self._probe_exception_outcome(exc))
             self._record_scan_note(
                 f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
             )

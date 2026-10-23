@@ -1771,9 +1771,10 @@ class ScanEngine:
                 fields += [(0, name, True) for name in page.url_params]
                 for fi, name, is_url in fields:
                     ledger.expect(unit_key(page.url, name, fi, check, is_url), check,
+                                  rules=(f"{check}_payload_oracle",) if check in {"sqli", "xss"} else (),
                                   reason="excluded_by_configuration"
                                   if page_excluded or name.lower() in getattr(self, "exclude_fields", set())
-                                  else "uninstrumented_detector_contract")
+                                  else "" if check in {"sqli", "xss"} else "uninstrumented_detector_contract")
         ledger.write_manifest()
 
     def _scan_matrix_for_display(self) -> list[dict]:
@@ -2549,7 +2550,10 @@ class ScanEngine:
                 self._json_probe_failed = False
                 before_count = len(self.all_findings)
                 try:
-                    findings = await scanner.scan_injection_point(ip, field)
+                    from .checkpoint import CheckpointState
+                    with ScanEngine._evidence_scope(self, CheckpointState._candidate_unit_key(ip, check_name), check_name,
+                                              rules=(f"{check_name}_payload_oracle",) if check_name in {"sqli", "xss"} else ()):
+                        findings = await scanner.scan_injection_point(ip, field)
                     for finding in findings or []:
                         self._record_finding(finding, source="json-body")
                 except AbortScan:
@@ -6831,7 +6835,8 @@ class ScanEngine:
             try:
                 before_count = len(self.all_findings)
                 from .checkpoint import CheckpointState
-                with ScanEngine._evidence_scope(self, CheckpointState._candidate_unit_key(ip, check_name), check_name):
+                with ScanEngine._evidence_scope(self, CheckpointState._candidate_unit_key(ip, check_name), check_name,
+                                                rules=(f"{check_name}_payload_oracle",) if check_name in {"sqli", "xss"} else ()):
                     findings = await scanner.scan_injection_point(ip, field)
                 if getattr(self, "enable_evolution_observation_reuse", False):
                     _get_observation = getattr(scanner, "_get_evolution_observation", None)

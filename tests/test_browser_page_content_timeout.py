@@ -246,7 +246,7 @@ class ChromiumDialogFloodTests(unittest.IsolatedAsyncioTestCase):
         scanner.log_payload_test = AsyncMock()
         scanner.record_finding = AsyncMock(return_value=SimpleNamespace(dialog_confirmed=True))
 
-        async def apply(ip, payload):
+        async def apply(ip, payload, **probe_context):
             await bm.page.goto(safe_url)
             await bm._on_dialog(dialog)
             return (await bm.get_page_source(), {})
