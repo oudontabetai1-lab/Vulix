@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from wscan import url_scope
 
@@ -31,6 +32,14 @@ _CURRENT_PROBE = ContextVar("outgoing_probe", default=None)
 def current_probe(logger):
     context = _CURRENT_PROBE.get()
     return context if context is not None and context["logger"] is logger else None
+
+
+def redact_graphql_url(url):
+    """GraphQL GET operations can contain arbitrary literals and variable secrets."""
+    parts = urlsplit(redact_url(url))
+    query = urlencode([(key, "<redacted>" if key.lower() in {"query", "variables", "extensions"} else value)
+                       for key, value in parse_qsl(parts.query, keep_blank_values=True)])
+    return urlunsplit(parts._replace(query=query))
 
 
 def _count_existing_records(path: Path) -> int:
@@ -182,11 +191,17 @@ class RequestLogger:
                   payload=None, url="", sent=False, actor="", rationale="",
                   parent_id="", outcome=None, decision_rule="", decision_version="",
                   record_kind="legacy", request_attempt_id="", completion_unit=None,
-                  wave="", baseline_attempt_ids=(), control_attempt_ids=(), browser=None) -> Optional[str]:
+                  wave="", baseline_attempt_ids=(), control_attempt_ids=(), browser=None,
+                  related_attempt_ids=(), decision_subject="") -> Optional[str]:
         """Append observation only; return its ID only after a successful write."""
         if not self.enabled:
             return
         try:
+            related_attempt_ids = tuple(related_attempt_ids)
+            if any(not isinstance(ref, str) or ref not in self.probe_ledger.events
+                   for ref in related_attempt_ids):
+                self.probe_ledger.manifest.note_gap("invalid_related_attempt_ids")
+                return None
             from wscan.probe_ledger import (
                 ProbeAttemptRecord, RequestRecord, ResponseRecord,
                 body_length, redact_excerpt, sha256_hex, header_material,
@@ -231,7 +246,15 @@ class RequestLogger:
                 record_kind=record_kind, request_attempt_id=request_attempt_id, wave=wave,
                 baseline_attempt_ids=tuple(baseline_attempt_ids), control_attempt_ids=tuple(control_attempt_ids),
                 rationale=redact_excerpt(rationale), browser=browser,
+                related_attempt_ids=tuple(related_attempt_ids),
+                decision_subject=decision_subject,
             )
+            if record_kind == "graphql_decision":
+                from .graphql_evidence import valid_shape
+                import dataclasses
+                if not valid_shape(dataclasses.asdict(record)):
+                    self.probe_ledger.manifest.note_gap("invalid_graphql_decision")
+                    return None
             if self.probe_ledger.append(record):
                 return record.attempt_id
         except Exception as exc:
@@ -250,9 +273,10 @@ class RequestLogger:
 
     @contextmanager
     def probe_scope(self, ip, check, *, role="attack", wave="standard",
-                    baseline_attempt_ids=(), control_attempt_ids=(), parent_id=""):
+                    baseline_attempt_ids=(), control_attempt_ids=(), parent_id="", transport=None):
         from wscan.probe_ledger import sha256_hex
         context = dict(logger=self, requests=[], role=role, check=check, wave=wave, parent_id=parent_id,
+                       transport=transport,
                        field=sha256_hex(json.dumps([ip.stable_key_parts(), ip.parameter_id,
                                                    ip.operation_id, ip.template_digest])) if ip is not None else "",
                        completion_unit=self.probe_ledger.current_unit(),
@@ -302,7 +326,7 @@ class RequestLogger:
                     body = None
                 req = {"method": request.method, "url": str(request.url),
                        "headers": dict(request.headers), "post_data": body, "timestamp": time.time()}
-                attempt_id = self.begin_request(context, req, Transport.HTTPX)
+                attempt_id = self.begin_request(context, req, context.get("transport") or Transport.HTTPX)
                 request.extensions["vulix_probe_context"] = (context, req)
                 request.extensions["vulix_probe_submission"] = (self, attempt_id)
                 return
@@ -332,7 +356,7 @@ class RequestLogger:
                 observation_id = self.observe_request(context, attempt_id, {
                     "request": req, "response": {"status": response.status_code,
                     "url": str(response.url), "headers": dict(response.headers), "timestamp": time.time()}},
-                    Transport.HTTPX)
+                    context.get("transport") or Transport.HTTPX)
                 response.extensions["vulix_probe_observation"] = (self, observation_id)
                 return
             observation_id = self.log_probe(
@@ -390,7 +414,7 @@ class RequestLogger:
                 # ログ保存はベストエフォート。失敗してもスキャンは継続する。
                 return False
 
-    def log_http(self, pair: Optional[dict]) -> None:
+    def log_http(self, pair: Optional[dict], *, record_probe=True) -> None:
         """NetworkCapture が組み立てた request/response ペアを記録する。"""
         if not self.enabled or not pair:
             return
@@ -412,6 +436,8 @@ class RequestLogger:
         }
         self._append(self.http_path, record)
         self.http_count += 1
+        if not record_probe:
+            return
         from wscan.probe_ledger import ProbeRole, Transport
         context = req.get("_probe_context")
         if context is not None and context["logger"] is self:

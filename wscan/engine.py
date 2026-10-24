@@ -1749,8 +1749,9 @@ class ScanEngine:
                 ledger.expect(f"unknown_paths:{check}", check,
                               reason="uninstrumented_detector_api_chain_adaptive_multi_parameter_paths")
             for template in getattr(self, "api_seed_requests", []):
+                rules = getattr(self.scanners.get(check), "PASSIVE_RULES", ()) if check == "graphql" else ()
                 ledger.expect(unit_key(template.url, "(api)", 0, check), check,
-                              reason="uninstrumented_api_template_path")
+                              rules=rules, reason="" if rules else "uninstrumented_api_template_path")
             # A queued URL can fail during crawl and never become a CrawledPage.
             for url in getattr(self, "visited_urls", []):
                 if url not in {page.url for page in pages} and url not in getattr(self, "reached_urls", set()):
@@ -2440,12 +2441,18 @@ class ScanEngine:
                 # scan_page は宣言メソッド不問で POST を出すため、profile で事前に skip する。
                 _page_gate = getattr(scanner, "may_run_page_scanner", None)
                 if callable(_page_gate) and not _page_gate(url):
+                    if check_name == "graphql":
+                        from .checkpoint import unit_key
+                        with ScanEngine._evidence_scope(self, unit_key(url, "(api)", 0, check_name),
+                                                       check_name, rules=scanner.PASSIVE_RULES):
+                            scanner.record_evidence_skip(url)
                     continue
                 try:
                     self._api_auth_failed = url_auth_failed
                     before_count = len(self.all_findings)
                     from .checkpoint import unit_key
-                    with ScanEngine._evidence_scope(self, unit_key(url, "(api)", 0, check_name), check_name):
+                    rules = getattr(scanner, "PASSIVE_RULES", ()) if check_name == "graphql" else ()
+                    with ScanEngine._evidence_scope(self, unit_key(url, "(api)", 0, check_name), check_name, rules=rules):
                         findings = await scanner.scan_page(url)
                     # 実テンプレ要求で認証失効を観測したら、再ログイン+1回だけ再試行。
                     # GET プレフライトでは検知できないメソッド限定保護(POST=401)を救済。
@@ -2458,7 +2465,7 @@ class ScanEngine:
                             # 登録済みのことがあり、そのまま再実行すると [] を返す。
                             # 再試行が実際に走るようガードからこの url を外す。
                             _reset_scanner_url_guard(scanner, url)
-                            with ScanEngine._evidence_scope(self, unit_key(url, "(api)", 0, check_name), check_name):
+                            with ScanEngine._evidence_scope(self, unit_key(url, "(api)", 0, check_name), check_name, rules=rules):
                                 findings = await scanner.scan_page(url)
                     for f in (findings or []):
                         self._record_finding(f, source="api-spec")
@@ -6083,6 +6090,11 @@ class ScanEngine:
                 else:
                     _page_gate = getattr(scanner, "may_run_page_scanner", None)
                     if callable(_page_gate) and not _page_gate(page.url):
+                        if check_name == "graphql":
+                            from .checkpoint import unit_key
+                            with ScanEngine._evidence_scope(self, unit_key(cp_url, "(page)", 0, check_name),
+                                                           check_name, rules=scanner.PASSIVE_RULES):
+                                scanner.record_evidence_skip(page.url)
                         continue
                     from .checkpoint import unit_key
                     rules = (("cors_wildcard_credentials", "cors_origin_reflection") if check_name == "cors"
@@ -7737,8 +7749,9 @@ class ScanEngine:
         if ledger is not None:
             from .checkpoint import unit_key
             for finding in to_verify:
-                check = finding.check_type
+                check = "graphql" if finding.check_type.startswith("graphql_") else finding.check_type
                 rules = ((finding.evidence_type,) if check in {"cors", "security_headers"} else
+                         (finding.check_type,) if check == "graphql" else
                          ("dom_xss_verify",) if check == "dom_xss" else ())
                 ledger.expect(unit_key(finding.url, finding.field_name, 0, check)
                               + "\x1everify:" + finding.evidence_type, check, rules=rules,
@@ -7936,6 +7949,11 @@ class ScanEngine:
             if errors is None:
                 self.wave_errors = errors = []
             errors.append(f"state_change_skipped:verify:{f.check_type}")
+            if f.check_type.startswith("graphql_") and _vscanner is not None:
+                from .checkpoint import unit_key
+                with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, "graphql")
+                        + "\x1everify:" + f.evidence_type, "graphql", rules=(f.check_type,), role="verify"):
+                    _vscanner.record_evidence_skip(f.url, rules=(f.check_type,), role="verify")
             return "assumed"  # profile がこの再送を許さない → penalize しない terminal state
 
         if f.check_type.startswith("graphql_"):
@@ -7961,7 +7979,10 @@ class ScanEngine:
             self._json_probe_failed = False
             from .checkpoint import unit_key
             rules = ((f.evidence_type,) if scanner_key in {"cors", "security_headers"} else
+                     (f.check_type,) if scanner_key == "graphql" else
                      ("dom_xss_verify",) if scanner_key == "dom_xss" else ())
+            if scanner_key == "graphql":
+                f.evidence_details.pop("verification_attempt_ids", None)
             with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, scanner_key) + "\x1everify:" + f.evidence_type,
                                       scanner_key, rules=rules, role="verify"):
                 scanner_result = await verifier(f)
@@ -7971,6 +7992,21 @@ class ScanEngine:
             # None だけを見ると「検証リクエストが失敗しただけ」で unreproduced に誤格下げ
             # してしまうため、結果値より前に flag を確認する。
             if self._api_auth_failed or self._json_probe_failed:
+                return "assumed"
+            if scanner_key == "graphql" and scanner_result is not None:
+                ledger = getattr(getattr(self, "request_logger", None), "probe_ledger", None)
+                accepted = []
+                ids = (f.evidence_details or {}).get("verification_attempt_ids", ())
+                if ledger:
+                    from .probe_recorder import completion_identity
+                    unit = completion_identity(unit_key(f.url, f.field_name, 0, "graphql") + "\x1everify:" + f.evidence_type)
+                    accepted = [r for rows in ledger._correlated_decisions().values() for r in rows
+                                if r.get("attempt_id") in ids and r.get("role") == "verify"
+                                and r.get("completion_unit") == unit
+                                and r.get("outcome") == ("matched" if scanner_result else "no_match")]
+                if not accepted or ledger.evidence_incomplete:
+                    return "assumed"
+            if scanner_key == "graphql" and scanner_result is None:
                 return "assumed"
             # SSTI needs a retrieved control. An indeterminate scanner result must
             # not become confirmed through the generic expected-string fallback.

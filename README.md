@@ -900,6 +900,8 @@ output/<timestamp>/
 
 通常スキャンの共通 Playwright query/form と direct HTTPX JSON 送信は、明示的な baseline・control・attack の役割と実リクエスト ID を記録します。SQLi の通常判定と XSS の dialog/reflection・等価性比較では、その ID と比較対象から判定を追跡できます。manifest の `logical_requests` はこの共通経路の送信試行数で、応答フックや判定行の数ではありません。通常のページ検査では、DOM-XSS の query/form と静的 JS 解析について flow・snapshot・観測・検証・復旧の親子関係も同じ台帳へ記録します。非 HTTP 行は送信件数に加算せず、未取得の外部 JS や欠落した親証跡は未完了として扱います。`clickjacking` と `security_headers` は共有 HTTP 応答の入力 hash と実行した各ヘッダ判定を記録し、後者の既存再検証も元判定と相関します。詳細と未対応経路は [Evidence completion](docs/evidence-completion.md) を参照してください。0 Finding・HTTP 成功・checkpoint 完了だけでは証跡完了や安全を意味しません。
 
+GraphQL の発見 POST/GET、既存の schema・batch・DoS・注入検査も実送信と本文 hash に相関します。二段 DoS は両方の応答を参照し、再検証は元 Finding の判定・注入先・送信内容との一致を必要とします。秘密を含み得る query/variables と本文は台帳に保存せず、通信互換ログには応答済み要求の metadata を追加します。不正 JSON・曖昧なエラー・相関欠落を安全な陰性や再現成功として扱いません。
+
 ### Webhook
 
 ```bash

@@ -19,10 +19,15 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from contextlib import nullcontext
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from wscan.graphql_evidence import RULES
+from wscan.probe_ledger import Transport, sha256_hex
 
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
@@ -124,6 +129,8 @@ _DOS_LIMIT_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+_VERIFY_EVIDENCE = ContextVar("graphql_verify_evidence", default=None)
+
 
 def build_alias_amplification_query(count: int) -> str:
     """``count`` 本のエイリアスで同一フィールド(__typename)を増幅するクエリ（純粋）。
@@ -211,6 +218,8 @@ class GraphQLScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "graphql"
+    # Discovery is a baseline prerequisite, rather than an attack rule.
+    PASSIVE_RULES = RULES
     CONTRACT = ScannerContract(
         execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS, ExecutionKind.PROTOCOL_MESSAGE}),
         capabilities=(
@@ -271,6 +280,129 @@ class GraphQLScanner(BaseScanner):
         self._tested_endpoints: set[str] = set()
         self._tested_urls: set[str] = set()
         self._confirmed_endpoints: list[str] = []
+        self._evidence_baselines: dict[str, str] = {}
+        self._schema_responses: dict[str, httpx.Response] = {}
+
+    async def _request(self, client, method, endpoint, *, rule, role="attack", **kwargs):
+        logger = getattr(self.engine, "request_logger", None)
+        verification = _VERIFY_EVIDENCE.get()
+        if verification is not None and verification["scanner"] is self:
+            role, rule = "verify", verification["finding"].check_type
+            verification["attempted"] = True
+        baselines = () if role != "attack" else tuple(filter(None, [self._evidence_baselines.get(endpoint)]))
+        scope = (logger.probe_scope(None, "graphql", role=role, transport=Transport.GRAPHQL,
+                                   baseline_attempt_ids=baselines)
+                 if callable(getattr(logger, "probe_scope", None)) else nullcontext({"requests": []}))
+        with scope as context:
+            try:
+                resp = await getattr(client, method)(endpoint, **kwargs)
+            except Exception as exc:
+                outcome = ("timeout" if isinstance(exc, httpx.TimeoutException) else
+                           "transport_error" if isinstance(exc, httpx.TransportError) else
+                           "verification_error" if role == "verify" else "unexecutable")
+                for request_id in context["requests"]:
+                    self._record_probe_evidence(
+                        role=role, check="graphql", actor="graphql_oracle", record_kind="graphql_decision",
+                        wave="standard", outcome=outcome, decision_rule=rule, decision_version="1",
+                        parent_id=request_id, request_attempt_id=request_id,
+                        baseline_attempt_ids=baselines, related_attempt_ids=self._verify_sources(),
+                        decision_subject=self._subject(endpoint, rule), rationale=type(exc).__name__)
+                raise
+        try:
+            owner, request_id = resp.request.extensions.get("vulix_probe_submission", (None, None))
+            bound = resp.request.extensions.get("vulix_probe_context")
+            if owner is logger and request_id and bound is not None:
+                captured_context, req = bound
+                pair = {"request": req, "response": {"status": resp.status_code,
+                        "url": str(resp.url), "body": resp.content, "timestamp": time.time()}}
+                observation_id = logger.observe_request(captured_context, request_id, pair, Transport.GRAPHQL)
+                resp.extensions["graphql_evidence"] = (request_id, observation_id, pair, role, baselines)
+                from wscan.request_logger import redact_graphql_url
+                logger.log_http({"request": {**req, "url": redact_graphql_url(req["url"]), "post_data": None},
+                                 "response": {"status": resp.status_code}}, record_probe=False)
+        except Exception as exc:
+            self._record_scan_note(f"probe_evidence_error:{type(exc).__name__}")
+            if logger is not None:
+                logger.probe_ledger.manifest.note_gap(f"graphql_observation_error:{type(exc).__name__}")
+        if verification is not None and verification["scanner"] is self:
+            verification["response"] = resp
+        return resp
+
+    def _verify_sources(self):
+        context = _VERIFY_EVIDENCE.get()
+        if context is None or context["scanner"] is not self:
+            return ()
+        return tuple((context["finding"].evidence_details or {}).get("attempt_ids", ()))
+
+    def record_evidence_skip(self, endpoint, *, rules=RULES, role="attack", reason="state_profile_policy"):
+        for rule in rules:
+            self._record_probe_evidence(role=role, check="graphql", actor="graphql_oracle",
+                record_kind="graphql_decision", outcome="skipped" if reason == "state_profile_policy" else "unexecutable",
+                decision_rule=rule, decision_version="1", rationale=reason,
+                decision_subject=self._subject(endpoint, rule))
+
+    def _subject(self, endpoint, rule, target="", subtype=""):
+        context = _VERIFY_EVIDENCE.get()
+        if context is not None and context["scanner"] is self:
+            finding = context["finding"]
+            endpoint, target, subtype = finding.url, finding.field_name, finding.evidence_type
+        else:
+            target = target or {"graphql_introspection": "(GraphQL introspection)",
+                "graphql_batch": "(GraphQL batch)", "graphql_dos": "(GraphQL query cost)",
+                "graphql_sensitive": "(GraphQL schema)"}.get(rule, rule)
+            subtype = subtype or ("graphql_sensitive_schema" if rule == "graphql_sensitive" else rule)
+        return sha256_hex(json.dumps([str(httpx.URL(endpoint)), rule, target, subtype]))
+
+    def _decision(self, resp, matched, rule, *, related=(), outcome=None, target="", subtype=""):
+        evidence = resp.extensions.get("graphql_evidence")
+        if evidence is None:
+            return None
+        request_id, observation_id, pair, role, baselines = evidence
+        if outcome is None:
+            outcome = "matched" if matched else "no_match"
+            try:
+                data = resp.json()
+                if not isinstance(data, (dict, list)) or not data:
+                    outcome = "unexecutable"
+                elif isinstance(data, dict) and data.get("errors") and not matched:
+                    errors = json.dumps(data["errors"])
+                    outcome = ("blocked" if _DOS_LIMIT_ERROR_RE.search(errors) or re.search(
+                        r"disabled|not allowed|not supported|unauthorized|forbidden|access denied|rate.limit",
+                        errors, re.I) else "unexecutable")
+                elif isinstance(data, dict) and "data" not in data and not matched:
+                    outcome = "unexecutable"
+            except (ValueError, TypeError):
+                outcome = "unexecutable"
+            if resp.status_code in (401, 403, 429):
+                outcome = "blocked"
+            elif not matched and resp.status_code not in (200, 400):
+                outcome = "unexecutable"
+        aid = self._record_probe_evidence(
+            role=role, check="graphql", actor="graphql_oracle", record_kind="graphql_decision",
+            pair=pair, wave="standard", outcome=outcome, decision_rule=rule, decision_version="1",
+            parent_id=observation_id or "", request_attempt_id=request_id,
+            baseline_attempt_ids=baselines, related_attempt_ids=related or self._verify_sources(),
+            decision_subject=self._subject(str(resp.request.url) if role == "baseline" else
+                pair["request"]["url"], rule, target, subtype))
+        if aid:
+            resp.extensions.setdefault("graphql_decisions", {})[rule] = aid
+        resp.extensions.setdefault("graphql_outcomes", {})[rule] = outcome
+        return aid
+
+    @staticmethod
+    def _dos_outcome(alias, depth, matched):
+        outcomes = {alias.extensions.get("graphql_outcomes", {}).get("graphql_dos_alias"),
+                    depth.extensions.get("graphql_outcomes", {}).get("graphql_dos_depth")}
+        if not outcomes <= {"matched", "no_match", "blocked"}:
+            return "unexecutable"
+        if "blocked" in outcomes:
+            return "blocked"
+        return "matched" if matched else "no_match"
+
+    @staticmethod
+    def _attempt_details(resp, rule):
+        aid = resp.extensions.get("graphql_decisions", {}).get(rule)
+        return {"attempt_ids": [aid]} if aid else {}
 
     def _client_proxy_kwargs(self) -> dict:
         proxy = getattr(self.engine, "proxy", "") or None
@@ -407,8 +539,13 @@ class GraphQLScanner(BaseScanner):
                 headers=headers,
                 **self._client_transport_kwargs(),
             ) as client:
-                resp = await client.post(endpoint, json=query)
+                resp = await self._request(client, "post", endpoint, json=query,
+                                           rule="graphql_discovery", role="baseline")
                 self._record_probe_status(resp)
+                matched = resp.status_code in (200, 400) and bool(_GQL_RESPONSE_RE.search(resp.text))
+                self._decision(resp, matched, "graphql_discovery")
+                if matched and resp.extensions.get("graphql_evidence"):
+                    self._evidence_baselines[endpoint] = resp.extensions["graphql_evidence"][0]
                 # 実 POST が 401/ログイン化 → 失効を通知して中断（resume の誤スキップ防止）
                 if self._note_auth_failure(resp, endpoint):
                     return False
@@ -417,11 +554,15 @@ class GraphQLScanner(BaseScanner):
                     if _GQL_RESPONSE_RE.search(body):
                         return True
                 # Some GQL servers accept GET with query param
-                resp2 = await client.get(
-                    endpoint,
+                resp2 = await self._request(
+                    client, "get", endpoint, rule="graphql_discovery", role="baseline",
                     params={"query": "{ __typename }"},
                 )
                 self._record_probe_status(resp2)
+                matched = resp2.status_code in (200, 400) and bool(_GQL_RESPONSE_RE.search(resp2.text))
+                self._decision(resp2, matched, "graphql_discovery")
+                if matched and resp2.extensions.get("graphql_evidence"):
+                    self._evidence_baselines[endpoint] = resp2.extensions["graphql_evidence"][0]
                 if self._note_auth_failure(resp2, endpoint):
                     return False
                 if resp2.status_code in (200, 400):
@@ -446,6 +587,7 @@ class GraphQLScanner(BaseScanner):
         findings: list[Finding] = []
 
         # 1. Introspection
+        self._schema_responses.pop(endpoint, None)
         schema_data = await self._test_introspection(endpoint, headers, timeout, findings)
 
         # 2. Batch queries
@@ -460,6 +602,8 @@ class GraphQLScanner(BaseScanner):
         # 4. Sensitive field/type names
         if schema_data:
             self._test_sensitive_schema(endpoint, schema_data, findings)
+        elif endpoint in self._schema_responses:
+            self._decision(self._schema_responses[endpoint], False, "graphql_sensitive", outcome="unexecutable")
 
         return findings
 
@@ -479,8 +623,16 @@ class GraphQLScanner(BaseScanner):
                 headers=headers,
                 **self._client_transport_kwargs(),
             ) as client:
-                resp = await client.post(endpoint, json=query)
+                resp = await self._request(client, "post", endpoint, json=query, rule="graphql_introspection")
                 self._record_probe_status(resp)
+                self._schema_responses[endpoint] = resp
+                try:
+                    candidate = resp.json()
+                    schema = (candidate.get("data") or {}).get("__schema") if isinstance(candidate, dict) else None
+                    matched = resp.status_code == 200 and isinstance(schema, dict)
+                except (ValueError, TypeError):
+                    matched = False
+                self._decision(resp, matched, "graphql_introspection")
                 if resp.status_code != 200:
                     return None
                 data = resp.json()
@@ -512,7 +664,7 @@ class GraphQLScanner(BaseScanner):
             response={"status": 200, "url": endpoint},
             confidence="likely",
             evidence_type="graphql_introspection",
-            evidence_details={"type_count": type_count},
+            evidence_details={"type_count": type_count, **self._attempt_details(resp, "graphql_introspection")},
         ))
         return schema
 
@@ -535,8 +687,9 @@ class GraphQLScanner(BaseScanner):
                 headers=headers,
                 **self._client_transport_kwargs(),
             ) as client:
-                resp = await client.post(endpoint, json=batch_query)
+                resp = await self._request(client, "post", endpoint, json=batch_query, rule="graphql_batch")
                 self._record_probe_status(resp)
+                self._decision(resp, resp.status_code == 200 and resp.text.strip().startswith("["), "graphql_batch")
                 if resp.status_code != 200:
                     return
                 body = resp.text
@@ -566,7 +719,7 @@ class GraphQLScanner(BaseScanner):
             response={"status": 200, "url": endpoint},
             confidence="likely",
             evidence_type="graphql_batch",
-            evidence_details={"operation_count": len(batch_query)},
+            evidence_details={"operation_count": len(batch_query), **self._attempt_details(resp, "graphql_batch")},
         ))
 
     async def _test_dos(
@@ -592,10 +745,24 @@ class GraphQLScanner(BaseScanner):
                 headers=headers,
                 **self._client_transport_kwargs(),
             ) as client:
-                r1 = await client.post(endpoint, json={"query": alias_query})
+                r1 = await self._request(client, "post", endpoint, json={"query": alias_query}, rule="graphql_dos_alias")
                 self._record_probe_status(r1)
-                r2 = await client.post(endpoint, json={"query": depth_query})
+                try:
+                    alias_matched = r1.status_code == 200 and detect_alias_amplification(r1.json(), _DOS_ALIAS_COUNT)
+                except ValueError:
+                    alias_matched = False
+                self._decision(r1, alias_matched, "graphql_dos_alias")
+                r2 = await self._request(client, "post", endpoint, json={"query": depth_query}, rule="graphql_dos_depth")
                 self._record_probe_status(r2)
+                try:
+                    depth_matched = r2.status_code == 200 and detect_no_depth_limit(r2.json())
+                except ValueError:
+                    depth_matched = False
+                self._decision(r2, depth_matched, "graphql_dos_depth")
+                related = r2.extensions.get("graphql_evidence")
+                if related:
+                    self._decision(r1, alias_matched and depth_matched, "graphql_dos", related=(related[1],),
+                                   outcome=self._dos_outcome(r1, r2, alias_matched and depth_matched))
                 if r1.status_code != 200 or r2.status_code != 200:
                     return
                 alias_data = r1.json()
@@ -632,7 +799,11 @@ class GraphQLScanner(BaseScanner):
             confidence="tentative",
             evidence_type="graphql_dos",
             evidence_details={"alias_count": _DOS_ALIAS_COUNT,
-                              "introspection_depth": _DOS_NEST_DEPTH},
+                              "introspection_depth": _DOS_NEST_DEPTH,
+                              "attempt_ids": [aid for aid in (
+                                  *self._attempt_details(r1, "graphql_dos").get("attempt_ids", ()),
+                                  *self._attempt_details(r1, "graphql_dos_alias").get("attempt_ids", ()),
+                                  *self._attempt_details(r2, "graphql_dos_depth").get("attempt_ids", ())) if aid]},
         ))
 
     async def _test_injection(
@@ -688,7 +859,7 @@ class GraphQLScanner(BaseScanner):
                         headers=headers,
                         **self._client_transport_kwargs(),
                     ) as client:
-                        resp = await client.post(endpoint, json=gql_body)
+                        resp = await self._request(client, "post", endpoint, json=gql_body, rule="graphql_injection")
                         self._record_probe_status(resp)
                         body = resp.text[:4000]
                 except Exception as exc:
@@ -700,6 +871,8 @@ class GraphQLScanner(BaseScanner):
                 matched, expected = self._classify_injection_response(
                     vuln_type, payload_str, body
                 )
+                self._decision(resp, matched, "graphql_injection", target=f"{type_name}.{field_name}({arg_name})",
+                               subtype=f"graphql_injection_{vuln_type}")
                 if matched:
                     findings.append(Finding(
                         check_type="graphql_injection",
@@ -725,6 +898,7 @@ class GraphQLScanner(BaseScanner):
                             "field_name": field_name,
                             "arg_name": arg_name,
                             "expected": expected,
+                            **self._attempt_details(resp, "graphql_injection"),
                         },
                     ))
                     break  # One finding per field is sufficient
@@ -761,6 +935,9 @@ class GraphQLScanner(BaseScanner):
                 if _SENSITIVE_NAME_RE.search(fld.get("name", "")):
                     sensitive_names.append(f"{type_name}.{fld['name']}")
 
+        resp = self._schema_responses.get(endpoint)
+        if resp is not None and _VERIFY_EVIDENCE.get() is None:
+            self._decision(resp, bool(sensitive_names), "graphql_sensitive")
         if not sensitive_names:
             return
 
@@ -780,10 +957,29 @@ class GraphQLScanner(BaseScanner):
             response={"status": 200, "url": endpoint},
             confidence="likely",
             evidence_type="graphql_sensitive_schema",
-            evidence_details={"sensitive_names": sensitive_names[:20]},
+            evidence_details={"sensitive_names": sensitive_names[:20],
+                              **(self._attempt_details(resp, "graphql_sensitive") if resp is not None else {})},
         ))
 
     async def verify_finding(self, finding: Finding) -> bool | None:
+        context = {"scanner": self, "finding": finding}
+        token = _VERIFY_EVIDENCE.set(context)
+        try:
+            result = await self._verify_finding(finding)
+            resp = context.get("response")
+            if resp is not None:
+                aid = self._decision(resp, result is True, finding.check_type,
+                                     outcome="verification_error" if result is None else None)
+                if aid:
+                    finding.evidence_details["verification_attempt_ids"] = [aid]
+            elif not context.get("attempted"):
+                self.record_evidence_skip(finding.url, rules=(finding.check_type,), role="verify",
+                                          reason="missing_replay_payload")
+            return result
+        finally:
+            _VERIFY_EVIDENCE.reset(token)
+
+    async def _verify_finding(self, finding: Finding) -> bool | None:
         headers = dict(_HEADERS)
         if hasattr(self.engine, "auth_headers"):
             headers.update(self.auth_headers_for_url(finding.url))
@@ -854,7 +1050,7 @@ class GraphQLScanner(BaseScanner):
                 headers=headers,
                 **self._client_transport_kwargs(),
             ) as client:
-                resp = await client.post(endpoint, json=payload)
+                resp = await self._request(client, "post", endpoint, json=payload, rule="graphql_introspection")
                 self._record_probe_status(resp)
                 return resp.status_code, resp.text
         except Exception as exc:

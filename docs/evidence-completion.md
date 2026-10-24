@@ -185,6 +185,39 @@ WSCAN_E2E=1 WSCAN_PASSIVE_ACCEPTANCE_DIR=/path/to/new-empty-directory \
   python -m pytest -q tests/test_passive_page_evidence_e2e.py
 ```
 
+### GraphQL transport decisions
+
+既存の GraphQL 発見 POST と条件付き GET、introspection、batch、alias/depth の二段 DoS、
+全 injection probe、および既存の再検証を実 HTTPX request identity に結びます。
+hook は本文を読みません。scanner が消費した応答の hash・長さを別の observation に記録し、
+既存 oracle の判定を `graphql_decision` として保存します。schema の sensitive-name 判定は
+introspection 応答に基づくローカル判断であり、追加の通信ではありません。
+
+discovery は baseline として各送信の outcome を持ち、同じ endpoint での成功した発見だけが
+攻撃の前提になります。ページ/API の計画は既存の実行キーと攻撃ルールを使い、baseline を
+attack に読み替えません。alias/depth は別々の攻撃で、集約判定の `related_attempt_ids` が
+第二の応答を参照します。Finding の `evidence_details.attempt_ids` は原因の判定を保持し、
+DoS では二段の判定と集約を参照します。
+
+再検証は元の同一 scan の一致判定と、endpoint・subtype・注入先・実送信 body hash を検証します。
+相関のない True、不正 JSON、曖昧な GraphQL errors、応答なし、logger failure は confirmed に
+昇格しません。明示的な認証/制限拒否、timeout、transport error、未送信の policy skip は別の
+outcome で保持します。元の候補 Finding と検出 oracle、HTTP 設定、probe 数は維持します。
+DoS の専用再検証は追加しません。
+
+query/variables/extensions の GET 値は伏字化し、request/response body は hash・長さのみ保持します。
+GraphQL の応答済み要求は `http_requests.jsonl` に metadata の互換行も一度記録します。
+この互換行は新しい通信や request 行を生まず、timeout 等の無応答の送信試行は台帳に残ります。
+`logical_requests` は request 行だけを数えます。旧 GraphQL 行は引き続き読めますが、新しい
+因果関係の代わりにはなりません。未知経路・未到達・未実行の計画は不完全のままです。
+
+```sh
+python -m pytest -q tests/test_graphql_evidence.py
+```
+
+この fixture は実 scanner と永続 logger を MockTransport/loopback HTTP で実行し、脆弱/安全
+ツイン、各 oracle、両 DoS 原因、再検証、改変/欠落した相関、resume、書込失敗と秘密値の非保存を確認します。
+
 実 Chromium fixture は本番 ScanEngine の脆弱・安全ツイン、非空の HTTP 500 応答、logger failure、
 別プロセス resume と証跡欠落を検証します。candidate と confirmed を分けて数え、server の実測
 受信数と共有 GET の台帳件数を照合します。resume の既存 crawl GET と、完了済みの監査 GET の
