@@ -965,7 +965,7 @@ class DetectionEvidenceTests(unittest.TestCase):
         self.assertTrue(matched)
         self.assertIn(expected.lower(), {"sqlite", "syntax", "sql"})
 
-    def test_engine_routes_graphql_subtype_to_graphql_verifier(self):
+    def test_engine_routes_graphql_subtype_but_requires_replay_evidence(self):
         async def run():
             engine = ScanEngine(
                 "http://fixture.test/",
@@ -990,7 +990,7 @@ class DetectionEvidenceTests(unittest.TestCase):
 
             result = await engine._verify_one(finding)
 
-            self.assertEqual(result, "reproduced")
+            self.assertEqual(result, "assumed")
             scanner.verify_finding.assert_awaited_once()
 
         self.run_async(run())
