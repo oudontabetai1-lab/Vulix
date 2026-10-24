@@ -74,6 +74,8 @@ class SecurityHeadersScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "security_headers"
+    PASSIVE_RULES = tuple("missing_" + h[0] for h in _HEADER_CHECKS) + (
+        "security_header_unsafe_csp", "security_header_short_hsts")
     CONTRACT = ScannerContract(
         execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
         capabilities=(
@@ -153,6 +155,8 @@ class SecurityHeadersScanner(BaseScanner):
         # 失敗のシグナル。失敗時は transport_error を刻み、degraded_checks が page-level tested 行を
         # 除外して passive case を誤 TN/FN でなく NOT_REACHED にする。
         if not response or response.get("status") is None:
+            for rule in self.PASSIVE_RULES:
+                self._passive_decision(pair, False, rule, outcome="unexecutable")
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
             if not response:
                 # 完全な取得失敗（_get 失敗＋capture 無し）は例外で engine に伝え、checkpoint 未完了に
@@ -171,10 +175,13 @@ class SecurityHeadersScanner(BaseScanner):
         # 監査して FN を作らない。
         ctype = (headers.get("content-type", "") or "").lower()
         if ctype and "html" not in ctype:
+            for rule in self.PASSIVE_RULES:
+                self._passive_decision(pair, False, rule, outcome="skipped")
             return []
 
         findings = []
         for header, description, severity, recommendation in _HEADER_CHECKS:
+            attempt = self._passive_decision(pair, header not in headers, "missing_" + header)
             if header not in headers:
                 finding = await self.record_finding(
                     url=url,
@@ -187,6 +194,7 @@ class SecurityHeadersScanner(BaseScanner):
                     evidence_type="security_header_missing",
                     evidence_details={
                         "header": header,
+                        "probe_attempt_id": attempt or "",
                         "recommendation": recommendation,
                     },
                     reproduction_steps=[
@@ -199,6 +207,8 @@ class SecurityHeadersScanner(BaseScanner):
 
         # Special check: CSP present but allows unsafe-inline
         csp = headers.get("content-security-policy", "")
+        attempt = self._passive_decision(pair, bool(csp and "unsafe-inline" in csp.lower()),
+                                         "security_header_unsafe_csp")
         if csp and "unsafe-inline" in csp.lower():
             finding = await self.record_finding(
                 url=url,
@@ -217,6 +227,7 @@ class SecurityHeadersScanner(BaseScanner):
                     "header": "content-security-policy",
                     "observed_value": csp,
                     "unsafe_directive": "unsafe-inline",
+                    "probe_attempt_id": attempt or "",
                 },
                 reproduction_steps=[
                     f"Request {url}",
@@ -228,8 +239,10 @@ class SecurityHeadersScanner(BaseScanner):
 
         # Special check: HSTS present but max-age is too short
         hsts = headers.get("strict-transport-security", "")
+        m = re.search(r"max-age\s*=\s*(\d+)", hsts, re.IGNORECASE) if hsts else None
+        attempt = self._passive_decision(pair, bool(m and int(m.group(1)) < 86400),
+                                         "security_header_short_hsts")
         if hsts:
-            m = re.search(r"max-age\s*=\s*(\d+)", hsts, re.IGNORECASE)
             if m and int(m.group(1)) < 86400:  # Less than 1 day
                 finding = await self.record_finding(
                     url=url,
@@ -248,6 +261,7 @@ class SecurityHeadersScanner(BaseScanner):
                         "observed_value": hsts,
                         "max_age": int(m.group(1)),
                         "recommended_minimum": 31536000,
+                        "probe_attempt_id": attempt or "",
                     },
                     reproduction_steps=[
                         f"Request {url}",
@@ -260,6 +274,30 @@ class SecurityHeadersScanner(BaseScanner):
         return findings
 
     async def verify_finding(self, finding: Finding) -> bool | None:
+        """既存の再取得/戻り値を保ち、その入力と元判定だけを相関する。"""
+        evidence_type = getattr(finding, "evidence_type", "") or ""
+        details = getattr(finding, "evidence_details", {}) or {}
+        pair = {}
+        async def fetch():
+            response = await self._get(finding.url)
+            try:
+                final_url = str(response.url)
+            except Exception:
+                final_url = finding.url
+            pair.update(request={"url": finding.url, "method": "GET"},
+                        response={"status": response.status_code, "url": final_url,
+                                  "headers": dict(response.headers)},
+                        _passive_binding=getattr(response, "probe_binding", None))
+            return response
+        result = await self._verify_header(finding, fetch)
+        self._passive_decision(pair, result is True, evidence_type,
+                               parent=details.get("probe_attempt_id", ""), role="verify", field_name=finding.field_name,
+                               source_rule=("missing_" + (details.get("header") or "").lower()
+                                            if evidence_type == "security_header_missing" else evidence_type),
+                               outcome="unexecutable" if result is None else None)
+        return result
+
+    async def _verify_header(self, finding: Finding, fetch) -> bool | None:
         """Re-fetch the page and confirm the same header weakness still exists."""
         evidence_type = getattr(finding, "evidence_type", "") or ""
         details = getattr(finding, "evidence_details", {}) or {}
@@ -272,7 +310,7 @@ class SecurityHeadersScanner(BaseScanner):
             return None
 
         try:
-            response = await self._get(finding.url)
+            response = await fetch()
         except Exception:
             return None
 

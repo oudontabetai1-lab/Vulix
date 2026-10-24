@@ -898,7 +898,7 @@ output/<timestamp>/
 
 確実性を重視する通常層では、HTML レポートの Observability の直後に Coverage を表示します。`reached`、`attempts`、`by_status`、HTTP 403/429、未到達 URL と理由を Finding と分けて確認し、0 findings の場合も検査範囲と通信ブロックの有無を合わせて判断してください。これらは記録・集計用で、既存の検出判定やスキャン挙動は変更しません。
 
-通常スキャンの共通 Playwright query/form と direct HTTPX JSON 送信は、明示的な baseline・control・attack の役割と実リクエスト ID を記録します。SQLi の通常判定と XSS の dialog/reflection・等価性比較では、その ID と比較対象から判定を追跡できます。manifest の `logical_requests` はこの共通経路の送信試行数で、応答フックや判定行の数ではありません。通常のページ検査では、DOM-XSS の query/form と静的 JS 解析について flow・snapshot・観測・検証・復旧の親子関係も同じ台帳へ記録します。非 HTTP 行は送信件数に加算せず、未取得の外部 JS や欠落した親証跡は未完了として扱います。詳細と未対応経路は [Evidence completion](docs/evidence-completion.md) を参照してください。0 Finding・HTTP 成功・checkpoint 完了だけでは証跡完了や安全を意味しません。
+通常スキャンの共通 Playwright query/form と direct HTTPX JSON 送信は、明示的な baseline・control・attack の役割と実リクエスト ID を記録します。SQLi の通常判定と XSS の dialog/reflection・等価性比較では、その ID と比較対象から判定を追跡できます。manifest の `logical_requests` はこの共通経路の送信試行数で、応答フックや判定行の数ではありません。通常のページ検査では、DOM-XSS の query/form と静的 JS 解析について flow・snapshot・観測・検証・復旧の親子関係も同じ台帳へ記録します。非 HTTP 行は送信件数に加算せず、未取得の外部 JS や欠落した親証跡は未完了として扱います。`clickjacking` と `security_headers` は共有 HTTP 応答の入力 hash と実行した各ヘッダ判定を記録し、後者の既存再検証も元判定と相関します。詳細と未対応経路は [Evidence completion](docs/evidence-completion.md) を参照してください。0 Finding・HTTP 成功・checkpoint 完了だけでは証跡完了や安全を意味しません。
 
 ### Webhook
 

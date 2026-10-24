@@ -654,10 +654,10 @@ class _DirectResponse:
     が使う ``status_code`` / ``headers``（小文字キー dict）/ ``text``（取得済み str）/ ``url`` を提供する。
     """
 
-    __slots__ = ("status_code", "headers", "text", "url", "body_unavailable")
+    __slots__ = ("status_code", "headers", "text", "url", "body_unavailable", "probe_binding")
 
     def __init__(self, status_code: int, headers: dict, text: str, url: str,
-                 body_unavailable: bool = False):
+                 body_unavailable: bool = False, probe_binding=None):
         self.status_code = status_code
         self.headers = headers
         self.text = text
@@ -665,6 +665,7 @@ class _DirectResponse:
         # 本文の取得/復号が完全に失敗した（text() も body() も失敗）ことを示す。空本文の 200 を
         # 「本文なし」と取り違えないための信号（content 観測系が PageDocumentUnavailable を投げる）。
         self.body_unavailable = body_unavailable
+        self.probe_binding = probe_binding
 
 
 class BaseScanner(ABC):
@@ -794,6 +795,9 @@ class BaseScanner(ABC):
                 return record(**observation)
         except Exception as exc:
             self._record_scan_note(f"probe_evidence_error:{type(exc).__name__}")
+            ledger = getattr(getattr(self.engine, "request_logger", None), "probe_ledger", None)
+            if ledger is not None:
+                ledger.manifest.note_gap(f"probe_evidence_error:{type(exc).__name__}")
 
     def _note_wave_degradation(self, wave: str, exc: Exception) -> None:
         """payload 強化 wave（evolution/mutation）の失敗を *観測可能* にする。
@@ -954,6 +958,33 @@ class BaseScanner(ABC):
                                    request_attempt_id=attempt, outcome=outcome or ("matched" if matched else "no_match"),
                                    decision_rule=rule, decision_version="1",
                                    rationale=rationale)
+
+    def _passive_decision(self, pair, matched, rule, *, parent="", role="attack", outcome=None, source_rule="", field_name="(page)"):
+        from wscan.probe_ledger import Transport, header_material, sha256_hex
+        logger = getattr(self.engine, "request_logger", None)
+        if logger is None:
+            return None
+        from wscan.checkpoint import unit_key
+        from wscan.probe_recorder import completion_identity
+        target = ((pair or {}).get("request") or {}).get("url", "")
+        key = unit_key(target, field_name, 0, self.CHECK_TYPE)
+        if role == "verify":
+            key += "\x1everify:" + rule
+        bound_unit = logger.probe_ledger.current_unit() == completion_identity(key)
+        binding = (pair or {}).get("_passive_binding")
+        response = (pair or {}).get("response") or {}
+        valid = (bound_unit and binding and binding[0] is logger and binding[1] and binding[2]
+                 and isinstance(response.get("headers"), dict)
+                 and sha256_hex(header_material(response["headers"])) == binding[3])
+        return self._record_probe_evidence(
+            role=role, check=self.CHECK_TYPE, actor="passive_header_oracle",
+            record_kind="passive_decision", transport=Transport.PLAYWRIGHT,
+            pair=pair, sent=bool(valid), parent_id=binding[2] if valid else "",
+            request_attempt_id=binding[1] if valid else "",
+            field=sha256_hex(((pair or {}).get("request") or {}).get("url", "")),
+            control_attempt_ids=(parent,) if parent else (), wave=source_rule,
+            outcome=outcome or (("matched" if matched else "no_match") if valid else "unexecutable"),
+            decision_rule=rule, decision_version="1", rationale="executed passive header predicate")
 
     @staticmethod
     def _probe_id(pair):
@@ -2058,30 +2089,45 @@ class BaseScanner(ABC):
 
         current = url
         response = None
-        from wscan.probe_ledger import ProbeRole, Transport
+        from wscan.probe_ledger import ProbeRole, Transport, sha256_hex, header_material
 
         async def get_hop(hop_url):
             headers = _headers_for(hop_url) or None
             request = {"method": "GET", "url": hop_url, "headers": headers}
             attempt_id = self._record_probe_evidence(
                 role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT,
-                actor="api_get_capture", pair={"request": request},
+                actor="api_get_capture", check="", completion_unit="",
+                record_kind="request", field=sha256_hex(url), pair={"request": request},
                 rationale="API GET submission; delivery and outcome unknown",
             )
-            result = await request_ctx.get(hop_url, headers=headers, **get_kwargs)
-            self._record_probe_evidence(
+            try:
+                result = await request_ctx.get(hop_url, headers=headers, **get_kwargs)
+            except BaseException as exc:
+                self._record_probe_evidence(
+                    role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT,
+                    actor="api_get_capture", check="", completion_unit="",
+                    record_kind="decision", request_attempt_id=attempt_id or "",
+                    parent_id=attempt_id or "", pair={"request": request},
+                    outcome=self._probe_exception_outcome(exc),
+                    decision_rule="passive_document_fetch", decision_version="1",
+                    rationale="shared document GET did not finish")
+                raise
+            observed = self._record_probe_evidence(
                 role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT,
-                actor="api_get_capture", sent=True, parent_id=attempt_id or "",
+                actor="api_get_capture", check="", completion_unit="", field=sha256_hex(url),
+                record_kind="observation", request_attempt_id=attempt_id or "",
+                sent=True, parent_id=attempt_id or "",
                 pair={"request": request, "response": {
                     "status": result.status, "url": str(getattr(result, "url", hop_url)),
                     "headers": dict(result.headers), "timestamp": time.time()}},
                 rationale="API GET response observed; detector role and outcome unknown",
             )
-            return result
+            return result, (getattr(self.engine, "request_logger", None), attempt_id, observed,
+                            sha256_hex(header_material(dict(result.headers))))
 
         try:
             # 最初の GET も try 内に入れ、cookie を変異させ得る送信は必ず finally の再同期に載せる。
-            response = await get_hop(current)
+            response, binding = await get_hop(current)
             hops = 0
             while response.status in (301, 302, 303, 307, 308) and hops < 5:
                 loc = response.headers.get("location")
@@ -2096,7 +2142,7 @@ class BaseScanner(ABC):
                 await self._dispose_response(response)  # 中間 response の body を解放
                 hops += 1
                 current = target
-                response = await get_hop(current)
+                response, binding = await get_hop(current)
             body_unavailable = False
             try:
                 text = await response.text()
@@ -2122,7 +2168,7 @@ class BaseScanner(ABC):
                 headers=dict(response.headers),  # Playwright は小文字キーの dict を返す
                 text=text[:50000],
                 url=str(getattr(response, "url", current) or current),
-                body_unavailable=body_unavailable,
+                body_unavailable=body_unavailable, probe_binding=binding,
             )
             self._record_probe_status(direct)
             return direct
@@ -2219,6 +2265,7 @@ class BaseScanner(ABC):
                 "response": {"url": raw.get("url", url), "headers": {}, "body": ""},
             }
         return {
+            "_passive_binding": raw.get("_passive_binding"),
             "request": {"url": url, "method": "GET"},
             "response": {
                 "url": raw.get("url", url),
@@ -2344,6 +2391,7 @@ class BaseScanner(ABC):
                 "body": (response.text or "")[:50000],
                 "url": str(getattr(response, "url", url) or url),
                 "body_unavailable": bool(getattr(response, "body_unavailable", False)),
+                "_passive_binding": getattr(response, "probe_binding", None),
             }
         except Exception:
             # latest/current_page_pair は query・method・document を保証しない。

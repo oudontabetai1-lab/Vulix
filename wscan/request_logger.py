@@ -189,7 +189,7 @@ class RequestLogger:
         try:
             from wscan.probe_ledger import (
                 ProbeAttemptRecord, RequestRecord, ResponseRecord,
-                body_length, redact_excerpt, sha256_hex,
+                body_length, redact_excerpt, sha256_hex, header_material,
             )
             req = (pair or {}).get("request") or {}
             resp = (pair or {}).get("response") or {}
@@ -207,7 +207,9 @@ class RequestLogger:
             response = None
             if resp:
                 body = resp.get("body")
+                material = header_material(resp["headers"]) if isinstance(resp.get("headers"), dict) else None
                 response = ResponseRecord(
+                    headers_hash=sha256_hex(material), headers_length=body_length(material),
                     status=resp.get("status"), final_url=resp.get("url", ""),
                     headers_excerpt=redact_excerpt("\n".join(
                         f"{k}: {v}" for k, v in (resp.get("headers") or {}).items())),

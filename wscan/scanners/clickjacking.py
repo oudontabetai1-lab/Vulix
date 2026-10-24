@@ -27,6 +27,7 @@ class ClickjackingScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "clickjacking"
+    PASSIVE_RULES = ("clickjacking_framing",)
     CONTRACT = ScannerContract(
         execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
         capabilities=(
@@ -107,6 +108,7 @@ class ClickjackingScanner(BaseScanner):
         pair = await self._response_pair(url)
         response = pair.get("response") or {}
         if not response or response.get("status") is None:
+            self._passive_decision(pair, False, self.PASSIVE_RULES[0], outcome="unexecutable")
             # レスポンス証拠なし（fetch 失敗）＝観測失敗。空ヘッダを「framing 保護なし」と誤判定
             # しないよう transport_error を刻む（degraded_checks が passive case を NOT_REACHED に）。
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
@@ -125,6 +127,7 @@ class ClickjackingScanner(BaseScanner):
         # skip し、欠落時は従来どおり監査して FN を作らない。
         ctype = (headers.get("content-type", "") or "").lower()
         if ctype and "html" not in ctype:
+            self._passive_decision(pair, False, self.PASSIVE_RULES[0], outcome="skipped")
             return []
 
         xfo = headers.get("x-frame-options", "").upper().strip()
@@ -133,6 +136,8 @@ class ClickjackingScanner(BaseScanner):
         has_xfo_protection = xfo in ("DENY", "SAMEORIGIN")
         has_csp_frame_ancestors = "frame-ancestors" in csp
 
+        self._passive_decision(pair, not (has_xfo_protection or has_csp_frame_ancestors),
+                               self.PASSIVE_RULES[0])
         if has_xfo_protection or has_csp_frame_ancestors:
             return []  # Protected
 

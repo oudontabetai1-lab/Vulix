@@ -1761,7 +1761,8 @@ class ScanEngine:
             for check, scanner in self.scanners.items():
                 if getattr(scanner, "HAS_PAGE_LEVEL", False) or hasattr(scanner, "scan_page_context"):
                     rules = (("cors_wildcard_credentials", "cors_origin_reflection") if check == "cors"
-                             else ("js_static_snapshot",) if check == "js_static" else ())
+                             else ("js_static_snapshot",) if check == "js_static"
+                             else getattr(scanner, "PASSIVE_RULES", ()))
                     ledger.expect(unit_key(_page_check_cp_url(check, page.url), "(page)", 0, check),
                                   check, rules=rules,
                                   reason="excluded_by_configuration" if page_excluded
@@ -6084,7 +6085,8 @@ class ScanEngine:
                     if callable(_page_gate) and not _page_gate(page.url):
                         continue
                     from .checkpoint import unit_key
-                    rules = ("cors_wildcard_credentials", "cors_origin_reflection") if check_name == "cors" else ()
+                    rules = (("cors_wildcard_credentials", "cors_origin_reflection") if check_name == "cors"
+                             else getattr(scanner, "PASSIVE_RULES", ()))
                     with ScanEngine._evidence_scope(self, unit_key(cp_url, "(page)", 0, check_name), check_name, rules=rules):
                         page_findings = await scanner.scan_page(page.url)
                 page_findings = page_findings or []
@@ -7736,7 +7738,7 @@ class ScanEngine:
             from .checkpoint import unit_key
             for finding in to_verify:
                 check = finding.check_type
-                rules = ((finding.evidence_type,) if check == "cors" else
+                rules = ((finding.evidence_type,) if check in {"cors", "security_headers"} else
                          ("dom_xss_verify",) if check == "dom_xss" else ())
                 ledger.expect(unit_key(finding.url, finding.field_name, 0, check)
                               + "\x1everify:" + finding.evidence_type, check, rules=rules,
@@ -7958,7 +7960,7 @@ class ScanEngine:
             self._api_auth_failed = False
             self._json_probe_failed = False
             from .checkpoint import unit_key
-            rules = ((f.evidence_type,) if scanner_key == "cors" else
+            rules = ((f.evidence_type,) if scanner_key in {"cors", "security_headers"} else
                      ("dom_xss_verify",) if scanner_key == "dom_xss" else ())
             with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, scanner_key) + "\x1everify:" + f.evidence_type,
                                       scanner_key, rules=rules, role="verify"):

@@ -215,15 +215,26 @@ async def test_api_get_records_each_redirect_hop_without_reading_intermediate_bo
         final.text.assert_awaited_once()
     redirect.text.assert_not_awaited()
     first, response1, second, *remaining = rows(logger)
+    assert request.get.await_count == 2
     assert response1["parent_id"] == first["attempt_id"]
     assert response1["response"]["status"] == 302
     assert second["request"]["url"] == "https://t.test/final"
     if fail_final:
-        assert not remaining
+        failure_row, = remaining
+        assert failure_row["record_kind"] == "decision"
+        assert failure_row["actor"] == "api_get_capture"
+        assert failure_row["role"] == "discover"
+        assert failure_row["parent_id"] == failure_row["request_attempt_id"] == second["attempt_id"]
+        assert failure_row["request"]["url"] == second["request"]["url"]
+        assert failure_row["outcome"] == "verification_error"
+        assert failure_row.get("response") is None
+        assert "private" not in logger.probe_ledger.path.read_text()
+        assert logger.probe_ledger.completion_summary(["security_headers"])["status"] != "COMPLETE"
     else:
         assert remaining[0]["parent_id"] == second["attempt_id"]
         assert remaining[0]["response"]["status"] == 403
-    assert all(row["outcome"] is None for row in rows(logger))
+        assert remaining[0]["outcome"] is None
+    assert all(row["outcome"] is None for row in (first, response1, second))
 
 
 @pytest.mark.parametrize("check,role", [

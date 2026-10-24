@@ -215,7 +215,7 @@ class ProbeLedger:
             invalid_decision = False
             for row in rows:
                 if row.get("record_kind", "legacy") == "legacy":
-                    if row.get("check") not in {"sqli", "xss"}:
+                    if row.get("check") not in {"sqli", "xss", "clickjacking", "security_headers"}:
                         accepted.append(row)
                     continue
                 if row.get("record_kind") != "decision":
@@ -258,6 +258,9 @@ class ProbeLedger:
             result[unit] = accepted
         from .browser_evidence import accepted_decisions
         for unit, decisions in accepted_decisions(self.events).items():
+            result[unit] = decisions
+        from .passive_evidence import accepted_decisions as passive_decisions
+        for unit, decisions in passive_decisions(self.events).items():
             result[unit] = decisions
         return result
 
@@ -339,8 +342,25 @@ class ProbeLedger:
         outcome = rec.get("outcome")
         if outcome is not None and outcome not in _VALID_OUTCOMES:
             return False  # 語彙外の outcome（null は未記録として許容）
-        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision", "browser"}:
+        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision", "browser", "passive_decision"}:
             return False
+        if rec.get("record_kind") == "passive_decision":
+            if (rec.get("check") not in {"clickjacking", "security_headers"}
+                    or rec.get("actor") != "passive_header_oracle"
+                    or rec.get("role") not in {"attack", "verify"}
+                    or rec.get("browser") is not None
+                    or rec.get("decision_version") != "1"
+                    or not isinstance(rec.get("decision_rule"), str)
+                    or not isinstance(rec.get("request"), dict)
+                    or rec.get("response") is not None and not isinstance(rec["response"], dict)):
+                return False
+            response = rec.get("response")
+            if response is not None and (
+                    not isinstance(response.get("headers_hash"), str)
+                    or type(response.get("headers_length")) is not int or response["headers_length"] < 0
+                    or not isinstance(response.get("final_url"), str)
+                    or response.get("status") is not None and type(response["status"]) is not int):
+                return False
         if rec.get("record_kind") == "browser":
             from .probe_ledger import BrowserEvidence
             import dataclasses
