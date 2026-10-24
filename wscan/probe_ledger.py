@@ -83,6 +83,12 @@ def body_length(body) -> int:
     return len(body)
 
 
+def header_material(headers) -> str:
+    """判定へ渡したヘッダ全体の fingerprint 用正規形（生値は保存しない）。"""
+    return json.dumps({k.lower(): v for k, v in headers.items()},
+                      ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def redact_excerpt(text: Optional[str], cap: int = 512) -> str:
     """機微値を伏せ、長さを cap で切詰めた excerpt を返す（純粋・保守的）。
 
@@ -133,6 +139,8 @@ class ResponseRecord:
     body_hash: str = ""
     body_length: int = 0
     elapsed_ms: Optional[float] = None
+    headers_hash: str = ""
+    headers_length: int = 0
     dom_diff: str = ""             # DOM/state 差の要約
     dialog: bool = False           # JS dialog 発火
     oob: bool = False              # OOB 到達

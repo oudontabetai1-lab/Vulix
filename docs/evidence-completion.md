@@ -157,3 +157,35 @@ The Chromium fixture exercises vulnerable/safe query and form twins, successful 
 intermediate-failure prerequisites, actual dialog-flood recovery, and separate-process
 checkpoint resume with and without retained evidence. Every rerun needs a fresh
 acceptance directory; previous failed artifacts remain separate.
+
+
+### Passive HTTP header decisions
+
+通常スキャンの `clickjacking` と `security_headers` は、既存の共有 API GET の実リクエストと
+応答を参照する `passive_decision` 行を記録します。ブラウザの非 HTTP snapshot 行へ置き換えず、
+ページ監査の共有取得回数も増やしません。redirect 後は実際の最終 hop の応答を参照します。
+応答ヘッダの全入力は hash と長さ、中央の伏字処理と上限を適用した excerpt で保持します。
+空のヘッダ辞書も有効な入力ですが、応答なし・非対象 content-type・非 2xx・取得失敗は
+安全という判定になりません。
+
+ページ単位の完了には、clickjacking の framing 判定、または security_headers のヘッダ欠落
+6 条件と CSP/HSTS 値の 2 条件がすべて保存され、対応する実入力との相関が必要です。
+`security_headers` の既存の再検証も元の一致判定と新しい取得応答を参照します。既存の
+検出条件・再検証の戻り値・Finding の確証ポリシーは保持されます。clickjacking に専用の
+再検証は追加しません。
+
+native network capture への fallback は引き続き検出に使いますが、この契約では元の永続 HTTP
+identity を証明できないため証跡は不完全のままです。未知の補助経路などの plan も残るため、
+このページ単位の完了は check 全体や全 transport の完了を意味しません。古い行や checkpoint
+だけで不足した判定を補うことはできず、logger failure は不完全として表示します。
+
+```sh
+python -m pytest -q tests/test_passive_page_evidence.py
+WSCAN_E2E=1 WSCAN_PASSIVE_ACCEPTANCE_DIR=/path/to/new-empty-directory \
+  python -m pytest -q tests/test_passive_page_evidence_e2e.py
+```
+
+実 Chromium fixture は本番 ScanEngine の脆弱・安全ツイン、非空の HTTP 500 応答、logger failure、
+別プロセス resume と証跡欠落を検証します。candidate と confirmed を分けて数え、server の実測
+受信数と共有 GET の台帳件数を照合します。resume の既存 crawl GET と、完了済みの監査 GET の
+再送抑制は別に確認します。再実行では新しい空の artifact directory を使ってください。
