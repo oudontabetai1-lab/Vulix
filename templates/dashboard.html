@@ -6638,6 +6638,55 @@ function onHistoryFilterChange(val) {
   renderHistoryTable();
 }
 
+function redactDisplayUrl(raw) {
+  if (!raw || typeof raw !== 'string') return raw || '';
+  const str = raw.trim();
+  if (!str) return '';
+  let result = str;
+  // 1. userinfo: scheme://user:pass@host -> scheme://<redacted>@host
+  const schemeMatch = str.match(/^[a-z][a-z0-9+.-]*:\/\//i);
+  if (schemeMatch) {
+    const after = str.slice(schemeMatch[0].length);
+    const cutIndices = [after.indexOf('/'), after.indexOf('?'), after.indexOf('#')].filter(i => i !== -1);
+    const authEnd = cutIndices.length ? Math.min(...cutIndices) : after.length;
+    const auth = after.slice(0, authEnd);
+    if (auth.includes('@')) {
+      const host = auth.slice(auth.lastIndexOf('@') + 1);
+      result = schemeMatch[0] + '<redacted>@' + host + after.slice(authEnd);
+    }
+  }
+
+  function maskKv(text) {
+    if (!text) return text;
+    return text.replace(/([^&=?\s]*)=([^&]*)/g, (match, k, v) => {
+      try {
+        const decoded = decodeURIComponent(k);
+        if (CONFIG_SENSITIVE_URL_KEY.test(decoded)) return `${k}=<redacted>`;
+      } catch (_) {
+        if (CONFIG_SENSITIVE_URL_KEY.test(k)) return `${k}=<redacted>`;
+      }
+      return match;
+    });
+  }
+
+  // 2. Query and fragment
+  if (result.includes('?')) {
+    const qParts = result.split('?', 2);
+    const base = qParts[0];
+    const rest = qParts[1];
+    if (rest.includes('#')) {
+      const fParts = rest.split('#', 2);
+      result = `${base}?${maskKv(fParts[0])}#${maskKv(fParts[1])}`;
+    } else {
+      result = `${base}?${maskKv(rest)}`;
+    }
+  } else if (result.includes('#')) {
+    const fParts = result.split('#', 2);
+    result = `${fParts[0]}#${maskKv(fParts[1])}`;
+  }
+  return result;
+}
+
 function formatHistoryBytes(bytes) {
   if (typeof bytes !== 'number' || isNaN(bytes) || bytes <= 0) return '—';
   if (bytes < 1024) return bytes + ' B';
@@ -6681,6 +6730,9 @@ async function loadScanHistory() {
   try {
     const res = await fetch('/api/v1/scans');
     if (!res.ok) {
+      if (res.status === 401) {
+        throw new Error('認証が必要です (HTTP 401 Unauthorized)。ログインするか認証トークンを確認してください。');
+      }
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     }
     const data = await res.json();
@@ -6743,13 +6795,14 @@ function renderHistoryTable() {
     tdId.appendChild(dateDiv);
     tr.appendChild(tdId);
 
-    // 2. Target URL
+    // 2. Target URL (safely redacted to remove credential secrets)
     const tdTarget = document.createElement('td');
     const targetDiv = document.createElement('div');
     targetDiv.className = 'history-target-cell';
-    const targetText = scan.target ? scan.target.trim() : '—';
-    targetDiv.textContent = targetText;
-    targetDiv.title = targetText;
+    const rawTarget = scan.target ? scan.target.trim() : '';
+    const safeTarget = rawTarget ? redactDisplayUrl(rawTarget) : '—';
+    targetDiv.textContent = safeTarget;
+    targetDiv.title = safeTarget;
     tdTarget.appendChild(targetDiv);
     tr.appendChild(tdTarget);
 

@@ -140,6 +140,16 @@ def test_dashboard_scan_history_playwright_e2e(tmp_path, monkeypatch):
         "findings": []
     }), encoding="utf-8")
 
+    # Add scan with secret canaries to verify URL privacy redaction
+    scan_secrets = tmp_path / "20261026_140000"
+    scan_secrets.mkdir()
+    (scan_secrets / "evidence.json").write_text(json.dumps({
+        "target": "https://admin:CANARY_SECRET_PASS@portal.corp/app?token=CANARY_QUERY_SECRET&safe=ok#access_token=CANARY_FRAG_SECRET",
+        "scan_date": "2026-10-26T14:00:00",
+        "status": "done",
+        "findings": []
+    }), encoding="utf-8")
+
     monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
 
     srv = MonitorServer()
@@ -174,7 +184,7 @@ def test_dashboard_scan_history_playwright_e2e(tmp_path, monkeypatch):
 
             # 4. Table Rows Populated
             rows = page.query_selector_all("#historyTable tbody tr")
-            assert len(rows) == 2
+            assert len(rows) == 3
 
             # Check done scan row
             row_html = page.inner_html("#historyTable tbody")
@@ -191,6 +201,14 @@ def test_dashboard_scan_history_playwright_e2e(tmp_path, monkeypatch):
             assert len(script_tags) == 0
             assert "&lt;script&gt;" in row_html or "<script>" in page.inner_text("#historyTable tbody")
 
+            # Verify URL privacy redaction: credential and sensitive query/fragment canaries are ABSENT
+            assert "CANARY_SECRET_PASS" not in row_html
+            assert "CANARY_QUERY_SECRET" not in row_html
+            assert "CANARY_FRAG_SECRET" not in row_html
+            # Verify redacted form appears in displayed text and title
+            assert "&lt;redacted&gt;@portal.corp" in row_html or "<redacted>@portal.corp" in page.inner_text("#historyTable tbody")
+            assert "token=&lt;redacted&gt;" in row_html or "token=<redacted>" in page.inner_text("#historyTable tbody")
+
             # 5. Search filtering
             page.fill("#historySearchInput", "malicious")
             filtered_rows = page.query_selector_all("#historyTable tbody tr")
@@ -200,12 +218,12 @@ def test_dashboard_scan_history_playwright_e2e(tmp_path, monkeypatch):
             # Clear search
             page.fill("#historySearchInput", "")
             all_rows = page.query_selector_all("#historyTable tbody tr")
-            assert len(all_rows) == 2
+            assert len(all_rows) == 3
 
             # Status filter
             page.select_option("#historyStatusFilter", "done")
             done_rows = page.query_selector_all("#historyTable tbody tr")
-            assert len(done_rows) == 1
+            assert len(done_rows) == 2
             assert "20261026_120000" in page.inner_text("#historyTable tbody")
 
             page.select_option("#historyStatusFilter", "all")
@@ -253,6 +271,111 @@ def test_dashboard_scan_history_empty_state(tmp_path, monkeypatch):
             assert page.is_visible("#historyEmptyState")
             assert not page.is_visible("#historyTableScroll")
             assert "スキャン履歴はありません" in page.inner_text("#historyEmptyState")
+
+            browser.close()
+    finally:
+        server_thread.stop()
+
+
+def test_dashboard_scan_history_fetch_error_and_401(tmp_path, monkeypatch):
+    """Test network error and 401 Unauthorized error state handling."""
+    monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
+
+    srv = MonitorServer()
+    port = find_free_port()
+    server_thread = UvicornServerThread(srv, port)
+    server_thread.start()
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            # 1. Simulate 401 Unauthorized on /api/v1/scans
+            page.route("**/api/v1/scans", lambda route: route.fulfill(
+                status=401,
+                body=json.dumps({"detail": "Unauthorized"}),
+                headers={"Content-Type": "application/json"}
+            ))
+
+            page.goto(f"http://127.0.0.1:{port}/monitor")
+            page.click("#navScanHistory")
+            page.wait_for_selector("#historyErrorState")
+
+            assert page.is_visible("#historyErrorState")
+            assert not page.is_visible("#historyTableScroll")
+            err_text = page.inner_text("#historyErrorMessage")
+            assert "401" in err_text or "認証" in err_text
+
+            # 2. Simulate network / fetch failure
+            page.unroute("**/api/v1/scans")
+            page.route("**/api/v1/scans", lambda route: route.abort())
+
+            # Click retry button
+            page.click("#historyErrorState button")
+            page.wait_for_selector("#historyErrorState")
+            assert page.is_visible("#historyErrorState")
+
+            # 3. Simulate recovery after network restored
+            page.unroute("**/api/v1/scans")
+            page.route("**/api/v1/scans", lambda route: route.fulfill(
+                status=200,
+                body=json.dumps({"scans": [], "storage": {}}),
+                headers={"Content-Type": "application/json"}
+            ))
+            page.click("#historyErrorState button")
+            page.wait_for_selector("#historyEmptyState")
+            assert page.is_visible("#historyEmptyState")
+            assert not page.is_visible("#historyErrorState")
+
+            browser.close()
+    finally:
+        server_thread.stop()
+
+
+def test_dashboard_scan_history_background_ws_liveness(tmp_path, monkeypatch):
+    """Test that background WebSocket updates continue while scan history is open."""
+    monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
+
+    srv = MonitorServer()
+
+    async def emit_test_page():
+        await srv.emit("page_start", {"url": "https://example.com/live-test-page"})
+        return {"ok": True}
+
+    srv.app.add_api_route("/__test__/emit-page", emit_test_page, methods=["POST"])
+
+    port = find_free_port()
+    server_thread = UvicornServerThread(srv, port)
+    server_thread.start()
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            page.goto(f"http://127.0.0.1:{port}/monitor")
+            page.wait_for_selector("#navLiveMonitor")
+
+            # Switch to Scan History
+            page.click("#navScanHistory")
+            assert page.is_visible("#viewScanHistory")
+            assert not page.is_visible("#viewLiveMonitor")
+
+            # Post to test endpoint inside uvicorn's event loop to trigger WS emit
+            res = page.request.post(f"http://127.0.0.1:{port}/__test__/emit-page")
+            assert res.status == 200
+
+            # Wait for client to process WebSocket message
+            page.wait_for_function("document.getElementById('statPages') && document.getElementById('statPages').textContent.trim() === '1'")
+
+            # Switch back to live monitor and verify state was preserved and updated
+            page.click("#navLiveMonitor")
+            assert page.is_visible("#viewLiveMonitor")
+            assert not page.is_visible("#viewScanHistory")
+
+            stat_pages = page.inner_text("#statPages")
+            assert "1" in stat_pages
 
             browser.close()
     finally:
