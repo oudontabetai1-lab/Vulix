@@ -215,7 +215,7 @@ class ProbeLedger:
             invalid_decision = False
             for row in rows:
                 if row.get("record_kind", "legacy") == "legacy":
-                    if row.get("check") not in {"sqli", "xss", "clickjacking", "security_headers"}:
+                    if row.get("check") not in {"sqli", "xss", "clickjacking", "security_headers", "graphql"}:
                         accepted.append(row)
                     continue
                 if row.get("record_kind") != "decision":
@@ -261,6 +261,9 @@ class ProbeLedger:
             result[unit] = decisions
         from .passive_evidence import accepted_decisions as passive_decisions
         for unit, decisions in passive_decisions(self.events).items():
+            result[unit] = decisions
+        from .graphql_evidence import accepted_decisions as graphql_decisions
+        for unit, decisions in graphql_decisions(self.events).items():
             result[unit] = decisions
         return result
 
@@ -342,8 +345,12 @@ class ProbeLedger:
         outcome = rec.get("outcome")
         if outcome is not None and outcome not in _VALID_OUTCOMES:
             return False  # 語彙外の outcome（null は未記録として許容）
-        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision", "browser", "passive_decision"}:
+        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision", "browser", "passive_decision", "graphql_decision"}:
             return False
+        if rec.get("record_kind") == "graphql_decision":
+            from .graphql_evidence import valid_shape
+            if not valid_shape(rec):
+                return False
         if rec.get("record_kind") == "passive_decision":
             if (rec.get("check") not in {"clickjacking", "security_headers"}
                     or rec.get("actor") != "passive_header_oracle"
@@ -386,7 +393,7 @@ class ProbeLedger:
                 return False
             if any(not isinstance(rec.get(k, []), list) or
                    any(not isinstance(ref, str) for ref in rec.get(k, []))
-                   for k in ("baseline_attempt_ids", "control_attempt_ids")):
+                   for k in ("baseline_attempt_ids", "control_attempt_ids", "related_attempt_ids")):
                 return False
             if any(rec.get(k) is not None and not isinstance(rec.get(k), dict) for k in ("request", "response")):
                 return False
@@ -521,6 +528,10 @@ class ProbeLedger:
                 # 別 scan のレコードを誤って渡された＝混入を正本へ書かない（呼び出し側バグ）。
                 self.manifest.record(record.role, record.outcome, write_ok=False,
                                      error="foreign_scan_record")
+                return False
+            if any(not isinstance(ref, str) or ref not in self.events
+                   for ref in record.related_attempt_ids):
+                self.manifest.note_gap("invalid_related_attempt_ids")
                 return False
             try:
                 line = to_jsonl_line(record)

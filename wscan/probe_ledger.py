@@ -205,6 +205,8 @@ class ProbeAttemptRecord:
     record_kind: str = "legacy"    # request / observation / decision / payload; legacy rows retain their meaning
     request_attempt_id: str = ""   # one outgoing request, independent of append-only event IDs
     browser: Optional[BrowserEvidence] = None
+    related_attempt_ids: tuple[str, ...] = ()
+    decision_subject: str = ""
 
     @property
     def correlated(self) -> bool:
@@ -224,6 +226,13 @@ def to_jsonl_line(record: ProbeAttemptRecord) -> str:
 
     Enum は str 継承のため値へ直列化される。改行を含まない 1 行を保証する。"""
     payload = dataclasses.asdict(record)
+    if (payload.get("request") and payload["request"].get("transport") == "graphql"
+            or payload.get("record_kind") == "graphql_decision"):
+        from .request_logger import redact_graphql_url
+        if payload.get("request"):
+            payload["request"]["url"] = redact_graphql_url(payload["request"].get("url", ""))
+        if payload.get("response"):
+            payload["response"]["final_url"] = redact_graphql_url(payload["response"].get("final_url", ""))
     # 永続化境界で URL クエリの機微値を伏せる（?access_token=... 等が redirect/callback/GET
     # probe から生で残らないように。正典 request_logger.redact_url へ委譲）。
     if payload.get("request") and payload["request"].get("url"):
