@@ -218,6 +218,40 @@ python -m pytest -q tests/test_graphql_evidence.py
 この fixture は実 scanner と永続 logger を MockTransport/loopback HTTP で実行し、脆弱/安全
 ツイン、各 oracle、両 DoS 原因、再検証、改変/欠落した相関、resume、書込失敗と秘密値の非保存を確認します。
 
+### WebSocket transport decisions
+
+既存の WebSocket 接続観測（`page.on("websocket")` / `framereceived`）、切断 cleanup、
+および XSS（反射・蓄積）、SQLi（エラー応答）、OS コマンド、SSTI の各注入メッセージ試行を、
+実 JS 境界（`page.evaluate`）での lifecycle envelope と受信 frame の hash・長さに結びます。
+
+送信境界 `_send_ws_message` は `websocket_attempt` を起点とし、実ソケットの open と
+`socket.send()` が成功した時のみ `websocket_request`（`sent=True`）を1件記録します。
+各 frame 受信は transient frame に対する Python regex 判定結果とともに
+`websocket_observation`（`captured_frame`）として記録し、本文全文は保持せず hash と長さのみ残します。
+ソケット終了時は `websocket_cleanup` を記録し、最終的な terminal outcome（`received`、`closed`、
+`timeout`、`open_error`、`send_error`、`socket_error`、`evaluation_error`、`malformed`）と
+フレーム件数・close error を含む `websocket_decision` を生成します。
+
+open 失敗や send 失敗は `transport_error`（`sent=False`）として扱い、送信成功を詐称しません。
+無応答 timeout は `timeout`、評価失敗・envelope 破損は `verification_error` として記録し、
+これらを safe negative（`no_match`）に倒しません。
+
+再検証は元の同一スキャン判定と、メモリ内の non-serialized replay map（同一 scanner インスタンス）に
+基づき元の送信内容を再現します。resume 等で replay context が欠落した場合は `unexecutable`
+（`missing_replay_context`）として記録し、捏造した固定 payload での再現を行いません。相関のない
+True や証跡欠落は confirmed に昇格せず、`assumed` に留まります。
+
+URL や frame 本文の機微値（token、cookie、secret）は台帳に平文保存せず、`request.url` は空文字列、
+body は hash と長さのみを保持します。
+
+```sh
+python -m pytest -q tests/test_websocket_evidence.py
+```
+
+このテストは実 scanner、JS evaluate envelope、永続 logger、脆弱/安全ツイン、各エラー状態、
+再検証、不正 envelope/親子関係の厳格な拒否、resume 時の未実行判定、秘密値の非保存、および
+実 Chromium と loopback WebSocket サーバでの統合動作を検証します。
+
 実 Chromium fixture は本番 ScanEngine の脆弱・安全ツイン、非空の HTTP 500 応答、logger failure、
 別プロセス resume と証跡欠落を検証します。candidate と confirmed を分けて数え、server の実測
 受信数と共有 GET の台帳件数を照合します。resume の既存 crawl GET と、完了済みの監査 GET の

@@ -24,11 +24,13 @@ import re
 import time
 from typing import TYPE_CHECKING
 
+from wscan.probe_ledger import ProbeOutcome, ProbeRole, Transport, sha256_hex
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
     PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
     ValueKind,
 )
+from wscan.websocket_evidence import DISCOVERY, RULES, VERIFY_RULES, subject
 
 from .base import BaseScanner, Finding
 
@@ -120,11 +122,28 @@ class WebSocketScanner(BaseScanner):
     )
 
     SEVERITY = "high"
+    PASSIVE_RULES = (DISCOVERY, *RULES)
 
     def __init__(self, engine: "ScanEngine"):
         super().__init__(engine)
         self._ws_urls: set[str] = set()
         self._observed_messages: list[str] = []
+        self._replay_map: dict[str, tuple[str, str, str]] = {}
+        self.last_decision_id: str = ""
+        self.last_decision_subject: str = ""
+        self.last_outcome: str = ""
+
+    def record_evidence_skip(self, endpoint: str, *, rules=PASSIVE_RULES, role="attack", reason="state_profile_policy"):
+        for rule in rules:
+            disc_subj = sha256_hex(f"skip:{endpoint}:{rule}")
+            self._record_probe_evidence(
+                role=role, check=self.CHECK_TYPE, actor="websocket_oracle",
+                decision_version="1", decision_rule=rule, decision_subject=disc_subj,
+                field=sha256_hex(endpoint), record_kind="websocket_decision",
+                parent_id="", request_attempt_id="",
+                rationale=f"terminal={reason};frames=0;close_error=0",
+                outcome="skipped" if reason == "state_profile_policy" else "unexecutable",
+            )
 
     # ──────────────────────────────────────────────────────────────────────────
     # BaseScanner interface
@@ -158,12 +177,87 @@ class WebSocketScanner(BaseScanner):
 
         page.on("websocket", on_websocket)
 
+        remove_error = False
         try:
             await self.browser.navigate(url)
             # WS 接続が確立されるまで最大 3 秒待機
             await asyncio.sleep(3.0 * self.sleep_factor)
         finally:
-            page.remove_listener("websocket", on_websocket)
+            try:
+                page.remove_listener("websocket", on_websocket)
+            except Exception:
+                remove_error = True
+
+        disc_subj = sha256_hex(f"discovery:{url}:{DISCOVERY}")
+        disc_ids: list[str] = []
+
+        for ws in ws_endpoints:
+            d_id = self._record_probe_evidence(
+                role=ProbeRole.DISCOVER,
+                check=self.CHECK_TYPE,
+                actor="websocket_oracle",
+                decision_version="1",
+                decision_rule=DISCOVERY,
+                decision_subject=disc_subj,
+                field=sha256_hex(url),
+                record_kind="websocket_discovery",
+                parent_id="",
+                request_attempt_id="",
+                rationale="endpoint_observed",
+                outcome=None,
+            )
+            if d_id:
+                disc_ids.append(d_id)
+
+        for m in ws_messages[:5]:
+            f_id = self._record_probe_evidence(
+                role=ProbeRole.DISCOVER,
+                check=self.CHECK_TYPE,
+                actor="websocket_oracle",
+                decision_version="1",
+                decision_rule=DISCOVERY,
+                decision_subject=disc_subj,
+                field=sha256_hex(url),
+                record_kind="websocket_discovery",
+                parent_id="",
+                request_attempt_id="",
+                rationale="frame_observed",
+                outcome=None,
+            )
+            if f_id:
+                disc_ids.append(f_id)
+
+        cleanup_id = self._record_probe_evidence(
+            role=ProbeRole.CLEANUP,
+            check=self.CHECK_TYPE,
+            actor="websocket_oracle",
+            decision_version="1",
+            decision_rule=DISCOVERY,
+            decision_subject=disc_subj,
+            field=sha256_hex(url),
+            record_kind="websocket_cleanup",
+            parent_id="",
+            request_attempt_id="",
+            rationale="page_listener_removed" if not remove_error else "page_listener_remove_error",
+            outcome=None if not remove_error else ProbeOutcome.TRANSPORT_ERROR.value,
+        )
+
+        linked_disc = disc_ids + ([cleanup_id] if cleanup_id else [])
+        self._record_probe_evidence(
+            role=ProbeRole.DISCOVER,
+            check=self.CHECK_TYPE,
+            actor="websocket_oracle",
+            decision_version="1",
+            decision_rule=DISCOVERY,
+            decision_subject=disc_subj,
+            field=sha256_hex(url),
+            record_kind="websocket_decision",
+            parent_id="",
+            request_attempt_id="",
+            related_attempt_ids=tuple(linked_disc),
+            rationale=f"terminal={'received' if ws_endpoints else 'closed'};frames={len(ws_messages)};close_error={1 if remove_error else 0}",
+            outcome=ProbeOutcome.MATCHED.value if ws_endpoints else ProbeOutcome.NO_MATCH.value,
+        )
 
         if not ws_endpoints:
             return []  # WS 接続なし
@@ -213,7 +307,15 @@ class WebSocketScanner(BaseScanner):
             inject_messages = self._build_inject_messages(payload, sample_json)
 
             for inject_msg, inject_key in inject_messages:
-                responses = await self._send_ws_message(ws_url, inject_msg)
+                endpoint_hash = sha256_hex(ws_url)
+                message_hash = sha256_hex(inject_msg)
+                subj = subject(endpoint_hash, message_hash, evidence_type)
+                self._replay_map[subj] = (ws_url, inject_msg, detection_pattern)
+
+                responses = await self._send_ws_message(
+                    ws_url, inject_msg,
+                    role=ProbeRole.ATTACK, rule=evidence_type, pattern=detection_pattern
+                )
 
                 # レスポンスをパターンマッチ
                 for resp in responses:
@@ -238,6 +340,9 @@ class WebSocketScanner(BaseScanner):
                                 "inject_key": inject_key,
                                 "pattern": detection_pattern,
                                 "sent": inject_msg,
+                                "decision_subject": subj,
+                                "source_decision_id": self.last_decision_id,
+                                "attempt_ids": (self.last_decision_id,) if self.last_decision_id else (),
                             },
                         )
                         findings.append(finding)
@@ -258,69 +363,296 @@ class WebSocketScanner(BaseScanner):
     def _response_matches(self, response: str, pattern: str) -> bool:
         return bool(re.search(pattern, response or ""))
 
-    async def _send_ws_message(self, ws_url: str, message: str, *, role=None) -> list[str]:
-        from wscan.probe_ledger import ProbeRole, Transport
+    async def _send_ws_message(
+        self,
+        ws_url: str,
+        message: str,
+        *,
+        role=None,
+        rule: str = "websocket_xss_reflection",
+        pattern: str = "",
+        source_decision_id: str | None = None,
+    ) -> list[str]:
+        role = role or ProbeRole.ATTACK
+        endpoint_hash = sha256_hex(ws_url)
+        message_hash = sha256_hex(message)
+        subj = subject(endpoint_hash, message_hash, rule)
+        key = f"endpoint_sha256={endpoint_hash};message_sha256={message_hash}"
+
         attempt_id = self._record_probe_evidence(
-            role=role or ProbeRole.ATTACK, transport=Transport.WEBSOCKET,
-            check=self.CHECK_TYPE, actor=self.__class__.__name__,
-            pair={"request": {"method": "SEND", "url": ws_url}},
-            payload=message, rationale="WebSocket submission; delivery and outcome unknown",
+            role=role,
+            check=self.CHECK_TYPE,
+            actor="websocket_oracle",
+            decision_version="1",
+            decision_rule=rule,
+            decision_subject=subj,
+            field=key,
+            record_kind="websocket_attempt",
+            parent_id="",
+            request_attempt_id="",
+            rationale="started",
+            outcome=None,
         )
+
         wait_ms = max(250, int(1000 * self.sleep_factor))
+        terminal = "evaluation_error"
+        sent = False
+        frames: list[str] = []
+        close_error = False
+
         try:
             result = await self.browser.page.evaluate(
                 """
                 ({ wsUrl, message, waitMs }) => new Promise((resolve) => {
-                  const responses = [];
+                  let socket;
                   let done = false;
-                  const finish = () => {
+                  let sent = false;
+                  let closeError = false;
+                  const frames = [];
+
+                  const finish = (terminalReason) => {
                     if (done) return;
                     done = true;
-                    try { socket.close(); } catch (_) {}
-                    resolve(responses);
+                    if (socket) {
+                      try {
+                        socket.close();
+                      } catch (_) {
+                        closeError = true;
+                      }
+                    }
+                    resolve({
+                      terminal: terminalReason,
+                      sent: sent,
+                      frames: frames,
+                      close_error: closeError,
+                    });
                   };
-                  let socket;
+
                   try {
                     socket = new WebSocket(wsUrl);
                   } catch (_) {
-                    resolve([]);
+                    finish("open_error");
                     return;
                   }
-                  socket.onmessage = (event) => responses.push(String(event.data));
-                  socket.onerror = finish;
-                  socket.onopen = () => {
-                    try { socket.send(message); } catch (_) { finish(); return; }
-                    setTimeout(finish, waitMs);
+
+                  socket.onmessage = (event) => {
+                    try {
+                      frames.push(String(event.data));
+                    } catch (_) {}
                   };
-                  setTimeout(finish, waitMs + 1000);
+
+                  socket.onerror = (e) => {
+                    finish(sent ? "socket_error" : "open_error");
+                  };
+
+                  socket.onclose = () => {
+                    if (!done) {
+                      finish(sent ? (frames.length > 0 ? "received" : "closed") : "open_error");
+                    }
+                  };
+
+                  socket.onopen = () => {
+                    try {
+                      socket.send(message);
+                      sent = true;
+                    } catch (_) {
+                      finish("send_error");
+                      return;
+                    }
+                    setTimeout(() => {
+                      if (!done) {
+                        finish(frames.length > 0 ? "received" : "timeout");
+                      }
+                    }, waitMs);
+                  };
+
+                  setTimeout(() => {
+                    if (!done) {
+                      finish(sent ? (frames.length > 0 ? "received" : "timeout") : "open_error");
+                    }
+                  }, waitMs + 2000);
                 })
                 """,
                 {"wsUrl": ws_url, "message": message, "waitMs": wait_ms},
             )
-            responses = [str(item) for item in (result or [])]
-            for response in responses:
-                self._record_probe_evidence(
-                    role=role or ProbeRole.ATTACK, transport=Transport.WEBSOCKET,
-                    check=self.CHECK_TYPE, actor=self.__class__.__name__,
-                    parent_id=attempt_id or "",
-                    pair={"request": {"method": "SEND", "url": ws_url},
-                          "response": {"url": ws_url, "body": response}},
-                    rationale="WebSocket message observed; send completion and outcome unknown",
-                )
-            return responses
+            if isinstance(result, dict):
+                terminal = str(result.get("terminal", "evaluation_error"))
+                sent = bool(result.get("sent", False))
+                frames = [str(item) for item in (result.get("frames") or [])]
+                close_error = bool(result.get("close_error", False))
+            elif isinstance(result, list):
+                frames = [str(item) for item in result]
+                sent = True
+                terminal = "received" if frames else "timeout"
+                close_error = False
         except Exception as exc:
             self._record_scan_note(f"websocket_observation_error:{type(exc).__name__}")
-            return []
+            terminal = "evaluation_error"
+            sent = False
+            frames = []
+            close_error = False
+
+        req_id = ""
+        if sent:
+            req_id = self._record_probe_evidence(
+                role=role,
+                transport=Transport.WEBSOCKET,
+                check=self.CHECK_TYPE,
+                actor="websocket_oracle",
+                decision_version="1",
+                decision_rule=rule,
+                decision_subject=subj,
+                field=key,
+                record_kind="websocket_request",
+                parent_id=attempt_id or "",
+                request_attempt_id="",
+                pair={"request": {
+                    "method": "SEND",
+                    "url": "",
+                    "transport": "websocket",
+                    "sent": True,
+                    "post_data": message,
+                }},
+                sent=True,
+                rationale="",
+                outcome=None,
+            ) or ""
+
+        observation_ids: list[str] = []
+        for frame in frames:
+            is_match = self._response_matches(frame, pattern) if pattern else False
+            obs_outcome = ProbeOutcome.MATCHED.value if is_match else ProbeOutcome.NO_MATCH.value
+            obs_id = self._record_probe_evidence(
+                role=role,
+                transport=Transport.WEBSOCKET,
+                check=self.CHECK_TYPE,
+                actor="websocket_oracle",
+                decision_version="1",
+                decision_rule=rule,
+                decision_subject=subj,
+                field=key,
+                record_kind="websocket_observation",
+                parent_id=req_id,
+                request_attempt_id=req_id,
+                pair={
+                    "request": {
+                        "method": "SEND",
+                        "url": "",
+                        "transport": "websocket",
+                        "sent": True,
+                        "post_data": message,
+                    },
+                    "response": {
+                        "url": "",
+                        "body": frame,
+                    },
+                },
+                sent=True,
+                rationale="captured_frame",
+                outcome=obs_outcome,
+            )
+            if obs_id:
+                observation_ids.append(obs_id)
+
+        cleanup_id = self._record_probe_evidence(
+            role=ProbeRole.CLEANUP,
+            check=self.CHECK_TYPE,
+            actor="websocket_oracle",
+            decision_version="1",
+            decision_rule=rule,
+            decision_subject=subj,
+            field=key,
+            record_kind="websocket_cleanup",
+            parent_id=attempt_id or "",
+            request_attempt_id="",
+            rationale="socket_close_requested" if not close_error else "socket_close_error",
+            outcome=None if not close_error else ProbeOutcome.TRANSPORT_ERROR.value,
+        )
+
+        if sent:
+            if any(self._response_matches(f, pattern) for f in frames) if pattern else False:
+                dec_outcome = ProbeOutcome.MATCHED.value
+            elif frames:
+                dec_outcome = ProbeOutcome.NO_MATCH.value
+            elif terminal == "timeout":
+                dec_outcome = ProbeOutcome.TIMEOUT.value
+            elif terminal in {"socket_error", "open_error", "send_error"}:
+                dec_outcome = ProbeOutcome.TRANSPORT_ERROR.value
+            elif terminal in {"evaluation_error", "malformed"}:
+                dec_outcome = ProbeOutcome.VERIFICATION_ERROR.value
+            else:
+                dec_outcome = ProbeOutcome.NO_MATCH.value
+        else:
+            if terminal in {"open_error", "send_error"}:
+                dec_outcome = ProbeOutcome.TRANSPORT_ERROR.value
+            elif terminal == "timeout":
+                dec_outcome = ProbeOutcome.TIMEOUT.value
+            elif terminal in {"evaluation_error", "malformed"}:
+                dec_outcome = ProbeOutcome.VERIFICATION_ERROR.value
+            elif terminal == "state_profile_policy":
+                dec_outcome = ProbeOutcome.SKIPPED.value
+            elif terminal in {"missing_replay_context", "no_endpoint", "endpoint_limit"}:
+                dec_outcome = ProbeOutcome.UNEXECUTABLE.value
+            else:
+                dec_outcome = ProbeOutcome.TRANSPORT_ERROR.value
+
+        source_ids = [source_decision_id] if (role == ProbeRole.VERIFY or str(role) == "verify") and source_decision_id else []
+        cleanup_ids = [cleanup_id] if cleanup_id else []
+        related_ids = tuple(observation_ids + cleanup_ids + source_ids)
+
+        dec_id = self._record_probe_evidence(
+            role=role,
+            check=self.CHECK_TYPE,
+            actor="websocket_oracle",
+            decision_version="1",
+            decision_rule=rule,
+            decision_subject=subj,
+            field=key,
+            record_kind="websocket_decision",
+            parent_id=attempt_id or "",
+            request_attempt_id=req_id if sent else "",
+            related_attempt_ids=related_ids,
+            rationale=f"terminal={terminal};frames={len(observation_ids)};close_error={1 if close_error else 0}",
+            outcome=dec_outcome,
+        )
+        self.last_decision_id = dec_id or ""
+        self.last_decision_subject = subj
+        self.last_outcome = dec_outcome
+        return frames
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         details = getattr(finding, "evidence_details", {}) or {}
+        subj = details.get("decision_subject")
         ws_url = details.get("ws_url") or (finding.request or {}).get("ws_url")
         pattern = details.get("pattern")
         sent = details.get("sent") or finding.payload
+        source_decision_id = details.get("source_decision_id")
+        rule = getattr(finding, "evidence_type", None) or "websocket_xss_reflection"
+
+        if subj and subj in self._replay_map:
+            replay_url, replay_sent, replay_pattern = self._replay_map[subj]
+            responses = await self._send_ws_message(
+                replay_url, replay_sent,
+                role=ProbeRole.VERIFY, rule=rule, pattern=replay_pattern,
+                source_decision_id=source_decision_id,
+            )
+            if self.last_decision_id:
+                finding.evidence_details["verification_attempt_ids"] = (self.last_decision_id,)
+            return self.last_outcome == ProbeOutcome.MATCHED.value
+
+        # Replay map is missing
+        ledger = getattr(getattr(self.engine, "request_logger", None), "probe_ledger", None)
+        if ledger is not None:
+            # Active ledger scan with missing replay context -> cannot fabricate replay
+            self.record_evidence_skip(
+                finding.url, rules=(rule,), role="verify", reason="missing_replay_context"
+            )
+            return None
+
+        # Fallback for simple unit tests without ledger
         if not ws_url or not pattern or not sent:
             return None
-        from wscan.probe_ledger import ProbeRole
-        responses = await self._send_ws_message(ws_url, sent, role=ProbeRole.VERIFY)
+        responses = await self._send_ws_message(ws_url, sent, role=ProbeRole.VERIFY, rule=rule, pattern=pattern)
         return any(self._response_matches(resp, pattern) for resp in responses)
 
     def _build_inject_messages(

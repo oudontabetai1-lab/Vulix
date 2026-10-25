@@ -902,6 +902,8 @@ output/<timestamp>/
 
 GraphQL の発見 POST/GET、既存の schema・batch・DoS・注入検査も実送信と本文 hash に相関します。二段 DoS は両方の応答を参照し、再検証は元 Finding の判定・注入先・送信内容との一致を必要とします。秘密を含み得る query/variables と本文は台帳に保存せず、通信互換ログには応答済み要求の metadata を追加します。不正 JSON・曖昧なエラー・相関欠落を安全な陰性や再現成功として扱いません。
 
+WebSocket の接続観測・切断・XSS/SQLi/OS/SSTI 注入試行も、実メッセージ送信・受信 frame の hash/長さと terminal envelope に相関します。再検証は元の同一スキャン判定・注入先・送信内容と一致するメモリ内コンテキストを必要とし、resume 後の欠落時は unexecutable として扱います。フレーム本文や機微 URL/トークンは台帳に保存せず、open 失敗・send 失敗・timeout・切断・不正データは安全な陰性や再現成功として扱いません。
+
 ### Webhook
 
 ```bash
