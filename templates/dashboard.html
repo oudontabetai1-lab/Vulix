@@ -6638,22 +6638,55 @@ function onHistoryFilterChange(val) {
   renderHistoryTable();
 }
 
+const UNSUPPORTED_URL_PLACEHOLDER = '（URL非表示）';
+
+function maskPathSecrets(path) {
+  if (!path) return path;
+  let out = path;
+  // ASP.NET cookieless session: /(S(id))/ -> /(<redacted>)/
+  out = out.replace(/\((?:[A-Z]\([^)]*\))+\)/gi, '(<redacted>)');
+  // Matrix parameters: ;name=value（jsessionid 等のセッション値を伏せる）
+  out = out.replace(/;([^/;?#=]+)=([^/;?#]*)/g, (match, key) => {
+    let decoded = key;
+    try {
+      decoded = decodeURIComponent(key);
+    } catch (_) {}
+    return CONFIG_SENSITIVE_URL_KEY.test(decoded) ? `;${key}=<redacted>` : match;
+  });
+  return out;
+}
+
+function hasUnmaskedSensitivePath(path) {
+  if (!path) return false;
+  // ASP.NET cookieless session がまだ残っている（マスクされていない）。
+  if (/\/\((?:[A-Z]\([^)]*\))+\)(?:\/|$)/i.test(path)) return true;
+  // エンコードされた区切りの matrix パラメータも一度だけ復号して判定する。
+  const decoded = path.replace(/%3b/ig, ';').replace(/%3d/ig, '=');
+  return decoded.split('/').some(segment =>
+    segment.split(';').slice(1).some(param => {
+      const equals = param.indexOf('=');
+      if (equals < 0) return false;
+      if (param.slice(equals + 1) === '<redacted>') return false;
+      return CONFIG_SENSITIVE_URL_KEY.test(
+        new URLSearchParams(`${param.slice(0, equals)}=`).keys().next().value
+      );
+    })
+  );
+}
+
 function redactDisplayUrl(raw) {
   if (!raw || typeof raw !== 'string') return raw || '';
   const str = raw.trim();
   if (!str) return '';
-  let result = str;
-  // 1. userinfo: scheme://user:pass@host -> scheme://<redacted>@host
-  const schemeMatch = str.match(/^[a-z][a-z0-9+.-]*:\/\//i);
-  if (schemeMatch) {
-    const after = str.slice(schemeMatch[0].length);
-    const cutIndices = [after.indexOf('/'), after.indexOf('?'), after.indexOf('#')].filter(i => i !== -1);
-    const authEnd = cutIndices.length ? Math.min(...cutIndices) : after.length;
-    const auth = after.slice(0, authEnd);
-    if (auth.includes('@')) {
-      const host = auth.slice(auth.lastIndexOf('@') + 1);
-      result = schemeMatch[0] + '<redacted>@' + host + after.slice(authEnd);
-    }
+  // 表示専用の防御: HTTP(S) URL として成立しない値は生文字列を一切表示しない。
+  let parsed;
+  try {
+    parsed = new URL(str);
+  } catch (_) {
+    return UNSUPPORTED_URL_PLACEHOLDER;
+  }
+  if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) {
+    return UNSUPPORTED_URL_PLACEHOLDER;
   }
 
   function maskKv(text) {
@@ -6669,21 +6702,49 @@ function redactDisplayUrl(raw) {
     });
   }
 
-  // 2. Query and fragment
-  if (result.includes('?')) {
-    const qParts = result.split('?', 2);
-    const base = qParts[0];
-    const rest = qParts[1];
-    if (rest.includes('#')) {
-      const fParts = rest.split('#', 2);
-      result = `${base}?${maskKv(fParts[0])}#${maskKv(fParts[1])}`;
-    } else {
-      result = `${base}?${maskKv(rest)}`;
-    }
-  } else if (result.includes('#')) {
-    const fParts = result.split('#', 2);
-    result = `${fParts[0]}#${maskKv(fParts[1])}`;
+  // 1. userinfo: scheme://user:pass@host -> scheme://<redacted>@host
+  const schemeMatch = str.match(/^[a-z][a-z0-9+.-]*:\/\//i);
+  const prefix = schemeMatch ? schemeMatch[0] : '';
+  const rest = str.slice(prefix.length);
+  let authEnd = rest.length;
+  for (const ch of ['/', '?', '#']) {
+    const idx = rest.indexOf(ch);
+    if (idx !== -1 && idx < authEnd) authEnd = idx;
   }
+  let authority = rest.slice(0, authEnd);
+  let tail = rest.slice(authEnd);
+  if (authority.includes('@')) {
+    const host = authority.slice(authority.lastIndexOf('@') + 1);
+    authority = '<redacted>@' + host;
+  }
+
+  // 2. path / query / fragment を分離（matrix・セッションは path 側で伏せる）
+  let path = tail;
+  let query = '';
+  let fragment = '';
+  let hadQuery = false;
+  let hadFragment = false;
+  const hashIdx = path.indexOf('#');
+  if (hashIdx !== -1) {
+    hadFragment = true;
+    fragment = path.slice(hashIdx + 1);
+    path = path.slice(0, hashIdx);
+  }
+  const queryIdx = path.indexOf('?');
+  if (queryIdx !== -1) {
+    hadQuery = true;
+    query = path.slice(queryIdx + 1);
+    path = path.slice(0, queryIdx);
+  }
+
+  const safePath = maskPathSecrets(path);
+  // エンコード済みの matrix/セッション区切りなど、変形しきれない既知の
+  // 資格情報パターンが残る場合は生文字列を出さず中立プレースホルダにする。
+  if (hasUnmaskedSensitivePath(safePath)) return UNSUPPORTED_URL_PLACEHOLDER;
+
+  let result = prefix + authority + safePath;
+  if (hadQuery) result += '?' + maskKv(query);
+  if (hadFragment) result += '#' + maskKv(fragment);
   return result;
 }
 
@@ -6835,58 +6896,70 @@ function renderHistoryTable() {
 
     // 4. Findings & Severity
     const tdFindings = document.createElement('td');
-    const fCount = typeof scan.findings_count === 'number' ? scan.findings_count : 0;
+    const fCount = scan.findings_count;
+    const fCountKnown = typeof fCount === 'number' && isFinite(fCount);
     const sevObj = scan.severity || {};
     const crit = sevObj.critical || 0;
     const high = sevObj.high || 0;
     const med = sevObj.medium || 0;
     const low = sevObj.low || 0;
 
-    const countSpan = document.createElement('span');
-    countSpan.style.fontWeight = '700';
-    countSpan.style.marginRight = '8px';
-    countSpan.textContent = String(fCount);
-    if (fCount > 0) countSpan.style.color = 'var(--critical)';
-    tdFindings.appendChild(countSpan);
-
-    if (fCount > 0) {
-      const sevContainer = document.createElement('span');
-      sevContainer.className = 'history-sev-badges';
-      if (crit > 0) {
-        const cPill = document.createElement('span');
-        cPill.className = 'history-sev-pill crit';
-        cPill.textContent = `C:${crit}`;
-        cPill.title = `Critical: ${crit}`;
-        sevContainer.appendChild(cPill);
-      }
-      if (high > 0) {
-        const hPill = document.createElement('span');
-        hPill.className = 'history-sev-pill high';
-        hPill.textContent = `H:${high}`;
-        hPill.title = `High: ${high}`;
-        sevContainer.appendChild(hPill);
-      }
-      if (med > 0) {
-        const mPill = document.createElement('span');
-        mPill.className = 'history-sev-pill med';
-        mPill.textContent = `M:${med}`;
-        mPill.title = `Medium: ${med}`;
-        sevContainer.appendChild(mPill);
-      }
-      if (low > 0) {
-        const lPill = document.createElement('span');
-        lPill.className = 'history-sev-pill low';
-        lPill.textContent = `L:${low}`;
-        lPill.title = `Low: ${low}`;
-        sevContainer.appendChild(lPill);
-      }
-      tdFindings.appendChild(sevContainer);
+    if (!fCountKnown) {
+      // evidence 欠落/破損/読取不能。0 件と捏造せず「未取得」と表示する。
+      const unknownSpan = document.createElement('span');
+      unknownSpan.style.color = 'var(--text-muted)';
+      unknownSpan.style.fontSize = '0.72rem';
+      unknownSpan.textContent = '未取得';
+      unknownSpan.title = '検出結果を確認できませんでした';
+      tdFindings.appendChild(unknownSpan);
     } else {
-      const noneSpan = document.createElement('span');
-      noneSpan.style.color = 'var(--text-muted)';
-      noneSpan.style.fontSize = '0.72rem';
-      noneSpan.textContent = '検出なし';
-      tdFindings.appendChild(noneSpan);
+      const countSpan = document.createElement('span');
+      countSpan.style.fontWeight = '700';
+      countSpan.style.marginRight = '8px';
+      countSpan.textContent = String(fCount);
+      if (fCount > 0) countSpan.style.color = 'var(--critical)';
+      tdFindings.appendChild(countSpan);
+
+      if (fCount > 0) {
+        const sevContainer = document.createElement('span');
+        sevContainer.className = 'history-sev-badges';
+        if (crit > 0) {
+          const cPill = document.createElement('span');
+          cPill.className = 'history-sev-pill crit';
+          cPill.textContent = `C:${crit}`;
+          cPill.title = `Critical: ${crit}`;
+          sevContainer.appendChild(cPill);
+        }
+        if (high > 0) {
+          const hPill = document.createElement('span');
+          hPill.className = 'history-sev-pill high';
+          hPill.textContent = `H:${high}`;
+          hPill.title = `High: ${high}`;
+          sevContainer.appendChild(hPill);
+        }
+        if (med > 0) {
+          const mPill = document.createElement('span');
+          mPill.className = 'history-sev-pill med';
+          mPill.textContent = `M:${med}`;
+          mPill.title = `Medium: ${med}`;
+          sevContainer.appendChild(mPill);
+        }
+        if (low > 0) {
+          const lPill = document.createElement('span');
+          lPill.className = 'history-sev-pill low';
+          lPill.textContent = `L:${low}`;
+          lPill.title = `Low: ${low}`;
+          sevContainer.appendChild(lPill);
+        }
+        tdFindings.appendChild(sevContainer);
+      } else if (rawStatus === 'done') {
+        // 「検出なし」は完了を裏づける有効な evidence が 0 件のときだけ。
+        const noneSpan = document.createElement('span');
+        noneSpan.style.color = 'var(--text-muted)';
+        noneSpan.style.fontSize = '0.72rem';
+        noneSpan.textContent = '検出なし';
+        tdFindings.appendChild(noneSpan);
+      }
     }
     tr.appendChild(tdFindings);
 

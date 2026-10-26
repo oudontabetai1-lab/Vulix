@@ -1361,41 +1361,66 @@ class MonitorServer:
                 "id": d.name,
                 "target": "",
                 "started_at": "",
-                "findings_count": 0,
+                # None = 件数を確証できない（欠落/破損/読取不能）。UI は 0 と混同しない。
+                "findings_count": None,
                 "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
                 "report_available": (d / "report.html").is_file(),
                 "sarif_available": (d / "report.sarif").is_file(),
                 "json_available": (d / "evidence.json").is_file(),
-                "status": "done",
+                "status": "incomplete",
                 "size_bytes": 0,
             }
             # Prefer evidence.json (authoritative result), fall back to config.
             evidence = d / "evidence.json"
             cfg = d / "scan_config.json"
-            try:
-                if evidence.is_file():
-                    data = json.loads(evidence.read_text(encoding="utf-8"))
-                    info["target"] = data.get("target", "") or ""
-                    info["started_at"] = data.get("scan_date", "") or ""
-                    status_val = data.get("status")
-                    if status_val == "aborted" or data.get("aborted") is True:
-                        info["status"] = "aborted"
-                    elif status_val:
-                        info["status"] = str(status_val)
-                    else:
-                        info["status"] = "done"
-                    findings = data.get("findings", []) or []
+            evidence_data: Optional[dict] = None
+            if evidence.is_file():
+                try:
+                    loaded = json.loads(evidence.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        evidence_data = loaded
+                except Exception:
+                    evidence_data = None
+
+            if evidence_data is not None:
+                info["target"] = evidence_data.get("target", "") or ""
+                info["started_at"] = evidence_data.get("scan_date", "") or ""
+                status_val = evidence_data.get("status")
+                findings = evidence_data.get("findings")
+                findings_valid = isinstance(findings, list)
+                if findings_valid:
                     info["findings_count"] = len(findings)
                     for f in findings:
+                        if not isinstance(f, dict):
+                            continue
                         sev = (f.get("severity") or "info").lower()
                         if sev in info["severity"]:
                             info["severity"][sev] += 1
-                elif cfg.is_file():
-                    data = json.loads(cfg.read_text(encoding="utf-8"))
-                    info["target"] = (data.get("config", {}) or {}).get("url", "") or ""
-                    info["started_at"] = data.get("submitted_at", "") or ""
-            except Exception:
-                pass
+                aborted = status_val == "aborted" or evidence_data.get("aborted") is True
+                if aborted:
+                    info["status"] = "aborted"
+                elif status_val:
+                    info["status"] = str(status_val)
+                elif findings_valid:
+                    # 旧 evidence（status なし）でも findings 配列があれば完了扱い。
+                    info["status"] = "done"
+                # findings 配列の無い evidence は完了を主張できない。
+                if info["status"] == "done" and not findings_valid:
+                    info["status"] = "incomplete"
+            elif evidence.is_file():
+                # 壊れた/読めない evidence を「完了・0件」と誤表示しない。
+                info["status"] = "error"
+            else:
+                # evidence が無い場合は対象/日時だけ config から補完し、完了や0件は主張しない。
+                try:
+                    if cfg.is_file():
+                        cfg_data = json.loads(cfg.read_text(encoding="utf-8"))
+                        if isinstance(cfg_data, dict):
+                            info["target"] = (cfg_data.get("config", {}) or {}).get("url", "") or ""
+                            info["started_at"] = cfg_data.get("submitted_at", "") or ""
+                except Exception:
+                    pass
+                info["status"] = "incomplete"
             if not info["started_at"]:
                 try:
                     info["started_at"] = datetime.datetime.fromtimestamp(
@@ -1406,8 +1431,6 @@ class MonitorServer:
             # Running scan: no evidence yet but it is the active output folder.
             if self.scan_in_progress and d.name == self.current_scan_id:
                 info["status"] = "scanning"
-            elif not evidence.is_file() and not info["report_available"]:
-                info["status"] = "incomplete"
             try:
                 info["size_bytes"] = sum(
                     p.stat().st_size for p in d.rglob("*") if p.is_file()

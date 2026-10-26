@@ -380,3 +380,266 @@ def test_dashboard_scan_history_background_ws_liveness(tmp_path, monkeypatch):
             browser.close()
     finally:
         server_thread.stop()
+
+
+def test_dashboard_scan_history_unknown_evidence_counts(tmp_path, monkeypatch):
+    """Missing/malformed evidence must surface as unknown counts, not done/0."""
+    # Valid complete evidence with an explicit zero: the only case that may be 0/done.
+    d_valid = tmp_path / "scan_valid_zero"
+    d_valid.mkdir()
+    (d_valid / "report.html").write_text("<html>ok</html>", encoding="utf-8")
+    (d_valid / "evidence.json").write_text(json.dumps({
+        "target": "https://example.com/ok",
+        "scan_date": "2026-10-26T10:00:00",
+        "status": "done",
+        "findings": [],
+    }), encoding="utf-8")
+
+    # Legacy evidence without status but with a findings array remains complete.
+    d_legacy = tmp_path / "scan_legacy_zero"
+    d_legacy.mkdir()
+    (d_legacy / "evidence.json").write_text(json.dumps({
+        "target": "https://example.com/legacy",
+        "scan_date": "2026-10-26T10:01:00",
+        "findings": [],
+    }), encoding="utf-8")
+
+    # Evidence missing entirely (report exists): unknown count, not done.
+    d_missing = tmp_path / "scan_missing_evidence"
+    d_missing.mkdir()
+    (d_missing / "report.html").write_text("<html>legacy report</html>", encoding="utf-8")
+
+    # Malformed JSON evidence.
+    d_malformed = tmp_path / "scan_malformed"
+    d_malformed.mkdir()
+    (d_malformed / "evidence.json").write_text("{not json", encoding="utf-8")
+
+    # Read failure (invalid UTF-8) must be treated like malformed evidence.
+    d_unreadable = tmp_path / "scan_unreadable"
+    d_unreadable.mkdir()
+    (d_unreadable / "evidence.json").write_bytes(b"\xff\xfe\x00\x00")
+
+    # Valid evidence that explicitly says done but has no findings array.
+    d_nofindings = tmp_path / "scan_done_no_findings"
+    d_nofindings.mkdir()
+    (d_nofindings / "evidence.json").write_text(json.dumps({
+        "target": "https://example.com/nofindings",
+        "scan_date": "2026-10-26T10:02:00",
+        "status": "done",
+    }), encoding="utf-8")
+
+    # Explicit non-complete statuses with a valid zero count.
+    d_error = tmp_path / "scan_error_zero"
+    d_error.mkdir()
+    (d_error / "evidence.json").write_text(json.dumps({
+        "target": "https://example.com/error",
+        "scan_date": "2026-10-26T10:03:00",
+        "status": "error",
+        "findings": [],
+    }), encoding="utf-8")
+
+    d_aborted = tmp_path / "scan_aborted_zero"
+    d_aborted.mkdir()
+    (d_aborted / "evidence.json").write_text(json.dumps({
+        "target": "https://example.com/aborted",
+        "scan_date": "2026-10-26T10:04:00",
+        "status": "aborted",
+        "findings": [],
+    }), encoding="utf-8")
+
+    d_incomplete = tmp_path / "scan_incomplete_zero"
+    d_incomplete.mkdir()
+    (d_incomplete / "evidence.json").write_text(json.dumps({
+        "target": "https://example.com/incomplete",
+        "scan_date": "2026-10-26T10:05:00",
+        "status": "incomplete",
+        "findings": [],
+    }), encoding="utf-8")
+
+    # Running scan without evidence yet.
+    d_running = tmp_path / "scan_running"
+    d_running.mkdir()
+
+    monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
+    srv = MonitorServer()
+    srv.scan_in_progress = True
+    srv.current_scan_id = "scan_running"
+    client = TestClient(srv.app)
+    scans = {s["id"]: s for s in client.get("/api/v1/scans").json()["scans"]}
+
+    assert scans["scan_valid_zero"]["findings_count"] == 0
+    assert scans["scan_valid_zero"]["status"] == "done"
+    assert scans["scan_legacy_zero"]["findings_count"] == 0
+    assert scans["scan_legacy_zero"]["status"] == "done"
+
+    for sid in ("scan_missing_evidence", "scan_malformed", "scan_unreadable",
+                "scan_done_no_findings"):
+        assert scans[sid]["findings_count"] is None, sid
+
+    assert scans["scan_missing_evidence"]["status"] == "incomplete"
+    assert scans["scan_malformed"]["status"] == "error"
+    assert scans["scan_unreadable"]["status"] == "error"
+    assert scans["scan_done_no_findings"]["status"] == "incomplete"
+
+    assert scans["scan_error_zero"]["findings_count"] == 0
+    assert scans["scan_error_zero"]["status"] == "error"
+    assert scans["scan_aborted_zero"]["findings_count"] == 0
+    assert scans["scan_aborted_zero"]["status"] == "aborted"
+    assert scans["scan_incomplete_zero"]["findings_count"] == 0
+    assert scans["scan_incomplete_zero"]["status"] == "incomplete"
+    assert scans["scan_running"]["findings_count"] is None
+    assert scans["scan_running"]["status"] == "scanning"
+
+
+def test_dashboard_scan_history_privacy_playwright(tmp_path, monkeypatch):
+    """Known credential canaries must not appear in cell, title, attrs, or localStorage."""
+    canaries = [
+        "CANARY_USER_PASS", "CANARY_QUERY", "CANARY_FRAG", "CANARY_NOSCHEME",
+        "CANARY_MATRIX", "CANARY_JSESSION", "CANARY_ASP", "CANARY_JS",
+        "CANARY_MALFORMED", "CANARY_ENCODED", "CANARY_LDAP",
+    ]
+    targets = {
+        "p-valid": (
+            "https://user:CANARY_USER_PASS@example.com/app"
+            "?token=CANARY_QUERY&safe=ok#access_token=CANARY_FRAG"
+        ),
+        "p-noscheme": "user:CANARY_NOSCHEME@example.com/path",
+        "p-matrix-token": "http://example.com/path;token=CANARY_MATRIX",
+        "p-jsession": "http://example.com/path;jsessionid=CANARY_JSESSION",
+        "p-asp": "https://example.com/path/(S(CANARY_ASP))/view",
+        "p-js": "javascript:alert('CANARY_JS')",
+        "p-malformed": "http://user:CANARY_MALFORMED@[bad-host/path",
+        "p-encoded-key": "https://example.com/app?%74oken=CANARY_ENCODED",
+        "p-ldap": "ldap://user:CANARY_LDAP@ldap.example.com/ou=users",
+        "p-safe": "https://example.com/safe/path?q=ok",
+    }
+    for sid, target in targets.items():
+        d = tmp_path / sid
+        d.mkdir()
+        (d / "evidence.json").write_text(json.dumps({
+            "target": target,
+            "scan_date": "2026-10-26T12:00:00",
+            "status": "done",
+            "findings": [],
+        }), encoding="utf-8")
+
+    monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
+    srv = MonitorServer()
+    port = find_free_port()
+    server_thread = UvicornServerThread(srv, port)
+    server_thread.start()
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/monitor")
+            page.click("#navScanHistory")
+            page.wait_for_selector("#historyTableBody tr")
+
+            body_text = page.inner_text("#historyTableBody")
+            body_html = page.locator("#historyTableBody").evaluate("el => el.outerHTML")
+            all_attrs = page.evaluate(
+                "() => Array.from(document.querySelectorAll('#historyTableBody *'))"
+                ".flatMap(el => Array.from(el.attributes).map(a => a.name + '=' + a.value))"
+            )
+            local_storage = page.evaluate("() => JSON.stringify(localStorage)")
+
+            for canary in canaries:
+                assert canary not in body_text, canary
+                assert canary not in body_html, canary
+                assert all(canary not in attr for attr in all_attrs), canary
+                assert canary not in local_storage, canary
+
+            # Valid HTTP(S) URLs keep a meaningful, masked display.
+            assert "<redacted>@example.com" in body_text
+            assert "token=<redacted>" in body_text
+            assert "access_token=<redacted>" in body_text
+            assert ";token=<redacted>" in body_text
+            assert ";jsessionid=<redacted>" in body_text
+            assert "(<redacted>)" in body_text
+            assert "%74oken=<redacted>" in body_text
+            assert "https://example.com/safe/path?q=ok" in body_text
+
+            # Invalid/unsupported values use the neutral placeholder.
+            assert "（URL非表示）" in body_text
+
+            # Cell text and title come from the same sanitized value.
+            valid_cell = page.locator("#historyTableBody tr").filter(
+                has_text="p-valid"
+            ).locator(".history-target-cell")
+            assert valid_cell.inner_text() == valid_cell.get_attribute("title")
+            assert "<redacted>@example.com" in valid_cell.inner_text()
+
+            # Still no executable markup injection from target text.
+            assert page.query_selector_all("#historyTableBody script") == []
+
+            browser.close()
+    finally:
+        server_thread.stop()
+
+
+def test_dashboard_scan_history_unknown_counts_playwright(tmp_path, monkeypatch):
+    """Unknown counts render as 未取得; only complete zero evidence says 検出なし."""
+    def make_scan(sid, evidence=None, raw_bytes=None):
+        d = tmp_path / sid
+        d.mkdir()
+        if raw_bytes is not None:
+            (d / "evidence.json").write_bytes(raw_bytes)
+        elif evidence is not None:
+            (d / "evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
+
+    make_scan("c-empty-done", {
+        "target": "https://example.com/done",
+        "scan_date": "2026-10-26T13:00:00", "status": "done", "findings": [],
+    })
+    make_scan("c-missing")
+    make_scan("c-malformed", raw_bytes=b"{broken")
+    make_scan("c-error-zero", {
+        "target": "https://example.com/error",
+        "scan_date": "2026-10-26T13:02:00", "status": "error", "findings": [],
+    })
+    make_scan("c-incomplete-zero", {
+        "target": "https://example.com/incomplete",
+        "scan_date": "2026-10-26T13:03:00", "status": "incomplete", "findings": [],
+    })
+    make_scan("c-running")
+
+    monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
+    srv = MonitorServer()
+    srv.scan_in_progress = True
+    srv.current_scan_id = "c-running"
+    port = find_free_port()
+    server_thread = UvicornServerThread(srv, port)
+    server_thread.start()
+
+    def findings_cell(page, sid):
+        return page.locator("#historyTableBody tr").filter(
+            has_text=sid
+        ).locator("td").nth(3).inner_text()
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/monitor")
+            page.click("#navScanHistory")
+            page.wait_for_selector("#historyTableBody tr")
+
+            done_cell = findings_cell(page, "c-empty-done")
+            assert "0" in done_cell
+            assert "検出なし" in done_cell
+
+            for sid in ("c-missing", "c-malformed", "c-running"):
+                cell = findings_cell(page, sid)
+                assert "未取得" in cell, sid
+                assert "検出なし" not in cell, sid
+
+            for sid in ("c-error-zero", "c-incomplete-zero"):
+                cell = findings_cell(page, sid)
+                assert "0" in cell, sid
+                assert "検出なし" not in cell, sid
+
+            browser.close()
+    finally:
+        server_thread.stop()
