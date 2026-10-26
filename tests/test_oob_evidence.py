@@ -507,3 +507,328 @@ async def test_privacy_invariants_no_cleartext_credentials_or_raw_rfc822(tmp_pat
     # 2. Raw confidential email body must not be persisted in full
     assert "TOP SECRET DATA DO NOT LEAK" not in ledger_content
     assert "Secret Corporate Letter" not in ledger_content
+
+
+# =====================================================================
+# 6. Physical HTTP Wire Fixture Tests: 4 Scanner States
+# =====================================================================
+
+import socket
+import threading
+from contextlib import contextmanager
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+import uvicorn
+from wscan.checkpoint import CheckpointState, save_checkpoint, load_checkpoint
+from wscan.report import ReportGenerator
+
+
+@contextmanager
+def _local_http_wire_fixture():
+    app = FastAPI()
+    recorded_wire_requests: list[dict] = []
+
+    @app.post("/contact")
+    async def contact_post(req: Request):
+        form = await req.form()
+        recorded_wire_requests.append(dict(form))
+        return HTMLResponse("<html><body>Contact received</body></html>")
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=lambda: server.run(sockets=[sock]), daemon=True)
+    thread.start()
+    import time
+    deadline = time.monotonic() + 5
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline
+        time.sleep(0.01)
+    try:
+        yield f"http://127.0.0.1:{port}", recorded_wire_requests
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+        sock.close()
+        assert not thread.is_alive()
+
+
+@pytest.mark.asyncio
+async def test_wire_state_vulnerable_confirmed_and_correlated(tmp_path, monkeypatch):
+    """State 1: Vulnerable with real wire HTTP submission and successful ledger correlation."""
+    monkeypatch.setattr(mail_header_mod, "OOB_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(mail_header_mod, "OOB_POLL_INTERVAL", 0.0)
+
+    with _local_http_wire_fixture() as (base_url, recorded):
+        winning_index = 1
+        winning_token = f"wscan-oob-tok{winning_index}"
+        received = ReceivedEmail(
+            uid="1",
+            to_addrs=[f"{winning_token}@collab.test"],
+            subject="Contact form delivery",
+            body="Message body",
+        )
+        page = SimpleNamespace(
+            evaluate=AsyncMock(return_value={"action": f"{base_url}/contact", "method": "POST", "fields": {"email": ""}})
+        )
+        browser = SimpleNamespace(
+            navigate=AsyncMock(return_value=True),
+            page=page,
+            screenshot_b64=AsyncMock(return_value=""),
+        )
+        engine = _StubEngine(tmp_path, browser, received=received, winning_index=winning_index)
+        scanner = MailHeaderInjectionScanner(engine)
+        ip = InjectionPoint.for_form(f"{base_url}/contact", "email", 0)
+        unit = engine.request_logger.probe_ledger.expect(_ip_unit(ip), "mail_header", rules=["mail_header_oob"])
+
+        with engine.request_logger.probe_ledger.unit_scope(unit):
+            findings = await scanner.scan_injection_point(ip, {"name": "email"})
+
+        # (1) Real wire verification
+        assert len(recorded) > 0
+        assert any(winning_token in str(r.get("email", "")) for r in recorded)
+
+        # (2) Finding state verification: confirmed and reproduced
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.confidence == "confirmed"
+        assert f.verification_state == "reproduced"
+        assert f.verified is True
+        assert "attempt_ids" in f.evidence_details
+        assert "CONFIRMED" in f.evidence
+
+        # (3) Ledger write and re-read verification
+        engine.request_logger.probe_ledger.write_manifest()
+        rows = persisted(engine.request_logger)
+        decisions = [r for r in rows if r.get("record_kind") == RECORD_KIND]
+        assert len(decisions) >= 1
+        matched = [d for d in decisions if d.get("outcome") == "matched"]
+        assert len(matched) == 1
+        assert matched[0]["attempt_id"] in f.evidence_details["attempt_ids"]
+
+        # (4) Checkpoint verification
+        state = CheckpointState(findings=[f.to_dict()])
+        save_checkpoint(tmp_path, state)
+        loaded = load_checkpoint(tmp_path)
+        assert len(loaded.findings) == 1
+        restored_f = Finding.from_dict(loaded.findings[0])
+        assert restored_f.confidence == "confirmed"
+        assert restored_f.verification_state == "reproduced"
+        assert restored_f.verified is True
+
+
+@pytest.mark.asyncio
+async def test_wire_state_safe_twin_timeout(tmp_path, monkeypatch):
+    """State 2: Safe twin with real wire HTTP submission, zero findings, timeout ledger."""
+    monkeypatch.setattr(mail_header_mod, "OOB_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(mail_header_mod, "OOB_POLL_INTERVAL", 0.0)
+
+    with _local_http_wire_fixture() as (base_url, recorded):
+        page = SimpleNamespace(
+            evaluate=AsyncMock(return_value={"action": f"{base_url}/contact", "method": "POST", "fields": {"email": ""}})
+        )
+        browser = SimpleNamespace(
+            navigate=AsyncMock(return_value=True),
+            page=page,
+            screenshot_b64=AsyncMock(return_value=""),
+        )
+        engine = _StubEngine(tmp_path, browser, received=None)
+        scanner = MailHeaderInjectionScanner(engine)
+        ip = InjectionPoint.for_form(f"{base_url}/contact", "email", 0)
+        unit = engine.request_logger.probe_ledger.expect(_ip_unit(ip), "mail_header", rules=["mail_header_oob"])
+
+        with engine.request_logger.probe_ledger.unit_scope(unit):
+            findings = await scanner.scan_injection_point(ip, {"name": "email"})
+
+        # (1) Real wire requests sent
+        assert len(recorded) > 0
+
+        # (2) Zero findings produced
+        oob_findings = [f for f in findings if f.evidence_type == "mail_header_oob"]
+        assert len(oob_findings) == 0
+
+        # (3) Ledger decisions are timeout, strictly not no_match
+        engine.request_logger.probe_ledger.write_manifest()
+        rows = persisted(engine.request_logger)
+        decisions = [r for r in rows if r.get("record_kind") == RECORD_KIND]
+        assert len(decisions) > 0
+        for d in decisions:
+            assert d["outcome"] == "timeout"
+            assert d["outcome"] != "no_match"
+
+        # (4) Manifest reflects incomplete
+        summary = engine.request_logger.probe_ledger.completion_summary(["mail_header"])
+        assert summary["status"] != "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_wire_state_transport_error(tmp_path, monkeypatch):
+    """State 3: Transport error with real wire HTTP submission, transport_error ledger."""
+    monkeypatch.setattr(mail_header_mod, "OOB_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(mail_header_mod, "OOB_POLL_INTERVAL", 0.0)
+
+    with _local_http_wire_fixture() as (base_url, recorded):
+        page = SimpleNamespace(
+            evaluate=AsyncMock(return_value={"action": f"{base_url}/contact", "method": "POST", "fields": {"email": ""}})
+        )
+        browser = SimpleNamespace(
+            navigate=AsyncMock(return_value=True),
+            page=page,
+            screenshot_b64=AsyncMock(return_value=""),
+        )
+        engine = _StubEngine(tmp_path, browser, sink_error=ConnectionResetError("IMAP connection reset"))
+        scanner = MailHeaderInjectionScanner(engine)
+        ip = InjectionPoint.for_form(f"{base_url}/contact", "email", 0)
+        unit = engine.request_logger.probe_ledger.expect(_ip_unit(ip), "mail_header", rules=["mail_header_oob"])
+
+        with engine.request_logger.probe_ledger.unit_scope(unit):
+            findings = await scanner.scan_injection_point(ip, {"name": "email"})
+
+        # (1) Real wire requests sent
+        assert len(recorded) > 0
+
+        # (2) Zero findings produced
+        assert [f for f in findings if f.evidence_type == "mail_header_oob"] == []
+
+        # (3) Ledger decisions are transport_error
+        engine.request_logger.probe_ledger.write_manifest()
+        rows = persisted(engine.request_logger)
+        decisions = [r for r in rows if r.get("record_kind") == RECORD_KIND]
+        assert len(decisions) > 0
+        for d in decisions:
+            assert d["outcome"] == "transport_error"
+
+        summary = engine.request_logger.probe_ledger.completion_summary(["mail_header"])
+        assert summary["status"] != "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_wire_state_logger_failure_unconfirmed_finding(tmp_path, monkeypatch):
+    """State 4: Logger write failure / quarantined ledger produces unconfirmed Finding without CONFIRMED claims."""
+    monkeypatch.setattr(mail_header_mod, "OOB_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(mail_header_mod, "OOB_POLL_INTERVAL", 0.0)
+
+    with _local_http_wire_fixture() as (base_url, recorded):
+        winning_token = "wscan-oob-tok0"
+        received = ReceivedEmail(
+            uid="1",
+            to_addrs=[f"{winning_token}@collab.test"],
+            subject="Contact form delivery",
+            body="Message body",
+        )
+        page = SimpleNamespace(
+            evaluate=AsyncMock(return_value={"action": f"{base_url}/contact", "method": "POST", "fields": {"email": ""}})
+        )
+        browser = SimpleNamespace(
+            navigate=AsyncMock(return_value=True),
+            page=page,
+            screenshot_b64=AsyncMock(return_value=""),
+        )
+        engine = _StubEngine(tmp_path, browser, received=received, winning_index=0)
+        # Force quarantine to simulate logger failure / quarantined ledger
+        engine.request_logger.probe_ledger._quarantined = True
+
+        scanner = MailHeaderInjectionScanner(engine)
+        ip = InjectionPoint.for_form(f"{base_url}/contact", "email", 0)
+        unit = engine.request_logger.probe_ledger.expect(_ip_unit(ip), "mail_header", rules=["mail_header_oob"])
+
+        with engine.request_logger.probe_ledger.unit_scope(unit):
+            findings = await scanner.scan_injection_point(ip, {"name": "email"})
+
+        # (1) Real wire requests sent
+        assert len(recorded) > 0
+
+        # (2) Finding generated but unconfirmed
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.confidence == "likely"
+        assert f.verification_state == "assumed"
+        assert f.verified is False
+        assert "attempt_ids" not in f.evidence_details
+        assert "CONFIRMED" not in f.evidence
+
+        # (3) Ledger manifest marks write failure / incomplete
+        engine.request_logger.probe_ledger.write_manifest()
+        summary = engine.request_logger.probe_ledger.completion_summary(["mail_header"])
+        assert summary["status"] != "COMPLETE"
+
+        # (4) Checkpoint persistence preserves unconfirmed state
+        state = CheckpointState(findings=[f.to_dict()])
+        save_checkpoint(tmp_path, state)
+        loaded = load_checkpoint(tmp_path)
+        assert len(loaded.findings) == 1
+        restored_f = Finding.from_dict(loaded.findings[0])
+        assert restored_f.confidence == "likely"
+        assert restored_f.verification_state == "assumed"
+        assert restored_f.verified is False
+
+        # (5) Report generation does not label finding as CONFIRMED
+        rg = ReportGenerator(output_dir=tmp_path)
+        report_file = rg.generate(
+            target=base_url,
+            findings=[f],
+            visited_urls=[base_url],
+            checks=["mail_header"],
+        )
+        report_content = report_file.read_text(encoding="utf-8")
+        assert "[CONFIRMED]" not in report_content
+        assert "CONFIRMED via OOB" not in report_content
+
+
+@pytest.mark.asyncio
+async def test_no_logger_unconfirmed_finding():
+    """No-logger environment: scanner preserves finding as likely/assumed without attempt_ids."""
+    winning_token = "wscan-oob-tok0"
+    received = ReceivedEmail(
+        uid="1",
+        to_addrs=[f"{winning_token}@collab.test"],
+        subject="Contact form delivery",
+        body="Message body",
+    )
+    page = SimpleNamespace(
+        evaluate=AsyncMock(return_value={"action": "http://target.test/contact", "method": "POST", "fields": {"email": ""}})
+    )
+    browser = SimpleNamespace(
+        navigate=AsyncMock(return_value=True),
+        page=page,
+        screenshot_b64=AsyncMock(return_value=""),
+    )
+
+    class _NoLoggingEngine:
+        def __init__(self, b, r):
+            self.target_url = "http://target.test"
+            self.request_logger = None
+            self.browser = b
+            self.monitor = None
+            self.payload_gen = None
+            self._finding_dedup = set()
+            self.all_findings = []
+            self.checks = ["mail_header"]
+            self.sleep_factor = 0.0
+            self.wave_errors = []
+            self._counter = 0
+
+            class _Sink:
+                def fetch_recent(self, limit=50):
+                    return [r]
+            self.oob_sink = _Sink()
+
+        def new_oob_address(self):
+            tok = f"wscan-oob-tok{self._counter}"
+            self._counter += 1
+            return (tok, f"{tok}@collab.test")
+
+    engine = _NoLoggingEngine(browser, received)
+    scanner = MailHeaderInjectionScanner(engine)
+    ip = InjectionPoint.for_form("http://target.test/contact", "email", 0)
+
+    findings = await scanner.scan_injection_point(ip, {"name": "email"})
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.confidence == "likely"
+    assert f.verification_state == "assumed"
+    assert f.verified is False
+    assert "attempt_ids" not in f.evidence_details
+    assert "CONFIRMED" not in f.evidence
+
