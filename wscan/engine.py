@@ -6090,7 +6090,7 @@ class ScanEngine:
                 else:
                     _page_gate = getattr(scanner, "may_run_page_scanner", None)
                     if callable(_page_gate) and not _page_gate(page.url):
-                        if check_name == "graphql":
+                        if check_name in {"graphql", "websocket"}:
                             from .checkpoint import unit_key
                             with ScanEngine._evidence_scope(self, unit_key(cp_url, "(page)", 0, check_name),
                                                            check_name, rules=scanner.PASSIVE_RULES):
@@ -7750,7 +7750,7 @@ class ScanEngine:
             from .checkpoint import unit_key
             for finding in to_verify:
                 check = "graphql" if finding.check_type.startswith("graphql_") else finding.check_type
-                rules = ((finding.evidence_type,) if check in {"cors", "security_headers"} else
+                rules = ((finding.evidence_type,) if check in {"cors", "security_headers", "websocket"} else
                          (finding.check_type,) if check == "graphql" else
                          ("dom_xss_verify",) if check == "dom_xss" else ())
                 ledger.expect(unit_key(finding.url, finding.field_name, 0, check)
@@ -7954,6 +7954,11 @@ class ScanEngine:
                 with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, "graphql")
                         + "\x1everify:" + f.evidence_type, "graphql", rules=(f.check_type,), role="verify"):
                     _vscanner.record_evidence_skip(f.url, rules=(f.check_type,), role="verify")
+            if f.check_type == "websocket" and _vscanner is not None:
+                from .checkpoint import unit_key
+                with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, "websocket")
+                        + "\x1everify:" + f.evidence_type, "websocket", rules=(f.evidence_type,), role="verify"):
+                    _vscanner.record_evidence_skip(f.url, rules=(f.evidence_type,), role="verify")
             return "assumed"  # profile がこの再送を許さない → penalize しない terminal state
 
         if f.check_type.startswith("graphql_"):
@@ -7978,10 +7983,10 @@ class ScanEngine:
             self._api_auth_failed = False
             self._json_probe_failed = False
             from .checkpoint import unit_key
-            rules = ((f.evidence_type,) if scanner_key in {"cors", "security_headers"} else
+            rules = ((f.evidence_type,) if scanner_key in {"cors", "security_headers", "websocket"} else
                      (f.check_type,) if scanner_key == "graphql" else
                      ("dom_xss_verify",) if scanner_key == "dom_xss" else ())
-            if scanner_key == "graphql":
+            if scanner_key in {"graphql", "websocket"}:
                 f.evidence_details.pop("verification_attempt_ids", None)
             with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, scanner_key) + "\x1everify:" + f.evidence_type,
                                       scanner_key, rules=rules, role="verify"):
@@ -7993,20 +7998,20 @@ class ScanEngine:
             # してしまうため、結果値より前に flag を確認する。
             if self._api_auth_failed or self._json_probe_failed:
                 return "assumed"
-            if scanner_key == "graphql" and scanner_result is not None:
+            if scanner_key in {"graphql", "websocket"} and scanner_result is not None:
                 ledger = getattr(getattr(self, "request_logger", None), "probe_ledger", None)
                 accepted = []
                 ids = (f.evidence_details or {}).get("verification_attempt_ids", ())
                 if ledger:
                     from .probe_recorder import completion_identity
-                    unit = completion_identity(unit_key(f.url, f.field_name, 0, "graphql") + "\x1everify:" + f.evidence_type)
+                    unit = completion_identity(unit_key(f.url, f.field_name, 0, scanner_key) + "\x1everify:" + f.evidence_type)
                     accepted = [r for rows in ledger._correlated_decisions().values() for r in rows
                                 if r.get("attempt_id") in ids and r.get("role") == "verify"
                                 and r.get("completion_unit") == unit
                                 and r.get("outcome") == ("matched" if scanner_result else "no_match")]
                 if not accepted or ledger.evidence_incomplete:
                     return "assumed"
-            if scanner_key == "graphql" and scanner_result is None:
+            if scanner_key in {"graphql", "websocket"} and scanner_result is None:
                 return "assumed"
             # SSTI needs a retrieved control. An indeterminate scanner result must
             # not become confirmed through the generic expected-string fallback.

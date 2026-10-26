@@ -255,6 +255,12 @@ class RequestLogger:
                 if not valid_shape(dataclasses.asdict(record)):
                     self.probe_ledger.manifest.note_gap("invalid_graphql_decision")
                     return None
+            if str(record_kind).startswith("websocket_"):
+                from .websocket_evidence import valid_shape
+                import dataclasses
+                if not valid_shape(dataclasses.asdict(record)):
+                    self.probe_ledger.manifest.note_gap("invalid_websocket_record")
+                    return None
             if self.probe_ledger.append(record):
                 return record.attempt_id
         except Exception as exc:

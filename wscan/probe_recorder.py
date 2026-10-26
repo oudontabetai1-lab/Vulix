@@ -215,7 +215,7 @@ class ProbeLedger:
             invalid_decision = False
             for row in rows:
                 if row.get("record_kind", "legacy") == "legacy":
-                    if row.get("check") not in {"sqli", "xss", "clickjacking", "security_headers", "graphql"}:
+                    if row.get("check") not in {"sqli", "xss", "clickjacking", "security_headers", "graphql", "websocket"}:
                         accepted.append(row)
                     continue
                 if row.get("record_kind") != "decision":
@@ -264,6 +264,9 @@ class ProbeLedger:
             result[unit] = decisions
         from .graphql_evidence import accepted_decisions as graphql_decisions
         for unit, decisions in graphql_decisions(self.events).items():
+            result[unit] = decisions
+        from .websocket_evidence import accepted_decisions as websocket_decisions
+        for unit, decisions in websocket_decisions(self.events).items():
             result[unit] = decisions
         return result
 
@@ -345,8 +348,12 @@ class ProbeLedger:
         outcome = rec.get("outcome")
         if outcome is not None and outcome not in _VALID_OUTCOMES:
             return False  # 語彙外の outcome（null は未記録として許容）
-        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision", "browser", "passive_decision", "graphql_decision"}:
+        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision", "browser", "passive_decision", "graphql_decision", "websocket_attempt", "websocket_request", "websocket_observation", "websocket_cleanup", "websocket_discovery", "websocket_decision"}:
             return False
+        if str(rec.get("record_kind", "")).startswith("websocket_"):
+            from .websocket_evidence import valid_shape
+            if not valid_shape(rec):
+                return False
         if rec.get("record_kind") == "graphql_decision":
             from .graphql_evidence import valid_shape
             if not valid_shape(rec):

@@ -358,14 +358,25 @@ async def test_websocket_attack_verify_and_failure_preserve_return_values(tmp_pa
     assert await scanner._send_ws_message("wss://t.test", "probe", role=ProbeRole.VERIFY) == ["observed"]
     page.evaluate.side_effect = RuntimeError("secret")
     assert await scanner._send_ws_message("wss://t.test", "probe") == []
-    assert [r["role"] for r in rows(logger)] == ["attack", "attack", "verify", "verify", "attack"]
-    attack, received, verify, verified, failed = rows(logger)
-    assert received["parent_id"] == attack["attempt_id"]
-    assert verified["parent_id"] == verify["attempt_id"]
-    assert received["response"]["body_length"] == len("observed")
-    assert received["response"]["body_excerpt"] == ""
-    assert failed["response"] is None
-    assert all(r["request"]["sent"] is False and r["outcome"] is None for r in rows(logger))
+    records = rows(logger)
+    assert [r["record_kind"] for r in records] == [
+        "websocket_attempt", "websocket_request", "websocket_observation", "websocket_cleanup", "websocket_decision",
+        "websocket_attempt", "websocket_request", "websocket_observation", "websocket_cleanup", "websocket_decision",
+        "websocket_attempt", "websocket_cleanup", "websocket_decision",
+    ]
+    attack_att, attack_req, attack_obs, attack_cln, attack_dec = records[:5]
+    verify_att, verify_req, verify_obs, verify_cln, verify_dec = records[5:10]
+    fail_att, fail_cln, fail_dec = records[10:]
+    assert attack_req["parent_id"] == attack_att["attempt_id"]
+    assert attack_obs["parent_id"] == attack_req["attempt_id"]
+    assert attack_dec["parent_id"] == attack_att["attempt_id"]
+    assert attack_req["request"]["sent"] is True
+    assert attack_obs["response"]["body_length"] == len("observed")
+    assert attack_obs["outcome"] == "no_match"
+    assert verify_req["parent_id"] == verify_att["attempt_id"]
+    assert verify_obs["parent_id"] == verify_req["attempt_id"]
+    assert fail_att["request"] is None
+    assert fail_dec["outcome"] == "verification_error"
     assert scanner.engine.wave_errors == ["websocket_observation_error:RuntimeError"]
 
 
