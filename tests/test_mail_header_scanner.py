@@ -4,10 +4,13 @@
 OOB 確証・フィールド名判定）だけを検証する。OOB シンクもスタブし、外部接続は
 発生させない。
 """
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 from wscan.oob_email import ReceivedEmail
+from wscan.request_logger import RequestLogger
 from wscan.scanners import mail_header as mail_header_mod
 from wscan.scanners.mail_header import (
     MailHeaderInjectionScanner,
@@ -56,10 +59,12 @@ class _OOBEngine(_Engine):
 
     ``received`` の To に当たり変種のアドレスを持たせ、``_poll_oob`` が
     ``email_matches_token`` でその変種に帰属することを検証できるようにする。
+    ``request_logger`` を渡すことで実ロガーへの確証決定台帳永続化を行える。
     """
 
-    def __init__(self, browser, received, winning_index=0):
+    def __init__(self, browser, received, winning_index=0, request_logger=None):
         super().__init__(browser)
+        self.request_logger = request_logger
         self._counter = 0
 
         class _Sink:
@@ -410,10 +415,13 @@ class OOBConfirmationTests(unittest.TestCase):
         self._orig_interval = mail_header_mod.OOB_POLL_INTERVAL
         mail_header_mod.OOB_WAIT_SECONDS = 0
         mail_header_mod.OOB_POLL_INTERVAL = 0
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.request_logger = RequestLogger(Path(self._temp_dir.name))
 
     def tearDown(self):
         mail_header_mod.OOB_WAIT_SECONDS = self._orig_wait
         mail_header_mod.OOB_POLL_INTERVAL = self._orig_interval
+        self._temp_dir.cleanup()
 
     def test_oob_received_attributes_finding_to_firing_variant(self):
         # 2 番目の変種(index=2)だけが着信する → その変種に正しく帰属すること。
@@ -429,6 +437,7 @@ class OOBConfirmationTests(unittest.TestCase):
                 _Browser("Thanks, your message was sent."),
                 received,
                 winning_index=winning_index,
+                request_logger=self.request_logger,
             )
         )
         findings = _run(
@@ -442,6 +451,36 @@ class OOBConfirmationTests(unittest.TestCase):
         # last_payload ではなく実際に発火した変種のトークンに帰属している。
         self.assertEqual(oob[0].evidence_details["oob_token"], winning_token)
         self.assertIn("Cc: %s@collab.test" % winning_token, oob[0].payload)
+        self.assertTrue(oob[0].evidence_details.get("attempt_ids"))
+
+    def test_oob_unlogged_retains_unconfirmed_finding(self):
+        # ロガー未配線または台帳隔離時は、Finding を消さずに likely / assumed として保持する契約。
+        winning_index = 2
+        winning_token = f"wscan-oob-tok{winning_index}"
+        received = ReceivedEmail(
+            uid="1",
+            to_addrs=[f"{winning_token}@collab.test"],
+            subject="Thanks",
+        )
+        scanner = MailHeaderInjectionScanner(
+            _OOBEngine(
+                _Browser("Thanks, your message was sent."),
+                received,
+                winning_index=winning_index,
+                request_logger=None,
+            )
+        )
+        findings = _run(
+            scanner.scan_field(
+                "http://t.test/contact", 0, {"name": "email"}, is_url_param=False
+            )
+        )
+        oob = [f for f in findings if f.evidence_type == "mail_header_oob"]
+        self.assertEqual(len(oob), 1)
+        self.assertEqual(oob[0].confidence, "likely")
+        self.assertEqual(oob[0].verification_state, "assumed")
+        self.assertFalse(oob[0].verified)
+        self.assertNotIn("attempt_ids", oob[0].evidence_details)
 
     def test_oob_no_mail_yields_no_oob_finding(self):
         scanner = MailHeaderInjectionScanner(

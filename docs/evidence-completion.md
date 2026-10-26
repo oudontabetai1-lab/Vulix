@@ -276,6 +276,10 @@ python -m pytest -q tests/test_websocket_evidence.py
 - **異常系とスタンドアロン判定**: IMAP 接続断や認証エラーは `transport_error`、パース例外は `verification_error`、
   OOB シンク未設定時はスタンドアロンの `skipped`（`rationale="oob_sink_not_configured"`）を記録し、
   安全確証として扱われることを防止します。
+- **証跡欠落時の未確証保持（通常ツール層）**: 台帳隔離・書込み失敗・未記録時など、実際に永続化できた
+  `decision_id` が存在しない場合は `confidence="likely"` / `verification_state="assumed"` として保持します。
+  OOB の観測事実と Finding 自体は消さずに残しつつ、台帳証跡のない未相関な `confirmed` / `reproduced` の
+  偽称（レポート・通知・チェックポイント上の verified 偽称）を防止します。
 - **プライバシー保護不変条件**: 生の RFC822 本文、生トークン、認証情報（`WSCAN_OOB_PASSWORD` 等）は
   台帳（`probe_attempts.jsonl`）、監査ログ（`http_requests.jsonl`）、およびマニフェストへ一切永続化しません。
   受信本文はハッシュ値（`body_hash`）とバイト長（`body_length`）のみを記録します。

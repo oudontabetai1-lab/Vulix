@@ -503,19 +503,29 @@ class MailHeaderInjectionScanner(BaseScanner):
             }
             if decision_id:
                 evidence_details["attempt_ids"] = [decision_id]
+                confidence = "confirmed"
+                evidence = (
+                    "Mail header injection CONFIRMED via OOB: the application sent an "
+                    "email whose injected Cc reached the out-of-band mailbox "
+                    f"(token {attempt['token']}, {attempt['desc']} newline)."
+                )
+            else:
+                confidence = "likely"
+                evidence = (
+                    "Mail header injection observed via OOB (unconfirmed evidence): "
+                    "the application sent an email whose injected Cc reached the "
+                    f"out-of-band mailbox (token {attempt['token']}, {attempt['desc']} newline), "
+                    "but probe evidence decision could not be persisted."
+                )
 
             return await self.record_finding(
                 url=ip.url,
                 field_name=field_name,
                 payload=attempt["payload"],
-                evidence=(
-                    "Mail header injection CONFIRMED via OOB: the application sent an "
-                    "email whose injected Cc reached the out-of-band mailbox "
-                    f"(token {attempt['token']}, {attempt['desc']} newline)."
-                ),
+                evidence=evidence,
                 pair=attempt["pair"],
                 severity="high",
-                confidence="confirmed",
+                confidence=confidence,
                 evidence_type="mail_header_oob",
                 evidence_details=evidence_details,
                 injection_point=ip,
