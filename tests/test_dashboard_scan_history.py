@@ -497,6 +497,7 @@ def test_dashboard_scan_history_privacy_playwright(tmp_path, monkeypatch):
         "CANARY_USER_PASS", "CANARY_QUERY", "CANARY_FRAG", "CANARY_NOSCHEME",
         "CANARY_MATRIX", "CANARY_JSESSION", "CANARY_ASP", "CANARY_JS",
         "CANARY_MALFORMED", "CANARY_ENCODED", "CANARY_LDAP",
+        "CRV_ENCJSESSION", "CRV_ENCAPSP", "CAN_NESTED_TOKEN",
     ]
     targets = {
         "p-valid": (
@@ -506,10 +507,13 @@ def test_dashboard_scan_history_privacy_playwright(tmp_path, monkeypatch):
         "p-noscheme": "user:CANARY_NOSCHEME@example.com/path",
         "p-matrix-token": "http://example.com/path;token=CANARY_MATRIX",
         "p-jsession": "http://example.com/path;jsessionid=CANARY_JSESSION",
+        "p-enc-jsession": "http://example.com/path;j%65ssionid=CRV_ENCJSESSION",
         "p-asp": "https://example.com/path/(S(CANARY_ASP))/view",
+        "p-enc-asp": "https://example.com/path/%28S%28CRV_ENCAPSP%29%29/view",
         "p-js": "javascript:alert('CANARY_JS')",
         "p-malformed": "http://user:CANARY_MALFORMED@[bad-host/path",
         "p-encoded-key": "https://example.com/app?%74oken=CANARY_ENCODED",
+        "p-nested-token": "https://example.com/app?next=%2Fapp%3Ftoken%3DCAN_NESTED_TOKEN",
         "p-ldap": "ldap://user:CANARY_LDAP@ldap.example.com/ou=users",
         "p-safe": "https://example.com/safe/path?q=ok",
     }
@@ -557,8 +561,10 @@ def test_dashboard_scan_history_privacy_playwright(tmp_path, monkeypatch):
             assert "access_token=<redacted>" in body_text
             assert ";token=<redacted>" in body_text
             assert ";jsessionid=<redacted>" in body_text
+            assert ";j%65ssionid=<redacted>" in body_text
             assert "(<redacted>)" in body_text
             assert "%74oken=<redacted>" in body_text
+            assert "%2Fapp%3Ftoken%3D<redacted>" in body_text
             assert "https://example.com/safe/path?q=ok" in body_text
 
             # Invalid/unsupported values use the neutral placeholder.
@@ -570,6 +576,33 @@ def test_dashboard_scan_history_privacy_playwright(tmp_path, monkeypatch):
             ).locator(".history-target-cell")
             assert valid_cell.inner_text() == valid_cell.get_attribute("title")
             assert "<redacted>@example.com" in valid_cell.inner_text()
+
+            # Encoded variants keep title == inner_text and no raw secrets
+            enc_cell = page.locator("#historyTableBody tr").filter(
+                has_text="p-enc-jsession"
+            ).locator(".history-target-cell")
+            assert enc_cell.inner_text() == enc_cell.get_attribute("title")
+            assert "CRV_ENCJSESSION" not in enc_cell.inner_text()
+
+            asp_cell = page.locator("#historyTableBody tr").filter(
+                has_text="p-enc-asp"
+            ).locator(".history-target-cell")
+            assert asp_cell.inner_text() == asp_cell.get_attribute("title")
+            assert "CRV_ENCAPSP" not in asp_cell.inner_text()
+
+            nested_cell = page.locator("#historyTableBody tr").filter(
+                has_text="p-nested-token"
+            ).locator(".history-target-cell")
+            assert nested_cell.inner_text() == nested_cell.get_attribute("title")
+            assert "CAN_NESTED_TOKEN" not in nested_cell.inner_text()
+
+            # Raw API200 retains original unsanitized target values
+            raw_res = page.evaluate("() => fetch('/api/v1/scans').then(r => r.json())")
+            raw_scans = raw_res.get("scans", []) if isinstance(raw_res, dict) else raw_res
+            raw_by_id = {s["id"]: s["target"] for s in raw_scans}
+            assert raw_by_id["p-enc-jsession"] == targets["p-enc-jsession"]
+            assert raw_by_id["p-enc-asp"] == targets["p-enc-asp"]
+            assert raw_by_id["p-nested-token"] == targets["p-nested-token"]
 
             # Still no executable markup injection from target text.
             assert page.query_selector_all("#historyTableBody script") == []
@@ -639,6 +672,139 @@ def test_dashboard_scan_history_unknown_counts_playwright(tmp_path, monkeypatch)
                 cell = findings_cell(page, sid)
                 assert "0" in cell, sid
                 assert "検出なし" not in cell, sid
+
+            browser.close()
+    finally:
+        server_thread.stop()
+
+def test_dashboard_scan_history_mobile_nav_keyboard(tmp_path, monkeypatch):
+    """Verify accessible mobile navigation (<=1200px) and keyboard interaction."""
+    scan1 = tmp_path / "m-scan-1"
+    scan1.mkdir()
+    (scan1 / "evidence.json").write_text(json.dumps({
+        "target": "https://example.com/mobile-target",
+        "scan_date": "2026-10-26T12:00:00",
+        "status": "done",
+        "findings": [{"id": "f1", "severity": "low"}],
+    }), encoding="utf-8")
+    scan2 = tmp_path / "m-scan-2"
+    scan2.mkdir()
+    (scan2 / "evidence.json").write_text(json.dumps({
+        "target": "https://example.com/filtered-target",
+        "scan_date": "2026-10-26T12:05:00",
+        "status": "error",
+        "findings": [],
+    }), encoding="utf-8")
+
+    monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
+    srv = MonitorServer()
+    port = find_free_port()
+    server_thread = UvicornServerThread(srv, port)
+    server_thread.start()
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            # Viewport width 390px (mobile)
+            page = browser.new_page(viewport={"width": 390, "height": 844})
+            page.goto(f"http://127.0.0.1:{port}/monitor")
+
+            # Check that .ws-rail is hidden and .hdr-view-toggle is visible
+            rail_display = page.evaluate("getComputedStyle(document.querySelector('.ws-rail')).display")
+            assert rail_display == "none"
+
+            toggle_display = page.evaluate("getComputedStyle(document.querySelector('.hdr-view-toggle')).display")
+            assert toggle_display == "flex"
+            assert page.is_visible("#hdrBtnLive")
+            assert page.is_visible("#hdrBtnHistory")
+
+            # Keyboard navigation to switch to History
+            page.focus("body")
+            page.keyboard.press("Tab")  # hdrBtnLive
+            page.keyboard.press("Tab")  # hdrBtnHistory
+            assert page.evaluate("document.activeElement.id") == "hdrBtnHistory"
+            page.keyboard.press("Enter")
+
+            page.wait_for_selector("#historyTableBody tr")
+            assert page.is_visible("#viewScanHistory")
+            assert not page.is_visible("#viewLiveMonitor")
+
+            # Rows initially rendered (2 rows)
+            assert page.locator("#historyTableBody tr").count() == 2
+
+            # Filter reducing rows
+            search_input = page.locator("#historySearchInput")
+            search_input.fill("filtered")
+            assert page.locator("#historyTableBody tr").count() == 1
+            assert "filtered-target" in page.locator("#historyTableBody").inner_text()
+
+            # Switch back to Live via click on #hdrBtnLive
+            page.click("#hdrBtnLive")
+            assert not page.is_visible("#viewScanHistory")
+            assert page.is_visible("#viewLiveMonitor")
+
+            browser.close()
+    finally:
+        server_thread.stop()
+
+def test_dashboard_scan_history_ws_lifecycle_across_views(tmp_path, monkeypatch):
+    """Verify WebSocket receives distinct new messages before, during, and after history view."""
+    monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
+    srv = MonitorServer()
+
+    async def emit_lifecycle_step(step: str):
+        await srv.emit("page_start", {"url": f"https://example.com/step-{step}"})
+        return {"ok": True, "step": step}
+
+    srv.app.add_api_route("/__test__/emit-step/{step}", emit_lifecycle_step, methods=["POST"])
+
+    port = find_free_port()
+    server_thread = UvicornServerThread(srv, port)
+    server_thread.start()
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            received_messages = []
+            def handle_ws(ws):
+                ws.on("framereceived", lambda payload: received_messages.append((time.time(), payload)))
+            page.on("websocket", handle_ws)
+
+            page.goto(f"http://127.0.0.1:{port}/monitor")
+            page.wait_for_selector("#viewLiveMonitor")
+
+            # 1. Trigger emit before entering history
+            res1 = page.request.post(f"http://127.0.0.1:{port}/__test__/emit-step/before_history")
+            assert res1.status == 200
+            page.wait_for_function("document.getElementById('statPages') && document.getElementById('statPages').textContent.trim() === '1'")
+            assert any("before_history" in str(msg[1]) for msg in received_messages)
+            count_before = len(received_messages)
+
+            # 2. Switch to scan history view
+            page.click("#navScanHistory")
+            page.wait_for_selector("#viewScanHistory")
+
+            # Trigger emit while history view is active
+            res2 = page.request.post(f"http://127.0.0.1:{port}/__test__/emit-step/during_history")
+            assert res2.status == 200
+            page.wait_for_function("document.getElementById('statPages') && document.getElementById('statPages').textContent.trim() === '2'")
+            assert any("during_history" in str(msg[1]) for msg in received_messages)
+            count_during = len(received_messages)
+            assert count_during > count_before
+
+            # 3. Switch back to live view
+            page.click("#navLiveMonitor")
+            page.wait_for_selector("#viewLiveMonitor")
+
+            # Trigger emit after returning to live
+            res3 = page.request.post(f"http://127.0.0.1:{port}/__test__/emit-step/after_return")
+            assert res3.status == 200
+            page.wait_for_function("document.getElementById('statPages') && document.getElementById('statPages').textContent.trim() === '3'")
+            assert any("after_return" in str(msg[1]) for msg in received_messages)
+            count_after = len(received_messages)
+            assert count_after > count_during
 
             browser.close()
     finally:
