@@ -1773,11 +1773,26 @@ class ScanEngine:
                           for inp in form.get("inputs", [])]
                 fields += [(0, name, True) for name in page.url_params]
                 for fi, name, is_url in fields:
+                    if check in {"sqli", "xss", "dom_xss"}:
+                        rules = (f"{check}_payload_oracle",)
+                        reason = ""
+                    elif check == "mail_header":
+                        from wscan.scanners.mail_header import _field_name_suggests_mail
+                        if _field_name_suggests_mail(name):
+                            rules = ("mail_header_oob",)
+                            reason = ""
+                        else:
+                            rules = ()
+                            reason = "field_not_targeted"
+                    else:
+                        rules = ()
+                        reason = "uninstrumented_detector_contract"
+
+                    if page_excluded or name.lower() in getattr(self, "exclude_fields", set()):
+                        reason = "excluded_by_configuration"
+
                     ledger.expect(unit_key(page.url, name, fi, check, is_url), check,
-                                  rules=(f"{check}_payload_oracle",) if check in {"sqli", "xss", "dom_xss"} else (),
-                                  reason="excluded_by_configuration"
-                                  if page_excluded or name.lower() in getattr(self, "exclude_fields", set())
-                                  else "" if check in {"sqli", "xss", "dom_xss"} else "uninstrumented_detector_contract")
+                                  rules=rules, reason=reason)
         ledger.write_manifest()
 
     def _scan_matrix_for_display(self) -> list[dict]:

@@ -231,6 +231,8 @@ class RequestLogger:
                     body_hash=sha256_hex(body), body_length=body_length(body),
                     elapsed_ms=((resp["timestamp"] - req["timestamp"]) * 1000
                                 if resp.get("timestamp") and req.get("timestamp") else None),
+                    dialog=bool(resp.get("dialog")),
+                    oob=bool(resp.get("oob")),
                 )
             # Submission payloads have no known carrier or sent request yet.
             if payload is not None:
@@ -260,6 +262,12 @@ class RequestLogger:
                 import dataclasses
                 if not valid_shape(dataclasses.asdict(record)):
                     self.probe_ledger.manifest.note_gap("invalid_websocket_record")
+                    return None
+            if record_kind == "oob_decision":
+                from .oob_evidence import valid_shape
+                import dataclasses
+                if not valid_shape(dataclasses.asdict(record)):
+                    self.probe_ledger.manifest.note_gap("invalid_oob_decision")
                     return None
             if self.probe_ledger.append(record):
                 return record.attempt_id
@@ -299,7 +307,8 @@ class RequestLogger:
             "role", "check", "field", "wave", "completion_unit",
             "baseline_attempt_ids", "control_attempt_ids")}
         try:
-            return self.log_probe(**metadata, actor="scanner_transport", **kwargs)
+            kwargs.setdefault("actor", "scanner_transport")
+            return self.log_probe(**metadata, **kwargs)
         except Exception as exc:
             self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
 

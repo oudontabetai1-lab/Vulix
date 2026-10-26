@@ -256,3 +256,30 @@ python -m pytest -q tests/test_websocket_evidence.py
 別プロセス resume と証跡欠落を検証します。candidate と confirmed を分けて数え、server の実測
 受信数と共有 GET の台帳件数を照合します。resume の既存 crawl GET と、完了済みの監査 GET の
 再送抑制は別に確認します。再実行では新しい空の artifact directory を使ってください。
+
+### OOB email transport decisions
+
+メールヘッダインジェクション検査（`mail_header`）の Out-Of-Band（OOB）確証は、非同期・疎結合な
+外部観測チャネルである受信メールボックスへの到達判定を実 HTTP 送信および確証オラクルに結びます。
+
+- **単一試行（single-shot）と変種帰属**: 決定論的な 9 種の改行バイパス変種ごとに一意の canary トークンと
+  OOB アドレスを発行して注入プローブを送信します。確証 Finding は、着信メールの宛先・ヘッダを
+  メモリ内で厳密に突合した当該変種へ一意に帰属させます。外部宛先への無用な二重送信を防ぐため、
+  `mail_header` は Phase 4.5 の再検証対象外（`_VERIFIABLE_CHECKS` 非対象）とし、単一試行の因果証跡のみで確証します。
+- **因果チェインの記録**: 各プローブ送信は `record_kind="request"`（生 HTTPX またはブラウザフォールバック）を
+  起点とし、HTTP 応答受信で `record_kind="observation"` を記録した上で、受信箱ポーリング判定結果を
+  `record_kind="oob_decision"`, `decision_rule="mail_header_oob"`, `decision_version="1"` として記録します。
+  決定の件名（`decision_subject`）には `sha256_hex(f"{unit}:{token}:{variant}")` の 64 文字 hex を使用します。
+- **空メールボックスは安全証明にならない**: ポーリング期限切れで着信が 0 件だった場合は `outcome="timeout"`
+  （計画完了判定 `EVIDENCE_INCOMPLETE`）として記録し、決して安全証明（`no_match` や `COMPLETE`）に倒しません。
+  `valid_shape` バリデータは `no_match` の記録を厳格に拒否します。
+- **異常系とスタンドアロン判定**: IMAP 接続断や認証エラーは `transport_error`、パース例外は `verification_error`、
+  OOB シンク未設定時はスタンドアロンの `skipped`（`rationale="oob_sink_not_configured"`）を記録し、
+  安全確証として扱われることを防止します。
+- **プライバシー保護不変条件**: 生の RFC822 本文、生トークン、認証情報（`WSCAN_OOB_PASSWORD` 等）は
+  台帳（`probe_attempts.jsonl`）、監査ログ（`http_requests.jsonl`）、およびマニフェストへ一切永続化しません。
+  受信本文はハッシュ値（`body_hash`）とバイト長（`body_length`）のみを記録します。
+
+```sh
+python -m pytest -q tests/test_oob_evidence.py
+```
