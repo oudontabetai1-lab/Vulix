@@ -138,6 +138,15 @@ def oob_payloads(oob_address: str) -> list[tuple[str, str]]:
     return list(crlf_bypass_variants("test@example.com", f"Cc: {oob_address}"))
 
 
+def _unit_key_for_ip(ip: InjectionPoint, check_type: str) -> str:
+    from wscan.checkpoint import unit_key
+    url, field_name, form_index, location_token, pointer = ip.stable_key_parts()
+    return unit_key(
+        url, field_name, int(form_index), check_type,
+        location_token=location_token, pointer=pointer,
+    )
+
+
 class MailHeaderInjectionScanner(BaseScanner):
     """Mail header injection scanner targeting email-related form fields (IPA 1.8)."""
 
@@ -370,15 +379,41 @@ class MailHeaderInjectionScanner(BaseScanner):
         （取りこぼされた後続変種を誤って「確証済み」と記録しない）。
         """
         new_addr = getattr(self.engine, "new_oob_address", None)
-        if not callable(new_addr):
-            return None
         sink = getattr(self.engine, "oob_sink", None)
-        if sink is None:
+        logger = getattr(getattr(self, "engine", None), "request_logger", None)
+        unit_id = (
+            logger.probe_ledger.current_unit()
+            if logger and hasattr(logger, "probe_ledger")
+            else ""
+        ) or _unit_key_for_ip(ip, self.CHECK_TYPE)
+
+        if not callable(new_addr) or sink is None:
+            if logger is not None and callable(getattr(logger, "scoped_probe", None)):
+                from wscan.oob_evidence import decision_subject
+                context = {
+                    "role": "attack",
+                    "check": self.CHECK_TYPE,
+                    "field": field_name,
+                    "wave": "standard",
+                    "completion_unit": unit_id,
+                    "baseline_attempt_ids": (),
+                    "control_attempt_ids": (),
+                }
+                logger.scoped_probe(
+                    context,
+                    record_kind="oob_decision",
+                    actor="oob_oracle",
+                    decision_rule="mail_header_oob",
+                    decision_version="1",
+                    outcome="skipped",
+                    decision_subject=decision_subject(unit_id, "none", "unconfigured"),
+                    rationale="oob_sink_not_configured",
+                )
             return None
 
         # 変種 i に対し一意トークン i を割り当て、payload/pair を保持する。
         # 改行表現の列挙は決定論的なので、i 番目のトークンを i 番目の変種へ対応づけられる。
-        attempts: list[dict] = []  # {token, payload, desc, pair}
+        attempts: list[dict] = []  # {token, payload, desc, pair, req_id, obs_id}
         seps = crlf_bypass_variants("x", "Cc: x")  # 変種数の参照（順序は決定論的）
         for i in range(len(seps)):
             issued = new_addr()
@@ -391,9 +426,12 @@ class MailHeaderInjectionScanner(BaseScanner):
             payload, desc = variants[i]
             await self.log_payload_test(field_name, payload, "mail_header", ip.url)
             _source, pair = await self._submit_probe(ip, payload)
+            evidence = (pair or {}).get("_probe_evidence")
+            req_id = evidence[1] if evidence else None
+            obs_id = evidence[2] if evidence else None
             attempts.append(
                 {"token": token, "address": oob_addr, "payload": payload,
-                 "desc": desc, "pair": pair or {}}
+                 "desc": desc, "pair": pair or {}, "req_id": req_id, "obs_id": obs_id}
             )
             await asyncio.sleep(0.2 * self.sleep_factor)
 
@@ -407,41 +445,114 @@ class MailHeaderInjectionScanner(BaseScanner):
             )
 
         try:
-            hit = await asyncio.to_thread(self._poll_oob, sink, attempts)
+            status, hit_attempt, received, rationale = await asyncio.to_thread(
+                self._poll_oob, sink, attempts
+            )
         except Exception as exc:
             self._note_wave_degradation("mail_oob", exc)
-            return None
+            status, hit_attempt, received, rationale = (
+                "transport_error", None, None, f"poll_exception:{type(exc).__name__}"
+            )
 
-        if not hit:
-            return None
-        attempt, received = hit
+        from wscan.oob_evidence import decision_subject
+        from wscan.probe_ledger import sha256_hex
 
-        return await self.record_finding(
-            url=ip.url,
-            field_name=field_name,
-            payload=attempt["payload"],
-            evidence=(
-                "Mail header injection CONFIRMED via OOB: the application sent an "
-                "email whose injected Cc reached the out-of-band mailbox "
-                f"(token {attempt['token']}, {attempt['desc']} newline)."
-            ),
-            pair=attempt["pair"],
-            severity="high",
-            confidence="confirmed",
-            evidence_type="mail_header_oob",
-            evidence_details={
+        if status == "matched" and hit_attempt and received:
+            attempt = hit_attempt
+            decision_id = None
+            if logger is not None and callable(getattr(logger, "scoped_probe", None)):
+                context = {
+                    "role": "attack",
+                    "check": self.CHECK_TYPE,
+                    "field": field_name,
+                    "wave": "standard",
+                    "completion_unit": unit_id,
+                    "baseline_attempt_ids": (),
+                    "control_attempt_ids": (),
+                }
+                body_bytes = (
+                    received.body.encode("utf-8", errors="replace")
+                    if isinstance(received.body, str)
+                    else (received.body or b"")
+                )
+                decision_id = logger.scoped_probe(
+                    context,
+                    record_kind="oob_decision",
+                    actor="oob_oracle",
+                    decision_rule="mail_header_oob",
+                    decision_version="1",
+                    outcome="matched",
+                    parent_id=attempt.get("obs_id") or "",
+                    request_attempt_id=attempt.get("req_id") or "",
+                    decision_subject=decision_subject(unit_id, attempt["token"], attempt["desc"]),
+                    pair={
+                        "response": {
+                            "oob": True,
+                            "body": body_bytes,
+                        }
+                    },
+                    rationale=rationale,
+                )
+
+            evidence_details = {
                 "oob_token": attempt["token"],
                 "oob_address": attempt["address"],
                 "newline_variant": attempt["desc"],
                 "received_subject": received.subject,
                 "received_to": received.to_addrs,
-            },
-            injection_point=ip,
-        )
+            }
+            if decision_id:
+                evidence_details["attempt_ids"] = [decision_id]
+
+            return await self.record_finding(
+                url=ip.url,
+                field_name=field_name,
+                payload=attempt["payload"],
+                evidence=(
+                    "Mail header injection CONFIRMED via OOB: the application sent an "
+                    "email whose injected Cc reached the out-of-band mailbox "
+                    f"(token {attempt['token']}, {attempt['desc']} newline)."
+                ),
+                pair=attempt["pair"],
+                severity="high",
+                confidence="confirmed",
+                evidence_type="mail_header_oob",
+                evidence_details=evidence_details,
+                injection_point=ip,
+            )
+
+        # Unmatched outcomes: timeout, transport_error, verification_error
+        if logger is not None and callable(getattr(logger, "scoped_probe", None)):
+            context = {
+                "role": "attack",
+                "check": self.CHECK_TYPE,
+                "field": field_name,
+                "wave": "standard",
+                "completion_unit": unit_id,
+                "baseline_attempt_ids": (),
+                "control_attempt_ids": (),
+            }
+            for att in attempts:
+                if att.get("obs_id") and att.get("req_id"):
+                    logger.scoped_probe(
+                        context,
+                        record_kind="oob_decision",
+                        actor="oob_oracle",
+                        decision_rule="mail_header_oob",
+                        decision_version="1",
+                        outcome=status,
+                        parent_id=att["obs_id"],
+                        request_attempt_id=att["req_id"],
+                        decision_subject=decision_subject(unit_id, att["token"], att["desc"]),
+                        pair={"response": {"oob": False}},
+                        rationale=rationale,
+                    )
+
+        return None
 
     @staticmethod
-    def _poll_oob(sink, attempts: list[dict]) -> "Optional[tuple[dict, object]]":
-        """締切まで受信箱をポーリングし、最初に着信した変種を返す（同期）。
+    def _poll_oob(sink, attempts: list[dict]) -> tuple[str, Optional[dict], Optional[object], str]:
+        """締切まで受信箱をポーリングし、(outcome, attempt, received, rationale) を返す（同期）。
 
         ``asyncio.to_thread`` から呼ぶ前提のブロッキング・ヘルパー。1 ポーリングで
         ``fetch_recent`` を **1 回だけ**呼んで直近メールを取得し、全トークンを
@@ -456,14 +567,19 @@ class MailHeaderInjectionScanner(BaseScanner):
         while True:
             try:
                 emails = sink.fetch_recent()
-            except Exception:
-                emails = []
+            except Exception as exc:
+                return "transport_error", None, None, f"imap_error:{type(exc).__name__}"
+
             for received in emails:
-                for attempt in attempts:
-                    if email_matches_token(received, attempt["token"]):
-                        return attempt, received
+                try:
+                    for attempt in attempts:
+                        if email_matches_token(received, attempt["token"]):
+                            return "matched", attempt, received, "token_matched"
+                except Exception as exc:
+                    return "verification_error", None, None, f"parse_error:{type(exc).__name__}"
+
             if _time.time() >= deadline:
-                return None
+                return "timeout", None, None, "polling_deadline_expired"
             _time.sleep(max(0.5, OOB_POLL_INTERVAL))
 
     async def _submit_probe(
@@ -478,6 +594,7 @@ class MailHeaderInjectionScanner(BaseScanner):
         生 HTTP 送信が必要（メールヘッダ注入が実際にサーバへ到達する経路）。
         フォーム抽出や送信が失敗した場合のみ従来のブラウザ経由へフォールバックする。
         """
+        raw = None
         try:
             # raw transport は共有 dispatch に混ぜず、legacy 引数を明示して呼ぶ。
             raw = await self._apply_payload_raw(
@@ -490,9 +607,52 @@ class MailHeaderInjectionScanner(BaseScanner):
         except Exception as exc:
             raw = None
             self._note_wave_degradation("mail_raw_submit", exc)
+
         if raw is not None:
-            return raw
-        return await self._apply_ip(ip, payload)
+            source, pair = raw
+        else:
+            source, pair = await self._apply_ip(ip, payload)
+
+        logger = getattr(getattr(self, "engine", None), "request_logger", None)
+        if logger is not None and pair is not None and not pair.get("_probe_evidence"):
+            from wscan.probe_ledger import Transport
+            from wscan.checkpoint import unit_key
+            url, field_name, form_index, location_token, pointer = ip.stable_key_parts()
+            unit_id = (
+                logger.probe_ledger.current_unit()
+                if hasattr(logger, "probe_ledger")
+                else ""
+            ) or unit_key(
+                url, field_name, int(form_index), self.CHECK_TYPE,
+                location_token=location_token, pointer=pointer,
+            )
+            context = {
+                "role": "attack",
+                "check": self.CHECK_TYPE,
+                "field": ip.parameter_id,
+                "wave": "standard",
+                "completion_unit": unit_id,
+                "baseline_attempt_ids": (),
+                "control_attempt_ids": (),
+                "requests": [],
+            }
+            req_data = {
+                "method": (pair.get("request") or {}).get("method") or "POST",
+                "url": (pair.get("request") or {}).get("url") or ip.url,
+                "payload": payload,
+            }
+            req_id = logger.begin_request(context, req_data, Transport.HTTPX)
+            evidence_pair = {
+                "request": req_data,
+                "response": {
+                    "status": (pair.get("response") or {}).get("status") or 200,
+                    "body": (pair.get("response") or {}).get("body") or "",
+                },
+            }
+            obs_id = logger.observe_request(context, req_id, evidence_pair, Transport.HTTPX)
+            pair["_probe_evidence"] = (context, req_id, obs_id)
+
+        return source, pair
 
     async def _apply_payload_raw(
         self,
@@ -536,12 +696,6 @@ class MailHeaderInjectionScanner(BaseScanner):
         }
         if hasattr(self.engine, "httpx_client_kwargs"):
             client_kwargs = self.engine.httpx_client_kwargs(**client_kwargs)
-        # cookie はブラウザコンテキストと engine.cookies を統合し、**スコープ
-        # （domain/path）を保持した cookie jar** として渡す。素の name/value 辞書に
-        # すると、フォーム action が別オリジンを指す場合に httpx が対象セッション
-        # cookie を第三者へ送ってしまう（漏洩）。jar なら httpx がリクエスト URL に
-        # マッチする cookie だけを送る。auth_headers の Cookie ヘッダと二重化しない
-        # よう include_cookie=False で取得。
         if hasattr(self.engine, "auth_headers"):
             try:
                 client_kwargs["headers"] = self.auth_headers_for_url(
@@ -552,23 +706,82 @@ class MailHeaderInjectionScanner(BaseScanner):
                 client_kwargs["headers"] = self.engine.auth_headers()
         client_kwargs["cookies"] = await self._collect_cookies()
 
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            if method == "GET":
-                resp = await client.get(action, params=data)
-            elif "multipart" in enctype:
-                # multipart/form-data 必須のハンドラ向け。各フィールドを
-                # ``(None, value)`` の非ファイルパートとして送ると multipart で
-                # エンコードされ、値中の CR/LF も生のまま保持される（注入に有効）。
-                files = {k: (None, v) for k, v in data.items()}
-                resp = await client.post(action, files=files)
-            else:
-                resp = await client.post(action, data=data)
-        self._record_probe_status(resp)
-        body = resp.text
-        pair = {
-            "request": {"url": action, "method": method, "payload": payload},
-            "response": {"status": resp.status_code, "body": body[:2000]},
-        }
+        from contextlib import nullcontext
+        from wscan.probe_ledger import Transport
+
+        target_ip = (
+            InjectionPoint.for_url_param(url, field_name)
+            if is_url_param
+            else InjectionPoint.for_form(url, field_name, form_index)
+        )
+        logger = getattr(getattr(self, "engine", None), "request_logger", None)
+        scope = (
+            logger.probe_scope(target_ip, self.CHECK_TYPE, role="attack", transport=Transport.HTTPX)
+            if logger is not None and callable(getattr(logger, "probe_scope", None))
+            else nullcontext({"requests": []})
+        )
+
+        with scope as context:
+            try:
+                async with httpx.AsyncClient(**client_kwargs) as client:
+                    if method == "GET":
+                        resp = await client.get(action, params=data)
+                    elif "multipart" in enctype:
+                        files = {k: (None, v) for k, v in data.items()}
+                        resp = await client.post(action, files=files)
+                    else:
+                        resp = await client.post(action, data=data)
+            except Exception as exc:
+                if logger is not None and callable(getattr(logger, "scoped_probe", None)):
+                    outcome = self._probe_exception_outcome(exc)
+                    req_id = context.get("requests", [""])[-1] if context.get("requests") else ""
+                    logger.scoped_probe(
+                        context,
+                        record_kind="decision",
+                        outcome=outcome,
+                        request_attempt_id=req_id,
+                        rationale=f"raw_http_error:{type(exc).__name__}",
+                        decision_version="1",
+                    )
+                raise
+
+            self._record_probe_status(resp)
+            body = resp.text
+            pair = {
+                "request": {"url": action, "method": method, "payload": payload},
+                "response": {"status": resp.status_code, "body": body[:2000]},
+            }
+
+            req_id = None
+            obs_id = None
+            if logger is not None and callable(getattr(logger, "scoped_probe", None)):
+                owner, submission_id = getattr(
+                    getattr(resp, "request", None), "extensions", {}
+                ).get("vulix_probe_submission", (None, None))
+                if owner is logger and submission_id:
+                    req_id = submission_id
+                elif context.get("requests"):
+                    req_id = context["requests"][-1]
+                else:
+                    req_data = {"method": method, "url": action, "payload": payload}
+                    req_id = logger.begin_request(context, req_data, Transport.HTTPX)
+
+                obs_owner, obs = getattr(resp, "extensions", {}).get(
+                    "vulix_probe_observation", (None, None)
+                )
+                if obs_owner is logger and obs:
+                    obs_id = obs
+                elif req_id:
+                    evidence_pair = {
+                        "request": {"method": method, "url": action, "payload": payload},
+                        "response": {"status": resp.status_code, "body": body[:2000]},
+                    }
+                    obs_id = logger.observe_request(
+                        context, req_id, evidence_pair, Transport.HTTPX
+                    )
+
+                pair["_probe_evidence"] = (context, req_id, obs_id)
+
         return body, pair
 
     async def _collect_cookies(self) -> "httpx.Cookies":

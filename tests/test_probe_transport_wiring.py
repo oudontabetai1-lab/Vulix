@@ -409,3 +409,43 @@ async def test_api_get_records_headers_without_an_additional_body_read(tmp_path)
     assert row["response"]["status"] == 200
     assert row["response"]["body_hash"] == ""
     assert row["outcome"] is None
+
+
+def test_mail_header_oob_decision_wiring(tmp_path):
+    from wscan.oob_evidence import RECORD_KIND, CHECK_TYPE, DECISION_RULE, DECISION_VERSION, decision_subject, valid_shape
+    logger = RequestLogger(tmp_path)
+    context = {
+        "role": "attack",
+        "check": CHECK_TYPE,
+        "field": "email",
+        "wave": "standard",
+        "completion_unit": "http://t.test/contact\x1femail\x1f0\x1ff\x1fmail_header",
+        "baseline_attempt_ids": (),
+        "control_attempt_ids": (),
+    }
+    subj = decision_subject(context["completion_unit"], "tok_abc", "bare LF")
+    aid = logger.scoped_probe(
+        context,
+        record_kind=RECORD_KIND,
+        actor="oob_oracle",
+        decision_rule=DECISION_RULE,
+        decision_version=DECISION_VERSION,
+        outcome="matched",
+        parent_id="scan:0001:0002",
+        request_attempt_id="scan:0001:0001",
+        decision_subject=subj,
+        pair={"response": {"oob": True, "body": b"Confidential mail content"}},
+        rationale="token_matched",
+    )
+    assert aid is not None
+    records = rows(logger)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["record_kind"] == RECORD_KIND
+    assert rec["outcome"] == "matched"
+    assert rec["decision_subject"] == subj
+    assert valid_shape(rec) is True
+    # Invariant: raw body is never stored in cleartext
+    assert "Confidential mail content" not in logger.probe_ledger.path.read_text()
+    assert rec["response"]["body_hash"] != ""
+

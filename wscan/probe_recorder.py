@@ -268,6 +268,9 @@ class ProbeLedger:
         from .websocket_evidence import accepted_decisions as websocket_decisions
         for unit, decisions in websocket_decisions(self.events).items():
             result[unit] = decisions
+        from .oob_evidence import accepted_decisions as oob_decisions
+        for unit, decisions in oob_decisions(self.events).items():
+            result[unit] = decisions
         return result
 
     def reconcile_persisted(self) -> None:
@@ -348,8 +351,12 @@ class ProbeLedger:
         outcome = rec.get("outcome")
         if outcome is not None and outcome not in _VALID_OUTCOMES:
             return False  # 語彙外の outcome（null は未記録として許容）
-        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision", "browser", "passive_decision", "graphql_decision", "websocket_attempt", "websocket_request", "websocket_observation", "websocket_cleanup", "websocket_discovery", "websocket_decision"}:
+        if rec.get("record_kind", "legacy") not in {"legacy", "payload", "request", "observation", "decision", "browser", "passive_decision", "graphql_decision", "websocket_attempt", "websocket_request", "websocket_observation", "websocket_cleanup", "websocket_discovery", "websocket_decision", "oob_decision"}:
             return False
+        if rec.get("record_kind") == "oob_decision":
+            from .oob_evidence import valid_shape
+            if not valid_shape(rec):
+                return False
         if str(rec.get("record_kind", "")).startswith("websocket_"):
             from .websocket_evidence import valid_shape
             if not valid_shape(rec):
