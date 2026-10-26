@@ -312,6 +312,9 @@ function fmtSize(b) {
 }
 
 function sevBadges(sev, count) {
+  if (typeof count !== 'number' || !isFinite(count)) {
+    return '<span class="b zero" title="検出結果を確認できませんでした">未取得</span>';
+  }
   if (!count) return '<span class="b zero">0</span>';
   const order = ['critical','high','medium','low'];
   const parts = order.filter(k => sev[k] > 0)

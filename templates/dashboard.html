@@ -931,7 +931,316 @@ body { padding-left: 212px; }
 .ws-nav.active{color:var(--text);background:rgba(233,233,237,.05)}
 .ws-nav.active .m{background:var(--accent)}
 .ws-newscan{all:unset;cursor:pointer;text-align:center;margin:10px 12px 4px;padding:9px;border-radius:7px;font-size:12.5px;font-weight:600;color:#f3f1ff;background:linear-gradient(to bottom,#655a9e,#544a86);box-shadow:0 0 0 1px #6f64a8}
-.ws-newscan:hover{background:linear-gradient(to bottom,#6f64a8,#5d5294)}.ws-newscan:focus-visible,.hdr-newscan:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.ws-nav:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.hdr-view-toggle{display:none;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:2px}
+.hdr-view-btn{all:unset;cursor:pointer;padding:3px 8px;border-radius:4px;font-size:0.72rem;font-weight:600;color:var(--text-muted)}
+.hdr-view-btn.active{background:var(--accent);color:#161826}
+.hdr-view-btn:focus-visible{outline:2px solid var(--accent)}
+@media(max-width:1200px){.hdr-view-toggle{display:inline-flex}}
+
+/* ─── Scan History Screen ────────────────────────────────────── */
+#viewScanHistory {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+.history-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px 20px;
+  overflow: hidden;
+  gap: 12px;
+}
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.history-title-area {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.history-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.history-subtitle {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.history-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.history-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  transition: background 0.15s, border-color 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.history-btn:hover { background: var(--surface); border-color: var(--accent); }
+.history-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.history-btn.primary {
+  background: var(--accent);
+  color: #161826;
+  border-color: var(--accent);
+}
+.history-btn.primary:hover { opacity: 0.9; }
+
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  border-radius: 8px;
+}
+.history-search-wrap {
+  flex: 1;
+  min-width: 220px;
+  position: relative;
+}
+.history-search-input {
+  width: 100%;
+  padding: 6px 10px 6px 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.8rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.history-search-input:focus { border-color: var(--accent); }
+.history-search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  pointer-events: none;
+}
+.history-filter-select {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.78rem;
+  outline: none;
+}
+.history-meta-stat {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.history-table-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+.history-table-scroll {
+  flex: 1;
+  overflow: auto;
+}
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+.history-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.7rem;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  z-index: 2;
+}
+.history-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(63,66,77,0.45);
+  color: var(--text);
+  vertical-align: middle;
+}
+.history-table tbody tr:hover td {
+  background: rgba(233,233,237,0.025);
+}
+.history-id-cell {
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+  font-size: 0.75rem;
+  color: var(--accent);
+}
+.history-target-cell {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+  font-size: 0.75rem;
+}
+.history-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+}
+.history-status-done {
+  background: rgba(143,185,201,0.15);
+  color: var(--low);
+  border-color: rgba(143,185,201,0.3);
+}
+.history-status-scanning {
+  background: rgba(217,154,99,0.15);
+  color: var(--running);
+  border-color: rgba(217,154,99,0.3);
+}
+.history-status-aborted {
+  background: rgba(217,154,99,0.18);
+  color: var(--high);
+  border-color: rgba(217,154,99,0.35);
+}
+.history-status-incomplete {
+  background: rgba(147,151,171,0.15);
+  color: var(--text-muted);
+  border-color: rgba(147,151,171,0.3);
+}
+.history-status-error {
+  background: rgba(226,112,143,0.15);
+  color: var(--critical);
+  border-color: rgba(226,112,143,0.3);
+}
+
+.history-sev-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.history-sev-pill {
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  font-family: monospace;
+}
+.history-sev-pill.crit { background: rgba(226,112,143,0.18); color: var(--critical); }
+.history-sev-pill.high { background: rgba(217,154,99,0.18); color: var(--high); }
+.history-sev-pill.med  { background: rgba(199,185,106,0.18); color: var(--medium); }
+.history-sev-pill.low  { background: rgba(143,185,201,0.18); color: var(--low); }
+
+.history-action-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.history-link-btn {
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.history-link-btn:hover { border-color: var(--accent); color: var(--accent); }
+.history-link-btn.primary {
+  background: rgba(145,132,217,0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.history-link-btn.primary:hover {
+  background: var(--accent);
+  color: #161826;
+}
+.history-link-disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.history-state-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  color: var(--text-muted);
+  gap: 12px;
+  text-align: center;
+  flex: 1;
+}
+.history-state-box .icon {
+  font-size: 2rem;
+  opacity: 0.8;
+}
+.history-state-box .title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.history-state-box .desc {
+  font-size: 0.78rem;
+  max-width: 360px;
+  line-height: 1.5;
+}
+.history-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: historySpin 0.7s linear infinite;
+}
+@keyframes historySpin { to { transform: rotate(360deg); } }
+
 .ws-rail .ws-cur{padding:12px 12px 2px}
 .ws-rail .ws-eyebrow{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px}
 .ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--text-muted)}.ws-rail .pulse.running{background:var(--running);animation:wsPulseRail 1.8s ease-in-out infinite}.ws-rail .pulse.done{background:var(--success)}.ws-rail .pulse.error{background:var(--critical)}.ws-rail .pulse.aborted{background:var(--high)}
@@ -947,7 +1256,12 @@ body { padding-left: 212px; }
 <aside class="ws-rail">
   <div class="brand"><span class="mark"></span>WScan</div>
   <nav>
-    <div class="ws-nav active" aria-current="page"><span class="m"></span><span style="flex:1">ライブモニター</span></div>
+    <button type="button" class="ws-nav active" id="navLiveMonitor" aria-current="page" onclick="switchMainView('live')">
+      <span class="m"></span><span style="flex:1">ライブモニター</span>
+    </button>
+    <button type="button" class="ws-nav" id="navScanHistory" onclick="switchMainView('history')">
+      <span class="m"></span><span style="flex:1">スキャン履歴</span>
+    </button>
     <button class="ws-newscan" onclick="document.getElementById('scanConfigOverlay').classList.add('active')">＋ 新規スキャン</button>
   </nav>
   <div class="ws-cur">
@@ -1785,7 +2099,11 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
 
 <!-- ─── Header ─────────────────────────────────────────────── -->
 <div class="header">
-  <div style="font-size:1rem;font-weight:600;color:var(--text);white-space:nowrap">ライブモニター</div>
+  <div id="headerTitle" style="font-size:1rem;font-weight:600;color:var(--text);white-space:nowrap">ライブモニター</div>
+  <div class="hdr-view-toggle">
+    <button type="button" class="hdr-view-btn active" id="hdrBtnLive" onclick="switchMainView('live')">ライブ</button>
+    <button type="button" class="hdr-view-btn" id="hdrBtnHistory" onclick="switchMainView('history')">履歴</button>
+  </div>
   <div class="status-bar">
     <div class="status-dot" id="statusDot"></div>
     <div class="status-text" id="statusText">Connecting...</div>
@@ -1832,6 +2150,9 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
     border:1px solid var(--border); background:var(--surface2);
   ">⎋ ログアウト</a>
 </div>
+
+<!-- ─── Live Monitor Container ──────────────────────────────── -->
+<div id="viewLiveMonitor" style="display:flex;flex-direction:column;flex:1;overflow:hidden">
 
 <!-- ─── Intervention Toolbar ───────────────────────────────── -->
 <div class="intervention-bar" id="interventionBar">
@@ -2064,6 +2385,87 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
   </select>
   <button onclick="sendManualPayload()" style="background:var(--accent);color:white;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.8rem;font-weight:700">実行</button>
   <button onclick="document.getElementById('manualPayloadPanel').style.display='none'" style="background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.8rem">✕</button>
+</div>
+
+</div><!-- /#viewLiveMonitor -->
+
+<!-- ─── Scan History View ──────────────────────────────────── -->
+<div id="viewScanHistory">
+  <div class="history-container">
+    <div class="history-header">
+      <div class="history-title-area">
+        <div class="history-title">
+          <span>📜</span>
+          <span>スキャン履歴</span>
+        </div>
+        <div class="history-subtitle">過去に実行されたスキャンの結果・レポート・成果物を一覧およびダウンロードできます</div>
+      </div>
+      <div class="history-actions">
+        <button type="button" class="history-btn primary" id="btnRefreshHistory" onclick="loadScanHistory()">
+          <span>🔄</span>
+          <span>更新</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="history-toolbar">
+      <div class="history-search-wrap">
+        <span class="history-search-icon">🔍</span>
+        <input type="text" id="historySearchInput" class="history-search-input" placeholder="スキャンIDまたは対象URLで絞り込み..." oninput="onHistorySearchInput(this.value)">
+      </div>
+      <div>
+        <select id="historyStatusFilter" class="history-filter-select" onchange="onHistoryFilterChange(this.value)">
+          <option value="all">すべてのステータス</option>
+          <option value="done">完了 (done)</option>
+          <option value="scanning">実行中 (scanning)</option>
+          <option value="aborted">中断 (aborted)</option>
+          <option value="incomplete">未完了 (incomplete)</option>
+          <option value="error">エラー (error)</option>
+        </select>
+      </div>
+      <div class="history-meta-stat" id="historyMetaStat">表示中: 0件</div>
+    </div>
+
+    <div class="history-table-card">
+      <div class="history-table-scroll" id="historyTableScroll">
+        <table class="history-table" id="historyTable">
+          <thead>
+            <tr>
+              <th style="width:170px">スキャンID / 日時</th>
+              <th>対象 URL</th>
+              <th style="width:110px">状態</th>
+              <th style="width:180px">脆弱性検出</th>
+              <th style="width:90px">サイズ</th>
+              <th style="width:170px;text-align:right">アクション</th>
+            </tr>
+          </thead>
+          <tbody id="historyTableBody">
+            <!-- populated dynamically -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- State boxes -->
+      <div id="historyLoadingState" class="history-state-box" style="display:none">
+        <div class="history-spinner"></div>
+        <div class="title">スキャン履歴を読み込み中...</div>
+        <div class="desc">サーバから過去のスキャン記録を取得しています</div>
+      </div>
+
+      <div id="historyEmptyState" class="history-state-box" style="display:none">
+        <div class="icon">📂</div>
+        <div class="title">スキャン履歴はありません</div>
+        <div class="desc">まだスキャンが実行されていないか、条件に一致する記録がありません</div>
+      </div>
+
+      <div id="historyErrorState" class="history-state-box" style="display:none">
+        <div class="icon" style="color:var(--critical)">⚠️</div>
+        <div class="title" style="color:var(--critical)">スキャン履歴の取得に失敗しました</div>
+        <div class="desc" id="historyErrorMessage">通信エラーが発生しました</div>
+        <button type="button" class="history-btn primary" style="margin-top:8px" onclick="loadScanHistory()">再試行</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ─── Plan Review Modal ───────────────────────────────────── -->
@@ -6178,6 +6580,481 @@ function renderCheckProgressBars() {
         <span class="cp-count">${done}</span>
       </div>`;
     }).join('');
+}
+
+// ─── Scan History Management ─────────────────────────────────────
+let currentHistoryData = [];
+let historySearchTerm = '';
+let historyStatusFilter = 'all';
+
+function switchMainView(viewName) {
+  const liveEl = document.getElementById('viewLiveMonitor');
+  const histEl = document.getElementById('viewScanHistory');
+  const navLive = document.getElementById('navLiveMonitor');
+  const navHist = document.getElementById('navScanHistory');
+  const hdrLive = document.getElementById('hdrBtnLive');
+  const hdrHist = document.getElementById('hdrBtnHistory');
+  const hdrTitle = document.getElementById('headerTitle');
+
+  if (viewName === 'history') {
+    if (liveEl) liveEl.style.display = 'none';
+    if (histEl) histEl.style.display = 'flex';
+    if (navLive) {
+      navLive.classList.remove('active');
+      navLive.removeAttribute('aria-current');
+    }
+    if (navHist) {
+      navHist.classList.add('active');
+      navHist.setAttribute('aria-current', 'page');
+    }
+    if (hdrLive) hdrLive.classList.remove('active');
+    if (hdrHist) hdrHist.classList.add('active');
+    if (hdrTitle) hdrTitle.textContent = 'スキャン履歴';
+    loadScanHistory();
+  } else {
+    if (histEl) histEl.style.display = 'none';
+    if (liveEl) liveEl.style.display = 'flex';
+    if (navHist) {
+      navHist.classList.remove('active');
+      navHist.removeAttribute('aria-current');
+    }
+    if (navLive) {
+      navLive.classList.add('active');
+      navLive.setAttribute('aria-current', 'page');
+    }
+    if (hdrHist) hdrHist.classList.remove('active');
+    if (hdrLive) hdrLive.classList.add('active');
+    if (hdrTitle) hdrTitle.textContent = 'ライブモニター';
+  }
+}
+
+function onHistorySearchInput(val) {
+  historySearchTerm = (val || '').trim().toLowerCase();
+  renderHistoryTable();
+}
+
+function onHistoryFilterChange(val) {
+  historyStatusFilter = val || 'all';
+  renderHistoryTable();
+}
+
+const UNSUPPORTED_URL_PLACEHOLDER = '（URL非表示）';
+
+function isSensitiveKey(key) {
+  if (!key || typeof key !== 'string') return false;
+  if (CONFIG_SENSITIVE_URL_KEY.test(key)) return true;
+  let decoded = key;
+  try {
+    decoded = decodeURIComponent(key);
+  } catch (_) {}
+  if (CONFIG_SENSITIVE_URL_KEY.test(decoded)) return true;
+  // Normalized session variants (e.g. jessionid)
+  if (/(?:^|[._-])(?:jsessionid|jessionid)(?:$|[._-])/i.test(decoded) ||
+      /(?:^|[._-])(?:jsessionid|jessionid)(?:$|[._-])/i.test(key)) return true;
+  return false;
+}
+
+function maskPathSecrets(path) {
+  if (!path) return path;
+  let out = path;
+  // ASP.NET cookieless session: /(S(id))/ or percent-encoded /%28S%28id%29%29/ -> /(<redacted>)/
+  out = out.replace(/(?:%28|\()([A-Z](?:%28|\()[^%()]*?(?:%29|\)))+(?:%29|\))/gi, '(<redacted>)');
+  // Matrix parameters: ;name=value（jsessionid 等のセッション値を伏せる）
+  out = out.replace(/;([^/;?#=]+)=([^/;?#]*)/g, (match, key) => {
+    return isSensitiveKey(key) ? `;${key}=<redacted>` : match;
+  });
+  return out;
+}
+
+function hasUnmaskedSensitivePath(path) {
+  if (!path) return false;
+  // ASP.NET cookieless session がまだ残っている（マスクされていない）。
+  if (/\/\((?:[A-Z]\([^)]*\))+\)(?:\/|$)/i.test(path)) return true;
+  let decoded = path;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch (_) {
+    decoded = path.replace(/%3b/ig, ';').replace(/%3d/ig, '=');
+  }
+  if (/\/\((?:[A-Z]\([^)]*\))+\)(?:\/|$)/i.test(decoded)) return true;
+  return decoded.split('/').some(segment =>
+    segment.split(';').slice(1).some(param => {
+      const equals = param.indexOf('=');
+      if (equals < 0) return false;
+      if (param.slice(equals + 1) === '<redacted>') return false;
+      return isSensitiveKey(param.slice(0, equals));
+    })
+  );
+}
+
+function maskNestedKv(val, depth = 0) {
+  if (!val || depth > 2) return val;
+  let decoded = val;
+  try {
+    decoded = decodeURIComponent(val);
+  } catch (_) {
+    return val;
+  }
+  if (!decoded) return val;
+  const isPercentEncoded = decoded !== val;
+
+  if (!decoded.includes('=') && !decoded.includes('?') && !decoded.includes(';') && !decoded.includes('(')) {
+    if (decoded.includes('%')) {
+      const inner = maskNestedKv(decoded, depth + 1);
+      if (inner !== decoded) {
+        return isPercentEncoded
+          ? encodeURIComponent(inner).replace(/%3C/g, '<').replace(/%3E/g, '>')
+          : inner;
+      }
+    }
+    return val;
+  }
+
+  let maskedDecoded = maskKv(decoded, depth + 1);
+  maskedDecoded = maskPathSecrets(maskedDecoded);
+  if (maskedDecoded !== decoded) {
+    return isPercentEncoded
+      ? encodeURIComponent(maskedDecoded).replace(/%3C/g, '<').replace(/%3E/g, '>')
+      : maskedDecoded;
+  }
+  return val;
+}
+
+function maskKv(text, depth = 0) {
+  if (!text) return text;
+  return text.replace(/([^&=?\s]*)=([^&]*)/g, (match, k, v) => {
+    if (isSensitiveKey(k)) return `${k}=<redacted>`;
+    if (depth <= 2 && v) {
+      const maskedVal = maskNestedKv(v, depth);
+      if (maskedVal !== v) return `${k}=${maskedVal}`;
+    }
+    return match;
+  });
+}
+
+function redactDisplayUrl(raw) {
+  if (!raw || typeof raw !== 'string') return raw || '';
+  const str = raw.trim();
+  if (!str) return '';
+  // 表示専用の防御: HTTP(S) URL として成立しない値は生文字列を一切表示しない。
+  let parsed;
+  try {
+    parsed = new URL(str);
+  } catch (_) {
+    return UNSUPPORTED_URL_PLACEHOLDER;
+  }
+  if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) {
+    return UNSUPPORTED_URL_PLACEHOLDER;
+  }
+
+  // 1. userinfo: scheme://user:pass@host -> scheme://<redacted>@host
+  const schemeMatch = str.match(/^[a-z][a-z0-9+.-]*:\/\//i);
+  const prefix = schemeMatch ? schemeMatch[0] : '';
+  const rest = str.slice(prefix.length);
+  let authEnd = rest.length;
+  for (const ch of ['/', '?', '#']) {
+    const idx = rest.indexOf(ch);
+    if (idx !== -1 && idx < authEnd) authEnd = idx;
+  }
+  let authority = rest.slice(0, authEnd);
+  let tail = rest.slice(authEnd);
+  if (authority.includes('@')) {
+    const host = authority.slice(authority.lastIndexOf('@') + 1);
+    authority = '<redacted>@' + host;
+  }
+
+  // 2. path / query / fragment を分離（matrix・セッションは path 側で伏せる）
+  let path = tail;
+  let query = '';
+  let fragment = '';
+  let hadQuery = false;
+  let hadFragment = false;
+  const hashIdx = path.indexOf('#');
+  if (hashIdx !== -1) {
+    hadFragment = true;
+    fragment = path.slice(hashIdx + 1);
+    path = path.slice(0, hashIdx);
+  }
+  const queryIdx = path.indexOf('?');
+  if (queryIdx !== -1) {
+    hadQuery = true;
+    query = path.slice(queryIdx + 1);
+    path = path.slice(0, queryIdx);
+  }
+
+  const safePath = maskPathSecrets(path);
+  // エンコード済みの matrix/セッション区切りなど、変形しきれない既知の
+  // 資格情報パターンが残る場合は生文字列を出さず中立プレースホルダにする。
+  if (hasUnmaskedSensitivePath(safePath)) return UNSUPPORTED_URL_PLACEHOLDER;
+
+  let result = prefix + authority + safePath;
+  if (hadQuery) result += '?' + maskKv(query, 0);
+  if (hadFragment) result += '#' + maskKv(fragment, 0);
+  return result;
+}
+
+function formatHistoryBytes(bytes) {
+  if (typeof bytes !== 'number' || isNaN(bytes) || bytes <= 0) return '—';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function formatHistoryDate(isoStr, scanId) {
+  if (isoStr) {
+    try {
+      const d = new Date(isoStr);
+      if (!isNaN(d.getTime())) {
+        return d.toLocaleString('ja-JP', {
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+      }
+    } catch (_) {}
+  }
+  return scanId || '—';
+}
+
+function setHistoryViewState(stateName, errorMsg) {
+  const scrollEl = document.getElementById('historyTableScroll');
+  const loadingEl = document.getElementById('historyLoadingState');
+  const emptyEl = document.getElementById('historyEmptyState');
+  const errorEl = document.getElementById('historyErrorState');
+  const errDesc = document.getElementById('historyErrorMessage');
+
+  if (scrollEl) scrollEl.style.display = stateName === 'table' ? 'block' : 'none';
+  if (loadingEl) loadingEl.style.display = stateName === 'loading' ? 'flex' : 'none';
+  if (emptyEl) emptyEl.style.display = stateName === 'empty' ? 'flex' : 'none';
+  if (errorEl) {
+    errorEl.style.display = stateName === 'error' ? 'flex' : 'none';
+    if (errDesc && errorMsg) errDesc.textContent = errorMsg;
+  }
+}
+
+async function loadScanHistory() {
+  setHistoryViewState('loading');
+  try {
+    const res = await fetch('/api/v1/scans');
+    if (!res.ok) {
+      if (res.status === 401) {
+        throw new Error('認証が必要です (HTTP 401 Unauthorized)。ログインするか認証トークンを確認してください。');
+      }
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    const data = await res.json();
+    currentHistoryData = Array.isArray(data.scans) ? data.scans : [];
+    renderHistoryTable();
+  } catch (err) {
+    console.error('Failed to load scan history:', err);
+    setHistoryViewState('error', 'スキャン履歴の取得に失敗しました: ' + (err.message || String(err)));
+  }
+}
+
+function renderHistoryTable() {
+  const tbody = document.getElementById('historyTableBody');
+  const metaStat = document.getElementById('historyMetaStat');
+  if (!tbody) return;
+
+  // Clear rows safely
+  while (tbody.firstChild) {
+    tbody.removeChild(tbody.firstChild);
+  }
+
+  const filtered = currentHistoryData.filter(scan => {
+    if (!scan) return false;
+    const status = (scan.status || 'incomplete').toLowerCase();
+    if (historyStatusFilter !== 'all' && status !== historyStatusFilter) {
+      return false;
+    }
+    if (historySearchTerm) {
+      const idMatch = String(scan.id || '').toLowerCase().includes(historySearchTerm);
+      const targetMatch = String(scan.target || '').toLowerCase().includes(historySearchTerm);
+      if (!idMatch && !targetMatch) return false;
+    }
+    return true;
+  });
+
+  if (metaStat) {
+    metaStat.textContent = `表示中: ${filtered.length}件 / 全${currentHistoryData.length}件`;
+  }
+
+  if (filtered.length === 0) {
+    setHistoryViewState('empty');
+    return;
+  }
+
+  setHistoryViewState('table');
+
+  filtered.forEach(scan => {
+    const tr = document.createElement('tr');
+
+    // 1. Scan ID / Started At
+    const tdId = document.createElement('td');
+    const idDiv = document.createElement('div');
+    idDiv.className = 'history-id-cell';
+    idDiv.textContent = scan.id || '—';
+    const dateDiv = document.createElement('div');
+    dateDiv.style.fontSize = '0.7rem';
+    dateDiv.style.color = 'var(--text-muted)';
+    dateDiv.textContent = formatHistoryDate(scan.started_at, scan.id);
+    tdId.appendChild(idDiv);
+    tdId.appendChild(dateDiv);
+    tr.appendChild(tdId);
+
+    // 2. Target URL (safely redacted to remove credential secrets)
+    const tdTarget = document.createElement('td');
+    const targetDiv = document.createElement('div');
+    targetDiv.className = 'history-target-cell';
+    const rawTarget = scan.target ? scan.target.trim() : '';
+    const safeTarget = rawTarget ? redactDisplayUrl(rawTarget) : '—';
+    targetDiv.textContent = safeTarget;
+    targetDiv.title = safeTarget;
+    tdTarget.appendChild(targetDiv);
+    tr.appendChild(tdTarget);
+
+    // 3. Status
+    const tdStatus = document.createElement('td');
+    const statusSpan = document.createElement('span');
+    const rawStatus = (scan.status || 'incomplete').toLowerCase();
+    let statusClass = 'history-status-incomplete';
+    let statusLabel = rawStatus;
+    if (rawStatus === 'done') {
+      statusClass = 'history-status-done';
+      statusLabel = '完了';
+    } else if (rawStatus === 'scanning') {
+      statusClass = 'history-status-scanning';
+      statusLabel = '実行中';
+    } else if (rawStatus === 'aborted') {
+      statusClass = 'history-status-aborted';
+      statusLabel = '中断';
+    } else if (rawStatus === 'error') {
+      statusClass = 'history-status-error';
+      statusLabel = 'エラー';
+    } else if (rawStatus === 'incomplete') {
+      statusClass = 'history-status-incomplete';
+      statusLabel = '未完了';
+    }
+    statusSpan.className = `history-status-badge ${statusClass}`;
+    statusSpan.textContent = statusLabel;
+    tdStatus.appendChild(statusSpan);
+    tr.appendChild(tdStatus);
+
+    // 4. Findings & Severity
+    const tdFindings = document.createElement('td');
+    const fCount = scan.findings_count;
+    const fCountKnown = typeof fCount === 'number' && isFinite(fCount);
+    const sevObj = scan.severity || {};
+    const crit = sevObj.critical || 0;
+    const high = sevObj.high || 0;
+    const med = sevObj.medium || 0;
+    const low = sevObj.low || 0;
+
+    if (!fCountKnown) {
+      // evidence 欠落/破損/読取不能。0 件と捏造せず「未取得」と表示する。
+      const unknownSpan = document.createElement('span');
+      unknownSpan.style.color = 'var(--text-muted)';
+      unknownSpan.style.fontSize = '0.72rem';
+      unknownSpan.textContent = '未取得';
+      unknownSpan.title = '検出結果を確認できませんでした';
+      tdFindings.appendChild(unknownSpan);
+    } else {
+      const countSpan = document.createElement('span');
+      countSpan.style.fontWeight = '700';
+      countSpan.style.marginRight = '8px';
+      countSpan.textContent = String(fCount);
+      if (fCount > 0) countSpan.style.color = 'var(--critical)';
+      tdFindings.appendChild(countSpan);
+
+      if (fCount > 0) {
+        const sevContainer = document.createElement('span');
+        sevContainer.className = 'history-sev-badges';
+        if (crit > 0) {
+          const cPill = document.createElement('span');
+          cPill.className = 'history-sev-pill crit';
+          cPill.textContent = `C:${crit}`;
+          cPill.title = `Critical: ${crit}`;
+          sevContainer.appendChild(cPill);
+        }
+        if (high > 0) {
+          const hPill = document.createElement('span');
+          hPill.className = 'history-sev-pill high';
+          hPill.textContent = `H:${high}`;
+          hPill.title = `High: ${high}`;
+          sevContainer.appendChild(hPill);
+        }
+        if (med > 0) {
+          const mPill = document.createElement('span');
+          mPill.className = 'history-sev-pill med';
+          mPill.textContent = `M:${med}`;
+          mPill.title = `Medium: ${med}`;
+          sevContainer.appendChild(mPill);
+        }
+        if (low > 0) {
+          const lPill = document.createElement('span');
+          lPill.className = 'history-sev-pill low';
+          lPill.textContent = `L:${low}`;
+          lPill.title = `Low: ${low}`;
+          sevContainer.appendChild(lPill);
+        }
+        tdFindings.appendChild(sevContainer);
+      } else if (rawStatus === 'done') {
+        // 「検出なし」は完了を裏づける有効な evidence が 0 件のときだけ。
+        const noneSpan = document.createElement('span');
+        noneSpan.style.color = 'var(--text-muted)';
+        noneSpan.style.fontSize = '0.72rem';
+        noneSpan.textContent = '検出なし';
+        tdFindings.appendChild(noneSpan);
+      }
+    }
+    tr.appendChild(tdFindings);
+
+    // 5. Size
+    const tdSize = document.createElement('td');
+    tdSize.style.color = 'var(--text-muted)';
+    tdSize.textContent = formatHistoryBytes(scan.size_bytes);
+    tr.appendChild(tdSize);
+
+    // 6. Action Links
+    const tdActions = document.createElement('td');
+    tdActions.style.textAlign = 'right';
+    const actionWrap = document.createElement('div');
+    actionWrap.className = 'history-action-links';
+    actionWrap.style.justifyContent = 'flex-end';
+
+    const safeId = encodeURIComponent(scan.id || '');
+
+    // Report Link
+    const reportLink = document.createElement('a');
+    reportLink.className = 'history-link-btn';
+    reportLink.textContent = '📄 レポート';
+    if (scan.report_available && safeId) {
+      reportLink.href = `/reports/${safeId}/report.html`;
+      reportLink.target = '_blank';
+      reportLink.rel = 'noopener noreferrer';
+      reportLink.classList.add('primary');
+    } else {
+      reportLink.classList.add('history-link-disabled');
+      reportLink.title = 'レポートファイルが存在しません';
+    }
+    actionWrap.appendChild(reportLink);
+
+    // Download Zip Link
+    const dlLink = document.createElement('a');
+    dlLink.className = 'history-link-btn';
+    dlLink.textContent = '⬇ ZIP';
+    if (safeId) {
+      dlLink.href = `/api/v1/scans/${safeId}/download`;
+      dlLink.title = '成果物一式をZIPでダウンロード';
+    } else {
+      dlLink.classList.add('history-link-disabled');
+    }
+    actionWrap.appendChild(dlLink);
+
+    tdActions.appendChild(actionWrap);
+    tr.appendChild(tdActions);
+
+    tbody.appendChild(tr);
+  });
 }
 
 // ─── Init ────────────────────────────────────────────────────────
