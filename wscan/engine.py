@@ -6611,8 +6611,7 @@ class ScanEngine:
                     f"{', '.join(field_payloads)}[/dim magenta]"
                 )
 
-                # multi-param は fill_and_submit_form_multi で直接送信し log_payload_test を
-                # 通さないため、per-payload の abort フックが効かない。送信直前にここで
+                # multi-param は fill_and_submit_form_multi で直接送信するため、送信前に
                 # 停止(abort)/一時停止を尊重し、残りの結合 payload を送り続けないようにする。
                 await self.controller.wait_if_paused_or_abort()
 
@@ -6636,6 +6635,13 @@ class ScanEngine:
                         return
                     continue
                 self.browser.reset_dialog()
+
+                # 結合送信で各フィールドへ投入する payload を、単一パラメータ経路と同じく
+                # BaseScanner.log_payload_test（payloads.jsonl の一元記録）へ送信前に残す。
+                for _fname, _fpayload in field_payloads.items():
+                    await scanner.log_payload_test(
+                        _fname, _fpayload, check_name, page.url
+                    )
 
                 source, pair = await self.browser.fill_and_submit_form_multi(
                     dom_idx, field_payloads
