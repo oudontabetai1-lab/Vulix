@@ -1241,6 +1241,260 @@ body { padding-left: 212px; }
 }
 @keyframes historySpin { to { transform: rotate(360deg); } }
 
+/* ─── Audit Log Screen ───────────────────────────────────────── */
+#viewAuditLog {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+.audit-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px 20px;
+  overflow: hidden;
+  gap: 12px;
+}
+.audit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.audit-title-area {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.audit-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.audit-subtitle {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.audit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.audit-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  transition: background 0.15s, border-color 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.audit-btn:hover { background: var(--surface); border-color: var(--accent); }
+.audit-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.audit-btn.primary {
+  background: var(--accent);
+  color: #161826;
+  border-color: var(--accent);
+}
+.audit-btn.primary:hover { opacity: 0.9; }
+
+.audit-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  border-radius: 8px;
+}
+.audit-search-wrap {
+  flex: 1;
+  min-width: 220px;
+  position: relative;
+}
+.audit-search-input {
+  width: 100%;
+  padding: 6px 10px 6px 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.8rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.audit-search-input:focus { border-color: var(--accent); }
+.audit-search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  pointer-events: none;
+}
+.audit-filter-select {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.78rem;
+  outline: none;
+}
+.audit-meta-stat {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.audit-table-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+.audit-table-scroll {
+  flex: 1;
+  overflow: auto;
+}
+.audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+.audit-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.7rem;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  z-index: 2;
+}
+.audit-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(63,66,77,0.45);
+  color: var(--text);
+  vertical-align: middle;
+}
+.audit-table tbody tr:hover td {
+  background: rgba(233,233,237,0.025);
+}
+.audit-ts-cell {
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+  font-size: 0.75rem;
+  color: var(--text);
+}
+.audit-ip-cell {
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.audit-detail-cell {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+  font-size: 0.75rem;
+}
+.audit-action-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+}
+.audit-action-scan {
+  background: rgba(145,132,217,0.15);
+  color: var(--accent);
+  border-color: rgba(145,132,217,0.3);
+}
+.audit-action-schedule {
+  background: rgba(143,185,201,0.15);
+  color: var(--low);
+  border-color: rgba(143,185,201,0.3);
+}
+.audit-action-settings {
+  background: rgba(199,185,106,0.15);
+  color: var(--medium);
+  border-color: rgba(199,185,106,0.3);
+}
+.audit-action-upload {
+  background: rgba(217,154,99,0.15);
+  color: var(--running);
+  border-color: rgba(217,154,99,0.3);
+}
+.audit-action-other {
+  background: rgba(147,151,171,0.15);
+  color: var(--text-muted);
+  border-color: rgba(147,151,171,0.3);
+}
+
+.audit-state-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  color: var(--text-muted);
+  gap: 12px;
+  text-align: center;
+  flex: 1;
+}
+.audit-state-box .icon {
+  font-size: 2rem;
+  opacity: 0.8;
+}
+.audit-state-box .title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.audit-state-box .desc {
+  font-size: 0.78rem;
+  max-width: 360px;
+  line-height: 1.5;
+}
+.audit-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: historySpin 0.7s linear infinite;
+}
+
 .ws-rail .ws-cur{padding:12px 12px 2px}
 .ws-rail .ws-eyebrow{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px}
 .ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--text-muted)}.ws-rail .pulse.running{background:var(--running);animation:wsPulseRail 1.8s ease-in-out infinite}.ws-rail .pulse.done{background:var(--success)}.ws-rail .pulse.error{background:var(--critical)}.ws-rail .pulse.aborted{background:var(--high)}
@@ -1261,6 +1515,9 @@ body { padding-left: 212px; }
     </button>
     <button type="button" class="ws-nav" id="navScanHistory" onclick="switchMainView('history')">
       <span class="m"></span><span style="flex:1">スキャン履歴</span>
+    </button>
+    <button type="button" class="ws-nav" id="navAuditLog" onclick="switchMainView('audit')" title="監査ログ" aria-label="監査ログ">
+      <span class="m"></span><span style="flex:1">監査ログ</span>
     </button>
     <button class="ws-newscan" onclick="document.getElementById('scanConfigOverlay').classList.add('active')">＋ 新規スキャン</button>
   </nav>
@@ -2103,6 +2360,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
   <div class="hdr-view-toggle">
     <button type="button" class="hdr-view-btn active" id="hdrBtnLive" onclick="switchMainView('live')">ライブ</button>
     <button type="button" class="hdr-view-btn" id="hdrBtnHistory" onclick="switchMainView('history')">履歴</button>
+    <button type="button" class="hdr-view-btn" id="hdrBtnAudit" onclick="switchMainView('audit')">監査</button>
   </div>
   <div class="status-bar">
     <div class="status-dot" id="statusDot"></div>
@@ -2463,6 +2721,83 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
         <div class="title" style="color:var(--critical)">スキャン履歴の取得に失敗しました</div>
         <div class="desc" id="historyErrorMessage">通信エラーが発生しました</div>
         <button type="button" class="history-btn primary" style="margin-top:8px" onclick="loadScanHistory()">再試行</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Audit Log View ──────────────────────────────────────── -->
+<div id="viewAuditLog">
+  <div class="audit-container">
+    <div class="audit-header">
+      <div class="audit-title-area">
+        <div class="audit-title">
+          <span>📋</span>
+          <span>監査ログ</span>
+        </div>
+        <div class="audit-subtitle">サーバー上で記録された管理操作の監査ログ（最新200件）を閲覧できます</div>
+      </div>
+      <div class="audit-actions">
+        <button type="button" class="audit-btn primary" id="btnRefreshAudit" onclick="loadAuditLog()">
+          <span>🔄</span>
+          <span>更新</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="audit-toolbar">
+      <div class="audit-search-wrap">
+        <span class="audit-search-icon">🔍</span>
+        <input type="text" id="auditSearchInput" class="audit-search-input" placeholder="操作名、送信元IP、詳細で絞り込み..." oninput="onAuditSearchInput(this.value)">
+      </div>
+      <div>
+        <select id="auditActionFilter" class="audit-filter-select" onchange="onAuditFilterChange(this.value)">
+          <option value="all">すべての操作</option>
+          <option value="scan">スキャン操作 (scan_*)</option>
+          <option value="schedule">定期スキャン (schedule_*)</option>
+          <option value="upload">ファイル配置 (upload)</option>
+          <option value="settings">設定変更 (settings_*)</option>
+          <option value="other">その他操作</option>
+        </select>
+      </div>
+      <div class="audit-meta-stat" id="auditMetaStat">表示中: 0件</div>
+    </div>
+
+    <div class="audit-table-card">
+      <div class="audit-table-scroll" id="auditTableScroll">
+        <table class="audit-table" id="auditTable">
+          <thead>
+            <tr>
+              <th style="width:190px">日時 (Timestamp)</th>
+              <th style="width:160px">操作 (Action)</th>
+              <th style="width:170px">送信元 (Source IP)</th>
+              <th>詳細 (Details)</th>
+            </tr>
+          </thead>
+          <tbody id="auditTableBody">
+            <!-- populated dynamically -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- State boxes -->
+      <div id="auditLoadingState" class="audit-state-box" style="display:none">
+        <div class="audit-spinner"></div>
+        <div class="title">監査ログを読み込み中...</div>
+        <div class="desc">サーバから監査ログを取得しています</div>
+      </div>
+
+      <div id="auditEmptyState" class="audit-state-box" style="display:none">
+        <div class="icon">📋</div>
+        <div class="title">記録された管理操作はありません</div>
+        <div class="desc">まだ管理操作が実行されていないか、条件に一致する記録がありません</div>
+      </div>
+
+      <div id="auditErrorState" class="audit-state-box" style="display:none">
+        <div class="icon" style="color:var(--critical)">⚠️</div>
+        <div class="title" style="color:var(--critical)">監査ログの取得に失敗しました</div>
+        <div class="desc" id="auditErrorMessage">通信エラーが発生しました</div>
+        <button type="button" class="audit-btn primary" style="margin-top:8px" onclick="loadAuditLog()">再試行</button>
       </div>
     </div>
   </div>
@@ -6590,39 +6925,55 @@ let historyStatusFilter = 'all';
 function switchMainView(viewName) {
   const liveEl = document.getElementById('viewLiveMonitor');
   const histEl = document.getElementById('viewScanHistory');
+  const auditEl = document.getElementById('viewAuditLog');
   const navLive = document.getElementById('navLiveMonitor');
   const navHist = document.getElementById('navScanHistory');
+  const navAudit = document.getElementById('navAuditLog');
   const hdrLive = document.getElementById('hdrBtnLive');
   const hdrHist = document.getElementById('hdrBtnHistory');
+  const hdrAudit = document.getElementById('hdrBtnAudit');
   const hdrTitle = document.getElementById('headerTitle');
 
-  if (viewName === 'history') {
-    if (liveEl) liveEl.style.display = 'none';
-    if (histEl) histEl.style.display = 'flex';
-    if (navLive) {
-      navLive.classList.remove('active');
-      navLive.removeAttribute('aria-current');
+  // Hide all views first
+  if (liveEl) liveEl.style.display = 'none';
+  if (histEl) histEl.style.display = 'none';
+  if (auditEl) auditEl.style.display = 'none';
+
+  // Deactivate all nav/hdr buttons
+  [navLive, navHist, navAudit].forEach(btn => {
+    if (btn) {
+      btn.classList.remove('active');
+      btn.removeAttribute('aria-current');
     }
+  });
+  [hdrLive, hdrHist, hdrAudit].forEach(btn => {
+    if (btn) btn.classList.remove('active');
+  });
+
+  if (viewName === 'audit') {
+    if (auditEl) auditEl.style.display = 'flex';
+    if (navAudit) {
+      navAudit.classList.add('active');
+      navAudit.setAttribute('aria-current', 'page');
+    }
+    if (hdrAudit) hdrAudit.classList.add('active');
+    if (hdrTitle) hdrTitle.textContent = '監査ログ';
+    loadAuditLog();
+  } else if (viewName === 'history') {
+    if (histEl) histEl.style.display = 'flex';
     if (navHist) {
       navHist.classList.add('active');
       navHist.setAttribute('aria-current', 'page');
     }
-    if (hdrLive) hdrLive.classList.remove('active');
     if (hdrHist) hdrHist.classList.add('active');
     if (hdrTitle) hdrTitle.textContent = 'スキャン履歴';
     loadScanHistory();
   } else {
-    if (histEl) histEl.style.display = 'none';
     if (liveEl) liveEl.style.display = 'flex';
-    if (navHist) {
-      navHist.classList.remove('active');
-      navHist.removeAttribute('aria-current');
-    }
     if (navLive) {
       navLive.classList.add('active');
       navLive.setAttribute('aria-current', 'page');
     }
-    if (hdrHist) hdrHist.classList.remove('active');
     if (hdrLive) hdrLive.classList.add('active');
     if (hdrTitle) hdrTitle.textContent = 'ライブモニター';
   }
@@ -7052,6 +7403,275 @@ function renderHistoryTable() {
 
     tdActions.appendChild(actionWrap);
     tr.appendChild(tdActions);
+
+    tbody.appendChild(tr);
+  });
+}
+
+// ─── Audit Log Management ───────────────────────────────────────
+let currentAuditData = [];
+let auditSearchTerm = '';
+let auditActionFilter = 'all';
+
+const AUDIT_ACTION_MAP = {
+  'scan_start': { label: 'スキャン開始', group: 'scan', badgeClass: 'audit-action-scan' },
+  'scan_abort': { label: 'スキャン中断', group: 'scan', badgeClass: 'audit-action-scan' },
+  'scan_delete': { label: 'スキャン削除', group: 'scan', badgeClass: 'audit-action-scan' },
+  'scans_prune': { label: '履歴手動整理', group: 'scan', badgeClass: 'audit-action-scan' },
+  'schedule_add': { label: '定期追加', group: 'schedule', badgeClass: 'audit-action-schedule' },
+  'schedule_toggle': { label: '定期切替', group: 'schedule', badgeClass: 'audit-action-schedule' },
+  'schedule_delete': { label: '定期削除', group: 'schedule', badgeClass: 'audit-action-schedule' },
+  'upload': { label: 'ファイル配置', group: 'upload', badgeClass: 'audit-action-upload' },
+  'settings_update': { label: '設定変更', group: 'settings', badgeClass: 'audit-action-settings' }
+};
+
+const SAFE_ALPHANUM_ID = /^[a-zA-Z0-9_-]{1,64}$/;
+const SAFE_SCHEDULE_ID = /^[0-9]{10,20}$/;
+const SAFE_PRUNE_DETAIL = /^[0-9]{1,6}\s*件$/;
+const SAFE_UPLOAD_FILENAME = /^[a-zA-Z0-9._-]{1,128}$/;
+const SAFE_SETTINGS_DETAIL = /^webhook_set=(True|False)\s+enabled=(True|False)$/;
+const SAFE_SCHEDULE_TOGGLE = /^(\S+)\s+enabled=(True|False)$/;
+const SAFE_SCHEDULE_ADD = /^(\S+)\s+\(([0-9.]+h)\)$/;
+const STRICT_IPV4_RE = /^(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/;
+const STRICT_IPV6_RE = /^[0-9a-fA-F:]{2,39}$/;
+
+function onAuditSearchInput(val) {
+  auditSearchTerm = (val || '').trim().toLowerCase();
+  renderAuditTable();
+}
+
+function onAuditFilterChange(val) {
+  auditActionFilter = val || 'all';
+  renderAuditTable();
+}
+
+function formatAuditTimestamp(isoStr) {
+  if (typeof isoStr !== 'string' || !isoStr) return '不明';
+  const match = isoStr.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+  if (!match) return '不明';
+  const d = new Date(isoStr);
+  if (isNaN(d.getTime())) return '不明';
+  try {
+    return d.toLocaleString('ja-JP', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    });
+  } catch (_) {
+    return `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}:${match[6]}`;
+  }
+}
+
+function validateAndSanitizeClientIp(ipStr) {
+  if (!ipStr || typeof ipStr !== 'string') return '—';
+  const trimmed = ipStr.trim();
+  if (STRICT_IPV4_RE.test(trimmed)) return trimmed;
+  if (trimmed.includes(':') && STRICT_IPV6_RE.test(trimmed)) {
+    const colons = (trimmed.match(/:/g) || []).length;
+    if (colons >= 2 && colons <= 7) return trimmed;
+  }
+  return '—';
+}
+
+function sanitizeSafeAuditUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== 'string') return null;
+  const trimmed = urlStr.trim();
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    let safeUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    if (parsed.search) {
+      const sp = new URLSearchParams(parsed.search);
+      const safeParams = [];
+      for (const [k, v] of sp.entries()) {
+        if (isSensitiveKey(k)) {
+          safeParams.push(`${encodeURIComponent(k)}=<redacted>`);
+        } else {
+          safeParams.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+        }
+      }
+      if (safeParams.length > 0) safeUrl += `?${safeParams.join('&')}`;
+    }
+    return safeUrl;
+  } catch (_) {
+    return null;
+  }
+}
+
+function formatSafeAuditDetail(action, rawDetail) {
+  if (!rawDetail || typeof rawDetail !== 'string') return '（詳細なし）';
+  const trimmed = rawDetail.trim();
+
+  switch (action) {
+    case 'scan_start': {
+      const sanitized = sanitizeSafeAuditUrl(trimmed);
+      return sanitized || '（詳細非表示）';
+    }
+    case 'scan_abort':
+    case 'scan_delete': {
+      if (SAFE_ALPHANUM_ID.test(trimmed)) return trimmed;
+      return '（詳細非表示）';
+    }
+    case 'scans_prune': {
+      if (SAFE_PRUNE_DETAIL.test(trimmed)) return trimmed;
+      return '（詳細非表示）';
+    }
+    case 'upload': {
+      // Filename may leak private sensitive project/secret names; check strict safe characters
+      if (SAFE_UPLOAD_FILENAME.test(trimmed)) {
+        // Also ensure it does not look like token/key file
+        const lower = trimmed.toLowerCase();
+        if (lower.includes('key') || lower.includes('secret') || lower.includes('token') || lower.includes('pass')) {
+          return '（詳細非表示）';
+        }
+        return trimmed;
+      }
+      return '（詳細非表示）';
+    }
+    case 'settings_update': {
+      if (SAFE_SETTINGS_DETAIL.test(trimmed)) return trimmed;
+      return '（詳細非表示）';
+    }
+    case 'schedule_add': {
+      const m = trimmed.match(SAFE_SCHEDULE_ADD);
+      if (m) {
+        const safeUrl = sanitizeSafeAuditUrl(m[1]);
+        if (safeUrl) return `${safeUrl} (${m[2]})`;
+      }
+      return '（詳細非表示）';
+    }
+    case 'schedule_toggle': {
+      const m = trimmed.match(SAFE_SCHEDULE_TOGGLE);
+      if (m) {
+        const safeUrl = sanitizeSafeAuditUrl(m[1]);
+        if (safeUrl) return `${safeUrl} enabled=${m[2]}`;
+      }
+      return '（詳細非表示）';
+    }
+    case 'schedule_delete': {
+      if (SAFE_SCHEDULE_ID.test(trimmed) || SAFE_ALPHANUM_ID.test(trimmed)) return trimmed;
+      return '（詳細非表示）';
+    }
+    default:
+      return '（詳細非表示）';
+  }
+}
+
+function setAuditViewState(stateName, errorMsg) {
+  const scrollEl = document.getElementById('auditTableScroll');
+  const loadingEl = document.getElementById('auditLoadingState');
+  const emptyEl = document.getElementById('auditEmptyState');
+  const errorEl = document.getElementById('auditErrorState');
+  const errDesc = document.getElementById('auditErrorMessage');
+
+  if (scrollEl) scrollEl.style.display = stateName === 'table' ? 'block' : 'none';
+  if (loadingEl) loadingEl.style.display = stateName === 'loading' ? 'flex' : 'none';
+  if (emptyEl) emptyEl.style.display = stateName === 'empty' ? 'flex' : 'none';
+  if (errorEl) {
+    errorEl.style.display = stateName === 'error' ? 'flex' : 'none';
+    if (errDesc && errorMsg) errDesc.textContent = errorMsg;
+  }
+}
+
+async function loadAuditLog() {
+  setAuditViewState('loading');
+  try {
+    const res = await fetch('/api/v1/audit');
+    if (!res.ok) {
+      if (res.status === 401) {
+        throw new Error('認証が必要です (HTTP 401 Unauthorized)。ログインするか認証トークンを確認してください。');
+      }
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    const data = await res.json();
+    currentAuditData = Array.isArray(data.audit) ? data.audit : [];
+    renderAuditTable();
+  } catch (err) {
+    console.error('Failed to load audit log:', err);
+    setAuditViewState('error', '監査ログの取得に失敗しました: ' + (err.message || String(err)));
+  }
+}
+
+function renderAuditTable() {
+  const tbody = document.getElementById('auditTableBody');
+  const metaStat = document.getElementById('auditMetaStat');
+  if (!tbody) return;
+
+  while (tbody.firstChild) {
+    tbody.removeChild(tbody.firstChild);
+  }
+
+  const filtered = currentAuditData.filter(entry => {
+    if (!entry) return false;
+    const actionKey = String(entry.action || '');
+    const meta = AUDIT_ACTION_MAP[actionKey];
+    const group = meta ? meta.group : 'other';
+
+    if (auditActionFilter !== 'all' && group !== auditActionFilter) {
+      return false;
+    }
+
+    if (auditSearchTerm) {
+      const actionMatch = (meta ? meta.label : actionKey).toLowerCase().includes(auditSearchTerm) ||
+                          actionKey.toLowerCase().includes(auditSearchTerm);
+      const ipMatch = String(entry.ip || '').toLowerCase().includes(auditSearchTerm);
+      const detailMatch = String(entry.detail || '').toLowerCase().includes(auditSearchTerm);
+      if (!actionMatch && !ipMatch && !detailMatch) return false;
+    }
+    return true;
+  });
+
+  if (metaStat) {
+    metaStat.textContent = `表示中: ${filtered.length}件 / 全${currentAuditData.length}件`;
+  }
+
+  if (filtered.length === 0) {
+    setAuditViewState('empty');
+    return;
+  }
+
+  setAuditViewState('table');
+
+  filtered.forEach(entry => {
+    const tr = document.createElement('tr');
+
+    // 1. Timestamp (strict validation)
+    const tdTs = document.createElement('td');
+    tdTs.className = 'audit-ts-cell';
+    tdTs.textContent = formatAuditTimestamp(entry.ts);
+    tr.appendChild(tdTs);
+
+    // 2. Action (whitelisted label)
+    const tdAction = document.createElement('td');
+    const badge = document.createElement('span');
+    badge.className = 'audit-action-badge';
+    const actionKey = String(entry.action || '');
+    const actionMeta = AUDIT_ACTION_MAP[actionKey];
+    if (actionMeta) {
+      badge.classList.add(actionMeta.badgeClass);
+      badge.textContent = actionMeta.label;
+    } else {
+      badge.classList.add('audit-action-other');
+      badge.textContent = 'その他操作';
+    }
+    tdAction.appendChild(badge);
+    tr.appendChild(tdAction);
+
+    // 3. Source IP (strict validation)
+    const tdIp = document.createElement('td');
+    tdIp.className = 'audit-ip-cell';
+    tdIp.textContent = validateAndSanitizeClientIp(entry.ip);
+    tr.appendChild(tdIp);
+
+    // 4. Details (structural sanitization or explicit concealment)
+    const tdDetail = document.createElement('td');
+    tdDetail.className = 'audit-detail-cell';
+    const safeDetail = formatSafeAuditDetail(actionKey, entry.detail);
+    tdDetail.textContent = safeDetail;
+    if (safeDetail !== '（詳細非表示）' && safeDetail !== '（詳細なし）') {
+      tdDetail.title = safeDetail;
+    }
+    tr.appendChild(tdDetail);
 
     tbody.appendChild(tr);
   });
