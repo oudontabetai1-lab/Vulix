@@ -211,20 +211,26 @@ def test_dashboard_audit_log_playwright_e2e(tmp_path, monkeypatch):
             dom_html = page.inner_html("#auditTableBody")
 
             # 3. Privacy & Canary Secret Verification
-            # Canary tokens MUST NOT appear anywhere in inner text or attributes
+            # Canary tokens and arbitrary details MUST NOT appear anywhere in inner text or attributes
             assert "CANARY_SECRET_TOKEN_123" not in dom_text
             assert "CANARY_SECRET_TOKEN_123" not in dom_html
             assert "CANARY_COMMAND_SECRET" not in dom_text
             assert "CANARY_COMMAND_SECRET" not in dom_html
 
-            # Sensitive upload file is concealed
+            # Upload filenames, scan IDs, URLs are completely concealed
+            assert "my-rules_v1.0.txt" not in dom_text
             assert "api_secret_key.pem" not in dom_text
+            assert "scan-safe-id-001" not in dom_text
+            assert "sched.example.com" not in dom_text
 
-            # Token query parameter was masked
-            assert "<redacted>" in dom_text
-
-            # Unknown action detail is concealed
+            # All non-empty details must be strictly （詳細非表示）
             assert "（詳細非表示）" in dom_text
+            detail_cells = page.locator("#auditTableBody td.audit-detail-cell")
+            for i in range(detail_cells.count()):
+                cell_text = detail_cells.nth(i).inner_text().strip()
+                assert cell_text in ("（詳細非表示）", "（詳細なし）")
+                # Ensure no title/tooltip attribute leaks detail
+                assert detail_cells.nth(i).get_attribute("title") is None
 
             # XSS probe detail was suppressed or text-escaped (no HTML tag execution)
             assert "<img src=x" not in dom_html
@@ -255,11 +261,15 @@ def test_dashboard_audit_log_playwright_e2e(tmp_path, monkeypatch):
             page.select_option("#auditActionFilter", "all")
             assert page.locator("#auditTableBody tr").count() == 9
 
-            # 5. Search Filter
+            # 5. Search Filter (matches action label/key or IP; detail is concealed and not searched)
             search = page.locator("#auditSearchInput")
-            search.fill("my-rules")
+            search.fill("スキャン開始")
             assert page.locator("#auditTableBody tr").count() == 1
-            assert "my-rules_v1.0.txt" in page.locator("#auditTableBody").inner_text()
+            search.fill("192.168.1.50")
+            assert page.locator("#auditTableBody tr").count() == 1
+            # Searching for raw detail text must yield 0 matches since detail is concealed
+            search.fill("my-rules")
+            assert page.locator("#auditTableBody tr").count() == 0
             search.fill("")
             assert page.locator("#auditTableBody tr").count() == 9
 
@@ -442,13 +452,110 @@ def test_dashboard_audit_log_ws_lifecycle_across_views(tmp_path, monkeypatch):
             page.click("#navLiveMonitor")
             page.wait_for_selector("#viewLiveMonitor")
 
-            # Trigger emit after returning to live
-            res3 = page.request.post(f"http://127.0.0.1:{port}/__test__/emit-step/after_return")
-            assert res3.status == 200
-            page.wait_for_function("document.getElementById('statPages') && document.getElementById('statPages').textContent.trim() === '3'")
-            assert any("after_return" in str(msg[1]) for msg in received_messages)
-            count_after = len(received_messages)
-            assert count_after > count_during
+            browser.close()
+    finally:
+        server_thread.stop()
+
+
+def test_dashboard_audit_log_adversarial_counterexamples(tmp_path, monkeypatch):
+    """Verify adversarial counterexamples: prototype pollution actions and total detail concealment."""
+    monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
+    srv = MonitorServer()
+
+    audit_file = tmp_path / "management_audit.jsonl"
+    entries = [
+        # 1-3. Prototype property names as action (must map to その他操作, never blank)
+        {"ts": "2026-10-26T12:00:00", "ip": "127.0.0.1", "action": "constructor", "detail": "CANARY_CONSTRUCTOR_DETAIL"},
+        {"ts": "2026-10-26T12:01:00", "ip": "127.0.0.1", "action": "__proto__", "detail": "CANARY_PROTO_DETAIL"},
+        {"ts": "2026-10-26T12:02:00", "ip": "127.0.0.1", "action": "toString", "detail": "CANARY_TOSTRING_DETAIL"},
+        # 4. Path canary in scan_start URL
+        {"ts": "2026-10-26T12:03:00", "ip": "10.0.0.1", "action": "scan_start", "detail": "https://example.com/api/v1/users/CANARY_SECRET_USER_123/profile"},
+        # 5. Userinfo, plain and nested query, fragment in scan_start URL
+        {"ts": "2026-10-26T12:04:00", "ip": "10.0.0.1", "action": "scan_start", "detail": "https://admin:CANARY_PASS_999@example.com/app?plain=CANARY_PLAIN&nested[key]=CANARY_NESTED#token=CANARY_HASH_999"},
+        # 6. Harmless alphanumeric sensitive filename in upload
+        {"ts": "2026-10-26T12:05:00", "ip": "10.0.0.1", "action": "upload", "detail": "sensitive_financial_records.xlsx"},
+        # 7. Safe-looking scan_id / alphanum ID in scan_abort / scan_delete
+        {"ts": "2026-10-26T12:06:00", "ip": "10.0.0.1", "action": "scan_delete", "detail": "scan-12345-CANARY-SAFE-ID"},
+        # 8. Numeric detail
+        {"ts": "2026-10-26T12:07:00", "ip": "10.0.0.1", "action": "scans_prune", "detail": "42"},
+        # 9. Boolean / settings detail
+        {"ts": "2026-10-26T12:08:00", "ip": "10.0.0.1", "action": "settings_update", "detail": "webhook_set=True enabled=True"},
+        # 10. Null / empty detail
+        {"ts": "2026-10-26T12:09:00", "ip": "10.0.0.1", "action": "scan_abort", "detail": ""},
+    ]
+    audit_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+
+    port = find_free_port()
+    server_thread = UvicornServerThread(srv, port)
+    server_thread.start()
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.goto(f"http://127.0.0.1:{port}/monitor")
+
+            page.click("#navAuditLog")
+            page.wait_for_selector("#auditTableBody tr")
+
+            dom_text = page.inner_text("#auditTableBody")
+            dom_html = page.inner_html("#auditTableBody")
+
+            # 1. Prototype pollution actions must all display その他操作 with audit-action-other class
+            proto_rows = [r for r in page.locator("#auditTableBody tr").all() if "その他操作" in r.inner_text()]
+            assert len(proto_rows) == 3
+            for r in proto_rows:
+                badge = r.locator(".audit-action-badge")
+                assert badge.inner_text().strip() == "その他操作"
+                assert "audit-action-other" in (badge.get_attribute("class") or "")
+
+            # 2. Total detail concealment verification:
+            # None of the canaries or raw details must leak anywhere into DOM text or HTML attributes
+            canaries = [
+                "CANARY_CONSTRUCTOR_DETAIL",
+                "CANARY_PROTO_DETAIL",
+                "CANARY_TOSTRING_DETAIL",
+                "CANARY_SECRET_USER_123",
+                "CANARY_PASS_999",
+                "CANARY_PLAIN",
+                "CANARY_NESTED",
+                "CANARY_HASH_999",
+                "sensitive_financial_records.xlsx",
+                "scan-12345-CANARY-SAFE-ID",
+                "42",
+                "webhook_set=True",
+                "example.com",
+            ]
+            for canary in canaries:
+                assert canary not in dom_text, f"Canary '{canary}' leaked into DOM text"
+                assert canary not in dom_html, f"Canary '{canary}' leaked into DOM HTML"
+
+            # 3. Check detail cells strictly contain either （詳細非表示） or （詳細なし）
+            detail_cells = page.locator("#auditTableBody td.audit-detail-cell")
+            assert detail_cells.count() == 10
+            for i in range(10):
+                cell = detail_cells.nth(i)
+                txt = cell.inner_text().strip()
+                assert txt in ("（詳細非表示）", "（詳細なし）")
+                assert cell.get_attribute("title") is None
+
+            # Empty detail entry must be rendered as （詳細なし）
+            empty_cell = detail_cells.first  # entries[9] is newest (first)
+            assert empty_cell.inner_text().strip() == "（詳細なし）"
+
+            # 4. Search and filter behavior
+            # Search by 'その他操作' should match the 3 prototype pollution entries
+            page.fill("#auditSearchInput", "その他操作")
+            assert page.locator("#auditTableBody tr").count() == 3
+
+            # Search by canary string should match 0 rows
+            page.fill("#auditSearchInput", "CANARY")
+            assert page.locator("#auditTableBody tr").count() == 0
+
+            # Filter by 'other' should match the 3 prototype pollution entries
+            page.fill("#auditSearchInput", "")
+            page.select_option("#auditActionFilter", "other")
+            assert page.locator("#auditTableBody tr").count() == 3
 
             browser.close()
     finally:

@@ -7425,13 +7425,13 @@ const AUDIT_ACTION_MAP = {
   'settings_update': { label: '設定変更', group: 'settings', badgeClass: 'audit-action-settings' }
 };
 
-const SAFE_ALPHANUM_ID = /^[a-zA-Z0-9_-]{1,64}$/;
-const SAFE_SCHEDULE_ID = /^[0-9]{10,20}$/;
-const SAFE_PRUNE_DETAIL = /^[0-9]{1,6}\s*件$/;
-const SAFE_UPLOAD_FILENAME = /^[a-zA-Z0-9._-]{1,128}$/;
-const SAFE_SETTINGS_DETAIL = /^webhook_set=(True|False)\s+enabled=(True|False)$/;
-const SAFE_SCHEDULE_TOGGLE = /^(\S+)\s+enabled=(True|False)$/;
-const SAFE_SCHEDULE_ADD = /^(\S+)\s+\(([0-9.]+h)\)$/;
+function getAuditActionMeta(actionKey) {
+  if (typeof actionKey === 'string' && Object.prototype.hasOwnProperty.call(AUDIT_ACTION_MAP, actionKey)) {
+    return AUDIT_ACTION_MAP[actionKey];
+  }
+  return null;
+}
+
 const STRICT_IPV4_RE = /^(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/;
 const STRICT_IPV6_RE = /^[0-9a-fA-F:]{2,39}$/;
 
@@ -7473,88 +7473,9 @@ function validateAndSanitizeClientIp(ipStr) {
   return '—';
 }
 
-function sanitizeSafeAuditUrl(urlStr) {
-  if (!urlStr || typeof urlStr !== 'string') return null;
-  const trimmed = urlStr.trim();
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-    let safeUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
-    if (parsed.search) {
-      const sp = new URLSearchParams(parsed.search);
-      const safeParams = [];
-      for (const [k, v] of sp.entries()) {
-        if (isSensitiveKey(k)) {
-          safeParams.push(`${encodeURIComponent(k)}=<redacted>`);
-        } else {
-          safeParams.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
-        }
-      }
-      if (safeParams.length > 0) safeUrl += `?${safeParams.join('&')}`;
-    }
-    return safeUrl;
-  } catch (_) {
-    return null;
-  }
-}
-
 function formatSafeAuditDetail(action, rawDetail) {
   if (!rawDetail || typeof rawDetail !== 'string') return '（詳細なし）';
-  const trimmed = rawDetail.trim();
-
-  switch (action) {
-    case 'scan_start': {
-      const sanitized = sanitizeSafeAuditUrl(trimmed);
-      return sanitized || '（詳細非表示）';
-    }
-    case 'scan_abort':
-    case 'scan_delete': {
-      if (SAFE_ALPHANUM_ID.test(trimmed)) return trimmed;
-      return '（詳細非表示）';
-    }
-    case 'scans_prune': {
-      if (SAFE_PRUNE_DETAIL.test(trimmed)) return trimmed;
-      return '（詳細非表示）';
-    }
-    case 'upload': {
-      // Filename may leak private sensitive project/secret names; check strict safe characters
-      if (SAFE_UPLOAD_FILENAME.test(trimmed)) {
-        // Also ensure it does not look like token/key file
-        const lower = trimmed.toLowerCase();
-        if (lower.includes('key') || lower.includes('secret') || lower.includes('token') || lower.includes('pass')) {
-          return '（詳細非表示）';
-        }
-        return trimmed;
-      }
-      return '（詳細非表示）';
-    }
-    case 'settings_update': {
-      if (SAFE_SETTINGS_DETAIL.test(trimmed)) return trimmed;
-      return '（詳細非表示）';
-    }
-    case 'schedule_add': {
-      const m = trimmed.match(SAFE_SCHEDULE_ADD);
-      if (m) {
-        const safeUrl = sanitizeSafeAuditUrl(m[1]);
-        if (safeUrl) return `${safeUrl} (${m[2]})`;
-      }
-      return '（詳細非表示）';
-    }
-    case 'schedule_toggle': {
-      const m = trimmed.match(SAFE_SCHEDULE_TOGGLE);
-      if (m) {
-        const safeUrl = sanitizeSafeAuditUrl(m[1]);
-        if (safeUrl) return `${safeUrl} enabled=${m[2]}`;
-      }
-      return '（詳細非表示）';
-    }
-    case 'schedule_delete': {
-      if (SAFE_SCHEDULE_ID.test(trimmed) || SAFE_ALPHANUM_ID.test(trimmed)) return trimmed;
-      return '（詳細非表示）';
-    }
-    default:
-      return '（詳細非表示）';
-  }
+  return '（詳細非表示）';
 }
 
 function setAuditViewState(stateName, errorMsg) {
@@ -7604,7 +7525,7 @@ function renderAuditTable() {
   const filtered = currentAuditData.filter(entry => {
     if (!entry) return false;
     const actionKey = String(entry.action || '');
-    const meta = AUDIT_ACTION_MAP[actionKey];
+    const meta = getAuditActionMeta(actionKey);
     const group = meta ? meta.group : 'other';
 
     if (auditActionFilter !== 'all' && group !== auditActionFilter) {
@@ -7612,11 +7533,11 @@ function renderAuditTable() {
     }
 
     if (auditSearchTerm) {
-      const actionMatch = (meta ? meta.label : actionKey).toLowerCase().includes(auditSearchTerm) ||
+      const actionLabel = meta ? meta.label : 'その他操作';
+      const actionMatch = actionLabel.toLowerCase().includes(auditSearchTerm) ||
                           actionKey.toLowerCase().includes(auditSearchTerm);
       const ipMatch = String(entry.ip || '').toLowerCase().includes(auditSearchTerm);
-      const detailMatch = String(entry.detail || '').toLowerCase().includes(auditSearchTerm);
-      if (!actionMatch && !ipMatch && !detailMatch) return false;
+      if (!actionMatch && !ipMatch) return false;
     }
     return true;
   });
@@ -7646,7 +7567,7 @@ function renderAuditTable() {
     const badge = document.createElement('span');
     badge.className = 'audit-action-badge';
     const actionKey = String(entry.action || '');
-    const actionMeta = AUDIT_ACTION_MAP[actionKey];
+    const actionMeta = getAuditActionMeta(actionKey);
     if (actionMeta) {
       badge.classList.add(actionMeta.badgeClass);
       badge.textContent = actionMeta.label;
@@ -7668,9 +7589,6 @@ function renderAuditTable() {
     tdDetail.className = 'audit-detail-cell';
     const safeDetail = formatSafeAuditDetail(actionKey, entry.detail);
     tdDetail.textContent = safeDetail;
-    if (safeDetail !== '（詳細非表示）' && safeDetail !== '（詳細なし）') {
-      tdDetail.title = safeDetail;
-    }
     tr.appendChild(tdDetail);
 
     tbody.appendChild(tr);
