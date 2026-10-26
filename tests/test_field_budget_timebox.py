@@ -1271,6 +1271,9 @@ class MultiParamRecoveryTests(unittest.IsolatedAsyncioTestCase):
             def may_scan_injection_point(self, ip):
                 return True
 
+            async def log_payload_test(self, *a, **k):
+                return None
+
         class _PG:
             default_payloads = {"xss": ["<x>"], "sqli": ["' or 1=1"], "ssti": ["{{7*7}}"]}
 
@@ -1341,6 +1344,9 @@ class MultiParamRecoveryTests(unittest.IsolatedAsyncioTestCase):
             class _Sc:
                 def may_scan_injection_point(self, ip):
                     return True
+
+                async def log_payload_test(self, *a, **k):
+                    return None
 
             class _PG:
                 default_payloads = {"xss": ["<x>"], "sqli": ["' or 1"]}
