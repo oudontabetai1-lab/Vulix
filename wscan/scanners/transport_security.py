@@ -138,6 +138,15 @@ class TransportSecurityScanner(BaseScanner):
             if logger.log_httpx_submission not in request_hooks:
                 request_hooks.append(logger.log_httpx_submission)
             hooks["request"] = request_hooks
+            # _observe_response() owns observation; the engine-wide response hook would
+            # record a second observation for the same probe.
+            response_hook = getattr(logger, "log_httpx_response", None)
+            if response_hook is not None:
+                remaining = [h for h in (hooks.get("response") or ()) if h != response_hook]
+                if remaining:
+                    hooks["response"] = remaining
+                else:
+                    hooks.pop("response", None)
             kwargs["event_hooks"] = hooks
         else:
             self._evidence_gap("transport_security_evidence_unavailable")

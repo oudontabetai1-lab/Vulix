@@ -43,12 +43,21 @@ class MethodFixture:
 
 def setup(tmp_path, monkeypatch, fixture, *, logging=True, hook=None):
     logger = None if logging is None else RequestLogger(tmp_path, enabled=logging)
+
+    def client_kwargs(**kwargs):
+        # Mirror ScanEngine.httpx_client_kwargs: both submission and response hooks.
+        hooks = {"request": [hook]} if hook else {}
+        if logger is not None:
+            hooks["request"] = [*hooks.get("request", []), logger.log_httpx_submission]
+            hooks["response"] = [logger.log_httpx_response]
+        return {**kwargs, "event_hooks": hooks}
+
     engine = SimpleNamespace(
         request_logger=logger, browser=SimpleNamespace(network=SimpleNamespace(pairs=[])), monitor=None,
         payload_gen=None, timeout=1, proxy="", wave_errors=[], all_findings=[], _finding_dedup=set(),
         _is_access_allowed_url=lambda url: httpx.URL(url).host == "target.test",
         _is_url_excluded=lambda url: False,
-        httpx_client_kwargs=lambda **kwargs: ({**kwargs, **({"event_hooks": {"request": [hook]}} if hook else {})}),
+        httpx_client_kwargs=client_kwargs,
     )
     scanner = TransportSecurityScanner(engine)
     original = httpx.AsyncClient
