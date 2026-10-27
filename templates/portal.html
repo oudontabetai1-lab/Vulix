@@ -296,6 +296,164 @@ function esc(s) {
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
+// 資格情報らしい URL パラメータ名。汎用語（auth/session/otp/ticket）は誤除外を抑えるため
+// キー全体か区切り後の末尾だけを対象にし、セッション ID 名は区切り単位で照合する。
+const CONFIG_SENSITIVE_URL_KEY = /(?:^key$|(?:api|access|auth)[_-]?key|password|passwd|pwd|secret|token|session[_-]?id|csrf|xsrf|credentials?|signature|samlresponse|(?:^|[._-])(?:sid|sessid|jwt|sig|jsessionid|phpsessid|bearer)(?:$|[._-])|(?:^|[._-])aspsessionid[a-z]*(?:$|[._-])|(?:^|[._-])(?:auth|authorization|session|otp|ticket)$)/i;
+const UNSUPPORTED_URL_PLACEHOLDER = '（URL非表示）';
+
+function isSensitiveKey(key) {
+  if (!key || typeof key !== 'string') return false;
+  if (CONFIG_SENSITIVE_URL_KEY.test(key)) return true;
+  let decoded = key;
+  try {
+    decoded = decodeURIComponent(key);
+  } catch (_) {}
+  if (CONFIG_SENSITIVE_URL_KEY.test(decoded)) return true;
+  // Normalized session variants (e.g. jessionid)
+  if (/(?:^|[._-])(?:jsessionid|jessionid)(?:$|[._-])/i.test(decoded) ||
+      /(?:^|[._-])(?:jsessionid|jessionid)(?:$|[._-])/i.test(key)) return true;
+  return false;
+}
+
+function maskPathSecrets(path) {
+  if (!path) return path;
+  let out = path;
+  // ASP.NET cookieless session: /(S(id))/ or percent-encoded /%28S%28id%29%29/ -> /(<redacted>)/
+  out = out.replace(/(?:%28|\()([A-Z](?:%28|\()[^%()]*?(?:%29|\)))+(?:%29|\))/gi, '(<redacted>)');
+  // Matrix parameters: ;name=value（jsessionid 等のセッション値を伏せる）
+  out = out.replace(/;([^/;?#=]+)=([^/;?#]*)/g, (match, key) => {
+    return isSensitiveKey(key) ? `;${key}=<redacted>` : match;
+  });
+  return out;
+}
+
+function hasUnmaskedSensitivePath(path) {
+  if (!path) return false;
+  // ASP.NET cookieless session がまだ残っている（マスクされていない）。
+  if (/\/\((?:[A-Z]\([^)]*\))+\)(?:\/|$)/i.test(path)) return true;
+  let decoded = path;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch (_) {
+    decoded = path.replace(/%3b/ig, ';').replace(/%3d/ig, '=');
+  }
+  if (/\/\((?:[A-Z]\([^)]*\))+\)(?:\/|$)/i.test(decoded)) return true;
+  return decoded.split('/').some(segment =>
+    segment.split(';').slice(1).some(param => {
+      const equals = param.indexOf('=');
+      if (equals < 0) return false;
+      if (param.slice(equals + 1) === '<redacted>') return false;
+      return isSensitiveKey(param.slice(0, equals));
+    })
+  );
+}
+
+function maskNestedKv(val, depth = 0) {
+  if (!val || depth > 2) return val;
+  let decoded = val;
+  try {
+    decoded = decodeURIComponent(val);
+  } catch (_) {
+    return val;
+  }
+  if (!decoded) return val;
+  const isPercentEncoded = decoded !== val;
+
+  if (!decoded.includes('=') && !decoded.includes('?') && !decoded.includes(';') && !decoded.includes('(')) {
+    if (decoded.includes('%')) {
+      const inner = maskNestedKv(decoded, depth + 1);
+      if (inner !== decoded) {
+        return isPercentEncoded
+          ? encodeURIComponent(inner).replace(/%3C/g, '<').replace(/%3E/g, '>')
+          : inner;
+      }
+    }
+    return val;
+  }
+
+  let maskedDecoded = maskKv(decoded, depth + 1);
+  maskedDecoded = maskPathSecrets(maskedDecoded);
+  if (maskedDecoded !== decoded) {
+    return isPercentEncoded
+      ? encodeURIComponent(maskedDecoded).replace(/%3C/g, '<').replace(/%3E/g, '>')
+      : maskedDecoded;
+  }
+  return val;
+}
+
+function maskKv(text, depth = 0) {
+  if (!text) return text;
+  return text.replace(/([^&=?\s]*)=([^&]*)/g, (match, k, v) => {
+    if (isSensitiveKey(k)) return `${k}=<redacted>`;
+    if (depth <= 2 && v) {
+      const maskedVal = maskNestedKv(v, depth);
+      if (maskedVal !== v) return `${k}=${maskedVal}`;
+    }
+    return match;
+  });
+}
+
+function redactDisplayUrl(raw) {
+  if (!raw || typeof raw !== 'string') return raw || '';
+  const str = raw.trim();
+  if (!str) return '';
+  // 表示専用の防御: HTTP(S) URL として成立しない値は生文字列を一切表示しない。
+  let parsed;
+  try {
+    parsed = new URL(str);
+  } catch (_) {
+    return UNSUPPORTED_URL_PLACEHOLDER;
+  }
+  if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) {
+    return UNSUPPORTED_URL_PLACEHOLDER;
+  }
+
+  // 1. userinfo: scheme://user:pass@host -> scheme://<redacted>@host
+  const schemeMatch = str.match(/^[a-z][a-z0-9+.-]*:\/\//i);
+  const prefix = schemeMatch ? schemeMatch[0] : '';
+  const rest = str.slice(prefix.length);
+  let authEnd = rest.length;
+  for (const ch of ['/', '?', '#']) {
+    const idx = rest.indexOf(ch);
+    if (idx !== -1 && idx < authEnd) authEnd = idx;
+  }
+  let authority = rest.slice(0, authEnd);
+  let tail = rest.slice(authEnd);
+  if (authority.includes('@')) {
+    const host = authority.slice(authority.lastIndexOf('@') + 1);
+    authority = '<redacted>@' + host;
+  }
+
+  // 2. path / query / fragment を分離（matrix・セッションは path 側で伏せる）
+  let path = tail;
+  let query = '';
+  let fragment = '';
+  let hadQuery = false;
+  let hadFragment = false;
+  const hashIdx = path.indexOf('#');
+  if (hashIdx !== -1) {
+    hadFragment = true;
+    fragment = path.slice(hashIdx + 1);
+    path = path.slice(0, hashIdx);
+  }
+  const queryIdx = path.indexOf('?');
+  if (queryIdx !== -1) {
+    hadQuery = true;
+    query = path.slice(queryIdx + 1);
+    path = path.slice(0, queryIdx);
+  }
+
+  const safePath = maskPathSecrets(path);
+  // エンコード済みの matrix/セッション区切りなど、変形しきれない既知の
+  // 資格情報パターンが残る場合は生文字列を出さず中立プレースホルダにする。
+  if (hasUnmaskedSensitivePath(safePath)) return UNSUPPORTED_URL_PLACEHOLDER;
+
+  let result = prefix + authority + safePath;
+  if (hadQuery) result += '?' + maskKv(query, 0);
+  if (hadFragment) result += '#' + maskKv(fragment, 0);
+  return result;
+}
+
 function fmtDate(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -345,8 +503,9 @@ async function loadStatus() {
     const p = s.progress || {};
     const pct = p.percent ?? 0;
     $('nowPhase').textContent = (s.phase || 'スキャン中').toUpperCase();
-    $('nowTarget').textContent = s.target || '';
-    $('nowTarget').title = s.target || '';
+    const safeNowTarget = s.target ? redactDisplayUrl(s.target) : '';
+    $('nowTarget').textContent = safeNowTarget;
+    $('nowTarget').title = safeNowTarget;
     $('nowPct').textContent = pct + '%';
     $('nowBar').style.width = pct + '%';
   } else {
@@ -470,9 +629,10 @@ function renderScans() {
       ? `<a class="btn sm" href="/reports/${encodeURIComponent(s.id)}/evidence.json" download="wscan-${esc(s.id)}.json" title="検出結果JSON">JSON</a>` : '';
     const diff = `<button class="btn sm" data-action="diff" data-id="${esc(s.id)}" title="同一対象の前回スキャンと比較">⟂ 差分</button>`;
     const size = s.size_bytes ? ` <span class="muted">${fmtSize(s.size_bytes)}</span>` : '';
+    const safeTarget = s.target ? redactDisplayUrl(s.target) : '—';
     return `<tr>
       <td>${fmtDate(s.started_at)}<br><span class="muted">${esc(s.id)}</span></td>
-      <td class="target" title="${esc(s.target)}">${esc(s.target) || '—'}</td>
+      <td class="target" title="${esc(safeTarget)}">${esc(safeTarget)}</td>
       <td>${sevBadges(s.severity || {}, s.findings_count)}</td>
       <td><span class="st ${esc(s.status)}">${esc(s.status)}</span></td>
       <td><div class="row-actions">
@@ -527,8 +687,9 @@ async function showDiff(id) {
     if (!r.ok) { body.innerHTML = `<p class="muted">${esc(d.error || '差分を計算できませんでした。')}</p>`; return; }
   } catch (e) { body.innerHTML = '<p class="muted">差分を計算できませんでした。</p>'; return; }
   const sm = d.summary || {};
+  const safeDiffTarget = d.target ? redactDisplayUrl(d.target) : '—';
   body.innerHTML =
-    `<p class="muted">対象 <code style="color:var(--accent2)">${esc(d.target || '—')}</code><br>` +
+    `<p class="muted">対象 <code style="color:var(--accent2)">${esc(safeDiffTarget)}</code><br>` +
     `今回 <b>${esc(d.scan_id)}</b> ⟂ 前回 <b>${esc(d.previous_id)}</b></p>` +
     `<div class="now-row" style="margin-top:10px">` +
     `<span class="status-pill"><span class="b critical">新規 ${sm.new_count ?? 0}</span></span>` +
@@ -642,8 +803,9 @@ async function loadSchedules() {
     const next = s.enabled ? fmtDate(new Date((s.next_run || 0) * 1000).toISOString()) : '—';
     const stCls = s.enabled ? 'scanning' : 'incomplete';
     const stTxt = s.enabled ? '有効' : '停止中';
+    const safeUrl = s.url ? redactDisplayUrl(s.url) : '';
     return `<tr>
-      <td class="target" title="${esc(s.url)}">${esc(s.url)}</td>
+      <td class="target" title="${esc(safeUrl)}">${esc(safeUrl)}</td>
       <td>${checks}</td>
       <td>${esc(s.interval_hours)}h</td>
       <td>${next}</td>
