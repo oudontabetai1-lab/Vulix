@@ -421,7 +421,7 @@ python3 main.py scan URL [URL ...] [options]
 | `--mfa-email-imap-password PASS` | 空 | IMAP パスワード。環境変数推奨 |
 | `--mfa-email-imap-ssl true\|false` | 未指定（実行時 `true`） | IMAP SSL |
 | `--include-registration` | 登録フォームを除外 | 登録/サインアップも検査 |
-| `--allow-state-changing-probes` | 無効 | 状態変更し得る権限昇格プローブを許可 |
+| `--allow-state-changing-probes` | 無効 | 状態変更し得る権限昇格・SPAプローブを許可（ダッシュボードの機能フラグ「状態変更プローブ許可」） |
 | `--state-profile unrestricted\|controlled-write\|read-only` | `unrestricted` | 注入フォームの送信方針。既定は従来どおり全送信 |
 | `--accounts USER:PASS,...` | 空 | 複数アカウント権限昇格検査 |
 | `--accounts-file FILE` | 空 | `accounts:` 配列を持つ YAML |

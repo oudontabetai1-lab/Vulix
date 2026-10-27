@@ -2035,6 +2035,7 @@ body { padding-left: 212px; }
           <div class="cfg-toggle off" id="tog-spa_crawl" onclick="toggleCfg('spa_crawl')">SPA クロール (React/Vue/Angular)</div>
           <div class="cfg-toggle on" id="tog-auto_spa_crawl" onclick="toggleCfg('auto_spa_crawl')">SPA自動有効化（検出時）</div>
           <div class="cfg-toggle off" id="tog-interactive_crawl_review" onclick="toggleCfg('interactive_crawl_review')" title="巡回完了後に画面一覧を確認し、再巡回・手動巡回追加を選べる">🔍 巡回レビュー (検査前に画面確認)</div>
+          <div class="cfg-toggle off" id="tog-allow_state_changing_probes" onclick="toggleCfg('allow_state_changing_probes')" title="権限昇格やSPA等でPOST/PUT/PATCH等の状態変更を伴うプローブを許可（検証環境専用）">状態変更プローブ許可</div>
         </div>
         <div class="cfg-field" style="margin-top:16px;max-width:420px">
           <label>状態変更プロファイル</label>
@@ -3131,6 +3132,7 @@ const cfgToggles = {
   tls_verify: false,
   auto_register: false,
   interactive_crawl_review: false,
+  allow_state_changing_probes: false,
 };
 
 const CHECK_GROUPS = {
@@ -3249,32 +3251,32 @@ function applyScanProfile(profile) {
       label: '高速トリアージ',
       checks: ['sqli', 'xss', 'os', 'security_headers', 'info_disclosure'],
       depth: 1, maxPayloads: 8, concurrency: 1, llm: 'none',
-      toggles: {fast_mode: true, headless: true, use_planner: false, interactive_plan: false, enable_ai_analysis: false, enable_waf_detection: false, enable_payload_learning: false, spa_crawl: false, auto_spa_crawl: true, ctf_mode: false},
+      toggles: {fast_mode: true, headless: true, use_planner: false, interactive_plan: false, enable_ai_analysis: false, enable_waf_detection: false, enable_payload_learning: false, spa_crawl: false, auto_spa_crawl: true, ctf_mode: false, allow_state_changing_probes: false},
     },
     standard: {
       label: '標準Web診断',
       checks: ['sqli', 'xss', 'os', 'path_traversal', 'csrf', 'open_redirect', 'clickjacking', 'session', 'cors', 'security_headers', 'info_disclosure'],
       depth: 2, maxPayloads: 0, concurrency: 1, llm: 'ollama',
-      toggles: {fast_mode: false, headless: true, use_planner: true, interactive_plan: false, enable_ai_analysis: true, enable_waf_detection: true, enable_payload_learning: true, enable_sitemap_crawl: true, spa_crawl: false, auto_spa_crawl: true, ctf_mode: false},
+      toggles: {fast_mode: false, headless: true, use_planner: true, interactive_plan: false, enable_ai_analysis: true, enable_waf_detection: true, enable_payload_learning: true, enable_sitemap_crawl: true, spa_crawl: false, auto_spa_crawl: true, ctf_mode: false, allow_state_changing_probes: false},
     },
     auth: {
       label: '認証あり診断',
       checks: ['sqli', 'xss', 'csrf', 'session', 'privesc', 'open_redirect', 'cors', 'security_headers', 'jwt'],
       depth: 2, maxPayloads: 0, concurrency: 1, llm: 'ollama',
-      toggles: {fast_mode: false, headless: true, use_planner: true, interactive_plan: true, enable_ai_analysis: true, enable_waf_detection: true, enable_payload_learning: true, enable_sitemap_crawl: true, spa_crawl: false, auto_spa_crawl: true, ctf_mode: false},
+      toggles: {fast_mode: false, headless: true, use_planner: true, interactive_plan: true, enable_ai_analysis: true, enable_waf_detection: true, enable_payload_learning: true, enable_sitemap_crawl: true, spa_crawl: false, auto_spa_crawl: true, ctf_mode: false, allow_state_changing_probes: false},
       tab: 'auth',
     },
     precision: {
       label: '精度重視診断',
       checks: ['sqli', 'xss', 'dom_xss', 'stored_xss', 'os', 'ssti', 'path_traversal', 'csrf', 'header_injection', 'open_redirect', 'session', 'privesc', 'cors', 'security_headers', 'info_disclosure', 'ssrf', 'graphql', 'jwt'],
       depth: 3, maxPayloads: 0, concurrency: 1, llm: 'ollama',
-      toggles: {fast_mode: false, headless: true, use_planner: true, interactive_plan: true, enable_ai_analysis: true, enable_waf_detection: true, enable_payload_learning: true, enable_sitemap_crawl: true, spa_crawl: true, auto_spa_crawl: true, ctf_mode: false},
+      toggles: {fast_mode: false, headless: true, use_planner: true, interactive_plan: true, enable_ai_analysis: true, enable_waf_detection: true, enable_payload_learning: true, enable_sitemap_crawl: true, spa_crawl: true, auto_spa_crawl: true, ctf_mode: false, allow_state_changing_probes: false},
     },
     ctf: {
       label: 'CTF/演習',
       checks: ['xss', 'sqli', 'ssti', 'os', 'path_traversal', 'ssrf', 'open_redirect'],
       depth: 1, maxPayloads: 12, concurrency: 1, llm: 'none',
-      toggles: {fast_mode: true, headless: true, use_planner: false, interactive_plan: false, enable_ai_analysis: false, enable_waf_detection: false, enable_payload_learning: false, enable_sitemap_crawl: true, spa_crawl: false, auto_spa_crawl: true, ctf_mode: true},
+      toggles: {fast_mode: true, headless: true, use_planner: false, interactive_plan: false, enable_ai_analysis: false, enable_waf_detection: false, enable_payload_learning: false, enable_sitemap_crawl: true, spa_crawl: false, auto_spa_crawl: true, ctf_mode: true, allow_state_changing_probes: false},
     },
   };
   const p = profiles[profile];
@@ -3910,6 +3912,7 @@ function submitScanConfig() {
     low_priv_cookies: document.getElementById('cfgLowPrivCookies').value.trim(),
     interactive_plan: cfgToggles.interactive_plan,
     interactive_crawl_review: cfgToggles.interactive_crawl_review,
+    allow_state_changing_probes: cfgToggles.allow_state_changing_probes,
     spa_crawl:    cfgToggles.spa_crawl,
     auto_spa_crawl: cfgToggles.auto_spa_crawl,
     fast_mode:    cfgToggles.fast_mode,

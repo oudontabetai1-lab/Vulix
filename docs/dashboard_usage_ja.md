@@ -149,7 +149,7 @@ Target URL を入力し、目的に近いプロファイルを選びます。
 | 検査項目 | XSS、SQLi、CSRF、CORS、SSRF、JWT、CMS などを選択 |
 | 認証・Cookie | Cookie、自動ログイン、低権限 Cookie、ネイティブ TOTP、Bearer/カスタムヘッダ、複数アカウント |
 | LLM設定 | provider、モデル、OpenAI互換 URL、役割別モデル |
-| 機能フラグ | Planner、AI 分析、WAF、学習、community ペイロード、sitemap、SPA、巡回レビュー |
+| 機能フラグ | Planner、AI 分析、WAF、学習、community ペイロード、sitemap、SPA、巡回レビュー、状態変更プローブ許可 |
 | スコープ・除外 | 攻撃対象、アクセスのみ、除外 URL、除外フィールド |
 | 手動巡回 | 可視/遠隔ブラウザ、URL リストからシードを作成 |
 | 攻撃フロー | ログイン、入力、クリック、待機など複数手順を定義 |
@@ -157,6 +157,10 @@ Target URL を入力し、目的に近いプロファイルを選びます。
 | ハイブリッド | Agent 偵察から通常スキャンへ引き渡すモード |
 
 機能フラグの「SPA自動有効化（検出時）」は既定 ON です。初回ページに Angular / React / Next.js / Vue / Nuxt の固有マーカーがある場合だけ「SPA クロール」を自動で有効化し、通常層の確実性を保つため一般的なページ構成だけでは有効化しません。CLI の opt-out は `--no-auto-spa` です。「SPA クロール (React/Vue/Angular)」を明示的に ON にした場合は自動判定の設定より優先されます。
+
+「状態変更プローブ許可」トグル（`allow_state_changing_probes`）は既定 OFF です。有効にすると、垂直・水平権限昇格検査における POST/PUT/PATCH 等のメソッド改ざんプローブや、SPA 自動クロール時のクリック探索および観測非GET body の注入再送を許可します。対象サーバの状態を変更する可能性があるため、変更を加えても安全なステージングやテスト環境などの検証環境に限定して有効化してください。CLI のオプションは `--allow-state-changing-probes` です。
+
+![機能フラグタブ: 状態変更プローブ許可トグル](images/dashboard-features-tab.png)
 
 「機能」タブの「状態変更プロファイル」は注入フォームの送信方針です。既定の `unrestricted` は従来どおり POST を含む全フォームを検査します。`controlled-write` は delete/remove/purchase/pay/transfer/send/logout などの破壊語を action・ボタン・URL に含む書込みを除外し、通常の POST 注入は続けます。`read-only` は POST/PUT/PATCH/DELETE を送信せず GET/URL パラメータだけを検査します。除外は Event/レポートの Observability に `state_change_skipped` として残るため、通常層の確実性を判断するときは未送信件数も確認してください。
 
