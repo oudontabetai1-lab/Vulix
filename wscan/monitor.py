@@ -51,8 +51,15 @@ _RESERVED_OUTPUT_NAMES = {"uploads"}
 
 # Name of the session cookie set after a successful token login.
 SESSION_COOKIE = "wscan_session"
-# Paths that never require authentication (health checks, the login page itself).
-_PUBLIC_PATHS = {"/health", "/login", "/favicon.ico"}
+# Paths that never require authentication (health checks, login page, public login assets/favicons).
+_PUBLIC_PATHS = {
+    "/health",
+    "/login",
+    "/favicon.ico",
+    "/ui/favicon.png",
+    "/ui/favicon.ico",
+    "/ui/vulix-logo-mark.png",
+}
 
 
 def _upload_destination(filename: str) -> tuple[str, Path, Path]:
@@ -499,9 +506,7 @@ class MonitorServer:
             if not self.auth_token:
                 return await call_next(request)
             path = request.url.path
-            referer = request.headers.get("referer", "")
-            from_login = urlparse(referer).path == "/login" if referer else False
-            if path in _PUBLIC_PATHS or self._request_authorized(request) or (from_login and path.startswith("/ui/")):
+            if path in _PUBLIC_PATHS or self._request_authorized(request):
                 return await call_next(request)
             # Browsers asking for HTML get redirected to the login page;
             # API/XHR callers get a clean 401 so they can react.
@@ -1804,7 +1809,7 @@ class MonitorServer:
 </head>
 <body>
   <form class="card" method="post" action="/login">
-    <div class="brand"><img src="/ui/vulix-logo.png" alt="Vulix" style="width:28px;height:28px;object-fit:contain;border-radius:6px;flex-shrink:0"><h1>Vulix</h1></div>
+    <div class="brand"><img src="/ui/vulix-logo-mark.png" alt="Vulix" style="width:28px;height:28px;object-fit:contain;border-radius:6px;flex-shrink:0"><h1>Vulix</h1></div>
     <p class="sub">Web Security Scanner — イントラネット版</p>
     <label for="token">アクセストークン</label>
     <input id="token" name="token" type="password" autofocus autocomplete="current-password"

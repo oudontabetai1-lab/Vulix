@@ -69,6 +69,10 @@ def test_logo_and_favicon_asset_delivery_and_auth_protection():
     assert logo_res.status_code == 200
     assert "image/png" in logo_res.headers["content-type"]
 
+    mark_res = client.get("/ui/vulix-logo-mark.png")
+    assert mark_res.status_code == 200
+    assert "image/png" in mark_res.headers["content-type"]
+
     fav_res = client.get("/ui/favicon.png")
     assert fav_res.status_code == 200
     assert "image/png" in fav_res.headers["content-type"]
@@ -88,21 +92,31 @@ def test_logo_and_favicon_asset_delivery_and_auth_protection():
     # Path traversal rejected
     assert client.get("/ui/%2e%2e/dashboard.html").status_code in {403, 404}
 
-    # 2. Auth behavior matches other protected assets (/ui/tokens.css)
+    # 2. Auth behavior: only explicit login assets are public without auth
     token = "test-auth-token"
     protected = TestClient(MonitorServer(auth_token=token).app)
     img_headers = {"accept": "image/png"}
 
-    # Without session -> 401
-    assert protected.get("/ui/vulix-logo.png", headers=img_headers).status_code == 401
-    assert protected.get("/ui/favicon.png", headers=img_headers).status_code == 401
-
-    # /favicon.ico is in _PUBLIC_PATHS, so accessible even when auth is enabled
+    # Public login assets accessible without session -> 200
+    assert protected.get("/ui/vulix-logo-mark.png", headers=img_headers).status_code == 200
+    assert protected.get("/ui/favicon.png", headers=img_headers).status_code == 200
+    assert protected.get("/ui/favicon.ico").status_code == 200
     assert protected.get("/favicon.ico").status_code == 200
+
+    # Non-public assets rejected without session -> 401
+    assert protected.get("/ui/vulix-logo.png", headers=img_headers).status_code == 401
+    assert protected.get("/ui/tokens.css").status_code == 401
+
+    # Referer: /login spoof must NOT grant access to non-public assets
+    assert protected.get("/ui/vulix-logo.png", headers={"referer": "/login"}).status_code == 401
+    assert protected.get("/ui/tokens.css", headers={"referer": "/login"}).status_code == 401
+    assert protected.get("/ui/tokens.css", headers={"referer": "http://testserver/login"}).status_code == 401
 
     # With session cookie -> 200
     protected.cookies.set(SESSION_COOKIE, _session_value(token))
     assert protected.get("/ui/vulix-logo.png").status_code == 200
+    assert protected.get("/ui/tokens.css").status_code == 200
+    assert protected.get("/ui/vulix-logo-mark.png").status_code == 200
     assert protected.get("/ui/favicon.png").status_code == 200
 
 
@@ -113,7 +127,7 @@ def test_html_brand_wiring_and_vulix_wordmark():
     dash_html = (ROOT / "templates" / "dashboard.html").read_text(encoding="utf-8")
     assert "<title>Vulix — Live Monitor</title>" in dash_html
     assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in dash_html
-    assert '<img src="/ui/vulix-logo.png" alt="Vulix"' in dash_html
+    assert '<img src="/ui/vulix-logo-mark.png" alt="Vulix"' in dash_html
     assert 'Vulix <span>Scan Setup</span>' in dash_html
     # Ensure tool name remains untouched
     assert "tool: 'WScan'" in dash_html
@@ -122,14 +136,14 @@ def test_html_brand_wiring_and_vulix_wordmark():
     portal_html = (ROOT / "templates" / "portal.html").read_text(encoding="utf-8")
     assert "<title>Vulix — Server Portal</title>" in portal_html
     assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in portal_html
-    assert '<img src="/ui/vulix-logo.png" alt="Vulix"' in portal_html
+    assert '<img src="/ui/vulix-logo-mark.png" alt="Vulix"' in portal_html
     assert '<h1>Vulix</h1>' in portal_html
 
     # 3. Login page
     login_html = server._login_html()
     assert "<title>Vulix — ログイン</title>" in login_html
     assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in login_html
-    assert '<img src="/ui/vulix-logo.png" alt="Vulix"' in login_html
+    assert '<img src="/ui/vulix-logo-mark.png" alt="Vulix"' in login_html
     assert '<h1>Vulix</h1>' in login_html
 
 
@@ -153,4 +167,9 @@ def test_vulix_logo_sha256_byte_parity_and_favicon_dimensions():
     assert fav_path.is_file()
     with Image.open(fav_path) as im:
         assert im.size == (32, 32)
+
+    mark_path = ROOT / "templates" / "ui" / "vulix-logo-mark.png"
+    assert mark_path.is_file()
+    with Image.open(mark_path) as im:
+        assert im.size == (96, 96)
 
