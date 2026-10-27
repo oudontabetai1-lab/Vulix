@@ -62,7 +62,7 @@ python3 main.py serve --host 127.0.0.1 --port 8765
 http://localhost:8765/
 ```
 
-`/` はスキャン履歴、現在の実行、定期スキャンを扱う Server Portal です。「新規スキャン」を押すと `/monitor` の設定画面へ移動します。直接 `http://localhost:8765/monitor` を開いても構いません。
+`/` はスキャン履歴、現在の実行、定期スキャンを扱う Server Portal です。画面上の対象 URL（スキャン一覧・実行中バナー・差分・定期スキャン）は `/monitor` と同様に表示時のみ資格情報（query/fragment/matrix/cookieless session）を伏せ、HTTP(S) として解釈できない値や曖昧な入力は中立のプレースホルダ（`（URL非表示）`）で表示して画面共有時の漏えいを防ぎます（保存済みの設定やスキャン入力は変更しません）。「新規スキャン」を押すと `/monitor` の設定画面へ移動します。直接 `http://localhost:8765/monitor` を開いても構いません。
 
 イントラネットから利用する場合は、認証トークンを設定してください。
 
