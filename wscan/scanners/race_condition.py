@@ -8,12 +8,17 @@ Only active on endpoints that look like state-changing operations (charge,
 buy, register, transfer, submit, coupon, apply, vote, etc.).
 """
 import asyncio
+from contextlib import nullcontext
 import re
+import time
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode, urljoin
 
 import httpx
 
+from wscan.probe_ledger import ProbeOutcome, Transport
+from wscan.request_logger import redact_text, _redact_headers
+from wscan.url_scope import redact_url
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
     PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
@@ -44,6 +49,67 @@ _SUCCESS_RE = re.compile(
 )
 
 _BURST_SIZE = 8  # simultaneous requests per race probe
+_URL_RE = re.compile(r"(?:[a-z][a-z0-9+.\-]*:)?//[^\s\'\"<>]+", re.IGNORECASE)
+_URL_USERINFO = re.compile(r"(?i)((?:[a-z][a-z0-9+.\-]*:)?//)([A-Za-z0-9._~%!$&'()*+,;=:@\-]*)@")
+
+
+def sanitize_exception(exc: Exception | str | None) -> str:
+    """Sanitize exception message for display/logging by redacting userinfo from URLs."""
+    if exc is None:
+        return ""
+    text = str(exc)
+    if not text:
+        return ""
+
+    def _replace_url(match: re.Match) -> str:
+        raw_url = match.group(0)
+        trailing = ""
+        while raw_url and raw_url[-1] in ".,;:!?)>]'\"":
+            trailing = raw_url[-1] + trailing
+            raw_url = raw_url[:-1]
+        try:
+            cleaned = redact_url(raw_url, drop_userinfo=True)
+        except Exception:
+            cleaned = _URL_USERINFO.sub(r"\1", raw_url)
+        return cleaned + trailing
+
+    replaced = _URL_RE.sub(_replace_url, text)
+    return _URL_USERINFO.sub(r"\1", replaced)
+
+
+def select_primary_burst_pair(
+    pairs: list[tuple[str | None, str | None]],
+) -> tuple[str, str]:
+    """Select the primary (observation_id, request_id) pair from burst tasks.
+
+    Guarantees that primary observation and request come from the same task pair.
+    If the selected task is missing its request ID, an empty string is returned rather than
+    mismatched with another task's request ID.
+    """
+    for req_id, obs_id in pairs:
+        if obs_id:
+            return obs_id, (req_id or "")
+    return "", ""
+
+
+def split_verification_and_display_urls(url: str) -> tuple[str, str]:
+    """Separate re-verification URL (retaining userinfo authentication) from
+    redacted persistent/display/evidence URL.
+
+    Returns:
+        (verification_url, display_url)
+    """
+    display_url = redact_url(url, drop_userinfo=True)
+    return url, display_url
+
+
+def get_verification_url(finding: Finding) -> str:
+    """Return the URL to use for re-verification, preserving userinfo if available."""
+    return (
+        getattr(finding, "verification_url", None)
+        or getattr(finding, "_verification_url", None)
+        or finding.url
+    )
 
 
 def _looks_like_state_change(url: str, field: dict) -> bool:
@@ -167,6 +233,8 @@ class RaceConditionScanner(BaseScanner):
         method: str,
         body: str,
         headers: dict,
+        *,
+        role: str = "attack",
     ) -> list:
         timeout = getattr(self.engine, "timeout", 15)
         client_kwargs: dict = {
@@ -183,10 +251,50 @@ class RaceConditionScanner(BaseScanner):
             base_headers.update(headers or {})
             headers = base_headers
 
+        logger = getattr(self.engine, "request_logger", None)
+        evidence_enabled = (
+            getattr(logger, "enabled", False)
+            and callable(getattr(logger, "probe_scope", None))
+            and callable(getattr(logger, "log_httpx_submission", None))
+        )
+        if evidence_enabled:
+            hooks = dict(client_kwargs.get("event_hooks") or {})
+            request_hooks = list(hooks.get("request", ()))
+            if logger.log_httpx_submission not in request_hooks:
+                request_hooks.append(logger.log_httpx_submission)
+            hooks["request"] = request_hooks
+            # _observe_response() owns observation; the engine-wide response hook would
+            # record a second observation for the same probe.
+            response_hook = getattr(logger, "log_httpx_response", None)
+            if response_hook is not None:
+                remaining = [h for h in (hooks.get("response") or ()) if h != response_hook]
+                if remaining:
+                    hooks["response"] = remaining
+                else:
+                    hooks.pop("response", None)
+            client_kwargs["event_hooks"] = hooks
+        else:
+            self._evidence_gap("race_condition_evidence_unavailable")
+
         async def _one_request(session: httpx.AsyncClient) -> httpx.Response:
-            if method == "POST":
-                return await session.post(url, content=body, headers=headers)
-            return await session.get(url, headers=headers)
+            scope = (
+                logger.probe_scope(None, self.CHECK_TYPE, role=role, transport=Transport.HTTPX)
+                if evidence_enabled else nullcontext({"requests": []})
+            )
+            with scope as context:
+                try:
+                    if method == "POST":
+                        response = await session.post(url, content=body, headers=headers)
+                    else:
+                        response = await session.get(url, headers=headers)
+                except Exception as exc:
+                    if evidence_enabled:
+                        self._evidence_failure(context, exc)
+                    raise
+                if evidence_enabled:
+                    observed = self._observe_response(response)
+                    response.extensions["vulix_race_evidence"] = (context, observed)
+                return response
 
         async with httpx.AsyncClient(**client_kwargs) as session:
             responses = await asyncio.gather(
@@ -197,6 +305,154 @@ class RaceConditionScanner(BaseScanner):
                 if not isinstance(response, Exception):
                     self._record_probe_status(response)
         return responses
+
+    def _evidence_gap(self, reason: str) -> None:
+        logger = getattr(self.engine, "request_logger", None)
+        ledger = getattr(logger, "probe_ledger", None)
+        manifest = getattr(ledger, "manifest", None)
+        if callable(getattr(manifest, "note_gap", None)):
+            manifest.note_gap(reason)
+        self._record_scan_note(reason)
+
+    def _observe_response(self, response: httpx.Response) -> str | None:
+        logger = getattr(self.engine, "request_logger", None)
+        if logger is None:
+            return None
+        owner, request_id = response.request.extensions.get("vulix_probe_submission", (None, None))
+        bound = response.request.extensions.get("vulix_probe_context")
+        if owner is not logger or not request_id or bound is None:
+            self._evidence_gap("race_condition_request_missing")
+            return None
+        context, request = bound
+        pair = {
+            "request": request,
+            "response": {
+                "status": response.status_code,
+                "url": str(response.url),
+                "headers": dict(response.headers),
+                "body": response.content,
+                "timestamp": time.time(),
+            },
+        }
+        observation = logger.observe_request(context, request_id, pair, Transport.HTTPX)
+        if not observation:
+            self._evidence_gap("race_condition_observation_missing")
+        else:
+            context.setdefault("observations", {})[request_id] = observation
+        return observation
+
+    def _evidence_failure(self, context: dict, exc: Exception) -> None:
+        logger = getattr(self.engine, "request_logger", None)
+        if not callable(getattr(logger, "scoped_probe", None)):
+            self._evidence_gap("race_condition_evidence_unavailable")
+            return
+        outcome = self._probe_exception_outcome(exc)
+        requests = context.get("requests", [])
+        if not requests:
+            self._evidence_gap("race_condition_request_missing")
+            return
+        for request_id in requests:
+            if not logger.scoped_probe(
+                context,
+                record_kind="decision",
+                outcome=outcome,
+                parent_id=request_id,
+                request_attempt_id=request_id,
+                decision_rule="race_condition_burst",
+                decision_version="1",
+                rationale=type(exc).__name__,
+            ):
+                self._evidence_gap("race_condition_decision_missing")
+
+    def _record_burst_decision(
+        self,
+        responses: list,
+        classified: tuple[str, dict] | None,
+        url: str,
+        *,
+        role: str = "attack",
+        related_sources: tuple[str, ...] = (),
+    ) -> str | None:
+        logger = getattr(self.engine, "request_logger", None)
+        if logger is None or not getattr(logger, "enabled", False):
+            return None
+
+        consumed_observations = []
+        task_pairs: list[tuple[str | None, str | None]] = []
+        has_transport_failure = False
+        for r in responses:
+            if isinstance(r, Exception):
+                has_transport_failure = True
+            elif isinstance(r, httpx.Response):
+                bound = r.extensions.get("vulix_race_evidence")
+                owner, req_id = (
+                    r.request.extensions.get("vulix_probe_submission", (None, None))
+                    if hasattr(r, "request") else (None, None)
+                )
+                if bound and owner is logger:
+                    context, obs_id = bound
+                    valid_req = req_id if isinstance(req_id, str) and req_id else None
+                    valid_obs = obs_id if isinstance(obs_id, str) and obs_id else None
+                    task_pairs.append((valid_req, valid_obs))
+                    if valid_obs:
+                        consumed_observations.append(valid_obs)
+
+        if not consumed_observations:
+            if has_transport_failure:
+                self._evidence_gap("race_condition_transport_failure")
+            return None
+
+        if classified is not None:
+            outcome = ProbeOutcome.MATCHED.value
+            evidence, details = classified
+            rationale = (
+                f"success_count={details['success_count']}; "
+                f"duplicate_count={details['duplicate_count']}; "
+                f"burst_size={details['burst_size']}; "
+                f"consumed={len(consumed_observations)}"
+            )
+        else:
+            if has_transport_failure:
+                self._evidence_gap("race_condition_partial_burst")
+                return None
+            outcome = ProbeOutcome.NO_MATCH.value
+            ok_count = sum(
+                1 for r in responses
+                if isinstance(r, httpx.Response) and hasattr(r, "text") and _SUCCESS_RE.search(r.text)
+            )
+            dup_count = sum(
+                1 for r in responses
+                if isinstance(r, httpx.Response) and hasattr(r, "text") and _DUPLICATE_RE.search(r.text)
+            )
+            rationale = (
+                f"success_count={ok_count}; "
+                f"duplicate_count={dup_count}; "
+                f"burst_size={_BURST_SIZE}; "
+                f"consumed={len(consumed_observations)}"
+            )
+
+        primary_obs, primary_req = select_primary_burst_pair(task_pairs)
+
+        related = list(consumed_observations)
+        for src in related_sources:
+            if src not in related:
+                related.append(src)
+
+        decision_id = logger.log_probe(
+            role=role,
+            check=self.CHECK_TYPE,
+            record_kind="decision",
+            outcome=outcome,
+            parent_id=primary_obs,
+            request_attempt_id=primary_req,
+            decision_rule="race_condition_burst",
+            decision_version="1",
+            rationale=rationale,
+            related_attempt_ids=tuple(related),
+        )
+        if not decision_id:
+            self._evidence_gap("race_condition_decision_missing")
+        return decision_id
 
     def _classify_responses(self, responses: list, url: str) -> tuple[str, dict] | None:
         ok_responses = [
@@ -246,30 +502,40 @@ class RaceConditionScanner(BaseScanner):
             return []
         self._checked_urls.add(key)
 
+        verification_url, display_url = split_verification_and_display_urls(action_url)
+
         if self.monitor:
-            await self.monitor.emit_status(f"Race condition form probe on {action_url}")
+            await self.monitor.emit_status(f"Race condition form probe on {display_url}")
 
         try:
-            responses = await self._send_burst(action_url, method, body, headers)
+            responses = await self._send_burst(verification_url, method, body, headers, role="attack")
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"[warn] race_condition: form burst failed on {action_url}: {exc}"
+                    f"[warn] race_condition: form burst failed on {display_url}: {sanitize_exception(exc)}"
                 )
             return []
 
-        classified = self._classify_responses(responses, action_url)
+        classified = self._classify_responses(responses, display_url)
+        decision_id = self._record_burst_decision(responses, classified, display_url, role="attack")
         if not classified:
             return []
         evidence, details = classified
-        details.update({"method": method, "body": body, "headers": headers})
+        safe_headers = _redact_headers(headers)
+        safe_body = redact_text(body)
+        details.update({
+            "method": method,
+            "body": safe_body,
+            "headers": safe_headers,
+            "attempt_ids": [decision_id] if decision_id else [],
+        })
         finding = await self.record_finding(
-            url=action_url,
+            url=display_url,
             field_name=field.get("name") or field.get("id") or "(form race)",
             payload=f"{_BURST_SIZE}x simultaneous {method} requests",
             evidence=evidence,
             pair={
-                "request": {"url": action_url, "method": method, "body": body},
+                "request": {"url": display_url, "method": method, "body": safe_body, "headers": safe_headers},
                 "response": {
                     "status": "mixed",
                     "body": f"{details['success_count']} success, {details['duplicate_count']} duplicate",
@@ -280,7 +546,11 @@ class RaceConditionScanner(BaseScanner):
             evidence_type="race_condition_burst",
             evidence_details=details,
         )
-        return [finding]
+        if finding:
+            finding.verification_url = verification_url
+            finding._verification_url = verification_url
+            return [finding]
+        return []
 
     async def scan_page(self, url: str) -> list[Finding]:
         if url in self._checked_urls:
@@ -289,8 +559,10 @@ class RaceConditionScanner(BaseScanner):
             return []
         self._checked_urls.add(url)
 
+        verification_url, display_url = split_verification_and_display_urls(url)
+
         if self.monitor:
-            await self.monitor.emit_status(f"Race condition probe on {url}")
+            await self.monitor.emit_status(f"Race condition probe on {display_url}")
 
         # Capture the last form submission body from the browser's network log
         pair = self.current_page_pair(url)
@@ -320,30 +592,48 @@ class RaceConditionScanner(BaseScanner):
             return []
 
         try:
-            responses = await self._send_burst(url, method, body, headers)
+            responses = await self._send_burst(verification_url, method, body, headers, role="attack")
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"[warn] race_condition: burst failed on {url}: {exc}"
+                    f"[warn] race_condition: burst failed on {display_url}: {sanitize_exception(exc)}"
                 )
             return []
 
-        classified = self._classify_responses(responses, url)
+        classified = self._classify_responses(responses, display_url)
+        decision_id = self._record_burst_decision(responses, classified, display_url, role="attack")
         if classified:
             evidence, details = classified
-            details.update({"method": method, "body": body, "headers": headers})
+            safe_headers = _redact_headers(headers)
+            safe_body = redact_text(body)
+            details.update({
+                "method": method,
+                "body": safe_body,
+                "headers": safe_headers,
+                "attempt_ids": [decision_id] if decision_id else [],
+            })
             finding = await self.record_finding(
-                url=url,
+                url=display_url,
                 field_name="(page-level race)",
                 payload=f"{_BURST_SIZE}x simultaneous {method} requests",
                 evidence=evidence,
-                pair=pair,
+                pair={
+                    "request": {"url": display_url, "method": method, "body": safe_body, "headers": safe_headers},
+                    "response": {
+                        "status": "mixed",
+                        "body": f"{details['success_count']} success, {details['duplicate_count']} duplicate",
+                    },
+                },
                 severity="high",
                 confidence="likely",
                 evidence_type="race_condition_burst",
                 evidence_details=details,
             )
-            return [finding]
+            if finding:
+                finding.verification_url = verification_url
+                finding._verification_url = verification_url
+                return [finding]
+            return []
 
         return []
 
@@ -354,8 +644,17 @@ class RaceConditionScanner(BaseScanner):
         headers = details.get("headers", {})
         if not method:
             return None
+        verify_url = get_verification_url(finding)
         try:
-            responses = await self._send_burst(finding.url, method, body, headers)
+            responses = await self._send_burst(verify_url, method, body, headers, role="verify")
         except Exception:
             return None
-        return bool(self._classify_responses(responses, finding.url))
+        display_url = redact_url(verify_url, drop_userinfo=True)
+        classified = self._classify_responses(responses, display_url)
+        baseline_ids = tuple(details.get("attempt_ids") or ())
+        decision_id = self._record_burst_decision(
+            responses, classified, display_url, role="verify", related_sources=baseline_ids
+        )
+        if decision_id and classified:
+            finding.evidence_details["verification_attempt_ids"] = [decision_id]
+        return bool(classified)
