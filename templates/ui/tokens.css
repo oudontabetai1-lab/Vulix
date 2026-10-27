@@ -1,0 +1,18 @@
+:root {
+  --bg: #161826;
+  --surface: #1c1e2c;
+  --surface2: #232532;
+  --rail: #12141f;
+  --border: #3f424d;
+  --text: #e9e9ed;
+  --text-muted: #9397ab;
+  --accent: #9184d9;
+  --accent-glow: rgba(145,132,217,0.18);
+  --critical: #e2708f;
+  --high: #d99a63;
+  --medium: #c7b96a;
+  --low: #8fb9c9;
+  --info: #b5abfc;
+  --success: #8fb9c9;
+  --running: #d99a63;
+}
