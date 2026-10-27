@@ -11,10 +11,15 @@ Detects insecure file upload endpoints that allow:
 """
 import io
 import re
+import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
 import httpx
+
+from wscan.probe_ledger import Transport
+from wscan.request_logger import _redact_headers, redact_text, redact_url
 
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
@@ -141,7 +146,10 @@ class FileUploadScanner(BaseScanner):
         filename: str,
         content: bytes,
         content_type: str = "image/jpeg",
+        *,
+        evidence: bool = True,
     ) -> tuple[str, int, dict]:
+        self._last_upload_response = None
         timeout = getattr(self.engine, "timeout", 15)
         client_kwargs: dict = {
             "timeout": timeout,
@@ -158,14 +166,68 @@ class FileUploadScanner(BaseScanner):
         request_kwargs = {
             "files": {field_name: (filename, io.BytesIO(content), content_type)},
         }
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            response = await client.post(url, **request_kwargs)
-            self._record_probe_status(response)
+        logger = getattr(self.engine, "request_logger", None)
+        if evidence and callable(getattr(logger, "log_httpx_submission", None)):
+            client_kwargs["event_hooks"] = {"request": [logger.log_httpx_submission]}
+        scope = (logger.probe_scope(None, self.CHECK_TYPE, role="attack", transport=Transport.HTTPX)
+                 if evidence and callable(getattr(logger, "probe_scope", None)) else nullcontext({"requests": []}))
+        if evidence and (logger is None or not getattr(logger, "enabled", False)):
+            ledger = getattr(logger, "probe_ledger", None)
+            if ledger is not None:
+                ledger.manifest.note_gap("file_upload_evidence_unavailable")
+            self._record_scan_note("file_upload_evidence_unavailable")
+        with scope as context:
+            try:
+                async with httpx.AsyncClient(**client_kwargs) as client:
+                    response = await client.post(url, **request_kwargs)
+                    self._record_probe_status(response)
+            except Exception as exc:
+                if evidence:
+                    self._upload_decision(context, self._probe_exception_outcome(exc), "file_upload_transport",
+                                          "upload request failed without a response")
+                raise
+            if evidence:
+                self._upload_observe(context, response)
+            context["response"] = response
+            self._last_upload_response = response
         pair = {
             "request": {"url": url, "method": "POST", "filename": filename},
             "response": {"status": response.status_code, "body": response.text[:1000]},
         }
         return response.text, response.status_code, pair
+
+    def _upload_observe(self, context, response):
+        logger = getattr(self.engine, "request_logger", None)
+        if logger is None:
+            return
+        owner, request_id = response.request.extensions.get("vulix_probe_submission", (None, None))
+        bound = response.request.extensions.get("vulix_probe_context")
+        if owner is not logger or not request_id or bound is None:
+            logger.probe_ledger.manifest.note_gap("file_upload_request_missing")
+            return
+        bound_context, request = bound
+        pair = {"request": request, "response": {"status": response.status_code, "url": str(response.url),
+                "headers": dict(response.headers), "body": response.content, "timestamp": time.time()}}
+        observation = logger.observe_request(bound_context, request_id, pair, Transport.HTTPX)
+        if observation:
+            bound_context.setdefault("observations", {})[request_id] = observation
+            context["request_id"] = request_id
+            context["observation_id"] = observation
+        else:
+            logger.probe_ledger.manifest.note_gap("file_upload_observation_missing")
+
+    def _upload_decision(self, context, outcome, rule, rationale):
+        logger = getattr(self.engine, "request_logger", None)
+        if not callable(getattr(logger, "scoped_probe", None)):
+            return
+        requests = context.get("requests", [])
+        if not requests:
+            logger.probe_ledger.manifest.note_gap("file_upload_request_missing")
+            return
+        attempt = requests[-1]
+        parent = context.get("observations", {}).get(attempt, attempt)
+        logger.scoped_probe(context, record_kind="decision", outcome=outcome, parent_id=parent,
+            request_attempt_id=attempt, decision_rule=rule, decision_version="1", rationale=rationale)
 
     def _classify(
         self,
@@ -235,19 +297,35 @@ class FileUploadScanner(BaseScanner):
                 continue
 
             classified = self._classify(body, status_code, filename, description)
+            # _upload_file's scope ends after the response; its saved context is carried on response.request.
+            response = getattr(self, "_last_upload_response", None)
+            evidence_context = (response.request.extensions.get("vulix_probe_context", (None, {}))[0]
+                                if response is not None else None)
+            request_ids = evidence_context.get("requests", []) if evidence_context else []
+            observation_ids = evidence_context.get("observations", {}) if evidence_context else {}
+            attempt_id = request_ids[-1] if request_ids else ""
+            # terminal decision is emitted after the unchanged classifier has made its choice
+            if evidence_context:
+                self._upload_decision(evidence_context, "matched" if classified else "no_match",
+                    classified[0] if classified else "file_upload_classifier",
+                    "upload response classified" if classified else "successful upload response had no classifier match")
 
             if classified:
                 evidence_type, severity, evidence, evidence_details = classified
                 finding = await self.record_finding(
-                    url=action_url,
+                    url=redact_url(action_url),
                     field_name=field_name,
                     payload=filename,
-                    evidence=evidence,
-                    pair=pair,
+                    evidence=redact_text(evidence),
+                    pair={"request": {"url": redact_url(action_url), "method": "POST", "filename": filename},
+                          "response": {"status": status_code, "body": redact_text(pair["response"]["body"]) }},
                     severity=severity,
                     confidence="likely",
                     evidence_type=evidence_type,
-                    evidence_details=evidence_details,
+                    evidence_details={**evidence_details, "probe_attempt_id": attempt_id,
+                        "headers": _redact_headers(dict(getattr(response.request, "headers", {}))) if response else {}},
+                    reproduction_steps=[redact_text(step) for step in
+                        self._default_reproduction_steps(redact_url(action_url), field_name, filename)],
                 )
                 findings.append(finding)
                 break
@@ -262,12 +340,14 @@ class FileUploadScanner(BaseScanner):
         if not probe:
             return None
         try:
+            # Verification remains the legacy replay path until Finding carries a trustworthy parent attempt ID.
             body, status_code, _pair = await self._upload_file(
                 finding.url,
                 finding.field_name,
                 probe.filename,
                 probe.content,
                 probe.content_type,
+                evidence=False,
             )
         except Exception:
             return None
