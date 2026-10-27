@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import secrets
+import time
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
 from wscan import transport_security as rules
+from wscan.probe_ledger import Transport
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
     ScannerContract, StateChangeClass,
@@ -125,21 +128,69 @@ class TransportSecurityScanner(BaseScanner):
             kwargs = self.engine.httpx_client_kwargs(**kwargs)
         # Anonymous read-only probes: observe real credentials passively instead of replaying them.
         kwargs.update(headers={}, auth=None, cookies=None)
+        logger = getattr(self.engine, "request_logger", None)
+        evidence_enabled = (getattr(logger, "enabled", False)
+                            and callable(getattr(logger, "probe_scope", None))
+                            and callable(getattr(logger, "log_httpx_submission", None)))
+        if evidence_enabled:
+            hooks = dict(kwargs.get("event_hooks") or {})
+            request_hooks = list(hooks.get("request", ()))
+            if logger.log_httpx_submission not in request_hooks:
+                request_hooks.append(logger.log_httpx_submission)
+            hooks["request"] = request_hooks
+            # _observe_response() owns observation; the engine-wide response hook would
+            # record a second observation for the same probe.
+            response_hook = getattr(logger, "log_httpx_response", None)
+            if response_hook is not None:
+                remaining = [h for h in (hooks.get("response") or ()) if h != response_hook]
+                if remaining:
+                    hooks["response"] = remaining
+                else:
+                    hooks.pop("response", None)
+            kwargs["event_hooks"] = hooks
+        else:
+            self._evidence_gap("transport_security_evidence_unavailable")
         try:
             async with httpx.AsyncClient(**kwargs) as client:
-                async def probe(method, destination, headers=None):
+                async def probe(method, destination, headers=None, *, role="attack", baselines=(), controls=()):
                     delay = getattr(self.engine, "_effective_delay", 0)
                     if delay:
                         await asyncio.sleep(delay)
                     await self.log_payload_test("(transport probe)", method, self.CHECK_TYPE,
                                                 redact_url(destination, drop_userinfo=True))
-                    response = await client.request(method, destination, headers=headers or {})
-                    self._record_probe_status(response)
-                    if response.status_code in (408, 429) or response.status_code >= 500 and response.status_code != 501:
-                        raise httpx.RequestError("temporary response")
-                    return response
+                    logger = getattr(self.engine, "request_logger", None)
+                    scope = (logger.probe_scope(None, self.CHECK_TYPE, role=role, transport=Transport.HTTPX,
+                                                 baseline_attempt_ids=baselines, control_attempt_ids=controls)
+                             if evidence_enabled else nullcontext({"requests": []}))
+                    with scope as context:
+                        try:
+                            response = await client.request(method, destination, headers=headers or {})
+                        except Exception as exc:
+                            self._evidence_failure(context, exc)
+                            raise
+                        self._record_probe_status(response)
+                        observed = self._observe_response(response) if evidence_enabled else None
+                        response.extensions["vulix_transport_security_evidence"] = (context, observed)
+                        if response.status_code in (408, 429) or response.status_code >= 500 and response.status_code != 501:
+                            exc = httpx.RequestError("temporary response", request=response.request)
+                            self._evidence_failure(context, exc)
+                            raise exc
+                        return response
 
-                baseline = await probe("GET", target)
+                def attempt_id(response):
+                    owner, request_id = response.request.extensions.get("vulix_probe_submission", (None, None))
+                    return request_id if owner is getattr(self.engine, "request_logger", None) else None
+
+                def decide(response, matched, rule, *, baselines=(), controls=()):
+                    context, observed = response.extensions.get("vulix_transport_security_evidence", (None, None))
+                    if context is None or not observed:
+                        return
+                    pair = {"_probe_evidence": (context, attempt_id(response), observed)}
+                    self._probe_decision(pair, matched, rule, baseline_attempt_ids=baselines,
+                                         control_attempt_ids=controls)
+
+                baseline = await probe("GET", target, role="baseline")
+                baseline_id = attempt_id(baseline)
                 upgrade = rules.https_redirect_status(target, baseline.status_code, baseline.headers.get("location", ""))
                 self._coverage(target, "https_upgrade", "gap" if upgrade in {"unknown", "not_applicable"} else "observed",
                                "include_HTTP_target_to_test_upgrade" if upgrade == "not_applicable" else upgrade)
@@ -167,13 +218,18 @@ class TransportSecurityScanner(BaseScanner):
                 if not self._allowed(control):
                     self._coverage(target, "methods", "gap", "nonexistent_control_outside_scope")
                     return findings
-                missing = await probe("GET", control)
+                missing = await probe("GET", control, role="control", baselines=(baseline_id,) if baseline_id else ())
+                missing_id = attempt_id(missing)
                 if not (200 <= baseline.status_code < 300 and missing.status_code in (404, 410)):
                     self._coverage(target, "methods", "gap", "resource_or_nonexistent_control_unconfirmed",
                                    {"existing_status": baseline.status_code, "missing_status": missing.status_code})
                     return findings
-                options = await probe("OPTIONS", target)
-                options_control = await probe("OPTIONS", control)
+                options = await probe("OPTIONS", target, role="baseline", baselines=(baseline_id,) if baseline_id else (),
+                                      controls=(missing_id,) if missing_id else ())
+                options_id = attempt_id(options)
+                options_control = await probe("OPTIONS", control, role="control",
+                    baselines=(baseline_id,) if baseline_id else (), controls=(missing_id,) if missing_id else ())
+                options_control_id = attempt_id(options_control)
                 self._coverage(target, "options", "observed", details={
                     "existing_allow": sorted(parse_allow_methods(options.headers.get("allow", ""))),
                     "control_allow": sorted(parse_allow_methods(options_control.headers.get("allow", ""))),
@@ -181,8 +237,12 @@ class TransportSecurityScanner(BaseScanner):
                 for method in ("TRACE", "CONNECT", "PROPFIND"):
                     token = "transport-" + secrets.token_hex(8)
                     headers = {"X-Xst-Probe": token} if method == "TRACE" else {"Depth": "0"} if method == "PROPFIND" else {}
-                    result = await probe(method, target, headers)
-                    counterpart = await probe(method, control, headers)
+                    base_ids = tuple(i for i in (baseline_id, options_id) if i)
+                    control_ids = tuple(i for i in (missing_id, options_control_id) if i)
+                    result = await probe(method, target, headers, baselines=base_ids, controls=control_ids)
+                    counterpart = await probe(method, control, headers, role="control", baselines=base_ids,
+                                              controls=control_ids)
+                    counterpart_id = attempt_id(counterpart)
                     differential = rules.method_difference(baseline.status_code, missing.status_code,
                                                           result.status_code, counterpart.status_code)
                     details = {"method": method, "status": result.status_code,
@@ -201,6 +261,10 @@ class TransportSecurityScanner(BaseScanner):
                         if capabilities:
                             kind, field = "http_webdav_enabled", "(WebDAV)"
                             details["capabilities"] = capabilities
+                    decide(result, bool(kind), {"TRACE": "http_trace_xst", "CONNECT": "http_connect_capability",
+                                                "PROPFIND": "http_webdav_enabled"}[method],
+                           baselines=tuple(i for i in (baseline_id, options_id) if i),
+                           controls=tuple(i for i in (missing_id, counterpart_id) if i))
                     if kind:
                         finding = await self._record(target, kind, details, method=method, status=result.status_code,
                                                      field=field, severity="medium" if method == "TRACE" else "low",
@@ -208,10 +272,16 @@ class TransportSecurityScanner(BaseScanner):
                         if finding:
                             findings.append(finding)
                 for name in ("X-HTTP-Method-Override", "X-Method-Override", "X-HTTP-Method"):
-                    overridden = await probe("GET", target, {name: "OPTIONS"})
-                    invalid = await probe("GET", target, {name: "WSCANINVALID"})
+                    overridden = await probe("GET", target, {name: "OPTIONS"}, baselines=(options_id,) if options_id else (),
+                                              controls=(options_control_id,) if options_control_id else ())
+                    invalid = await probe("GET", target, {name: "WSCANINVALID"}, role="control",
+                                          baselines=(options_id,) if options_id else (),
+                                          controls=(options_control_id,) if options_control_id else ())
+                    invalid_id = attempt_id(invalid)
                     signature = lambda r: (r.status_code, tuple(sorted(parse_allow_methods(r.headers.get("allow", "")))), r.text)
                     matched = rules.override_matches(signature(options), signature(overridden), signature(baseline), signature(invalid))
+                    decide(overridden, matched, "http_method_override", baselines=tuple(i for i in (options_id,) if i),
+                           controls=tuple(i for i in (invalid_id, options_control_id) if i))
                     self._coverage(target, name, "observed", details={"effective_method": "OPTIONS", "matched_canonical": matched})
                     if matched:
                         finding = await self._record(target, "http_method_override", {"header": name, "effective_method": "OPTIONS",
@@ -226,6 +296,50 @@ class TransportSecurityScanner(BaseScanner):
             raise PageDocumentUnavailable("Transport method probes incomplete", findings=findings) from exc
         self._checked.add(target)
         return findings
+
+    def _evidence_gap(self, reason):
+        logger = getattr(self.engine, "request_logger", None)
+        ledger = getattr(logger, "probe_ledger", None)
+        manifest = getattr(ledger, "manifest", None)
+        if callable(getattr(manifest, "note_gap", None)):
+            manifest.note_gap(reason)
+        self._record_scan_note(reason)
+
+    def _observe_response(self, response):
+        logger = getattr(self.engine, "request_logger", None)
+        if logger is None:
+            return None
+        owner, request_id = response.request.extensions.get("vulix_probe_submission", (None, None))
+        bound = response.request.extensions.get("vulix_probe_context")
+        if owner is not logger or not request_id or bound is None:
+            self._evidence_gap("transport_security_request_missing")
+            return None
+        context, request = bound
+        pair = {"request": request, "response": {"status": response.status_code, "url": str(response.url),
+                "headers": dict(response.headers), "body": response.content, "timestamp": time.time()}}
+        observation = logger.observe_request(context, request_id, pair, Transport.HTTPX)
+        if not observation:
+            self._evidence_gap("transport_security_observation_missing")
+        else:
+            context.setdefault("observations", {})[request_id] = observation
+        return observation
+
+    def _evidence_failure(self, context, exc):
+        logger = getattr(self.engine, "request_logger", None)
+        if not callable(getattr(logger, "scoped_probe", None)):
+            self._evidence_gap("transport_security_evidence_unavailable")
+            return
+        outcome = self._probe_exception_outcome(exc)
+        requests = context.get("requests", [])
+        if not requests:
+            self._evidence_gap("transport_security_request_missing")
+            return
+        for request_id in requests:
+            parent = context.get("observations", {}).get(request_id, request_id)
+            if not logger.scoped_probe(context, record_kind="decision", outcome=outcome,
+                    parent_id=parent, request_attempt_id=request_id, decision_rule="transport_security_transport",
+                    decision_version="1", rationale=type(exc).__name__):
+                self._evidence_gap("transport_security_decision_missing")
 
     async def _tls(self, target):
         config = getattr(self.engine, "tls_config", None)
