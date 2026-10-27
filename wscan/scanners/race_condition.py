@@ -476,19 +476,20 @@ class RaceConditionScanner(BaseScanner):
             return []
         self._checked_urls.add(key)
 
+        verification_url, display_url = split_verification_and_display_urls(action_url)
+
         if self.monitor:
-            await self.monitor.emit_status(f"Race condition form probe on {action_url}")
+            await self.monitor.emit_status(f"Race condition form probe on {display_url}")
 
         try:
-            responses = await self._send_burst(action_url, method, body, headers, role="attack")
+            responses = await self._send_burst(verification_url, method, body, headers, role="attack")
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"[warn] race_condition: form burst failed on {action_url}: {exc}"
+                    f"[warn] race_condition: form burst failed on {display_url}: {exc}"
                 )
             return []
 
-        verification_url, display_url = split_verification_and_display_urls(action_url)
         classified = self._classify_responses(responses, display_url)
         decision_id = self._record_burst_decision(responses, classified, display_url, role="attack")
         if not classified:
@@ -532,8 +533,10 @@ class RaceConditionScanner(BaseScanner):
             return []
         self._checked_urls.add(url)
 
+        verification_url, display_url = split_verification_and_display_urls(url)
+
         if self.monitor:
-            await self.monitor.emit_status(f"Race condition probe on {url}")
+            await self.monitor.emit_status(f"Race condition probe on {display_url}")
 
         # Capture the last form submission body from the browser's network log
         pair = self.current_page_pair(url)
@@ -563,15 +566,14 @@ class RaceConditionScanner(BaseScanner):
             return []
 
         try:
-            responses = await self._send_burst(url, method, body, headers, role="attack")
+            responses = await self._send_burst(verification_url, method, body, headers, role="attack")
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"[warn] race_condition: burst failed on {url}: {exc}"
+                    f"[warn] race_condition: burst failed on {display_url}: {exc}"
                 )
             return []
 
-        verification_url, display_url = split_verification_and_display_urls(url)
         classified = self._classify_responses(responses, display_url)
         decision_id = self._record_burst_decision(responses, classified, display_url, role="attack")
         if classified:

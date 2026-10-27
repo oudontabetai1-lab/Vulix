@@ -482,12 +482,14 @@ async def test_partial_observation_burst_decision_pairs_primary_request_and_obse
 
     orig_observe = logger.observe_request
     call_count = 0
+    dropped_request_id = None
 
     def mock_observe(context, request_id, pair, transport):
-        nonlocal call_count
+        nonlocal call_count, dropped_request_id
         call_count += 1
-        # Drop observation for the first probe to create a partial observation scenario
+        # Drop observation for the first observed callback to create a partial observation scenario
         if call_count == 1:
+            dropped_request_id = request_id
             return None
         return orig_observe(context, request_id, pair, transport)
 
@@ -503,17 +505,26 @@ async def test_partial_observation_burst_decision_pairs_primary_request_and_obse
     decisions = [row for row in records if row["record_kind"] == "decision"]
 
     assert len(requests) == 8
-    assert len(observations) == 7  # 1st probe dropped observation
+    assert len(observations) == 7  # 1 callback dropped observation
     assert len(decisions) == 1
+    assert dropped_request_id is not None
+
+    # Identify the request whose observation was dropped
+    dropped_req = next((r for r in requests if r["attempt_id"] == dropped_request_id), None)
+    assert dropped_req is not None
+
+    # Verify no observation exists for the dropped request
+    assert not any(obs.get("request_attempt_id") == dropped_request_id for obs in observations)
 
     decision = decisions[0]
-    # Primary observation is the first successful observation (probe 2)
-    primary_obs = observations[0]
-    assert decision["parent_id"] == primary_obs["attempt_id"]
-    # Primary request MUST be probe 2's request (same task!), NOT requests[0] (probe 1)
+    # Primary observation must be an actual recorded observation
+    primary_obs = next((obs for obs in observations if obs["attempt_id"] == decision["parent_id"]), None)
+    assert primary_obs is not None
+
+    # Primary request MUST be from the same task as the primary observation (pairing preserved!)
     assert decision["request_attempt_id"] == primary_obs["request_attempt_id"]
-    assert decision["request_attempt_id"] != requests[0]["attempt_id"]
-    assert decision["request_attempt_id"] == requests[1]["attempt_id"]
+    # The dropped request (missing observation) must NEVER be chosen as the primary request
+    assert decision["request_attempt_id"] != dropped_request_id
 
 
 def test_url_separation_pure_helpers():
@@ -641,3 +652,68 @@ async def test_scan_field_preserves_verification_url_with_userinfo(
     for req in fixture.requests:
         assert req.headers.get("authorization") == "Basic dXNlcjpwYXNz"
 
+
+@pytest.mark.asyncio
+async def test_monitor_status_and_warning_redact_userinfo(tmp_path, monkeypatch):
+    fixture = RaceConditionFixture(vulnerable=True)
+    engine, scanner, logger, _ = setup(tmp_path, monkeypatch, fixture)
+
+    mock_monitor = SimpleNamespace(
+        emit_status=AsyncMock(),
+        emit_finding=AsyncMock(),
+        emit_screenshot=AsyncMock(),
+    )
+    engine.monitor = mock_monitor
+    scanner.monitor = mock_monitor
+
+    # 1. Normal scan_page emit_status
+    findings = await scanner.scan_page(URL)
+    assert len(findings) == 1
+    assert mock_monitor.emit_status.called
+    for call_args in mock_monitor.emit_status.call_args_list:
+        msg = call_args[0][0]
+        assert "user:pass" not in msg
+        assert "http://target.test/coupon/apply" in msg
+
+    mock_monitor.emit_status.reset_mock()
+
+    # 2. Normal scan_field emit_status
+    field = {"name": "coupon", "id": "coupon_code"}
+    field_findings = await scanner.scan_field(URL, 0, field)
+    assert len(field_findings) == 1
+    assert mock_monitor.emit_status.called
+    for call_args in mock_monitor.emit_status.call_args_list:
+        msg = call_args[0][0]
+        assert "user:pass" not in msg
+        assert "http://target.test/coupon/apply" in msg
+
+    mock_monitor.emit_status.reset_mock()
+
+    # 3. Warning on burst failure (scan_page)
+    scanner._checked_urls.clear()
+    fail_fixture = RaceConditionFixture(vulnerable=True)
+    _, fail_scanner, _, _ = setup(tmp_path, monkeypatch, fail_fixture)
+    fail_scanner.monitor = mock_monitor
+    monkeypatch.setattr(fail_scanner, "_send_burst", AsyncMock(side_effect=Exception("network down")))
+    fail_findings = await fail_scanner.scan_page(URL)
+    assert len(fail_findings) == 0
+    warn_calls = [
+        call_args[0][0] for call_args in mock_monitor.emit_status.call_args_list
+        if "[warn]" in call_args[0][0]
+    ]
+    assert len(warn_calls) == 1
+    assert "user:pass" not in warn_calls[0]
+    assert "http://target.test/coupon/apply" in warn_calls[0]
+
+    mock_monitor.emit_status.reset_mock()
+
+    # 4. Warning on burst failure (scan_field)
+    fail_field_findings = await fail_scanner.scan_field(URL, 0, field)
+    assert len(fail_field_findings) == 0
+    warn_calls = [
+        call_args[0][0] for call_args in mock_monitor.emit_status.call_args_list
+        if "[warn]" in call_args[0][0]
+    ]
+    assert len(warn_calls) == 1
+    assert "user:pass" not in warn_calls[0]
+    assert "http://target.test/coupon/apply" in warn_calls[0]
