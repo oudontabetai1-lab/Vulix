@@ -3,6 +3,8 @@ deletion and scan management endpoints."""
 import io
 import json
 import shutil
+import subprocess
+import tempfile
 import unittest
 import zipfile
 from pathlib import Path
@@ -17,10 +19,7 @@ class PortalTestBase(unittest.TestCase):
     SCAN_ID = "20260529_120000"
 
     def setUp(self):
-        self.tmp = Path("/tmp/wscan_portal_test")
-        if self.tmp.exists():
-            shutil.rmtree(self.tmp)
-        self.tmp.mkdir(parents=True)
+        self.tmp = Path(tempfile.mkdtemp(prefix="wscan_portal_test_"))
         # Redirect the module-level output base at the temp dir.
         self._orig_base = monitor_mod.OUTPUT_BASE
         monitor_mod.OUTPUT_BASE = self.tmp
@@ -160,6 +159,138 @@ class PortalAuthTests(PortalTestBase):
         self.assertEqual(
             self.client.get(f"/reports/{self.SCAN_ID}/report.html").status_code, 200
         )
+
+
+class PortalDisplayUrlRedactionTests(unittest.TestCase):
+    """Browser-independent tests for display URL redaction parity in portal.html."""
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for portal JS test")
+    def test_portal_redact_display_url_matches_dashboard_parity(self):
+        portal_html = Path("templates/portal.html").read_text(encoding="utf-8")
+        self.assertIn("function redactDisplayUrl(raw)", portal_html)
+        self.assertIn("CONFIG_SENSITIVE_URL_KEY", portal_html)
+
+        # Extract script content from portal.html and evaluate in Node.js
+        script_eval = """
+global.setInterval = () => ({ unref: () => {} });
+global.document = { getElementById: () => ({ addEventListener: () => {} }) };
+global.window = {};
+
+const fs = require('fs');
+const html = fs.readFileSync('templates/portal.html', 'utf8');
+const scriptMatch = html.match(/<script>([\\s\\S]*?)<\\/script>/);
+if (!scriptMatch) process.exit(1);
+
+const fn = new Function(scriptMatch[1] + '; return { redactDisplayUrl, isSensitiveKey, maskPathSecrets, maskKv, esc };');
+const { redactDisplayUrl, esc } = fn();
+
+const canaries = [
+  'CANARY_USER_PASS', 'CANARY_QUERY', 'CANARY_FRAG', 'CANARY_NOSCHEME',
+  'CANARY_MATRIX', 'CANARY_JSESSION', 'CANARY_ASP', 'CANARY_JS',
+  'CANARY_MALFORMED', 'CANARY_ENCODED', 'CANARY_LDAP',
+  'CRV_ENCJSESSION', 'CRV_ENCAPSP', 'CAN_NESTED_TOKEN',
+];
+
+const targets = {
+  'p-valid': 'https://user:CANARY_USER_PASS@example.com/app?token=CANARY_QUERY&safe=ok#access_token=CANARY_FRAG',
+  'p-noscheme': 'user:CANARY_NOSCHEME@example.com/path',
+  'p-matrix-token': 'http://example.com/path;token=CANARY_MATRIX',
+  'p-jsession': 'http://example.com/path;jsessionid=CANARY_JSESSION',
+  'p-enc-jsession': 'http://example.com/path;j%65ssionid=CRV_ENCJSESSION',
+  'p-asp': 'https://example.com/path/(S(CANARY_ASP))/view',
+  'p-enc-asp': 'https://example.com/path/%28S%28CRV_ENCAPSP%29%29/view',
+  'p-js': "javascript:alert('CANARY_JS')",
+  'p-malformed': 'http://user:CANARY_MALFORMED@[bad-host/path',
+  'p-encoded-key': 'https://example.com/app?%74oken=CANARY_ENCODED',
+  'p-nested-token': 'https://example.com/app?next=%2Fapp%3Ftoken%3DCAN_NESTED_TOKEN',
+  'p-ldap': 'ldap://user:CANARY_LDAP@ldap.example.com/ou=users',
+  'p-safe': 'https://example.com/safe/path?q=ok',
+};
+
+for (const [name, rawUrl] of Object.entries(targets)) {
+  const redacted = redactDisplayUrl(rawUrl);
+  // Escaped display text and title attribute
+  const displayHtml = esc(redacted);
+
+  for (const canary of canaries) {
+    if (redacted.includes(canary)) {
+      console.error(`Canary leaked in redacted display for ${name}: ${canary}`);
+      process.exit(2);
+    }
+    if (displayHtml.includes(canary)) {
+      console.error(`Canary leaked in escaped display HTML for ${name}: ${canary}`);
+      process.exit(3);
+    }
+  }
+}
+
+// Parity checks on specific sanitized outputs
+if (redactDisplayUrl(targets['p-valid']) !== 'https://<redacted>@example.com/app?token=<redacted>&safe=ok#access_token=<redacted>') process.exit(4);
+if (redactDisplayUrl(targets['p-safe']) !== 'https://example.com/safe/path?q=ok') process.exit(5);
+if (redactDisplayUrl(targets['p-js']) !== '（URL非表示）') process.exit(6);
+if (redactDisplayUrl(targets['p-malformed']) !== '（URL非表示）') process.exit(7);
+if (redactDisplayUrl(targets['p-noscheme']) !== '（URL非表示）') process.exit(8);
+if (redactDisplayUrl(targets['p-matrix-token']) !== 'http://example.com/path;token=<redacted>') process.exit(9);
+if (redactDisplayUrl(targets['p-jsession']) !== 'http://example.com/path;jsessionid=<redacted>') process.exit(10);
+if (redactDisplayUrl(targets['p-enc-jsession']) !== 'http://example.com/path;j%65ssionid=<redacted>') process.exit(11);
+if (redactDisplayUrl(targets['p-asp']) !== 'https://example.com/path/(<redacted>)/view') process.exit(12);
+if (redactDisplayUrl(targets['p-enc-asp']) !== 'https://example.com/path/(<redacted>)/view') process.exit(13);
+if (redactDisplayUrl(targets['p-encoded-key']) !== 'https://example.com/app?%74oken=<redacted>') process.exit(14);
+if (redactDisplayUrl(targets['p-nested-token']) !== 'https://example.com/app?next=%2Fapp%3Ftoken%3D<redacted>') process.exit(15);
+
+process.exit(0);
+"""
+        res = subprocess.run(
+            [shutil.which("node"), "-e", script_eval],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(res.returncode, 0, f"Node script failed with: {res.stderr}\nOutput: {res.stdout}")
+
+    def test_portal_api_and_storage_urls_remain_unredacted(self):
+        """Confirm backend API responses and disk data retain full unredacted URLs."""
+        tmp = Path(tempfile.mkdtemp(prefix="wscan_portal_unredacted_"))
+        orig_base = monitor_mod.OUTPUT_BASE
+        monitor_mod.OUTPUT_BASE = tmp
+        raw_target = "https://user:CANARY_RAW_SECRET@example.com/app?token=CANARY_QUERY_SECRET"
+
+        try:
+            sid = "scan_unredacted_test"
+            sdir = tmp / sid
+            sdir.mkdir()
+            (sdir / "evidence.json").write_text(json.dumps({
+                "target": raw_target,
+                "scan_date": "2026-10-27T12:00:00",
+                "findings": [],
+            }), encoding="utf-8")
+
+            srv = MonitorServer(port=9000, auth_token="")
+            client = TestClient(srv.app)
+
+            # GET /api/v1/scans must return raw target without display redaction
+            r = client.get("/api/v1/scans")
+            self.assertEqual(r.status_code, 200)
+            scans = r.json()["scans"]
+            self.assertEqual(len(scans), 1)
+            self.assertEqual(scans[0]["target"], raw_target)
+            self.assertIn("CANARY_RAW_SECRET", scans[0]["target"])
+            self.assertIn("CANARY_QUERY_SECRET", scans[0]["target"])
+
+            # Schedule API must retain submitted raw URL
+            r_post = client.post("/api/v1/schedules", json={
+                "url": raw_target,
+                "interval_hours": 12,
+            })
+            self.assertEqual(r_post.status_code, 200)
+            r_scheds = client.get("/api/v1/schedules")
+            self.assertEqual(r_scheds.status_code, 200)
+            scheds = r_scheds.json()["schedules"]
+            self.assertEqual(len(scheds), 1)
+            self.assertEqual(scheds[0]["url"], raw_target)
+        finally:
+            monitor_mod.OUTPUT_BASE = orig_base
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
