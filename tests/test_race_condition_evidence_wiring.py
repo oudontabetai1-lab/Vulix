@@ -573,6 +573,32 @@ def test_url_separation_pure_helpers():
     assert get_verification_url(finding_fallback) == "http://target.test/coupon/apply"
 
 
+def test_sanitize_exception_pure_helper():
+    from wscan.scanners.race_condition import sanitize_exception
+
+    # 1. URL with userinfo in exception string
+    exc1 = Exception("Failed connecting to http://alice:secret123@target.test/apply: connection reset")
+    sanitized1 = sanitize_exception(exc1)
+    assert "alice:secret123" not in sanitized1
+    assert "http://target.test/apply" in sanitized1
+    assert sanitized1 == "Failed connecting to http://target.test/apply: connection reset"
+
+    # 2. httpx error with userinfo and sensitive query param
+    req = httpx.Request("POST", "http://bob:token456@sub.target.test:8000/api?access_token=secretkey")
+    exc2 = httpx.ConnectError(f"Cannot reach {req.url}", request=req)
+    sanitized2 = sanitize_exception(exc2)
+    assert "bob:token456" not in sanitized2
+    assert "secretkey" not in sanitized2
+    assert "http://sub.target.test:8000/api?access_token=<redacted>" in sanitized2
+
+    # 3. Plain exception without URL
+    assert sanitize_exception(Exception("network down")) == "network down"
+
+    # 4. Empty or None
+    assert sanitize_exception(None) == ""
+    assert sanitize_exception(Exception("")) == ""
+
+
 @pytest.mark.asyncio
 async def test_reverification_preserves_userinfo_auth_while_evidence_remains_redacted(
     tmp_path, monkeypatch
@@ -689,12 +715,13 @@ async def test_monitor_status_and_warning_redact_userinfo(tmp_path, monkeypatch)
 
     mock_monitor.emit_status.reset_mock()
 
-    # 3. Warning on burst failure (scan_page)
+    # 3. Warning on burst failure (scan_page) with userinfo in exception
     scanner._checked_urls.clear()
     fail_fixture = RaceConditionFixture(vulnerable=True)
     _, fail_scanner, _, _ = setup(tmp_path, monkeypatch, fail_fixture)
     fail_scanner.monitor = mock_monitor
-    monkeypatch.setattr(fail_scanner, "_send_burst", AsyncMock(side_effect=Exception("network down")))
+    exc_with_userinfo = httpx.ConnectError(f"connection error while connecting to {URL}")
+    monkeypatch.setattr(fail_scanner, "_send_burst", AsyncMock(side_effect=exc_with_userinfo))
     fail_findings = await fail_scanner.scan_page(URL)
     assert len(fail_findings) == 0
     warn_calls = [
@@ -702,12 +729,17 @@ async def test_monitor_status_and_warning_redact_userinfo(tmp_path, monkeypatch)
         if "[warn]" in call_args[0][0]
     ]
     assert len(warn_calls) == 1
+    # Verify userinfo and secret query params from both display_url AND exc are redacted
     assert "user:pass" not in warn_calls[0]
+    assert "query-secret" not in warn_calls[0]
     assert "http://target.test/coupon/apply" in warn_calls[0]
+    assert "connection error while connecting to" in warn_calls[0]
 
     mock_monitor.emit_status.reset_mock()
 
-    # 4. Warning on burst failure (scan_field)
+    # 4. Warning on burst failure (scan_field) with custom userinfo in exception
+    field_exc = Exception("request failed: http://field_user:field_pass@target.test/coupon/apply")
+    monkeypatch.setattr(fail_scanner, "_send_burst", AsyncMock(side_effect=field_exc))
     fail_field_findings = await fail_scanner.scan_field(URL, 0, field)
     assert len(fail_field_findings) == 0
     warn_calls = [
@@ -716,4 +748,6 @@ async def test_monitor_status_and_warning_redact_userinfo(tmp_path, monkeypatch)
     ]
     assert len(warn_calls) == 1
     assert "user:pass" not in warn_calls[0]
+    assert "field_user:field_pass" not in warn_calls[0]
     assert "http://target.test/coupon/apply" in warn_calls[0]
+    assert "request failed: http://target.test/coupon/apply" in warn_calls[0]

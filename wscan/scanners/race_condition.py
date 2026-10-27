@@ -49,6 +49,32 @@ _SUCCESS_RE = re.compile(
 )
 
 _BURST_SIZE = 8  # simultaneous requests per race probe
+_URL_RE = re.compile(r"(?:[a-z][a-z0-9+.\-]*:)?//[^\s\'\"<>]+", re.IGNORECASE)
+_URL_USERINFO = re.compile(r"(?i)((?:[a-z][a-z0-9+.\-]*:)?//)([A-Za-z0-9._~%!$&'()*+,;=:@\-]*)@")
+
+
+def sanitize_exception(exc: Exception | str | None) -> str:
+    """Sanitize exception message for display/logging by redacting userinfo from URLs."""
+    if exc is None:
+        return ""
+    text = str(exc)
+    if not text:
+        return ""
+
+    def _replace_url(match: re.Match) -> str:
+        raw_url = match.group(0)
+        trailing = ""
+        while raw_url and raw_url[-1] in ".,;:!?)>]'\"":
+            trailing = raw_url[-1] + trailing
+            raw_url = raw_url[:-1]
+        try:
+            cleaned = redact_url(raw_url, drop_userinfo=True)
+        except Exception:
+            cleaned = _URL_USERINFO.sub(r"\1", raw_url)
+        return cleaned + trailing
+
+    replaced = _URL_RE.sub(_replace_url, text)
+    return _URL_USERINFO.sub(r"\1", replaced)
 
 
 def select_primary_burst_pair(
@@ -486,7 +512,7 @@ class RaceConditionScanner(BaseScanner):
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"[warn] race_condition: form burst failed on {display_url}: {exc}"
+                    f"[warn] race_condition: form burst failed on {display_url}: {sanitize_exception(exc)}"
                 )
             return []
 
@@ -570,7 +596,7 @@ class RaceConditionScanner(BaseScanner):
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"[warn] race_condition: burst failed on {display_url}: {exc}"
+                    f"[warn] race_condition: burst failed on {display_url}: {sanitize_exception(exc)}"
                 )
             return []
 
