@@ -491,6 +491,7 @@ class MonitorServer:
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
+        app.mount("/ui", StaticFiles(directory=str(TEMPLATES_DIR / "ui")), name="ui")
 
         @app.middleware("http")
         async def _auth_middleware(request: Request, call_next):
