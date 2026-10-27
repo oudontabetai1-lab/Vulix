@@ -17,9 +17,14 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
+from contextlib import nullcontext
 from typing import Optional, TYPE_CHECKING
 
 import httpx
+
+from wscan.probe_ledger import Transport
+from wscan.request_logger import _redact_headers, redact_text, redact_url
 
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
@@ -28,6 +33,12 @@ from wscan.scanner_contract import (
 )
 
 from .base import BaseScanner, Finding, merge_template_headers
+
+
+def _redact_finding_request(url, method, body, headers):
+    return {"url": redact_url(url), "method": method, "body": redact_text(body),
+            "headers": _redact_headers(dict(headers or {}))}
+
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -224,6 +235,69 @@ class MassAssignmentScanner(BaseScanner):
             kwargs["proxy"] = self.engine.proxy
         return kwargs
 
+    def _evidence_gap(self, reason: str) -> None:
+        try:
+            self._record_scan_note(reason)
+        except Exception:
+            pass
+        ledger = getattr(getattr(self.engine, "request_logger", None), "probe_ledger", None)
+        try:
+            if ledger is not None:
+                ledger.manifest.note_gap(reason)
+        except Exception:
+            pass
+
+    def _observe_response(self, context, response) -> None:
+        logger = getattr(self.engine, "request_logger", None)
+        if logger is None:
+            return
+        try:
+            owner, request_id = response.request.extensions.get("vulix_probe_submission", (None, None))
+            bound = response.request.extensions.get("vulix_probe_context")
+            if owner is not logger or not request_id or bound is None:
+                self._evidence_gap("mass_assignment_request_missing")
+                return
+            bound_context, request = bound
+            pair = {"request": request, "response": {"status": response.status_code,
+                    "url": str(response.url), "headers": _redact_headers(dict(response.headers)),
+                    "body": response.content, "timestamp": time.time()}}
+            # Baselines must be completed evidence too; their own reference makes the
+            # observation locally valid without claiming a detector decision.
+            observation = logger.scoped_probe(bound_context, pair=pair, transport=Transport.HTTPX,
+                sent=True, parent_id=request_id, request_attempt_id=request_id,
+                record_kind="observation", outcome=None,
+                rationale="baseline response recorded for comparison")
+            if observation:
+                bound_context.setdefault("observations", {})[request_id] = observation
+                context["observations"] = bound_context["observations"]
+                context["request_id"] = request_id
+            else:
+                self._evidence_gap("mass_assignment_observation_missing")
+        except Exception as exc:
+            self._evidence_gap(f"mass_assignment_observation_error:{type(exc).__name__}")
+
+    def _evidence_decision(self, context, outcome, rationale) -> None:
+        logger = getattr(self.engine, "request_logger", None)
+        if not callable(getattr(logger, "scoped_probe", None)):
+            return
+        try:
+            requests = context.get("requests", [])
+            if not requests:
+                self._evidence_gap("mass_assignment_request_missing")
+                return
+            attempt = requests[-1]
+            parent = context.get("observations", {}).get(attempt, attempt)
+            result = logger.scoped_probe(context, record_kind="decision", outcome=outcome,
+                parent_id=parent, request_attempt_id=attempt,
+                decision_rule="mass_assignment_reflection", decision_version="1", rationale=rationale)
+            if not result:
+                self._evidence_gap("mass_assignment_decision_missing")
+        except Exception as exc:
+            self._evidence_gap(f"mass_assignment_decision_error:{type(exc).__name__}")
+
+    def _response_observation(self, response) -> None:
+        self._record_probe_status(response)
+
     async def _test_template(self, tmpl) -> Optional[Finding]:
         sentinels = make_sentinels()
         base_body = tmpl.json_body if isinstance(tmpl.json_body, dict) else {}
@@ -253,13 +327,44 @@ class MassAssignmentScanner(BaseScanner):
         polluted_payload = json.dumps(polluted)
         await self.log_payload_test("(JSON body)", polluted_payload, "mass_assignment", tmpl.url)
 
+        logger = getattr(self.engine, "request_logger", None)
+        if getattr(logger, "enabled", False) and callable(getattr(logger, "log_httpx_submission", None)):
+            hooks = dict(kwargs.get("event_hooks") or {})
+            hooks["request"] = [*hooks.get("request", []), logger.log_httpx_submission]
+            kwargs["event_hooks"] = hooks
+        if logger is None or not getattr(logger, "enabled", False):
+            self._evidence_gap("mass_assignment_evidence_unavailable")
+
         try:
             async with httpx.AsyncClient(**kwargs) as client:
-                baseline = await client.request(method, tmpl.url, content=baseline_payload)
-                self._record_probe_status(baseline)
-                tainted = await client.request(method, tmpl.url, content=polluted_payload)
-                self._record_probe_status(tainted)
-        except Exception:
+                scope = (logger.probe_scope(None, self.CHECK_TYPE, role="baseline", transport=Transport.HTTPX)
+                         if getattr(logger, "enabled", False) and callable(getattr(logger, "probe_scope", None)) else nullcontext({"requests": []}))
+                with scope as baseline_context:
+                    try:
+                        baseline = await client.request(method, tmpl.url, content=baseline_payload)
+                    except Exception as exc:
+                        self._evidence_decision(baseline_context,
+                            "timeout" if isinstance(exc, (httpx.TimeoutException, TimeoutError)) else "transport_error",
+                            type(exc).__name__)
+                        raise
+                    self._response_observation(baseline)
+                    self._observe_response(baseline_context, baseline)
+                baseline_ids = tuple(baseline_context.get("requests", []))
+                scope = (logger.probe_scope(None, self.CHECK_TYPE, role="attack",
+                            baseline_attempt_ids=baseline_ids, transport=Transport.HTTPX)
+                         if getattr(logger, "enabled", False) and callable(getattr(logger, "probe_scope", None)) else nullcontext({"requests": []}))
+                with scope as attack_context:
+                    try:
+                        tainted = await client.request(method, tmpl.url, content=polluted_payload)
+                    except Exception as exc:
+                        self._evidence_decision(attack_context,
+                            "timeout" if isinstance(exc, (httpx.TimeoutException, TimeoutError)) else "transport_error",
+                            type(exc).__name__)
+                        raise
+                    self._response_observation(tainted)
+                    self._observe_response(attack_context, tainted)
+        except Exception as exc:
+            self._evidence_gap(f"mass_assignment_transport_error:{type(exc).__name__}")
             return None
 
         # 実メソッドの応答で認証失効を検知したらエンジンへ通知する。GET プレフライトでは
@@ -278,6 +383,7 @@ class MassAssignmentScanner(BaseScanner):
                 self.engine._api_auth_failed = True
             except Exception:
                 pass
+            self._evidence_gap("mass_assignment_session_guard_incomplete")
             return None
 
         # 受理（2xx）された場合のみ過剰割り当てとみなす。400/422 等の
@@ -286,27 +392,32 @@ class MassAssignmentScanner(BaseScanner):
             return None
 
         hit = detect_mass_assignment(baseline.text, tainted.text, sentinels)
+        self._evidence_decision(attack_context, "matched" if hit else "no_match",
+                                "privileged sentinel reflected" if hit else "no privileged sentinel reflected")
         if not hit:
             return None
         field_name, value = hit
 
         return await self.record_finding(
-            url=tmpl.url,
+            url=redact_url(tmpl.url),
             field_name=f"(JSON body: {field_name})",
-            payload=polluted_payload,
-            evidence=(
+            payload=redact_text(polluted_payload),
+            evidence=redact_text((
                 f"Mass assignment: the privileged property '{field_name}' was "
                 f"accepted and reflected (value '{value}') when added to the "
                 f"{method} body of {tmpl.url}, but was absent from the baseline "
                 f"response. Clients can set fields they should not control "
                 f"(e.g. role/admin/verified/balance)."
-            ),
+            )),
             pair={
-                "request": {"url": tmpl.url, "method": method, "body": polluted_payload},
-                "response": {"status": tainted.status_code, "body": tainted.text[:1000]},
+                "request": _redact_finding_request(tmpl.url, method, polluted_payload, kwargs.get("headers", {})),
+                "response": {"status": tainted.status_code, "url": redact_url(str(tainted.url)),
+                             "headers": _redact_headers(dict(tainted.headers)),
+                             "body": redact_text(tainted.text[:1000])},
             },
             severity="high",
             confidence="likely",
             evidence_type="mass_assignment",
             evidence_details={"field": field_name, "method": method},
+            reproduction_steps=[f"Send {method} to {redact_url(tmpl.url)} with JSON body {redact_text(polluted_payload)}"],
         )
