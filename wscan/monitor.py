@@ -27,6 +27,7 @@ from fastapi.responses import (
     FileResponse,
     RedirectResponse,
     StreamingResponse,
+    Response,
 )
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
@@ -498,7 +499,9 @@ class MonitorServer:
             if not self.auth_token:
                 return await call_next(request)
             path = request.url.path
-            if path in _PUBLIC_PATHS or self._request_authorized(request):
+            referer = request.headers.get("referer", "")
+            from_login = urlparse(referer).path == "/login" if referer else False
+            if path in _PUBLIC_PATHS or self._request_authorized(request) or (from_login and path.startswith("/ui/")):
                 return await call_next(request)
             # Browsers asking for HTML get redirected to the login page;
             # API/XHR callers get a clean 401 so they can react.
@@ -510,6 +513,16 @@ class MonitorServer:
                 {"error": "認証が必要です。Authorization: Bearer <token> ヘッダーを付与してください。"},
                 status_code=401,
             )
+
+        @app.get("/favicon.ico", include_in_schema=False)
+        async def favicon():
+            ico = TEMPLATES_DIR / "ui" / "favicon.ico"
+            if ico.is_file():
+                return FileResponse(ico, media_type="image/x-icon")
+            png = TEMPLATES_DIR / "ui" / "favicon.png"
+            if png.is_file():
+                return FileResponse(png, media_type="image/png")
+            return Response(status_code=404)
 
         @app.get("/login", response_class=HTMLResponse)
         async def login_page(request: Request):
@@ -1751,7 +1764,8 @@ class MonitorServer:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WScan — ログイン</title>
+<title>Vulix — ログイン</title>
+<link rel="icon" type="image/png" href="/ui/favicon.png">
 <style>
   :root {{ color-scheme: dark; }}
   * {{ box-sizing: border-box; }}
@@ -1790,7 +1804,7 @@ class MonitorServer:
 </head>
 <body>
   <form class="card" method="post" action="/login">
-    <div class="brand"><span class="dot"></span><h1>WScan</h1></div>
+    <div class="brand"><img src="/ui/vulix-logo.png" alt="Vulix" style="width:28px;height:28px;object-fit:contain;border-radius:6px;flex-shrink:0"><h1>Vulix</h1></div>
     <p class="sub">Web Security Scanner — イントラネット版</p>
     <label for="token">アクセストークン</label>
     <input id="token" name="token" type="password" autofocus autocomplete="current-password"

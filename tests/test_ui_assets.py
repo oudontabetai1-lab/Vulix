@@ -59,3 +59,98 @@ def test_ui_assets_are_scoped_and_protected():
     assert asset.status_code == existing.status_code == 401
     protected.cookies.set(SESSION_COOKIE, _session_value(token))
     assert protected.get("/ui/tokens.css").status_code == 200
+
+
+def test_logo_and_favicon_asset_delivery_and_auth_protection():
+    client = TestClient(MonitorServer().app)
+
+    # 1. Successful 200 and correct image MIME types
+    logo_res = client.get("/ui/vulix-logo.png")
+    assert logo_res.status_code == 200
+    assert "image/png" in logo_res.headers["content-type"]
+
+    fav_res = client.get("/ui/favicon.png")
+    assert fav_res.status_code == 200
+    assert "image/png" in fav_res.headers["content-type"]
+
+    fav_ico_res = client.get("/ui/favicon.ico")
+    assert fav_ico_res.status_code == 200
+    assert any(mime in fav_ico_res.headers["content-type"] for mime in ["image/x-icon", "image/vnd.microsoft.icon"])
+
+    # Root /favicon.ico is public and works without auth
+    root_ico = client.get("/favicon.ico")
+    assert root_ico.status_code == 200
+    assert any(mime in root_ico.headers["content-type"] for mime in ["image/x-icon", "image/vnd.microsoft.icon"])
+
+    # Missing asset returns 404
+    assert client.get("/ui/missing-logo.png").status_code == 404
+
+    # Path traversal rejected
+    assert client.get("/ui/%2e%2e/dashboard.html").status_code in {403, 404}
+
+    # 2. Auth behavior matches other protected assets (/ui/tokens.css)
+    token = "test-auth-token"
+    protected = TestClient(MonitorServer(auth_token=token).app)
+    img_headers = {"accept": "image/png"}
+
+    # Without session -> 401
+    assert protected.get("/ui/vulix-logo.png", headers=img_headers).status_code == 401
+    assert protected.get("/ui/favicon.png", headers=img_headers).status_code == 401
+
+    # /favicon.ico is in _PUBLIC_PATHS, so accessible even when auth is enabled
+    assert protected.get("/favicon.ico").status_code == 200
+
+    # With session cookie -> 200
+    protected.cookies.set(SESSION_COOKIE, _session_value(token))
+    assert protected.get("/ui/vulix-logo.png").status_code == 200
+    assert protected.get("/ui/favicon.png").status_code == 200
+
+
+def test_html_brand_wiring_and_vulix_wordmark():
+    server = MonitorServer()
+
+    # 1. Dashboard
+    dash_html = (ROOT / "templates" / "dashboard.html").read_text(encoding="utf-8")
+    assert "<title>Vulix — Live Monitor</title>" in dash_html
+    assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in dash_html
+    assert '<img src="/ui/vulix-logo.png" alt="Vulix"' in dash_html
+    assert 'Vulix <span>Scan Setup</span>' in dash_html
+    # Ensure tool name remains untouched
+    assert "tool: 'WScan'" in dash_html
+
+    # 2. Portal
+    portal_html = (ROOT / "templates" / "portal.html").read_text(encoding="utf-8")
+    assert "<title>Vulix — Server Portal</title>" in portal_html
+    assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in portal_html
+    assert '<img src="/ui/vulix-logo.png" alt="Vulix"' in portal_html
+    assert '<h1>Vulix</h1>' in portal_html
+
+    # 3. Login page
+    login_html = server._login_html()
+    assert "<title>Vulix — ログイン</title>" in login_html
+    assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in login_html
+    assert '<img src="/ui/vulix-logo.png" alt="Vulix"' in login_html
+    assert '<h1>Vulix</h1>' in login_html
+
+
+def test_vulix_logo_sha256_byte_parity_and_favicon_dimensions():
+    import hashlib
+    from PIL import Image
+
+    logo_path = ROOT / "templates" / "ui" / "vulix-logo.png"
+    assert logo_path.is_file()
+
+    expected_sha = "d6aa10fbd221d54ffb050cf08a96fb1512b8437b08e80944690b50674aa70219"
+    actual_sha = hashlib.sha256(logo_path.read_bytes()).hexdigest()
+    assert actual_sha == expected_sha, f"Logo SHA mismatch: {actual_sha} != {expected_sha}"
+
+    provenance_original = Path("/Users/Owner/.config/orca-failover/reports/ui-v3-logo-20261028/Vulix_logo.png")
+    if provenance_original.is_file():
+        orig_sha = hashlib.sha256(provenance_original.read_bytes()).hexdigest()
+        assert actual_sha == orig_sha, "Byte mismatch with original file"
+
+    fav_path = ROOT / "templates" / "ui" / "favicon.png"
+    assert fav_path.is_file()
+    with Image.open(fav_path) as im:
+        assert im.size == (32, 32)
+
