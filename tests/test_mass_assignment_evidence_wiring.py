@@ -119,11 +119,16 @@ async def test_logger_absent_or_disabled_preserves_finding(tmp_path, monkeypatch
 
 @pytest.mark.asyncio
 async def test_wire_keeps_secrets_but_finding_and_probe_records_redact(tmp_path, monkeypatch):
+    received_headers = {}
     def handler(request, index):
         body = json.loads(request.content)
         if index == 2:
             body["role"] = body["role"]
-        return httpx.Response(200, json=body, headers={"X-Note": "email=private@example.test", "Set-Cookie": "sid=response-secret"}, request=request)
+        headers = {"X-Note": "email=private@example.test",
+            "X-Owner": "contact=someone@example.test", "Content-Type": "application/json",
+            "Set-Cookie": "sid=response-secret"}
+        received_headers.update(headers)
+        return httpx.Response(200, json=body, headers=headers, request=request)
     scanner, _, logger, physical, template = setup(tmp_path, monkeypatch, handler)
     finding = await scanner._test_template(template)
     assert finding is not None
@@ -131,6 +136,13 @@ async def test_wire_keeps_secrets_but_finding_and_probe_records_redact(tmp_path,
     assert wire.headers["Authorization"] == "Basic dXNlcjpwYXNz"
     assert wire.headers["Cookie"] == "sid=cookie-secret"
     assert wire.url.params["access_token"] == "query-secret"
+    assert received_headers["X-Note"] == "email=private@example.test"
+    assert received_headers["X-Owner"] == "contact=someone@example.test"
     serialized = json.dumps(finding.to_dict()) + logger.probe_ledger._path.read_text()
+    finding_json = json.dumps(finding.to_dict())
+    assert "email=private@example.test" not in finding_json
+    assert "contact=someone@example.test" not in finding_json
+    assert "X-Note" not in finding_json and "X-Owner" not in finding_json
+    assert "application/json" in finding_json
     for secret in ("user:pass", "query-secret", "cookie-secret", "response-secret"):
         assert secret not in serialized

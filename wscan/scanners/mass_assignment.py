@@ -40,6 +40,14 @@ def _redact_finding_request(url, method, body, headers):
             "headers": _redact_headers(dict(headers or {}))}
 
 
+_FINDING_RESPONSE_HEADERS = {"content-type", "content-length", "location", "cache-control", "server"}
+
+
+def _finding_response_headers(headers):
+    return {key: redact_text(value) for key, value in headers.items()
+            if key.lower() in _FINDING_RESPONSE_HEADERS}
+
+
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
@@ -412,7 +420,7 @@ class MassAssignmentScanner(BaseScanner):
             pair={
                 "request": _redact_finding_request(tmpl.url, method, polluted_payload, kwargs.get("headers", {})),
                 "response": {"status": tainted.status_code, "url": redact_url(str(tainted.url)),
-                             "headers": _redact_headers(dict(tainted.headers)),
+                             "headers": _finding_response_headers(tainted.headers),
                              "body": redact_text(tainted.text[:1000])},
             },
             severity="high",
