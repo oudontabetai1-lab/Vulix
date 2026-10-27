@@ -314,6 +314,7 @@ class OpenRedirectScanner(BaseScanner):
                     form_index, field_name, payload
                 )
         except Exception as exc:
+            self._probe_failure(self._probe_exception_outcome(exc))
             self._record_scan_note(
                 f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
             )
