@@ -51,6 +51,41 @@ _SUCCESS_RE = re.compile(
 _BURST_SIZE = 8  # simultaneous requests per race probe
 
 
+def select_primary_burst_pair(
+    pairs: list[tuple[str | None, str | None]],
+) -> tuple[str, str]:
+    """Select the primary (observation_id, request_id) pair from burst tasks.
+
+    Guarantees that primary observation and request come from the same task pair.
+    If the selected task is missing its request ID, an empty string is returned rather than
+    mismatched with another task's request ID.
+    """
+    for req_id, obs_id in pairs:
+        if obs_id:
+            return obs_id, (req_id or "")
+    return "", ""
+
+
+def split_verification_and_display_urls(url: str) -> tuple[str, str]:
+    """Separate re-verification URL (retaining userinfo authentication) from
+    redacted persistent/display/evidence URL.
+
+    Returns:
+        (verification_url, display_url)
+    """
+    display_url = redact_url(url, drop_userinfo=True)
+    return url, display_url
+
+
+def get_verification_url(finding: Finding) -> str:
+    """Return the URL to use for re-verification, preserving userinfo if available."""
+    return (
+        getattr(finding, "verification_url", None)
+        or getattr(finding, "_verification_url", None)
+        or finding.url
+    )
+
+
 def _looks_like_state_change(url: str, field: dict) -> bool:
     name = (field.get("name") or field.get("id") or "").lower()
     return bool(_STATE_CHANGE_RE.search(url) or _STATE_CHANGE_RE.search(name))
@@ -317,20 +352,24 @@ class RaceConditionScanner(BaseScanner):
             return None
 
         consumed_observations = []
-        consumed_requests = []
+        task_pairs: list[tuple[str | None, str | None]] = []
         has_transport_failure = False
         for r in responses:
             if isinstance(r, Exception):
                 has_transport_failure = True
             elif isinstance(r, httpx.Response):
                 bound = r.extensions.get("vulix_race_evidence")
-                owner, req_id = r.request.extensions.get("vulix_probe_submission", (None, None))
+                owner, req_id = (
+                    r.request.extensions.get("vulix_probe_submission", (None, None))
+                    if hasattr(r, "request") else (None, None)
+                )
                 if bound and owner is logger:
                     context, obs_id = bound
-                    if obs_id:
-                        consumed_observations.append(obs_id)
-                    if req_id:
-                        consumed_requests.append(req_id)
+                    valid_req = req_id if isinstance(req_id, str) and req_id else None
+                    valid_obs = obs_id if isinstance(obs_id, str) and obs_id else None
+                    task_pairs.append((valid_req, valid_obs))
+                    if valid_obs:
+                        consumed_observations.append(valid_obs)
 
         if not consumed_observations:
             if has_transport_failure:
@@ -366,8 +405,7 @@ class RaceConditionScanner(BaseScanner):
                 f"consumed={len(consumed_observations)}"
             )
 
-        primary_obs = consumed_observations[0]
-        primary_req = consumed_requests[0] if consumed_requests else ""
+        primary_obs, primary_req = select_primary_burst_pair(task_pairs)
 
         related = list(consumed_observations)
         for src in related_sources:
@@ -450,7 +488,7 @@ class RaceConditionScanner(BaseScanner):
                 )
             return []
 
-        display_url = redact_url(action_url, drop_userinfo=True)
+        verification_url, display_url = split_verification_and_display_urls(action_url)
         classified = self._classify_responses(responses, display_url)
         decision_id = self._record_burst_decision(responses, classified, display_url, role="attack")
         if not classified:
@@ -481,7 +519,11 @@ class RaceConditionScanner(BaseScanner):
             evidence_type="race_condition_burst",
             evidence_details=details,
         )
-        return [finding]
+        if finding:
+            finding.verification_url = verification_url
+            finding._verification_url = verification_url
+            return [finding]
+        return []
 
     async def scan_page(self, url: str) -> list[Finding]:
         if url in self._checked_urls:
@@ -529,7 +571,7 @@ class RaceConditionScanner(BaseScanner):
                 )
             return []
 
-        display_url = redact_url(url, drop_userinfo=True)
+        verification_url, display_url = split_verification_and_display_urls(url)
         classified = self._classify_responses(responses, display_url)
         decision_id = self._record_burst_decision(responses, classified, display_url, role="attack")
         if classified:
@@ -559,7 +601,11 @@ class RaceConditionScanner(BaseScanner):
                 evidence_type="race_condition_burst",
                 evidence_details=details,
             )
-            return [finding]
+            if finding:
+                finding.verification_url = verification_url
+                finding._verification_url = verification_url
+                return [finding]
+            return []
 
         return []
 
@@ -570,11 +616,12 @@ class RaceConditionScanner(BaseScanner):
         headers = details.get("headers", {})
         if not method:
             return None
+        verify_url = get_verification_url(finding)
         try:
-            responses = await self._send_burst(finding.url, method, body, headers, role="verify")
+            responses = await self._send_burst(verify_url, method, body, headers, role="verify")
         except Exception:
             return None
-        display_url = redact_url(finding.url, drop_userinfo=True)
+        display_url = redact_url(verify_url, drop_userinfo=True)
         classified = self._classify_responses(responses, display_url)
         baseline_ids = tuple(details.get("attempt_ids") or ())
         decision_id = self._record_burst_decision(

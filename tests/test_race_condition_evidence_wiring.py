@@ -439,3 +439,205 @@ async def test_state_gate_prevents_burst_and_records_note(tmp_path, monkeypatch)
     # State gate remains no-send: 0 HTTP requests sent
     assert len(fixture.requests) == 0
     assert "state_change_skipped:race_condition" in engine.wave_errors
+
+
+def test_select_primary_burst_pair_guarantees_same_task_pairing():
+    from wscan.scanners.race_condition import select_primary_burst_pair
+
+    # Standard case: all tasks succeed
+    pairs = [("req_0", "obs_0"), ("req_1", "obs_1"), ("req_2", "obs_2")]
+    assert select_primary_burst_pair(pairs) == ("obs_0", "req_0")
+
+    # Partial observation: probe 0 missing observation, probe 1 has both
+    # In old code: primary_obs was obs_1, but primary_req was req_0 (mismatched!)
+    partial_pairs = [("req_0", None), ("req_1", "obs_1"), ("req_2", "obs_2")]
+    primary_obs, primary_req = select_primary_burst_pair(partial_pairs)
+    assert primary_obs == "obs_1"
+    assert primary_req == "req_1"  # Same task pair! Never req_0!
+
+    # Multiple initial gaps
+    multi_gap_pairs = [("req_0", None), ("req_1", None), ("req_2", "obs_2")]
+    assert select_primary_burst_pair(multi_gap_pairs) == ("obs_2", "req_2")
+
+    # Partial observation where the first observed task lacks request ID
+    missing_req_pairs = [("req_0", None), (None, "obs_1"), ("req_2", "obs_2")]
+    primary_obs, primary_req = select_primary_burst_pair(missing_req_pairs)
+    assert primary_obs == "obs_1"
+    assert primary_req == ""  # Treated as missing, not borrowed from req_0!
+
+    # All observations missing
+    no_obs_pairs = [("req_0", None), ("req_1", None)]
+    assert select_primary_burst_pair(no_obs_pairs) == ("", "")
+
+    # Empty input
+    assert select_primary_burst_pair([]) == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_partial_observation_burst_decision_pairs_primary_request_and_observation_to_same_task(
+    tmp_path, monkeypatch
+):
+    fixture = RaceConditionFixture(vulnerable=True)
+    _, scanner, logger, _ = setup(tmp_path, monkeypatch, fixture)
+
+    orig_observe = logger.observe_request
+    call_count = 0
+
+    def mock_observe(context, request_id, pair, transport):
+        nonlocal call_count
+        call_count += 1
+        # Drop observation for the first probe to create a partial observation scenario
+        if call_count == 1:
+            return None
+        return orig_observe(context, request_id, pair, transport)
+
+    monkeypatch.setattr(logger, "observe_request", mock_observe)
+
+    findings = await scanner.scan_page(URL)
+    assert len(findings) == 1
+    assert len(fixture.requests) == 8
+
+    records = ledger_rows(logger)
+    requests = [row for row in records if row["record_kind"] == "request"]
+    observations = [row for row in records if row["record_kind"] == "observation"]
+    decisions = [row for row in records if row["record_kind"] == "decision"]
+
+    assert len(requests) == 8
+    assert len(observations) == 7  # 1st probe dropped observation
+    assert len(decisions) == 1
+
+    decision = decisions[0]
+    # Primary observation is the first successful observation (probe 2)
+    primary_obs = observations[0]
+    assert decision["parent_id"] == primary_obs["attempt_id"]
+    # Primary request MUST be probe 2's request (same task!), NOT requests[0] (probe 1)
+    assert decision["request_attempt_id"] == primary_obs["request_attempt_id"]
+    assert decision["request_attempt_id"] != requests[0]["attempt_id"]
+    assert decision["request_attempt_id"] == requests[1]["attempt_id"]
+
+
+def test_url_separation_pure_helpers():
+    from wscan.scanners.base import Finding
+    from wscan.scanners.race_condition import (
+        get_verification_url,
+        split_verification_and_display_urls,
+    )
+
+    raw_url = "http://user:pass@target.test/coupon/apply?access_token=secret&page=1"
+    verify_url, display_url = split_verification_and_display_urls(raw_url)
+
+    # Verification URL preserves full userinfo and secrets
+    assert verify_url == raw_url
+    assert "user:pass@" in verify_url
+    assert "access_token=secret" in verify_url
+
+    # Display / evidence URL redacts userinfo and sensitive query params
+    assert display_url == "http://target.test/coupon/apply?access_token=<redacted>&page=1"
+    assert "user:pass" not in display_url
+    assert "secret" not in display_url
+
+    # Test get_verification_url resolution
+    finding_with_attr = Finding(
+        check_type="race_condition",
+        severity="high",
+        url=display_url,
+        field_name="coupon",
+        payload="8x simultaneous POST requests",
+        evidence=f"Race condition probe on {display_url}",
+    )
+    finding_with_attr.verification_url = verify_url
+
+    assert get_verification_url(finding_with_attr) == verify_url
+    assert "user:pass@" in get_verification_url(finding_with_attr)
+
+    # Fallback to finding.url if verification_url is not set
+    finding_fallback = Finding(
+        check_type="race_condition",
+        severity="high",
+        url="http://target.test/coupon/apply",
+        field_name="coupon",
+        payload="8x simultaneous POST requests",
+        evidence="evidence",
+    )
+    assert get_verification_url(finding_fallback) == "http://target.test/coupon/apply"
+
+
+@pytest.mark.asyncio
+async def test_reverification_preserves_userinfo_auth_while_evidence_remains_redacted(
+    tmp_path, monkeypatch
+):
+    fixture = RaceConditionFixture(vulnerable=True)
+    _, scanner, logger, _ = setup(tmp_path, monkeypatch, fixture)
+
+    findings = await scanner.scan_page(URL)
+    assert len(findings) == 1
+    finding = findings[0]
+
+    # Verify that finding and evidence strictly redact userinfo and secrets
+    assert "user:pass" not in finding.url
+    assert "user:pass" not in finding.evidence
+    assert "user:pass" not in finding.request.get("url", "")
+    assert "query-secret" not in finding.url
+
+    finding_dict = finding.to_dict()
+    finding_json = json.dumps(finding_dict)
+    assert "user:pass" not in finding_json
+    assert "query-secret" not in finding_json
+
+    # Verification URL on finding in-memory retains userinfo authentication
+    from wscan.scanners.race_condition import get_verification_url
+    assert get_verification_url(finding) == URL
+    assert "user:pass@" in get_verification_url(finding)
+
+    # Now run verify_finding and ensure re-verification outgoing requests keep userinfo Basic auth
+    fixture.requests.clear()
+    verified = await scanner.verify_finding(finding)
+    assert verified is True
+    assert len(fixture.requests) == 8
+
+    # All outgoing re-verification requests carry the userinfo Basic auth
+    for req in fixture.requests:
+        assert req.method == "POST"
+        assert req.headers.get("authorization") == "Basic dXNlcjpwYXNz"
+        assert "user:pass@" in str(req.url)
+
+    # Verification decision in ledger remains redacted
+    records = ledger_rows(logger)
+    verify_decisions = [
+        row for row in records
+        if row["record_kind"] == "decision" and row["role"] == "verify"
+    ]
+    assert len(verify_decisions) == 1
+    assert "user:pass" not in str(verify_decisions[0])
+
+
+@pytest.mark.asyncio
+async def test_scan_field_preserves_verification_url_with_userinfo(
+    tmp_path, monkeypatch
+):
+    fixture = RaceConditionFixture(vulnerable=True)
+    _, scanner, logger, _ = setup(tmp_path, monkeypatch, fixture)
+
+    field = {"name": "coupon", "id": "coupon_code"}
+    findings = await scanner.scan_field(URL, 0, field)
+    assert len(findings) == 1
+    finding = findings[0]
+
+    # Persistent URL is redacted
+    assert "user:pass" not in finding.url
+    assert "query-secret" not in finding.url
+    assert "user:pass" not in json.dumps(finding.to_dict())
+
+    # Verification URL retains userinfo
+    from wscan.scanners.race_condition import get_verification_url
+    verify_url = get_verification_url(finding)
+    assert "user:pass@" in verify_url
+    assert verify_url.startswith("http://user:pass@target.test/coupon/apply")
+
+    fixture.requests.clear()
+    verified = await scanner.verify_finding(finding)
+    assert verified is True
+    assert len(fixture.requests) == 8
+    for req in fixture.requests:
+        assert req.headers.get("authorization") == "Basic dXNlcjpwYXNz"
+
