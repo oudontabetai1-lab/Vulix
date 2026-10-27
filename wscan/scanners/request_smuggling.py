@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from wscan.probe_ledger import Transport
-from wscan.request_logger import current_probe
+from wscan.request_logger import _redact_headers, current_probe, redact_text, redact_url
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
     PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
@@ -278,7 +278,7 @@ class RequestSmugglingScanner(BaseScanner):
                 # A baseline measurement terminates here; it is not an attack comparison decision.
                 observation = logger.scoped_probe(context, pair=pair, transport=Transport.HTTPX,
                     sent=True, parent_id=request_id, request_attempt_id=request_id,
-                    record_kind="observation", outcome="no_match",
+                    record_kind="observation", outcome=None,
                     decision_rule="request_smuggling_baseline", decision_version="1",
                     rationale="baseline response received; comparison measurement only")
             else:
@@ -368,15 +368,23 @@ class RequestSmugglingScanner(BaseScanner):
             "normal_elapsed": round(normal_elapsed, 4),
             "probe_elapsed": round(probe_elapsed, 4),
             "delta": round(delta, 4),
-            "probe_status": probe_status,
+            **({} if probe_status == 0 else {"probe_status": probe_status}),
         }
         if delta >= _TIMEOUT_DELTA_THRESHOLD or probe_status == 0:
-            evidence = (
-                f"HTTP Request Smuggling indicator ({probe_name}): "
-                f"probe response took {probe_elapsed:.1f}s vs baseline {normal_elapsed:.1f}s "
-                f"(+{delta:.1f}s). Backend may be waiting for more data, "
-                f"suggesting a CL/TE parsing disagreement."
-            )
+            if probe_status == 0:
+                evidence = (
+                    f"HTTP Request Smuggling indicator ({probe_name}): "
+                    f"probe timed out after {probe_elapsed:.1f}s vs baseline {normal_elapsed:.1f}s "
+                    f"(+{delta:.1f}s). Backend may be waiting for more data, "
+                    f"suggesting a CL/TE parsing disagreement."
+                )
+            else:
+                evidence = (
+                    f"HTTP Request Smuggling indicator ({probe_name}): "
+                    f"probe response took {probe_elapsed:.1f}s vs baseline {normal_elapsed:.1f}s "
+                    f"(+{delta:.1f}s). Backend may be waiting for more data, "
+                    f"suggesting a CL/TE parsing disagreement."
+                )
             return "request_smuggling_timing", "high", details, evidence
 
         err = self.check_response_for_patterns(probe_body, _SMUGGLE_ERROR_PATTERNS)
@@ -408,6 +416,7 @@ class RequestSmugglingScanner(BaseScanner):
                 probe_elapsed, probe_body, probe_status = await self._send_probe(
                     url, headers, body, base_timeout, proxy
                 )
+                probe_timed_out = probe_status == 0
                 classified = self._classify_probe(
                     url, headers, probe_name, normal_elapsed, probe_elapsed, probe_body, probe_status
                 )
@@ -422,23 +431,31 @@ class RequestSmugglingScanner(BaseScanner):
                     details["attempt_ids"] = baseline["requests"] + attack["requests"]
                 if baseline["requests"]:
                     details["baseline_attempt_id"] = baseline["requests"][-1]
-                pair = {
-                    "request": {"url": url, "headers": dict(headers)},
-                    "response": {
+                safe_headers = _redact_headers(headers)
+                pair = {"request": {"url": redact_url(url), "headers": safe_headers}}
+                if not probe_timed_out:
+                    pair["response"] = {
                         "status": probe_status,
-                        "body": probe_body[:500],
-                    },
-                }
+                        "body": redact_text(probe_body[:500]),
+                    }
+                safe_details = dict(details)
+                if probe_timed_out:
+                    safe_details.pop("probe_status", None)
+                safe_details["headers"] = safe_headers
+                safe_evidence = redact_text(evidence)
+                safe_reproduction_steps = [redact_text(step) for step in
+                                           self._default_reproduction_steps(url, "(HTTP request headers)", probe_name)]
                 finding = await self.record_finding(
-                    url=url,
+                    url=redact_url(url),
                     field_name="(HTTP request headers)",
                     payload=probe_name,
-                    evidence=evidence,
+                    evidence=safe_evidence,
                     pair=pair,
                     severity=severity,
                     confidence="tentative",
                     evidence_type=evidence_type,
-                    evidence_details=details,
+                    evidence_details=safe_details,
+                    reproduction_steps=safe_reproduction_steps,
                 )
                 return [finding]
 

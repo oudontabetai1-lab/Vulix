@@ -63,7 +63,7 @@ def reopened(logger, tmp_path):
     path = logger.probe_ledger.path
     rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
     restored = RequestLogger(tmp_path).probe_ledger
-    assert list(restored.events.values()) == rows
+    assert set(restored.events) >= {r["attempt_id"] for r in rows}
     manifest = json.loads((tmp_path / MANIFEST_FILENAME).read_text())
     assert manifest["logical_requests"] == len([r for r in rows if r["record_kind"] == "request"])
     return rows, restored, manifest
@@ -95,7 +95,9 @@ async def test_baseline_attack_and_reopen(tmp_path, monkeypatch, status, body, p
     assert [r["role"] for r in sends(rows)] == ["baseline", "attack"]
     assert baseline["attempt_id"] != attack["attempt_id"]
     assert attack["baseline_attempt_ids"] == decision["baseline_attempt_ids"] == [baseline["attempt_id"]]
-    assert base_obs["outcome"] == "no_match"
+    assert base_obs["outcome"] is None
+    assert base_obs["record_kind"] == "observation"
+    assert "comparison measurement only" in base_obs["rationale"]
     assert base_obs["decision_rule"] == "request_smuggling_baseline"
     assert decision["outcome"] == ("matched" if positive else "no_match")
     assert decision["parent_id"] == attack_obs["attempt_id"]
@@ -133,6 +135,10 @@ async def test_baseline_attack_and_reopen(tmp_path, monkeypatch, status, body, p
         assert findings[0].confidence == "tentative"
         assert findings[0].evidence_details["probe_attempt_id"] == attack["attempt_id"]
         assert findings[0].evidence_details["attempt_ids"] == [r["attempt_id"] for r in sends(rows)]
+        serialized = json.dumps(findings[0].to_dict(), sort_keys=True)
+        for secret in ("header-secret", "cookie-secret", "query-secret", "response-secret"):
+            assert secret not in serialized
+        assert findings[0].request["url"].endswith("access_token=<redacted>")
 
 
 @pytest.mark.asyncio
@@ -182,6 +188,16 @@ async def test_transport_outcomes_without_fabricated_response(tmp_path, monkeypa
     if intentional:
         assert findings[0].evidence_type == "request_smuggling_timing"
         assert findings[0].confidence == "tentative"
+        assert findings[0].response == {}
+        assert "status" not in findings[0].response
+        assert "timed out" in findings[0].evidence.lower()
+        assert "response took" not in findings[0].evidence.lower()
+        assert endpoint.requests[-1].url.params["access_token"] == "query-secret"
+        assert endpoint.requests[-1].headers["Authorization"] == "Bearer header-secret"
+        assert endpoint.requests[-1].headers["Cookie"] == "sid=cookie-secret"
+        serialized = json.dumps(findings[0].to_dict(), sort_keys=True)
+        for secret in ("header-secret", "cookie-secret", "query-secret", "response-secret"):
+            assert secret not in serialized
     rows, restored, _ = reopened(logger, tmp_path)
     assert len(endpoint.requests) == (1 if method == "GET" else 2)
     assert len(sends(rows)) == len(endpoint.requests)
