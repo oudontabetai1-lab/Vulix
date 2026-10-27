@@ -17,11 +17,14 @@ CDN/リバースプロキシキャッシュ前提の現代 Web 向け。
 from __future__ import annotations
 
 import secrets
+import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from wscan.probe_ledger import Transport
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
     PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
@@ -243,7 +246,90 @@ class CachePoisoningScanner(BaseScanner):
             kwargs = self.engine.httpx_client_kwargs(**kwargs)
         elif getattr(self.engine, "proxy", ""):
             kwargs["proxy"] = self.engine.proxy
+        logger = getattr(self.engine, "request_logger", None)
+        if getattr(logger, "enabled", False) and callable(getattr(logger, "log_httpx_submission", None)):
+            kwargs["event_hooks"] = {"request": [logger.log_httpx_submission]}
         return kwargs
+
+    def _evidence_gap(self, reason: str) -> None:
+        self._record_scan_note(reason)
+        logger = getattr(self.engine, "request_logger", None)
+        ledger = getattr(logger, "probe_ledger", None)
+        if ledger is not None:
+            ledger.manifest.note_gap(reason)
+
+    def _evidence_scope(self, role, *, baselines=(), parent_id=""):
+        logger = getattr(self.engine, "request_logger", None)
+        scope = (logger.probe_scope(None, self.CHECK_TYPE, role=role,
+                                   baseline_attempt_ids=baselines, parent_id=parent_id)
+                 if callable(getattr(logger, "probe_scope", None))
+                 else nullcontext({"requests": []}))
+        if logger is None or not getattr(logger, "enabled", False):
+            self._evidence_gap(f"{self.CHECK_TYPE}_evidence_unavailable")
+
+        class _ScopeContextManager:
+            def __enter__(_self):
+                _self.context = scope.__enter__()
+                return _self.context
+
+            def __exit__(_self, exc_type, exc, tb):
+                try:
+                    if exc is not None:
+                        outcome = ("timeout" if isinstance(exc, (httpx.TimeoutException, TimeoutError)) else
+                                   "transport_error" if isinstance(exc, (httpx.TransportError, OSError)) else
+                                   "verification_error" if role == "verify" else "unexecutable")
+                        self._evidence_decision(_self.context, outcome, f"{self.CHECK_TYPE}_transport", type(exc).__name__)
+                finally:
+                    return scope.__exit__(exc_type, exc, tb)
+
+        return _ScopeContextManager()
+
+    def _observe_response(self, response) -> None:
+        logger = getattr(self.engine, "request_logger", None)
+        if logger is None:
+            return
+        try:
+            owner, request_id = response.request.extensions.get("vulix_probe_submission", (None, None))
+            bound = response.request.extensions.get("vulix_probe_context")
+            if owner is not logger or not request_id or bound is None:
+                self._evidence_gap(f"{self.CHECK_TYPE}_request_missing")
+                return
+            context, request = bound
+            pair = {"request": request, "response": {
+                "status": response.status_code, "url": str(response.url),
+                "headers": dict(response.headers), "body": response.content, "timestamp": time.time()}}
+            if context["role"] == "baseline":
+                observation = logger.scoped_probe(context, pair=pair, transport=Transport.HTTPX,
+                    sent=True, parent_id=request_id, request_attempt_id=request_id,
+                    record_kind="observation", outcome=None,
+                    decision_rule="cache_deception_baseline", decision_version="1",
+                    rationale="baseline response received; comparison measurement only")
+            else:
+                observation = logger.observe_request(context, request_id, pair, Transport.HTTPX)
+            if observation:
+                context.setdefault("observations", {})[request_id] = observation
+            else:
+                self._evidence_gap(f"{self.CHECK_TYPE}_observation_missing")
+        except Exception as exc:
+            self._evidence_gap(f"{self.CHECK_TYPE}_observation_error:{type(exc).__name__}")
+
+    def _evidence_decision(self, context, outcome, rule, rationale):
+        logger = getattr(self.engine, "request_logger", None)
+        if not callable(getattr(logger, "scoped_probe", None)):
+            return
+        try:
+            requests = context.get("requests", [])
+            if not requests:
+                self._evidence_gap(f"{self.CHECK_TYPE}_request_missing")
+                return
+            for request_id in requests:
+                parent = context.get("observations", {}).get(request_id, request_id)
+                if not logger.scoped_probe(context, record_kind="decision", outcome=outcome,
+                        parent_id=parent, request_attempt_id=request_id, decision_rule=rule,
+                        decision_version="1", rationale=rationale):
+                    self._evidence_gap(f"{self.CHECK_TYPE}_decision_missing")
+        except Exception as exc:
+            self._evidence_gap(f"{self.CHECK_TYPE}_decision_error:{type(exc).__name__}")
 
     def _auth_headers(self, url: str) -> dict:
         if hasattr(self.engine, "auth_headers"):
@@ -267,9 +353,20 @@ class CachePoisoningScanner(BaseScanner):
                 f"(header) {header}", marker_host, "cache_poisoning", url
             )
             try:
-                async with httpx.AsyncClient(**self._client_kwargs()) as client:
-                    poisoned = await client.get(probe_url, headers=inj_headers)
-                    self._record_probe_status(poisoned)
+                with self._evidence_scope("attack") as attack_ctx:
+                    async with httpx.AsyncClient(**self._client_kwargs()) as client:
+                        poisoned = await client.get(probe_url, headers=inj_headers)
+                        self._record_probe_status(poisoned)
+                    self._observe_response(poisoned)
+                    is_refl = reflected(poisoned.text, marker_host)
+                    is_cache = is_cacheable(dict(poisoned.headers))
+                    matched = is_refl and is_cache
+                    self._evidence_decision(
+                        attack_ctx,
+                        "matched" if matched else "no_match",
+                        "cache_poisoning_reflection",
+                        f"status {poisoned.status_code}; reflected={is_refl}; cacheable={is_cache}",
+                    )
             except Exception:
                 continue
 
@@ -278,18 +375,29 @@ class CachePoisoningScanner(BaseScanner):
             if not is_cacheable(dict(poisoned.headers)):
                 continue
 
+            attack_attempt_id = (attack_ctx.get("requests", []) or [None])[-1]
+            baselines = (attack_attempt_id,) if attack_attempt_id else ()
+
             # 反射 + キャッシュ可能。クリーン再取得で汚染が残るか確認。
             confirmed = False
             try:
-                async with httpx.AsyncClient(**self._client_kwargs()) as client:
-                    clean = await client.get(
-                        probe_url,
-                        headers=self._auth_headers(probe_url),
+                with self._evidence_scope("verify", baselines=baselines) as verify_ctx:
+                    async with httpx.AsyncClient(**self._client_kwargs()) as client:
+                        clean = await client.get(
+                            probe_url,
+                            headers=self._auth_headers(probe_url),
+                        )
+                        self._record_probe_status(clean)
+                    self._observe_response(clean)
+                    confirmed = reflected(clean.text, marker_host) and cache_hit(
+                        dict(clean.headers)
                     )
-                    self._record_probe_status(clean)
-                confirmed = reflected(clean.text, marker_host) and cache_hit(
-                    dict(clean.headers)
-                )
+                    self._evidence_decision(
+                        verify_ctx,
+                        "matched" if confirmed else "no_match",
+                        "cache_poisoning_persistence",
+                        f"status {clean.status_code}; persisted={confirmed}",
+                    )
             except Exception:
                 confirmed = False
 
@@ -343,14 +451,36 @@ class CachePoisoningScanner(BaseScanner):
         # 送信前に置いて真の pre-send チェックポイントにする。
         await self.log_payload_test("(path)", css_url, "cache_deception", url)
         try:
-            async with httpx.AsyncClient(**self._client_kwargs()) as client:
-                base = await client.get(url, headers=self._auth_headers(url))
-                self._record_probe_status(base)
-                css = await client.get(
-                    css_url,
-                    headers=self._auth_headers(css_url),
+            with self._evidence_scope("baseline") as base_ctx:
+                async with httpx.AsyncClient(**self._client_kwargs()) as client:
+                    base = await client.get(url, headers=self._auth_headers(url))
+                    self._record_probe_status(base)
+                self._observe_response(base)
+
+            base_attempt_id = (base_ctx.get("requests", []) or [None])[-1]
+            baselines = (base_attempt_id,) if base_attempt_id else ()
+
+            with self._evidence_scope("attack", baselines=baselines) as attack_ctx:
+                async with httpx.AsyncClient(**self._client_kwargs()) as client:
+                    css = await client.get(
+                        css_url,
+                        headers=self._auth_headers(css_url),
+                    )
+                    self._record_probe_status(css)
+                self._observe_response(css)
+                succeeded = deception_succeeded(
+                    base_status=base.status_code,
+                    base_body=base.text,
+                    css_status=css.status_code,
+                    css_body=css.text,
+                    css_headers=dict(css.headers),
                 )
-                self._record_probe_status(css)
+                self._evidence_decision(
+                    attack_ctx,
+                    "matched" if succeeded else "no_match",
+                    "cache_deception_match",
+                    f"base_status={base.status_code}; css_status={css.status_code}; succeeded={succeeded}",
+                )
         except Exception:
             return []
 
