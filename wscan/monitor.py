@@ -829,6 +829,13 @@ class MonitorServer:
             """Return config/wscan.yaml-derived defaults for the dashboard form."""
             return JSONResponse(self.default_scan_cfg or {})
 
+        @app.get("/api/capability-manifest")
+        @app.get("/api/v1/capability-manifest")
+        async def api_capability_manifest():
+            """Return versioned scanner capability manifest derived from SCANNERS registry."""
+            from wscan.capability_manifest import get_capability_manifest
+            return JSONResponse(get_capability_manifest())
+
         @app.post("/api/auto-config")
         async def api_auto_config(request: Request):
             """自然言語の説明からスキャン設定を生成するHTTPエンドポイント。"""

@@ -1,0 +1,523 @@
+{
+  "manifest_kind": "scanner_capability_manifest",
+  "declaration_only": true,
+  "execution_coverage_claimed": false,
+  "default_checks": [
+    "sqli",
+    "xss",
+    "os"
+  ],
+  "scanner_count": 3,
+  "scanner_ids": [
+    "os",
+    "sqli",
+    "xss"
+  ],
+  "scanners": {
+    "os": {
+      "id": "os",
+      "name": "OSInjectionScanner",
+      "check_type": "os",
+      "severity": "critical",
+      "cvss": {
+        "score": 10.0,
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"
+      },
+      "is_default": true,
+      "applicable_modes": [
+        "normal",
+        "hybrid"
+      ],
+      "state_change": "conditional",
+      "cost": "medium",
+      "prerequisites": [],
+      "execution_kinds": [
+        "field_injection"
+      ],
+      "has_page_level": false,
+      "supports_json_body": true,
+      "supports_xml_body": false,
+      "always_state_changing": false,
+      "declared_carriers": {
+        "cookie": {
+          "carrier": "cookie",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "form": {
+          "carrier": "form",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "playwright"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": true,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        },
+        "graphql": {
+          "carrier": "graphql",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "header": {
+          "carrier": "header",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "json": {
+          "carrier": "json",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "httpx"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        },
+        "multipart": {
+          "carrier": "multipart",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "path": {
+          "carrier": "path",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "query": {
+          "carrier": "query",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "playwright"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": true,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        },
+        "websocket": {
+          "carrier": "websocket",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "xml": {
+          "carrier": "xml",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        }
+      },
+      "declaration_only": true
+    },
+    "sqli": {
+      "id": "sqli",
+      "name": "SQLiScanner",
+      "check_type": "sqli",
+      "is_default": true,
+      "applicable_modes": [
+        "normal",
+        "hybrid"
+      ],
+      "state_change": "conditional",
+      "cost": "medium",
+      "prerequisites": [],
+      "execution_kinds": [
+        "field_injection"
+      ],
+      "has_page_level": false,
+      "supports_json_body": true,
+      "supports_xml_body": true,
+      "always_state_changing": false,
+      "declared_carriers": {
+        "cookie": {
+          "carrier": "cookie",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "form": {
+          "carrier": "form",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "playwright"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": true,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        },
+        "graphql": {
+          "carrier": "graphql",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "header": {
+          "carrier": "header",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "json": {
+          "carrier": "json",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "httpx"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        },
+        "multipart": {
+          "carrier": "multipart",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "path": {
+          "carrier": "path",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "query": {
+          "carrier": "query",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "playwright"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": true,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        },
+        "websocket": {
+          "carrier": "websocket",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "xml": {
+          "carrier": "xml",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "httpx"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        }
+      },
+      "declaration_only": true
+    },
+    "xss": {
+      "id": "xss",
+      "name": "XSSScanner",
+      "check_type": "xss",
+      "severity": "high",
+      "cvss": {
+        "score": 8.8,
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N"
+      },
+      "is_default": true,
+      "applicable_modes": [
+        "normal",
+        "hybrid"
+      ],
+      "state_change": "conditional",
+      "cost": "medium",
+      "prerequisites": [],
+      "execution_kinds": [
+        "field_injection"
+      ],
+      "has_page_level": false,
+      "supports_json_body": true,
+      "supports_xml_body": true,
+      "always_state_changing": false,
+      "declared_carriers": {
+        "cookie": {
+          "carrier": "cookie",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "form": {
+          "carrier": "form",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "playwright"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": true,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        },
+        "graphql": {
+          "carrier": "graphql",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "header": {
+          "carrier": "header",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "json": {
+          "carrier": "json",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "httpx"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        },
+        "multipart": {
+          "carrier": "multipart",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "path": {
+          "carrier": "path",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "query": {
+          "carrier": "query",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "playwright"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": true,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        },
+        "websocket": {
+          "carrier": "websocket",
+          "state": "planned",
+          "value_kinds": [],
+          "transports": [],
+          "payload_shapes": [],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "carrier 別 dispatcher は未接続",
+          "task": "0035-D",
+          "declaration_only": true
+        },
+        "xml": {
+          "carrier": "xml",
+          "state": "supported",
+          "value_kinds": [
+            "string"
+          ],
+          "transports": [
+            "httpx"
+          ],
+          "payload_shapes": [
+            "scalar"
+          ],
+          "browser_required": false,
+          "structured_payload": false,
+          "reason": "",
+          "task": "",
+          "declaration_only": true
+        }
+      },
+      "declaration_only": true
+    }
+  }
+}
