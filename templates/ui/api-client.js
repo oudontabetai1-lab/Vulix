@@ -28,7 +28,7 @@
       this.data = init.data !== undefined ? init.data : null;
       this.error = init.error || null;
       this.headers = init.headers || null;
-      this.rawText = init.rawText || null;
+      this.rawText = init.rawText !== undefined ? init.rawText : null;
       this._customErrorMessage = init.errorMessage || '';
     }
 
@@ -400,7 +400,8 @@
 
       // Default: JSON decoding
       if (!rawText || !rawText.trim()) {
-        return ApiResult.success(null, res.status, res.headers, res.statusText);
+        const parseErr = new SyntaxError('Unexpected end of JSON input (empty response body)');
+        return ApiResult.decodeError(res.status, res.statusText, res.headers, rawText, parseErr);
       }
 
       try {

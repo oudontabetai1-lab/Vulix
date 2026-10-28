@@ -231,12 +231,64 @@ def test_api_client_request_flows_with_mock_fetch():
         });
         const res5 = await client5.get('/api/v1/scans');
 
+        // 6. Decode error on empty body (200 OK with empty body -> decode_error)
+        const client6 = new ApiClient({
+            fetch: makeMockFetch(async () => ({
+                ok: true,
+                status: 200,
+                statusText: 'OK',
+                headers: {},
+                text: async () => '',
+            })),
+        });
+        const res6 = await client6.get('/api/v1/scans');
+
+        // 7. Decode error on whitespace-only body (200 OK -> decode_error)
+        const client7 = new ApiClient({
+            fetch: makeMockFetch(async () => ({
+                ok: true,
+                status: 200,
+                statusText: 'OK',
+                headers: {},
+                text: async () => '   \\n  \\t  ',
+            })),
+        });
+        const res7 = await client7.get('/api/v1/scans');
+
+        // 8. Legitimate empty array response (200 OK -> success with empty array)
+        const client8 = new ApiClient({
+            fetch: makeMockFetch(async () => ({
+                ok: true,
+                status: 200,
+                statusText: 'OK',
+                headers: {},
+                text: async () => '[]',
+            })),
+        });
+        const res8 = await client8.get('/api/v1/scans');
+
+        // 9. Legitimate scans: [] response (200 OK -> success with scans: [])
+        const client9 = new ApiClient({
+            fetch: makeMockFetch(async () => ({
+                ok: true,
+                status: 200,
+                statusText: 'OK',
+                headers: {},
+                text: async () => JSON.stringify({ scans: [] }),
+            })),
+        });
+        const res9 = await client9.get('/api/v1/scans');
+
         console.log(JSON.stringify({
             res1: { ok: res1.ok, kind: res1.kind, data: res1.data },
             res2: { ok: res2.ok, kind: res2.kind, status: res2.status, hookCalled: hookCalled },
             res3: { ok: res3.ok, kind: res3.kind, status: res3.status },
             res4: { ok: res4.ok, kind: res4.kind, isDecodeError: res4.isDecodeError() },
             res5: { ok: res5.ok, kind: res5.kind, isNetworkError: res5.isNetworkError() },
+            res6: { ok: res6.ok, kind: res6.kind, isDecodeError: res6.isDecodeError(), rawText: res6.rawText },
+            res7: { ok: res7.ok, kind: res7.kind, isDecodeError: res7.isDecodeError() },
+            res8: { ok: res8.ok, kind: res8.kind, isSuccess: res8.isSuccess(), data: res8.data },
+            res9: { ok: res9.ok, kind: res9.kind, isSuccess: res9.isSuccess(), data: res9.data },
         }));
     })();
     """
@@ -261,6 +313,27 @@ def test_api_client_request_flows_with_mock_fetch():
     assert data["res5"]["ok"] is False
     assert data["res5"]["kind"] == "network_error"
     assert data["res5"]["isNetworkError"] is True
+
+    # 200 with empty / whitespace body must be decode_error (parity with fetch().json())
+    assert data["res6"]["ok"] is False
+    assert data["res6"]["kind"] == "decode_error"
+    assert data["res6"]["isDecodeError"] is True
+    assert data["res6"]["rawText"] == ""
+
+    assert data["res7"]["ok"] is False
+    assert data["res7"]["kind"] == "decode_error"
+    assert data["res7"]["isDecodeError"] is True
+
+    # Legitimate empty collections must succeed
+    assert data["res8"]["ok"] is True
+    assert data["res8"]["kind"] == "success"
+    assert data["res8"]["isSuccess"] is True
+    assert data["res8"]["data"] == []
+
+    assert data["res9"]["ok"] is True
+    assert data["res9"]["kind"] == "success"
+    assert data["res9"]["isSuccess"] is True
+    assert data["res9"]["data"] == {"scans": []}
 
 
 def test_scoped_api_client_cancel_all_stale_reads():
@@ -435,4 +508,56 @@ def test_dashboard_history_unmount_cancels_in_flight_fetch_in_browser(tmp_path, 
             browser.close()
     finally:
         server_thread.stop()
+
+
+def test_dashboard_history_empty_response_body_shows_error_state(tmp_path, monkeypatch):
+    """Verify parity with legacy fetch: 200 OK with empty response body shows error state in scan history."""
+    monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
+
+    srv = MonitorServer()
+    port = find_free_port()
+    server_thread = UvicornServerThread(srv, port)
+    server_thread.start()
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            # 1. Route /api/v1/scans with 200 OK and empty body (decode failure parity)
+            page.route("**/api/v1/scans", lambda route: route.fulfill(
+                status=200,
+                body="",
+                headers={"Content-Type": "application/json"}
+            ))
+
+            page.goto(f"http://127.0.0.1:{port}/monitor")
+            page.click("#navScanHistory")
+            page.wait_for_selector("#historyErrorState")
+
+            assert page.is_visible("#historyErrorState")
+            assert not page.is_visible("#historyTableScroll")
+            assert not page.is_visible("#historyEmptyState")
+            err_text = page.inner_text("#historyErrorMessage")
+            assert "解析に失敗しました" in err_text or "JSON" in err_text
+
+            # 2. Route with legitimate empty scans array (200 OK) -> empty state
+            page.unroute("**/api/v1/scans")
+            page.route("**/api/v1/scans", lambda route: route.fulfill(
+                status=200,
+                body=json.dumps({"scans": []}),
+                headers={"Content-Type": "application/json"}
+            ))
+
+            # Click retry button
+            page.click("#historyErrorState button")
+            page.wait_for_selector("#historyEmptyState")
+            assert page.is_visible("#historyEmptyState")
+            assert not page.is_visible("#historyErrorState")
+            assert "スキャン履歴はありません" in page.inner_text("#historyEmptyState")
+
+            browser.close()
+    finally:
+        server_thread.stop()
+
 
