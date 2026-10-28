@@ -455,7 +455,11 @@
           backendVersion: typeof this.backendVersion === 'function' ? this.backendVersion() : this.backendVersion })
         : { valid: true, durable: false };
       if (!ingress.valid) {
-        if (fromWire || ingress.durable) this._markWireStale(ingress.reason, event.type || null);
+        if (fromWire || ingress.durable) {
+          // A version mismatch is a client/server compatibility state, not a broken
+          // socket; reconnecting cannot repair it and would close the Agent send path.
+          this._markWireStale(ingress.reason, event.type || null, !ingress.reason.startsWith('backend_version_'));
+        }
         return;
       }
       if (this._wireStale && event.type !== 'scan_snapshot') return;
@@ -501,12 +505,12 @@
       }
     }
 
-    _markWireStale(reason, type) {
+    _markWireStale(reason, type, reconnect = true) {
       this._wireStale = true;
       const state = this.stateAccessor();
       if (state) state.eventStreamStale = { reason: reason, type: type };
       if (this.onWireStale) this.onWireStale({ reason: reason, type: type });
-      if (this.ws) this.reconnect();
+      if (reconnect && this.ws) this.reconnect();
     }
 
     /**

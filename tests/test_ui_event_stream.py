@@ -175,6 +175,19 @@ class EventStreamNodeUnitTests(unittest.TestCase):
         self.assertEqual(data["received"], ["scan_started"])
         self.assertEqual(data["stale"]["reason"], "backend_version_unavailable")
 
+    def test_backend_version_rejection_keeps_websocket_open_for_agent_submission(self):
+        data = _run_node_script("""
+        const state = { serverInstanceId: 'srv-1', scanRunId: 'run-1', lastEventSequence: 0 };
+        const client = new EventStreamClient({ stateAccessor: () => state, backendVersion: null });
+        let reconnects = 0;
+        client.ws = {};
+        client.reconnect = () => { reconnects++; };
+        client.processEvent({ type: 'scan_started', server_id: 'srv-1', run_id: 'run-1', sequence: 1,
+          backend_version: '1.0.0', data: {} }, true);
+        console.log(JSON.stringify({ reconnects, stale: state.eventStreamStale.reason }));
+        """)
+        self.assertEqual(data, {"reconnects": 0, "stale": "backend_version_unavailable"})
+
     def test_unknown_and_malformed_wire_fixtures(self):
         for name in ("unknown_stream.json", "malformed_stream.json"):
             fixture = json.loads((EVENT_STREAM_FIXTURES / name).read_text(encoding="utf-8"))
@@ -631,6 +644,7 @@ class EventStreamNodeUnitTests(unittest.TestCase):
             WebSocket: MockWebSocket,
             reconnectDelay: 20,
             stateAccessor: () => state,
+            backendVersion: '1.0.0',
             onEvent: (evt) => received.push(evt.type),
         });
 
