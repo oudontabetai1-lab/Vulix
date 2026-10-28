@@ -2970,57 +2970,87 @@ function isSecretKeyName(key) {
 
 function sanitizeUrlForExport(raw) {
   if (typeof raw !== 'string') return raw;
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
   if (!trimmed) return trimmed;
   const sensitiveRegex = (typeof CONFIG_SENSITIVE_URL_KEY !== 'undefined')
     ? CONFIG_SENSITIVE_URL_KEY
     : _SENSITIVE_URL_KEY_FALLBACK;
-  try {
-    const parsed = new URL(trimmed);
-    parsed.username = '';
-    parsed.password = '';
-    const keysToDelete = [];
-    for (const key of parsed.searchParams.keys()) {
-      if (sensitiveRegex.test(key)) {
-        keysToDelete.push(key);
-      }
-    }
-    keysToDelete.forEach(k => parsed.searchParams.delete(k));
-    if (parsed.hash) {
-      const fragment = parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash;
+  let parsed;
+  let isRelative = false;
+  let isProtocolRelative = false;
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+    if (trimmed.startsWith('//')) {
+      isProtocolRelative = true;
       try {
-        const fragParams = new URLSearchParams(fragment);
-        let changed = false;
-        const fragKeysToDelete = [];
-        for (const k of fragParams.keys()) {
-          if (sensitiveRegex.test(k)) {
-            fragKeysToDelete.push(k);
-            changed = true;
-          }
-        }
-        if (changed) {
-          fragKeysToDelete.forEach(k => fragParams.delete(k));
-          const newFrag = fragParams.toString();
-          parsed.hash = newFrag ? '#' + newFrag : '';
-        }
+        parsed = new URL('http:' + trimmed);
+      } catch (_) {}
+    } else {
+      trimmed = trimmed.replace(/^[^/?#\s]+(?::[^/?#\s]*)?@/, '');
+      try {
+        parsed = new URL(trimmed, 'http://localhost');
+        isRelative = true;
       } catch (_) {}
     }
-    if (parsed.pathname && /;[^/?#]+/i.test(parsed.pathname)) {
-      parsed.pathname = parsed.pathname.replace(/;([a-zA-Z0-9_-]+)=[^;/?#]*/g, (match, paramName) => {
-        return sensitiveRegex.test(paramName) ? '' : match;
-      });
-    }
-    let res = parsed.toString();
-    if (!trimmed.endsWith('/') && res.endsWith('/') && parsed.pathname === '/' && !parsed.search && !parsed.hash) {
-      res = res.slice(0, -1);
-    }
-    return res;
-  } catch (_) {
+  } else {
+    try {
+      parsed = new URL(trimmed);
+    } catch (_) {}
+  }
+  if (!parsed) {
     return trimmed
-      .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#]*@/i, m => m.replace(/\/\/.*@/, '//'))
+      .replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:)?\/\/[^/?#]*@/i, m => m.replace(/\/\/.*@/, '//'))
+      .replace(/^[^/?#\s]+(?::[^/?#\s]*)?@/, '')
       .replace(/([?&])(?:key|access_key|api_key|auth(?:_token)?|password|secret|token|sig|signature|jwt|sid|session_id)=[^&#]*/gi, '$1')
       .replace(/[?&]+$/, '');
   }
+  parsed.username = '';
+  parsed.password = '';
+  const keysToDelete = [];
+  for (const key of parsed.searchParams.keys()) {
+    if (sensitiveRegex.test(key)) {
+      keysToDelete.push(key);
+    }
+  }
+  keysToDelete.forEach(k => parsed.searchParams.delete(k));
+  if (parsed.hash) {
+    const fragment = parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash;
+    try {
+      const fragParams = new URLSearchParams(fragment);
+      let changed = false;
+      const fragKeysToDelete = [];
+      for (const k of fragParams.keys()) {
+        if (sensitiveRegex.test(k)) {
+          fragKeysToDelete.push(k);
+          changed = true;
+        }
+      }
+      if (changed) {
+        fragKeysToDelete.forEach(k => fragParams.delete(k));
+        const newFrag = fragParams.toString();
+        parsed.hash = newFrag ? '#' + newFrag : '';
+      }
+    } catch (_) {}
+  }
+  if (parsed.pathname && /;[^/?#]+/i.test(parsed.pathname)) {
+    parsed.pathname = parsed.pathname.replace(/;([a-zA-Z0-9_-]+)=[^;/?#]*/g, (match, paramName) => {
+      return sensitiveRegex.test(paramName) ? '' : match;
+    });
+  }
+  if (isProtocolRelative) {
+    return '//' + parsed.host + parsed.pathname + parsed.search + parsed.hash;
+  }
+  if (isRelative) {
+    let out = parsed.pathname + parsed.search + parsed.hash;
+    if (!trimmed.startsWith('/') && out.startsWith('/')) {
+      out = out.slice(1);
+    }
+    return out;
+  }
+  let res = parsed.toString();
+  if (!trimmed.endsWith('/') && res.endsWith('/') && parsed.pathname === '/' && !parsed.search && !parsed.hash) {
+    res = res.slice(0, -1);
+  }
+  return res;
 }
 
 function sanitizeUrlListForExport(raw) {
@@ -4386,6 +4416,8 @@ const CONFIG_SECRET_KEYS = [
   'auth_pass', 'tls_client_cert_password', 'bearer', 'headers', 'cookies',
   'low_priv_cookies', 'mfa_totp_uri', 'mfa_totp_secret', 'mfa_totp_qr',
   'mfa_email_imap_password', 'password', 'passwd', 'secret', 'token',
+  'api_key', 'apikey', 'access_token', 'private_key', 'client_secret',
+  'credential', 'credentials',
 ];
 
 // 資格情報らしい URL パラメータ名。汎用語（auth/session/otp/ticket）は誤除外を抑えるため
@@ -4442,6 +4474,103 @@ function safeUrlListForStorage(value) {
     .filter(v => v !== undefined && v !== '').join('\n');
 }
 
+function safeExcludeUrl(raw) {
+  if (typeof raw !== 'string') return raw;
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  if (typeof sanitizeUrlForExport === 'function') {
+    return sanitizeUrlForExport(trimmed);
+  }
+  const sensitiveRegex = (typeof CONFIG_SENSITIVE_URL_KEY !== 'undefined')
+    ? CONFIG_SENSITIVE_URL_KEY
+    : _SENSITIVE_URL_KEY_FALLBACK;
+  let parsed;
+  let isRelative = false;
+  let isProtocolRelative = false;
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+    if (trimmed.startsWith('//')) {
+      isProtocolRelative = true;
+      try {
+        parsed = new URL('http:' + trimmed);
+      } catch (_) {}
+    } else {
+      const cleanNoScheme = trimmed.replace(/^[^/?#\s]+(?::[^/?#\s]*)?@/, '');
+      try {
+        parsed = new URL(cleanNoScheme, 'http://localhost');
+        isRelative = true;
+      } catch (_) {}
+    }
+  } else {
+    try {
+      parsed = new URL(trimmed);
+    } catch (_) {}
+  }
+  if (!parsed) {
+    return trimmed
+      .replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:)?\/\/[^/?#]*@/i, m => m.replace(/\/\/.*@/, '//'))
+      .replace(/^[^/?#\s]+(?::[^/?#\s]*)?@/, '')
+      .replace(/([?&])(?:key|access_key|api_key|auth(?:_token)?|password|secret|token|sig|signature|jwt|sid|session_id)=[^&#]*/gi, '$1')
+      .replace(/[?&]+$/, '');
+  }
+  parsed.username = '';
+  parsed.password = '';
+  const keysToDelete = [];
+  for (const key of parsed.searchParams.keys()) {
+    if (sensitiveRegex.test(key)) {
+      keysToDelete.push(key);
+    }
+  }
+  keysToDelete.forEach(k => parsed.searchParams.delete(k));
+  if (parsed.hash) {
+    const fragment = parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash;
+    try {
+      const fragParams = new URLSearchParams(fragment);
+      let changed = false;
+      const fragKeysToDelete = [];
+      for (const k of fragParams.keys()) {
+        if (sensitiveRegex.test(k)) {
+          fragKeysToDelete.push(k);
+          changed = true;
+        }
+      }
+      if (changed) {
+        fragKeysToDelete.forEach(k => fragParams.delete(k));
+        const newFrag = fragParams.toString();
+        parsed.hash = newFrag ? '#' + newFrag : '';
+      }
+    } catch (_) {}
+  }
+  if (parsed.pathname && /;[^/?#]+/i.test(parsed.pathname)) {
+    parsed.pathname = parsed.pathname.replace(/;([a-zA-Z0-9_-]+)=[^;/?#]*/g, (match, paramName) => {
+      return sensitiveRegex.test(paramName) ? '' : match;
+    });
+  }
+  if (isProtocolRelative) {
+    return '//' + parsed.host + parsed.pathname + parsed.search + parsed.hash;
+  }
+  if (isRelative) {
+    let out = parsed.pathname + parsed.search + parsed.hash;
+    if (!trimmed.startsWith('/') && out.startsWith('/')) {
+      out = out.slice(1);
+    }
+    return out;
+  }
+  let res = parsed.toString();
+  if (!trimmed.endsWith('/') && res.endsWith('/') && parsed.pathname === '/' && !parsed.search && !parsed.hash) {
+    res = res.slice(0, -1);
+  }
+  return res;
+}
+
+function safeExcludeUrlsForStorage(value) {
+  if (value == null) return '';
+  const rawList = Array.isArray(value) ? value : String(value).split('\n');
+  return rawList
+    .map(safeExcludeUrl)
+    .filter(u => u !== undefined && u !== '')
+    .join('\n');
+}
+
 function saveConfigToStorage() {
   try {
     // まず全フィールドを集めてから allowlist で絞り込む。秘匿値を含む spread
@@ -4487,7 +4616,7 @@ function saveConfigToStorage() {
       ...mfaTotpFields(),
       ...timeWindowFields(),
       exclude_fields: document.getElementById('cfgExcludeFields').value,
-      exclude_urls: document.getElementById('cfgExcludeUrls').value,
+      exclude_urls: safeExcludeUrlsForStorage(document.getElementById('cfgExcludeUrls').value),
       target_urls: safeUrlListForStorage(document.getElementById('cfgTargetUrls').value),
       access_urls: safeUrlListForStorage(document.getElementById('cfgAccessUrls').value),
       ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value,
@@ -4533,8 +4662,8 @@ function loadConfigFromStorage() {
     if (cfg.gemini_model) document.getElementById('cfgGeminiModel').value = cfg.gemini_model;
     if (cfg.claude_model) document.getElementById('cfgClaudeModel').value = cfg.claude_model;
     if (cfg.openai_base_url != null) document.getElementById('cfgLlmBaseUrl').value = cfg.openai_base_url;
-    if (cfg.llm) updateLlmModelField();
-    if (cfg.role_models) restoreRoleModels(cfg.role_models);
+    if (cfg.llm && typeof updateLlmModelField === 'function') updateLlmModelField();
+    if (cfg.role_models && typeof restoreRoleModels === 'function') restoreRoleModels(cfg.role_models);
     if (cfg.auth_user) document.getElementById('cfgAuthUser').value = cfg.auth_user;
     if (cfg.auth_pass) document.getElementById('cfgAuthPass').value = cfg.auth_pass;
     if (cfg.login_url) document.getElementById('cfgLoginUrl').value = cfg.login_url;
@@ -4550,7 +4679,7 @@ function loadConfigFromStorage() {
     applyTimeWindows(cfg);
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
-    if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
+    if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = safeExcludeUrlsForStorage(cfg.exclude_urls);
     if (restoreTarget && cfg.target_urls) document.getElementById('cfgTargetUrls').value = safeUrlListForStorage(cfg.target_urls);
     if (restoreTarget && cfg.access_urls) document.getElementById('cfgAccessUrls').value = safeUrlListForStorage(cfg.access_urls);
     if (cfg.ctf_flag_pattern) document.getElementById('cfgCtfFlagPattern').value = cfg.ctf_flag_pattern;
@@ -4573,7 +4702,9 @@ function loadConfigFromStorage() {
     }
     // 後方互換: 旧バージョンが平文で残した秘匿値があれば破棄し、allowlist だけで
     // 上書き保存する（フィールドへは復元済みなので当セッションの利用は保てる）。
-    if (CONFIG_SECRET_KEYS.some(k => k in cfg)) saveConfigToStorage();
+    const excludeNeedsSanitizing = cfg.exclude_urls &&
+      safeExcludeUrlsForStorage(cfg.exclude_urls) !== (Array.isArray(cfg.exclude_urls) ? cfg.exclude_urls.join('\n') : cfg.exclude_urls);
+    if (CONFIG_SECRET_KEYS.some(k => k in cfg) || excludeNeedsSanitizing) saveConfigToStorage();
   } catch(e) {}
 }
 
@@ -4607,8 +4738,8 @@ async function loadDefaultConfigFromServer() {
     if (cfg.gemini_model) document.getElementById('cfgGeminiModel').value = cfg.gemini_model;
     if (cfg.claude_model) document.getElementById('cfgClaudeModel').value = cfg.claude_model;
     if (cfg.openai_base_url != null) document.getElementById('cfgLlmBaseUrl').value = cfg.openai_base_url;
-    if (cfg.llm) updateLlmModelField();
-    if (cfg.role_models) restoreRoleModels(cfg.role_models);
+    if (cfg.llm && typeof updateLlmModelField === 'function') updateLlmModelField();
+    if (cfg.role_models && typeof restoreRoleModels === 'function') restoreRoleModels(cfg.role_models);
     if (cfg.auth_user) document.getElementById('cfgAuthUser').value = cfg.auth_user;
     if (cfg.auth_pass) document.getElementById('cfgAuthPass').value = cfg.auth_pass;
     if (cfg.login_url) document.getElementById('cfgLoginUrl').value = cfg.login_url;

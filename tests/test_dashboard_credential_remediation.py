@@ -72,6 +72,17 @@ const fragUrl = 'https://example.com/app#token=SECRET123&tab=overview';
 const cleanFrag = sanitizeUrlForExport(fragUrl);
 if (cleanFrag.includes('SECRET123')) throw new Error('Fragment secret leaked: ' + cleanFrag);
 if (!cleanFrag.includes('tab=overview')) throw new Error('Safe fragment param dropped: ' + cleanFrag);
+
+// 4. Relative paths and exclude pattern sanitization
+const relSecret = '/admin/settings?token=SECRET123&keep=ok';
+const cleanRel = sanitizeUrlForExport(relSecret);
+if (cleanRel.includes('SECRET123')) throw new Error('Relative query secret leaked: ' + cleanRel);
+if (cleanRel !== '/admin/settings?keep=ok') throw new Error('Unexpected sanitized relative url: ' + cleanRel);
+
+const wildcardUrl = 'https://admin:SECRET123@example.test/dontScan/*';
+const cleanWildcard = sanitizeUrlForExport(wildcardUrl);
+if (cleanWildcard.includes('SECRET123')) throw new Error('Wildcard secret leaked: ' + cleanWildcard);
+if (cleanWildcard !== 'https://example.test/dontScan/*') throw new Error('Unexpected sanitized wildcard url: ' + cleanWildcard);
 """
     result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
@@ -141,6 +152,7 @@ const fullRawConfig = {{
   ],
   target_urls: `https://user:${{SENTINELS.URL_USERINFO}}@example.test/target?key=${{SENTINELS.URL_QUERY}}`,
   access_urls: `https://example.test/api?token=${{SENTINELS.URL_QUERY}}`,
+  exclude_urls: `https://user:${{SENTINELS.URL_USERINFO}}@example.test/exclude?key=${{SENTINELS.URL_QUERY}}&keep=1`,
   depth: 2,
   timeout: 30,
   checks: ['sqli', 'xss'],
@@ -234,6 +246,9 @@ if (exported.flows[0].steps[1].value !== '') {{
 }}
 if (exported.url !== 'https://example.test/portal') {{
   throw new Error('URL was not properly sanitized: ' + exported.url);
+}}
+if (exported.exclude_urls !== 'https://example.test/exclude?keep=1') {{
+  throw new Error('Exclude URL was not properly sanitized: ' + exported.exclude_urls);
 }}
 """
     result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=False)
@@ -340,14 +355,24 @@ def test_storage_allowlist_and_legacy_cleanup():
 
     script = f"""
 const fields = new Map();
+const elements = new Map();
 const document = {{
-  getElementById: id => ({{
-    value: fields.get(id) || '',
-  }}),
+  getElementById: id => {{
+    if (!elements.has(id)) {{
+      elements.set(id, {{
+        get value() {{ return fields.get(id) || ''; }},
+        set value(v) {{ fields.set(id, v); }},
+      }});
+    }}
+    return elements.get(id);
+  }},
   querySelectorAll: () => [],
 }};
 const cfgToggles = {{}};
 const collectRoleModels = () => ({{}});
+const restoreRoleModels = () => {{}};
+const restoreFlows = () => {{}};
+const updateLlmModelField = () => {{}};
 const mfaImapFields = () => ({{}});
 const mfaTotpFields = () => ({{}});
 const timeWindowFields = () => ({{}});
@@ -374,6 +399,7 @@ store['wscan_config'] = JSON.stringify({{
   low_priv_cookies: 'SENTINEL_OLD_LOW_COOKIE',
   tls_client_cert_password: 'SENTINEL_OLD_TLS_PASS',
   password: 'SENTINEL_OLD_RAW_PASS',
+  exclude_urls: 'https://user:SENTINEL_OLD_EXCL_USERINFO@example.test/dontScan?api_key=SENTINEL_OLD_EXCL_QUERY&keep=1\\n/private/logout?token=SENTINEL_OLD_EXCL_TOKEN&mode=all',
 }});
 
 loadConfigFromStorage();
@@ -389,6 +415,9 @@ const cleanedStr = JSON.stringify(cleaned);
 if (cleanedStr.includes('SENTINEL_OLD')) {{
   throw new Error('Sentinel remained in overwritten storage: ' + cleanedStr);
 }}
+if (!cleaned.exclude_urls || !cleaned.exclude_urls.includes('https://example.test/dontScan?keep=1') || !cleaned.exclude_urls.includes('/private/logout?mode=all')) {{
+  throw new Error('Safe exclude URL portions were lost during cleanup: ' + cleaned.exclude_urls);
+}}
 
 // 2. Verify saveConfigToStorage excludes credentials even if field has value
 fields.set('cfgInputUrl', 'https://example.test');
@@ -396,11 +425,26 @@ fields.set('cfgAuthPass', 'SENTINEL_INPUT_PASS');
 fields.set('cfgCookies', 'SENTINEL_INPUT_COOKIE');
 fields.set('cfgLowPrivCookies', 'SENTINEL_INPUT_LOW_COOKIE');
 fields.set('cfgTlsClientCertPassword', 'SENTINEL_INPUT_TLS_PASS');
+fields.set('cfgExcludeUrls', 'https://user:SENTINEL_INPUT_EXCL_USERINFO@example.test/admin?token=SENTINEL_INPUT_EXCL_QUERY&page=1\\n/private/delete?jwt=SENTINEL_INPUT_EXCL_JWT&confirm=true');
 saveConfigToStorage();
 
 const reSavedStr = store['wscan_config'];
 if (reSavedStr.includes('SENTINEL_INPUT')) {{
   throw new Error('Sentinel entered storage via saveConfigToStorage: ' + reSavedStr);
+}}
+const reSavedCfg = JSON.parse(reSavedStr);
+if (!reSavedCfg.exclude_urls || !reSavedCfg.exclude_urls.includes('https://example.test/admin?page=1') || !reSavedCfg.exclude_urls.includes('/private/delete?confirm=true')) {{
+  throw new Error('Exclude URLs safe portions were lost during save: ' + reSavedCfg.exclude_urls);
+}}
+
+// 3. Verify restoration from storage populates form with sanitized exclude_urls
+fields.clear();
+loadConfigFromStorage();
+const restoredExclude = document.getElementById('cfgExcludeUrls').value;
+if (restoredExclude.includes('SENTINEL') ||
+    !restoredExclude.includes('https://example.test/admin?page=1') ||
+    !restoredExclude.includes('/private/delete?confirm=true')) {{
+  throw new Error('Restored exclude_urls invalid: ' + restoredExclude);
 }}
 """
     result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=False)
