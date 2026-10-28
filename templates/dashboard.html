@@ -3325,8 +3325,11 @@ const CHECK_GROUPS = new Proxy({}, {
 });
 
 function renderCheckGroups(groupedScanners, mode = currentScanMode) {
-  const selected = new Set(getSelectedChecks());
-  const hasExistingSelection = selected.size > 0;
+  const existingItems = document.querySelectorAll('.cfg-check-item');
+  const hasExistingDom = existingItems.length > 0;
+  const selected = new Set(
+    [...document.querySelectorAll('.cfg-check-item.checked')].map(el => el.dataset.check)
+  );
   const banner = document.getElementById('checksUnavailableBanner');
   const reader = (typeof VulixCapabilityReader !== 'undefined') ? VulixCapabilityReader.defaultReader : null;
 
@@ -3340,6 +3343,12 @@ function renderCheckGroups(groupedScanners, mode = currentScanMode) {
     if (banner) banner.style.display = 'none';
   }
 
+  const knownGroups = ['injection', 'xss', 'access', 'header', 'proto', 'file'];
+  knownGroups.forEach(g => {
+    const el = document.getElementById('checkGroup-' + g);
+    if (el) el.innerHTML = '';
+  });
+
   const groups = groupedScanners || (reader && reader.isReady() ? reader.getGroupedScanners(mode) : {});
   Object.entries(groups).forEach(([group, checks]) => {
     const el = document.getElementById('checkGroup-' + group);
@@ -3347,7 +3356,7 @@ function renderCheckGroups(groupedScanners, mode = currentScanMode) {
     el.innerHTML = '';
     checks.forEach(c => {
       const div = document.createElement('div');
-      const isChecked = hasExistingSelection ? selected.has(c.id) : Boolean(c.def);
+      const isChecked = hasExistingDom ? selected.has(c.id) : Boolean(c.def);
       div.className = 'cfg-check-item' + (isChecked ? ' checked' : '');
       div.dataset.check = c.id;
       div.innerHTML = escapeHtml(c.label || c.name || c.id);
@@ -3396,10 +3405,12 @@ function setScanMode(mode) {
   }
 }
 
-function getSelectedChecks() {
-  return [...document.querySelectorAll('.cfg-check-item.checked')]
-    .filter(el => !el.classList.contains('gated'))
-    .map(el => el.dataset.check);
+function getSelectedChecks(filterGated = false) {
+  let items = [...document.querySelectorAll('.cfg-check-item.checked')];
+  if (filterGated) {
+    items = items.filter(el => !el.classList.contains('gated'));
+  }
+  return items.map(el => el.dataset.check);
 }
 
 function selectAllChecks(on) {
@@ -4059,6 +4070,18 @@ function openManualCrawlAfterScan() {
 
 function submitScanConfig() {
   if (!validateTotpReadiness()) return;
+  const reader = (typeof VulixCapabilityReader !== 'undefined') ? VulixCapabilityReader.defaultReader : null;
+  if (!reader || !reader.isReady()) {
+    const reason = reader ? (reader.errorMessage || (reader.isLoading() ? '機能マニフェストを読み込み中です' : '機能マニフェストが利用できません (unavailable)')) : '機能マニフェストリーダーが初期化されていません';
+    const banner = document.getElementById('checksUnavailableBanner');
+    if (banner) {
+      banner.style.display = 'block';
+      const reasonEl = document.getElementById('checksUnavailableReason');
+      if (reasonEl) reasonEl.textContent = reason;
+    }
+    alert('機能マニフェストが利用できないため、スキャンを開始できません: ' + reason);
+    return;
+  }
   const url = document.getElementById('cfgInputUrl').value.trim();
   if (!url || !url.startsWith('http')) {
     document.getElementById('cfgInputUrl').focus();
@@ -4069,6 +4092,10 @@ function submitScanConfig() {
   const excludeUrlsRaw = document.getElementById('cfgExcludeUrls').value.trim();
   const targetUrlsRaw = document.getElementById('cfgTargetUrls').value.trim();
   const accessUrlsRaw = document.getElementById('cfgAccessUrls').value.trim();
+  const selectedChecks = getSelectedChecks();
+  const applicableChecks = selectedChecks.filter(id =>
+    reader.isScannerApplicable(id, 'normal', { allow_state_changing: cfgToggles.allow_state_changing_probes })
+  );
   const config = {
     url,
     depth:       parseInt(document.getElementById('cfgDepth').value) || 2,
@@ -4100,7 +4127,7 @@ function submitScanConfig() {
     enable_llm_web_browsing: cfgToggles.enable_llm_web_browsing,
     ctf_mode:    cfgToggles.ctf_mode,
     ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value.trim(),
-    checks:      getSelectedChecks(),
+    checks:      applicableChecks,
     llm:         document.getElementById('cfgLlm').value,
     ollama_model:  document.getElementById('cfgOllamaModel').value.trim() || 'llama3',
     openai_model:  document.getElementById('cfgOpenaiModel').value.trim() || 'gpt-4o-mini',
@@ -4341,11 +4368,8 @@ function applyImportedConfig(cfg) {
       }
     });
   }
-  if (Array.isArray(cfg.checks) && cfg.checks.length) {
-    document.querySelectorAll('.cfg-check-item').forEach(el => {
-      if (cfg.checks.includes(el.dataset.check)) el.classList.add('checked');
-      else el.classList.remove('checked');
-    });
+  if (Array.isArray(cfg.checks)) {
+    setSelectedChecks(cfg.checks);
   }
   if (Array.isArray(cfg.flows) && cfg.flows.length) {
     const list = document.getElementById('flowsList');
@@ -4737,11 +4761,8 @@ function loadConfigFromStorage() {
       if (el) el.className = 'cfg-toggle ' + (cfgToggles[k] ? 'on' : 'off');
     });
     // Restore checks
-    if (cfg.checks && cfg.checks.length) {
-      document.querySelectorAll('.cfg-check-item').forEach(el => {
-        if (cfg.checks.includes(el.dataset.check)) el.classList.add('checked');
-        else el.classList.remove('checked');
-      });
+    if (Array.isArray(cfg.checks)) {
+      setSelectedChecks(cfg.checks);
     }
     // 後方互換: 旧バージョンが平文で残した秘匿値があれば破棄し、allowlist だけで
     // 上書き保存する（フィールドへは復元済みなので当セッションの利用は保てる）。
@@ -4799,7 +4820,7 @@ async function loadDefaultConfigFromServer() {
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
-    if (cfg.checks && cfg.checks.length) setSelectedChecks(cfg.checks);
+    if (Array.isArray(cfg.checks)) setSelectedChecks(cfg.checks);
     if (cfg.toggles) {
       Object.entries(cfg.toggles).forEach(([key, val]) => {
         if (key in cfgToggles) setCfgToggle(key, val);
@@ -6604,6 +6625,18 @@ function applyAutoConfig(cfg) {
 // ─── ハイブリッドスキャン送信 ────────────────────────────────────
 function submitHybridScan() {
   if (!validateTotpReadiness()) return;
+  const reader = (typeof VulixCapabilityReader !== 'undefined') ? VulixCapabilityReader.defaultReader : null;
+  if (!reader || !reader.isReady()) {
+    const reason = reader ? (reader.errorMessage || (reader.isLoading() ? '機能マニフェストを読み込み中です' : '機能マニフェストが利用できません (unavailable)')) : '機能マニフェストリーダーが初期化されていません';
+    const banner = document.getElementById('checksUnavailableBanner');
+    if (banner) {
+      banner.style.display = 'block';
+      const reasonEl = document.getElementById('checksUnavailableReason');
+      if (reasonEl) reasonEl.textContent = reason;
+    }
+    alert('機能マニフェストが利用できないため、ハイブリッドスキャンを開始できません: ' + reason);
+    return;
+  }
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
     alert('WebSocket が接続されていません。ページをリロードしてください。');
     return;
@@ -6614,7 +6647,11 @@ function submitHybridScan() {
     document.getElementById('cfgInputUrl')?.focus();
     return;
   }
-  const checks = getSelectedChecks();
+  const selectedChecks = getSelectedChecks();
+  const applicableChecks = selectedChecks.filter(id =>
+    reader.isScannerApplicable(id, 'hybrid', { allow_state_changing: cfgToggles.allow_state_changing_probes })
+  );
+  const checks = applicableChecks;
   const config = {
     url,
     hybrid_mode:       true,
