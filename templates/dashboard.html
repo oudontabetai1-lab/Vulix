@@ -2847,6 +2847,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
   <img id="lbImg" src="" alt="">
 </div>
 
+<script src="/ui/evidence-viewer-registry.js"></script>
 <script src="/ui/api-client.js"></script>
 <script src="/ui/capability-reader.js"></script>
 <script src="/ui/app-shell.js"></script>
@@ -2909,6 +2910,11 @@ const state = {
   // finding_update（検証フェーズでの state 変化）で該当カードの verification badge を
   // 差し替えるため、安定キー→カード要素を保持する。
   findingCards: new Map(),
+};
+const findingCardKeys = new WeakMap();
+const findingViewerHelpers = {
+  redactUrl: value => redactDisplayUrl(value),
+  redactText: value => maskKv(String(value), 0).replace(/\b(https?:\/\/)[^\s/?#@]+(?::[^\s/?#@]*)?@/gi, '$1[redacted]@'),
 };
 
 // スキャン開始時に呼ぶ: config に一意な nonce を刻み、受理確認までは nonsecret な descriptor を pending に置く。
@@ -5504,7 +5510,8 @@ function dispatchLegacyEvent(event) {
       else state.hypothesisCount++;
       state.findingCount++;
       updateFindingCounters();
-      addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${(data.evidence||'').substring(0,60)}`);
+      const safeEvidence = EvidenceViewerRegistry.cleanText(data.evidence || '', '', findingViewerHelpers);
+      addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${String(safeEvidence).substring(0,60)}`);
       if (data.url) state.urlFindingCounts[data.url] = (state.urlFindingCounts[data.url] || 0) + 1;
       if (data.url) markSiteMapVuln(data.url);
       // Mark the finding's URL as vuln in the URL list
@@ -6064,11 +6071,11 @@ function addFinding(data) {
   const verificationLabel = vb.label;
   const evidenceType = data.evidence_type || data.check_type || '';
   const details = data.evidence_details || {};
-  const detailRows = Object.entries(details).slice(0, 8).map(([k, v]) =>
-    `<div><span style="color:var(--accent)">${escapeHtml(k)}</span>: ${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</div>`
-  ).join('');
+  const viewerHelpers = findingViewerHelpers;
+  const evidenceViewer = EvidenceViewerRegistry.render(data, viewerHelpers);
+  const screenshotHtml = EvidenceViewerRegistry.screenshot(data.screenshot_b64, data.dialog_confirmed);
   const steps = (data.reproduction_steps || []).slice(0, 6).map((s, i) =>
-    `<div>${i + 1}. ${escapeHtml(s)}</div>`
+    `<div>${i + 1}. ${escapeHtml(EvidenceViewerRegistry.cleanText(s, '', viewerHelpers))}</div>`
   ).join('');
   const card = document.createElement('div');
   card.className = 'finding-card';
@@ -6087,24 +6094,8 @@ function addFinding(data) {
         border:1px solid rgba(248,113,113,0.4);">
       <span style="font-size:1.1rem;">🚨</span>
       <span>XSS CONFIRMED — JavaScript alert() was triggered</span>
-      <span style="margin-left:auto;font-weight:400;font-size:0.75rem;opacity:0.85;">${escapeHtml(data.dialog_message || '')}</span>
+      <span style="margin-left:auto;font-weight:400;font-size:0.75rem;opacity:0.85;">${escapeHtml(EvidenceViewerRegistry.cleanText(data.dialog_message || '', '', viewerHelpers))}</span>
     </div>`;
-  }
-
-  let ssHtml = '';
-  if (data.screenshot_b64) {
-    const border = data.dialog_confirmed
-      ? 'border:2px solid var(--critical);box-shadow:0 0 8px rgba(226,112,143,0.4);'
-      : '';
-    const dataSrc = `data:image/jpeg;base64,${data.screenshot_b64}`;
-    ssHtml = `
-      <div style="position:relative">
-        <button class="btn-show-shot" style="margin-top:6px;padding:4px 10px;font-size:0.75rem;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text-muted);cursor:pointer;"
-          onclick="var img=this.nextElementSibling;img.src=this.dataset.src;img.style.display='block';this.style.display='none';"
-          data-src="${dataSrc}">📷 Show screenshot</button>
-        <img class="fc-screenshot" style="${border}display:none" onclick="openLightbox(this.src)" alt="Screenshot" onload="this.style.display='block'">
-        ${data.dialog_confirmed ? '<div style="position:absolute;top:6px;left:6px;background:rgba(220,38,38,0.9);color:white;font-size:0.65rem;font-weight:800;padding:3px 8px;border-radius:4px;letter-spacing:0.05em;">ALERT FIRED</div>' : ''}
-      </div>`;
   }
 
   card.innerHTML = `
@@ -6118,15 +6109,15 @@ function addFinding(data) {
     </div>
     <div class="fc-meta-grid">
       <div class="fc-meta"><div class="fc-meta-label">Evidence Type</div><div class="fc-meta-value">${escapeHtml(evidenceType)}</div></div>
-      <div class="fc-meta"><div class="fc-meta-label">Signal</div><div class="fc-meta-value">${escapeHtml(details.execution_signal || details.matched_error || details.context || 'response analysis')}</div></div>
+      <div class="fc-meta"><div class="fc-meta-label">Signal</div><div class="fc-meta-value">${escapeHtml(EvidenceViewerRegistry.cleanText(details.execution_signal || details.matched_error || details.context || 'response analysis', '', viewerHelpers))}</div></div>
     </div>
-    <div class="fc-evidence">${escapeHtml(data.evidence || '')}</div>
-    <div class="fc-url">${escapeHtml(data.url || '')}</div>
-    <div class="fc-payload">${escapeHtml(data.payload || '')}</div>
-    ${(detailRows || steps) ? `<details class="fc-details"><summary>Evidence details / reproduction</summary><div class="fc-detail-list">${detailRows}${steps ? '<div style="height:4px"></div>' + steps : ''}</div></details>` : ''}
-    ${ssHtml}
+    <div class="fc-evidence">${escapeHtml(EvidenceViewerRegistry.cleanText(data.evidence || '', '', viewerHelpers))}</div>
+    <div class="fc-url">${escapeHtml(EvidenceViewerRegistry.cleanText(data.url || '', 'url', viewerHelpers))}</div>
+    <div class="fc-payload">${escapeHtml(EvidenceViewerRegistry.cleanText(data.payload || '', '', viewerHelpers))}</div>
+    ${(evidenceViewer || steps) ? `<details class="fc-details"><summary>Evidence details / reproduction</summary><div class="fc-detail-list">${evidenceViewer}${steps ? '<div style="height:4px"></div>' + steps : ''}</div></details>` : ''}
+    ${screenshotHtml}
   `;
-  card.dataset.findingKey = key;  // eviction 時に map から外すため保持
+  findingCardKeys.set(card, key);  // DOM 属性へ生 URL/payload を置かず、eviction 用キーを保持
   panel.insertBefore(card, panel.firstChild);
   state.findingCards.set(key, card);  // finding_update で badge を差し替えるため保持
 
@@ -6136,8 +6127,9 @@ function addFinding(data) {
     const removed = panel.lastChild;
     // map からも外す（強参照を残すとキャップ後もメモリが増え続け、finding_update が
     // detached な不可視カードを更新してしまう）。
-    if (removed && removed.dataset && state.findingCards.get(removed.dataset.findingKey) === removed) {
-      state.findingCards.delete(removed.dataset.findingKey);
+    const removedKey = removed && findingCardKeys.get(removed);
+    if (removedKey && state.findingCards.get(removedKey) === removed) {
+      state.findingCards.delete(removedKey);
     }
     panel.removeChild(removed);
   }
