@@ -12,6 +12,9 @@ Verifies via real Chromium browser:
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from tests.ui_harness import (
@@ -23,6 +26,9 @@ from tests.ui_harness import (
 from wscan.scanners import SCANNERS
 
 VIEWPORT_WIDTHS = [1440, 1280, 768]
+SCREENSHOTS_DEST = (
+    Path(os.environ["WSCAN_SCREENSHOT_DIR"]) if os.environ.get("WSCAN_SCREENSHOT_DIR") else None
+)
 
 
 @pytest.mark.parametrize("width", VIEWPORT_WIDTHS)
@@ -106,7 +112,9 @@ def test_capability_reader_browser_normal_and_agent_gating(ui_harness: UIHarness
         ui_harness.assert_no_errors(page)
 
         # 6. Capture screenshot
-        screenshot_path, w, h = ui_harness.capture_screenshot(page, "checks_capability_normal", width)
+        screenshot_path, w, h = ui_harness.capture_screenshot(
+            page, "checks_capability_normal", width, dest_dir=SCREENSHOTS_DEST
+        )
         assert screenshot_path.is_file()
         assert w == width
     finally:
@@ -151,7 +159,9 @@ def test_capability_reader_browser_unavailable_banner(ui_harness: UIHarness):
         # No uncaught console errors
         ui_harness.assert_no_errors(page)
 
-        screenshot_path, w, h = ui_harness.capture_screenshot(page, "checks_capability_unavailable", 1280)
+        screenshot_path, w, h = ui_harness.capture_screenshot(
+            page, "checks_capability_unavailable", 1280, dest_dir=SCREENSHOTS_DEST
+        )
         assert screenshot_path.is_file()
     finally:
         page.close()
