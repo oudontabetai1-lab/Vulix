@@ -2841,6 +2841,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
   <img id="lbImg" src="" alt="">
 </div>
 
+<script src="/ui/app-shell.js"></script>
 <script>
 // ─── State ─────────────────────────────────────────────────────
 const state = {
@@ -6821,7 +6822,19 @@ let currentHistoryData = [];
 let historySearchTerm = '';
 let historyStatusFilter = 'all';
 
+// Initialize nonvisual navigation registry & legacy adapter via AppShell
+const _appShellInstance = (function () {
+  if (typeof VulixAppShell !== 'undefined' && VulixAppShell.setupAppShell) {
+    return VulixAppShell.setupAppShell({ global: window });
+  }
+  return null;
+})();
+
 function switchMainView(viewName) {
+  if (_appShellInstance && typeof _appShellInstance.switchMainView === 'function') {
+    return _appShellInstance.switchMainView(viewName);
+  }
+
   const liveEl = document.getElementById('viewLiveMonitor');
   const histEl = document.getElementById('viewScanHistory');
   const auditEl = document.getElementById('viewAuditLog');
