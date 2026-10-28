@@ -432,6 +432,11 @@
       mount: function () {
         adapter.render('history', targetGlobal);
       },
+      unmount: function () {
+        if (typeof targetGlobal.cancelScanHistory === 'function') {
+          targetGlobal.cancelScanHistory();
+        }
+      },
     });
 
     registry.register({

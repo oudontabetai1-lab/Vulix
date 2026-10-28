@@ -116,6 +116,11 @@ def test_ui_assets_are_scoped_and_protected():
     assert response_comp.status_code == 200
     assert "text/css" in response_comp.headers["content-type"]
 
+    # api-client.js
+    response_api = client.get("/ui/api-client.js")
+    assert response_api.status_code == 200
+    assert any(m in response_api.headers["content-type"] for m in ["javascript", "text/javascript"])
+
     # missing and traversal
     assert client.get("/ui/missing.css").status_code == 404
     assert client.get("/ui/%2e%2e/dashboard.html").status_code in {403, 404}
@@ -125,11 +130,13 @@ def test_ui_assets_are_scoped_and_protected():
     headers = {"accept": "text/css"}
     asset = protected.get("/ui/tokens.css", headers=headers)
     asset_comp = protected.get("/ui/components.css", headers=headers)
+    asset_api = protected.get("/ui/api-client.js")
     existing = protected.get("/reports/missing/file.css", headers=headers)
-    assert asset.status_code == asset_comp.status_code == existing.status_code == 401
+    assert asset.status_code == asset_comp.status_code == asset_api.status_code == existing.status_code == 401
     protected.cookies.set(SESSION_COOKIE, _session_value(token))
     assert protected.get("/ui/tokens.css").status_code == 200
     assert protected.get("/ui/components.css").status_code == 200
+    assert protected.get("/ui/api-client.js").status_code == 200
 
 
 def test_logo_and_favicon_asset_delivery_and_auth_protection():
