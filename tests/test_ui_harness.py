@@ -472,3 +472,60 @@ def test_terminate_serve_process_unconfirmed_logs_warning(caplog):
     # Pipes should still be closed cleanly
     mock_proc.stdout.close.assert_called_once()
     mock_proc.stderr.close.assert_called_once()
+
+
+def test_ui_harness_cleanup_retains_reference_and_tempdir_on_unconfirmed_termination(caplog):
+    """Verify cleanup honors unconfirmed termination: retains server_proc, does not delete temp dir, and warns/raises."""
+    harness = UIHarness(seed_fixtures=False)
+
+    # Set up mock temp directory and unconfirmed mock server process
+    mock_temp = MagicMock(spec=tempfile.TemporaryDirectory)
+    mock_temp.name = "/mock/temp/dir"
+    harness._temp_dir = mock_temp
+    harness.output_dir = Path("/mock/temp/dir/output")
+
+    mock_proc = MagicMock(spec=subprocess.Popen)
+    mock_proc.pid = 88888
+    harness.server_proc = mock_proc
+
+    # Simulate _terminate_serve_process returning False (unconfirmed termination)
+    with patch.object(harness, "_terminate_serve_process", return_value=False) as mock_terminate:
+        with caplog.at_level(logging.WARNING):
+            with pytest.warns(RuntimeWarning, match="Teardown incomplete: serve process \\(pid=88888\\) termination could not be confirmed"):
+                with pytest.raises(RuntimeError, match="Teardown incomplete: serve process \\(pid=88888\\) termination could not be confirmed"):
+                    harness.cleanup()
+
+    mock_terminate.assert_called_once_with(mock_proc)
+    # server_proc reference must be RETAINED (not untracked)
+    assert harness.server_proc is mock_proc
+    # temp dir must NOT be cleaned up
+    mock_temp.cleanup.assert_not_called()
+    assert harness._temp_dir is mock_temp
+    assert harness.output_dir == Path("/mock/temp/dir/output")
+
+    # Verify warning log was recorded
+    assert any("Teardown incomplete: serve process (pid=88888)" in record.message for record in caplog.records)
+
+
+def test_ui_harness_cleanup_clears_reference_and_tempdir_on_confirmed_termination():
+    """Verify cleanup clears server_proc and temp dir when termination is confirmed."""
+    harness = UIHarness(seed_fixtures=False)
+
+    mock_temp = MagicMock(spec=tempfile.TemporaryDirectory)
+    mock_temp.name = "/mock/temp/dir"
+    harness._temp_dir = mock_temp
+    harness.output_dir = Path("/mock/temp/dir/output")
+
+    mock_proc = MagicMock(spec=subprocess.Popen)
+    mock_proc.pid = 77777
+    harness.server_proc = mock_proc
+
+    with patch.object(harness, "_terminate_serve_process", return_value=True) as mock_terminate:
+        harness.cleanup()
+
+    mock_terminate.assert_called_once_with(mock_proc)
+    assert harness.server_proc is None
+    mock_temp.cleanup.assert_called_once()
+    assert harness._temp_dir is None
+    assert harness.output_dir is None
+

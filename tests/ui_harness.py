@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Generator
 
@@ -654,22 +655,31 @@ class UIHarness:
             self._playwright = None
 
         # 4. Terminate serve process and verify termination before discarding reference
+        proc_terminated = True
         try:
             if self.server_proc:
-                self._terminate_serve_process(self.server_proc)
-        finally:
-            self.server_proc = None
+                proc_terminated = self._terminate_serve_process(self.server_proc)
+                if proc_terminated:
+                    self.server_proc = None
+        except Exception:
+            proc_terminated = False
 
-        # 5. Clean up temporary directory
+        # 5. Clean up temporary directory only if server process termination was confirmed
         try:
-            if self._temp_dir:
+            if proc_terminated and self._temp_dir:
                 try:
                     self._temp_dir.cleanup()
                 except Exception:
                     pass
+                self._temp_dir = None
+                self.output_dir = None
         finally:
-            self._temp_dir = None
-            self.output_dir = None
+            if not proc_terminated:
+                pid = getattr(self.server_proc, "pid", None)
+                msg = f"Teardown incomplete: serve process (pid={pid}) termination could not be confirmed"
+                logger.warning(msg)
+                warnings.warn(msg, RuntimeWarning, stacklevel=2)
+                raise RuntimeError(msg)
 
     def close(self) -> None:
         """Alias for cleanup to support manual lifecycle management."""
