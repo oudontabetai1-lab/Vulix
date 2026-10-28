@@ -92,6 +92,27 @@ class AuthEnabledTests(unittest.TestCase):
             # Server keeps the connection open; a ping/history frame is fine.
             ws.send_text("{}")
 
+    def test_login_assets_public_and_referer_spoof_rejected(self):
+        # Explicit login assets are public without auth
+        self.assertEqual(self.client.get("/ui/vulix-logo-mark.png").status_code, 200)
+        self.assertEqual(self.client.get("/ui/favicon.png").status_code, 200)
+        self.assertEqual(self.client.get("/ui/favicon.ico").status_code, 200)
+        self.assertEqual(self.client.get("/favicon.ico").status_code, 200)
+
+        # Other /ui/* assets are rejected without auth
+        self.assertEqual(self.client.get("/ui/vulix-logo.png").status_code, 401)
+        self.assertEqual(self.client.get("/ui/tokens.css").status_code, 401)
+
+        # Referer spoofing /login must not grant access to non-public /ui/* assets
+        self.assertEqual(
+            self.client.get("/ui/vulix-logo.png", headers={"referer": "http://testserver/login"}).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get("/ui/tokens.css", headers={"referer": "/login"}).status_code,
+            401,
+        )
+
 
 class ConcurrentScanRejectionTests(unittest.TestCase):
     """A second scan submitted while one is running must be rejected, not
