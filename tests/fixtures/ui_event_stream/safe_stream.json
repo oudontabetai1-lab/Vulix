@@ -1,0 +1,61 @@
+{
+  "description": "安全側ツイン: 同一 server/run の正順イベントのみ。全て受理され cursor が単調に進む。",
+  "state": {
+    "serverInstanceId": "srv-a",
+    "scanRunId": "run-1",
+    "scanId": "scan-1",
+    "lastEventSequence": 2,
+    "eventCount": 2
+  },
+  "events": [
+    {
+      "type": "ping"
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 3,
+      "data": {
+        "url": "http://t/a"
+      }
+    },
+    {
+      "type": "page_end",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 4,
+      "data": {
+        "url": "http://t/a"
+      }
+    },
+    {
+      "type": "finding",
+      "data": {
+        "url": "http://t/a"
+      }
+    },
+    {
+      "type": "scan_snapshot",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 5,
+      "data": {
+        "status": "scanning"
+      }
+    }
+  ],
+  "expected_actions": [
+    "ignore",
+    "process",
+    "process",
+    "process",
+    "apply_snapshot"
+  ],
+  "expected_final": {
+    "serverInstanceId": "srv-a",
+    "scanRunId": "run-1",
+    "lastEventSequence": 4,
+    "eventCount": 5
+  }
+}

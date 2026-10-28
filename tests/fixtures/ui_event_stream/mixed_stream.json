@@ -1,0 +1,97 @@
+{
+  "description": "混合ツイン: 敵性イベントと正当イベントを交互に流す。敵性は cursor を進めず、正当だけが cursor/eventCount を進める（偽因果・二重観測なし）。",
+  "state": {
+    "serverInstanceId": "srv-a",
+    "scanRunId": "run-1",
+    "scanId": "scan-1",
+    "lastEventSequence": 2,
+    "eventCount": 2
+  },
+  "events": [
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 2,
+      "data": {
+        "url": "http://dup"
+      }
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 3,
+      "data": {
+        "url": "http://t/a"
+      }
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-b",
+      "run_id": "run-1",
+      "sequence": 4,
+      "data": {
+        "url": "http://other"
+      }
+    },
+    {
+      "type": "page_end",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 4,
+      "data": {
+        "url": "http://t/a"
+      }
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-2",
+      "sequence": 5,
+      "data": {
+        "url": "http://stale-run"
+      }
+    },
+    {
+      "type": "finding",
+      "data": {
+        "url": "http://t/a"
+      }
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 9,
+      "data": {
+        "url": "http://gap"
+      }
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 5,
+      "data": {
+        "url": "http://t/b"
+      }
+    }
+  ],
+  "expected_actions": [
+    "drop",
+    "process",
+    "drop",
+    "process",
+    "drop",
+    "process",
+    "reconnect_on_gap",
+    "process"
+  ],
+  "expected_final": {
+    "serverInstanceId": "srv-a",
+    "scanRunId": "run-1",
+    "lastEventSequence": 5,
+    "eventCount": 5
+  }
+}
