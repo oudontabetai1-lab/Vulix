@@ -218,9 +218,18 @@ def test_html_brand_wiring_and_vulix_wordmark():
     assert '<h1>Vulix</h1>' in login_html
 
 
+def _png_dimensions(data: bytes) -> tuple[int, int]:
+    """PNG の IHDR チャンクから (width, height) をビッグエンディアン uint32 でパースする。"""
+    assert len(data) >= 24, "PNG data too short"
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", "Invalid PNG signature"
+    assert data[12:16] == b"IHDR", "Missing IHDR chunk"
+    import struct
+    width, height = struct.unpack(">II", data[16:24])
+    return width, height
+
+
 def test_vulix_logo_sha256_byte_parity_and_favicon_dimensions():
     import hashlib
-    from PIL import Image
 
     logo_path = ROOT / "templates" / "ui" / "vulix-logo.png"
     assert logo_path.is_file()
@@ -231,10 +240,12 @@ def test_vulix_logo_sha256_byte_parity_and_favicon_dimensions():
 
     fav_path = ROOT / "templates" / "ui" / "favicon.png"
     assert fav_path.is_file()
-    with Image.open(fav_path) as im:
-        assert im.size == (32, 32)
+    assert _png_dimensions(fav_path.read_bytes()) == (32, 32)
 
     mark_path = ROOT / "templates" / "ui" / "vulix-logo-mark.png"
     assert mark_path.is_file()
-    with Image.open(mark_path) as im:
-        assert im.size == (96, 96)
+    assert _png_dimensions(mark_path.read_bytes()) == (96, 96)
+
+    ico_path = ROOT / "templates" / "ui" / "favicon.ico"
+    assert ico_path.is_file()
+    assert ico_path.stat().st_size > 0
