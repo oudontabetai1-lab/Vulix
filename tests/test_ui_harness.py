@@ -9,15 +9,19 @@ Verifies:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import struct
+import subprocess
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tests.ui_harness import (
+    SAFE_EXTRA_ENV_KEYS,
+    SAFE_PASSTHROUGH_KEYS,
     build_sanitized_env,
     find_free_port,
     get_baseline_monitor_events,
@@ -25,6 +29,7 @@ from tests.ui_harness import (
     parse_png_dimensions,
     require_browser,
     reset_chromium_cache,
+    sanitize_path_output,
     seed_baseline_audit_log,
     seed_baseline_scans,
     seed_baseline_settings,
@@ -321,3 +326,149 @@ def test_ui_harness_cleanup_idempotent():
     harness.cleanup()
     harness.cleanup()
     harness.close()
+
+
+def test_build_sanitized_env_extra_env_allowlist():
+    """Verify extra_env enforces allowlist: permits deterministic test keys and blocks unallowed keys."""
+    extra = {
+        "PYTHONHASHSEED": "0",
+        "WSCAN_TEST_MODE": "1",
+        "CI": "true",
+        "GEMINI_API_KEY": "leaked-gemini-key",
+        "ANTHROPIC_API_KEY": "leaked-anthropic-key",
+        "WSCAN_AUTH_TOKEN": "secret-auth-token",
+        "CUSTOM_SECRET_KEY": "arbitrary-secret",
+    }
+    env = build_sanitized_env(extra_env=extra)
+
+    # Allowed deterministic test variables must be present
+    assert env.get("PYTHONHASHSEED") == "0"
+    assert env.get("WSCAN_TEST_MODE") == "1"
+    assert env.get("CI") == "true"
+
+    # Disallowed secrets and unexpected keys must NOT be present
+    assert "GEMINI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "WSCAN_AUTH_TOKEN" not in env
+    assert "CUSTOM_SECRET_KEY" not in env
+
+
+def test_sanitize_path_output(tmp_path: Path):
+    """Verify absolute paths are sanitized to safe relative forms or placeholders."""
+    dummy_repo = tmp_path / "mock_repo"
+    dummy_repo.mkdir()
+    dummy_temp = tmp_path / "mock_temp"
+    dummy_temp.mkdir()
+
+    raw_traceback = (
+        f'File "{dummy_repo}/main.py", line 45, in serve\n'
+        f'File "{dummy_temp}/output/evidence.json", line 1\n'
+        f'PermissionError: /Users/someuser/secret.key\n'
+        f'Error in /home/remoteuser/.config\n'
+    )
+
+    sanitized = sanitize_path_output(raw_traceback, repo_root=dummy_repo, temp_dir=dummy_temp)
+
+    assert str(dummy_repo) not in sanitized
+    assert str(dummy_temp) not in sanitized
+    assert "/Users/someuser" not in sanitized
+    assert "/home/remoteuser" not in sanitized
+
+    assert 'File "./main.py"' in sanitized
+    assert 'File "<isolated_cwd>/output/evidence.json"' in sanitized
+    assert "~/secret.key" in sanitized
+    assert "~/.config" in sanitized
+
+
+def test_ui_harness_server_startup_error_sanitization(tmp_path: Path, monkeypatch):
+    """Verify serve startup failure error message does not leak absolute paths."""
+    harness = UIHarness(seed_fixtures=False, repo_root=tmp_path)
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = 1
+    mock_proc.returncode = 1
+    mock_proc.communicate.return_value = (
+        b"",
+        f'Traceback (most recent call last):\n  File "{tmp_path}/main.py", line 10\n  File "/Users/testuser/lib.py"\nRuntimeError: Crash'.encode("utf-8"),
+    )
+    harness.server_proc = mock_proc
+
+    with pytest.raises(RuntimeError) as exc_info:
+        harness._wait_for_server(timeout=1.0)
+
+    err_msg = str(exc_info.value)
+    assert str(tmp_path) not in err_msg
+    assert "/Users/testuser" not in err_msg
+    assert 'File "./main.py"' in err_msg
+    assert 'File "~/lib.py"' in err_msg
+
+
+def test_terminate_serve_process_graceful():
+    """Verify graceful SIGTERM termination without kill escalation."""
+    harness = UIHarness()
+    mock_proc = MagicMock(spec=subprocess.Popen)
+    mock_proc.pid = 12345
+    mock_proc.stdout = MagicMock()
+    mock_proc.stderr = MagicMock()
+    mock_proc.stdin = None
+
+    # Process is running initially, then exits after terminate()
+    poll_states = [None, 0]
+    mock_proc.poll.side_effect = lambda: poll_states.pop(0) if poll_states else 0
+
+    success = harness._terminate_serve_process(mock_proc, timeout_terminate=0.1, timeout_kill=0.1)
+
+    assert success is True
+    mock_proc.terminate.assert_called_once()
+    mock_proc.kill.assert_not_called()
+    mock_proc.stdout.close.assert_called_once()
+    mock_proc.stderr.close.assert_called_once()
+
+
+def test_terminate_serve_process_escalation_to_kill():
+    """Verify escalation to SIGKILL if SIGTERM times out."""
+    harness = UIHarness()
+    mock_proc = MagicMock(spec=subprocess.Popen)
+    mock_proc.pid = 12346
+    mock_proc.stdout = MagicMock()
+    mock_proc.stderr = MagicMock()
+    mock_proc.stdin = None
+
+    def mock_wait(timeout=None):
+        if mock_proc.kill.called:
+            return 0
+        raise subprocess.TimeoutExpired(cmd="serve", timeout=timeout)
+
+    mock_proc.wait.side_effect = mock_wait
+    # poll() returns None until kill is called, then returns -9
+    mock_proc.poll.side_effect = lambda: -9 if mock_proc.kill.called else None
+
+    success = harness._terminate_serve_process(mock_proc, timeout_terminate=0.05, timeout_kill=0.05)
+
+    assert success is True
+    mock_proc.terminate.assert_called_once()
+    mock_proc.kill.assert_called_once()
+    mock_proc.stdout.close.assert_called_once()
+
+
+def test_terminate_serve_process_unconfirmed_logs_warning(caplog):
+    """Verify warning is logged if process termination cannot be confirmed."""
+    harness = UIHarness()
+    mock_proc = MagicMock(spec=subprocess.Popen)
+    mock_proc.pid = 99999
+    mock_proc.stdout = MagicMock()
+    mock_proc.stderr = MagicMock()
+    mock_proc.stdin = None
+
+    # Never exits: poll() always returns None
+    mock_proc.poll.return_value = None
+    mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd="serve", timeout=0.05)
+
+    with caplog.at_level(logging.WARNING):
+        success = harness._terminate_serve_process(mock_proc, timeout_terminate=0.05, timeout_kill=0.05)
+
+    assert success is False
+    assert any("pid=99999 could not be confirmed terminated" in record.message for record in caplog.records)
+    # Pipes should still be closed cleanly
+    mock_proc.stdout.close.assert_called_once()
+    mock_proc.stderr.close.assert_called_once()

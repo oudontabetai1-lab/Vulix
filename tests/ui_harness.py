@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -24,6 +26,8 @@ from pathlib import Path
 from typing import Any, Generator
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -119,6 +123,124 @@ def require_browser() -> None:
         pytest.skip(reason)
 
 
+SAFE_PASSTHROUGH_KEYS = frozenset({
+    # Execution & paths
+    "PATH",
+    # Windows system paths
+    "SYSTEMROOT",
+    "WINDIR",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERPROFILE",
+    "HOMEPATH",
+    "HOMEDRIVE",
+    "COMSPEC",
+    "PATHEXT",
+    # Temporary directories
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    # Locale & encoding
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    # Terminal
+    "TERM",
+    # Python / Conda environment markers
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "PYTHONHOME",
+    # TLS / CA certificates if configured
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+})
+
+SAFE_EXTRA_ENV_KEYS = frozenset(
+    SAFE_PASSTHROUGH_KEYS
+    | {
+        # Deterministic Python test runtime settings
+        "PYTHONPATH",
+        "PYTHONUNBUFFERED",
+        "PYTHONIOENCODING",
+        "PYTHONHASHSEED",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONDEBUG",
+        "PYTHONUTF8",
+        # Non-secret test flags & runner markers
+        "WSCAN_TEST_MODE",
+        "WSCAN_UI_TEST",
+        "WSCAN_LOG_LEVEL",
+        "WSCAN_ENV",
+        "TESTING",
+        "CI",
+        "PYTEST_CURRENT_TEST",
+    }
+)
+
+
+def sanitize_path_output(
+    text: str,
+    repo_root: Path | None = None,
+    temp_dir: Path | None = None,
+) -> str:
+    """Sanitize absolute filesystem paths from command output and error messages.
+
+    Replaces real absolute paths with safe relative representations or placeholders
+    to avoid leaking local environment filesystem paths (e.g., /Users/..., /home/...).
+    """
+    if not text:
+        return text
+
+    sanitized = text
+
+    # 1. Replace temporary working directory path
+    if temp_dir is not None:
+        t_str = str(temp_dir).rstrip("/\\")
+        if t_str:
+            sanitized = sanitized.replace(t_str, "<isolated_cwd>")
+            if t_str.startswith("/private/var"):
+                sanitized = sanitized.replace(t_str[len("/private"):], "<isolated_cwd>")
+
+    # 2. Replace repository root with relative "."
+    root = repo_root or REPO_ROOT
+    r_str = str(root).rstrip("/\\")
+    if r_str:
+        sanitized = sanitized.replace(r_str, ".")
+        if r_str.startswith("/private/var"):
+            sanitized = sanitized.replace(r_str[len("/private"):], ".")
+
+    # 3. Replace user home directory
+    try:
+        home_str = str(Path.home()).rstrip("/\\")
+        if home_str and home_str != "/":
+            sanitized = sanitized.replace(home_str, "~")
+            if home_str.startswith("/private/var"):
+                sanitized = sanitized.replace(home_str[len("/private"):], "~")
+    except Exception:
+        pass
+
+    # 4. Replace Python virtualenv / conda prefix
+    for prefix in (getattr(sys, "prefix", None), getattr(sys, "base_prefix", None)):
+        if prefix:
+            p_str = str(prefix).rstrip("/\\")
+            if len(p_str) > 1 and p_str != "/":
+                sanitized = sanitized.replace(p_str, "<python_env>")
+
+    # 5. Regex replacement for any remaining user home absolute paths
+    # macOS: /Users/<user>[/...] or /private/Users/...
+    sanitized = re.sub(r"/(?:private/)?Users/[^\s/\"':\\()]+", "~", sanitized)
+    # Linux: /home/<user>[/...]
+    sanitized = re.sub(r"/home/[^\s/\"':\\()]+", "~", sanitized)
+    # Windows: [A-Za-z]:\Users\<user>[\...]
+    sanitized = re.sub(r"[A-Za-z]:\\+Users\\[^\s/\\\"':()]+", "~", sanitized)
+
+    return sanitized
+
+
 def build_sanitized_env(
     repo_root: Path | None = None,
     extra_env: dict[str, str] | None = None,
@@ -126,46 +248,11 @@ def build_sanitized_env(
     """Create a minimal sanitized environment for isolated serve subprocess.
 
     Excludes parent credentials, API keys, tokens, and secrets while retaining
-    essential system and runtime variables.
+    essential system and runtime variables. Enforces allowlist on extra_env
+    so unexpected or sensitive keys cannot bypass isolation.
     """
-    safe_passthrough_keys = {
-        # Execution & paths
-        "PATH",
-        # Windows system paths
-        "SYSTEMROOT",
-        "WINDIR",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "USERPROFILE",
-        "HOMEPATH",
-        "HOMEDRIVE",
-        "COMSPEC",
-        "PATHEXT",
-        # Temporary directories
-        "TMPDIR",
-        "TEMP",
-        "TMP",
-        # Locale & encoding
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "TZ",
-        # Terminal
-        "TERM",
-        # Python / Conda environment markers
-        "VIRTUAL_ENV",
-        "CONDA_PREFIX",
-        "CONDA_DEFAULT_ENV",
-        "PYTHONHOME",
-        # TLS / CA certificates if configured
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-    }
-
     env: dict[str, str] = {}
-    for key in safe_passthrough_keys:
+    for key in SAFE_PASSTHROUGH_KEYS:
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
@@ -176,8 +263,11 @@ def build_sanitized_env(
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
 
+    # Enforce safe allowlist for extra_env
     if extra_env:
-        env.update(extra_env)
+        for key, val in extra_env.items():
+            if key in SAFE_EXTRA_ENV_KEYS and val is not None:
+                env[key] = str(val)
 
     return env
 
@@ -469,60 +559,117 @@ class UIHarness:
         self._contexts: list[Any] = []
         self._page_errors: dict[Any, list[str]] = {}
 
+    @staticmethod
+    def _close_process_pipes(proc: subprocess.Popen) -> None:
+        """Safely close standard I/O pipe descriptors of a process."""
+        for pipe in (
+            getattr(proc, "stdout", None),
+            getattr(proc, "stderr", None),
+            getattr(proc, "stdin", None),
+        ):
+            if pipe:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+
+    def _terminate_serve_process(
+        self,
+        proc: subprocess.Popen,
+        timeout_terminate: float = 5.0,
+        timeout_kill: float = 3.0,
+    ) -> bool:
+        """Terminate serve process with SIGKILL escalation and termination verification."""
+        try:
+            if proc.poll() is not None:
+                return True
+
+            # 1. Attempt graceful SIGTERM
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=timeout_terminate)
+                except (subprocess.TimeoutExpired, Exception):
+                    pass
+            except ProcessLookupError:
+                return True
+            except Exception as exc:
+                logger.debug("Failed to send SIGTERM to serve process pid %s: %s", getattr(proc, "pid", None), exc)
+
+            # 2. Escalate to SIGKILL if still running
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=timeout_kill)
+                    except (subprocess.TimeoutExpired, Exception):
+                        pass
+                except ProcessLookupError:
+                    return True
+                except Exception as exc:
+                    logger.debug("Failed to send SIGKILL to serve process pid %s: %s", getattr(proc, "pid", None), exc)
+
+            # 3. Final verification of process termination via poll() / returncode
+            is_terminated = proc.poll() is not None
+            if not is_terminated:
+                logger.warning(
+                    "Serve process pid=%s could not be confirmed terminated after SIGTERM and SIGKILL escalation (poll=None)",
+                    getattr(proc, "pid", None),
+                )
+            return is_terminated
+        finally:
+            self._close_process_pipes(proc)
+
     def cleanup(self) -> None:
         """Safely release all allocated resources (contexts, browser, playwright, server, tempdir)."""
-        for ctx in list(self._contexts):
-            try:
-                ctx.close()
-            except Exception:
-                pass
-        self._contexts.clear()
+        # 1. Close browser contexts
+        try:
+            for ctx in list(self._contexts):
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+            self._contexts.clear()
+        except Exception:
+            pass
 
-        if self._browser:
-            try:
-                self._browser.close()
-            except Exception:
-                pass
+        # 2. Close browser
+        try:
+            if self._browser:
+                try:
+                    self._browser.close()
+                except Exception:
+                    pass
+        finally:
             self._browser = None
 
-        if self._playwright:
-            try:
-                self._playwright.stop()
-            except Exception:
-                pass
+        # 3. Stop Playwright
+        try:
+            if self._playwright:
+                try:
+                    self._playwright.stop()
+                except Exception:
+                    pass
+        finally:
             self._playwright = None
 
-        if self.server_proc:
-            try:
-                if self.server_proc.poll() is None:
-                    self.server_proc.terminate()
-                    try:
-                        self.server_proc.wait(timeout=5.0)
-                    except subprocess.TimeoutExpired:
-                        self.server_proc.kill()
-                        self.server_proc.wait(timeout=2.0)
-            except Exception:
-                pass
-            finally:
-                if self.server_proc.stdout:
-                    try:
-                        self.server_proc.stdout.close()
-                    except Exception:
-                        pass
-                if self.server_proc.stderr:
-                    try:
-                        self.server_proc.stderr.close()
-                    except Exception:
-                        pass
-                self.server_proc = None
+        # 4. Terminate serve process and verify termination before discarding reference
+        try:
+            if self.server_proc:
+                self._terminate_serve_process(self.server_proc)
+        finally:
+            self.server_proc = None
 
-        if self._temp_dir:
-            try:
-                self._temp_dir.cleanup()
-            except Exception:
-                pass
+        # 5. Clean up temporary directory
+        try:
+            if self._temp_dir:
+                try:
+                    self._temp_dir.cleanup()
+                except Exception:
+                    pass
+        finally:
             self._temp_dir = None
-        self.output_dir = None
+            self.output_dir = None
 
     def close(self) -> None:
         """Alias for cleanup to support manual lifecycle management."""
@@ -577,8 +724,16 @@ class UIHarness:
                 pytest.skip(f"Chromium launch failed during UI harness setup: {exc}")
 
             return self
-        except BaseException:
+        except BaseException as exc:
+            tmp_path = Path(self._temp_dir.name) if self._temp_dir else None
             self.cleanup()
+            msg = str(exc)
+            sanitized_msg = sanitize_path_output(msg, repo_root=self.repo_root, temp_dir=tmp_path)
+            if sanitized_msg != msg:
+                try:
+                    raise type(exc)(sanitized_msg) from None
+                except TypeError:
+                    raise RuntimeError(sanitized_msg) from None
             raise
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -592,11 +747,16 @@ class UIHarness:
 
         while time.time() < deadline:
             if self.server_proc and self.server_proc.poll() is not None:
-                stdout, stderr = self.server_proc.communicate()
+                stdout_bytes, stderr_bytes = self.server_proc.communicate()
+                stdout_str = stdout_bytes.decode("utf-8", errors="replace")
+                stderr_str = stderr_bytes.decode("utf-8", errors="replace")
+                tmp_path = Path(self._temp_dir.name) if self._temp_dir else None
+                s_stdout = sanitize_path_output(stdout_str, repo_root=self.repo_root, temp_dir=tmp_path)
+                s_stderr = sanitize_path_output(stderr_str, repo_root=self.repo_root, temp_dir=tmp_path)
                 raise RuntimeError(
                     f"Server process exited unexpectedly with code {self.server_proc.returncode}.\n"
-                    f"STDOUT: {stdout.decode('utf-8', errors='replace')}\n"
-                    f"STDERR: {stderr.decode('utf-8', errors='replace')}"
+                    f"STDOUT: {s_stdout}\n"
+                    f"STDERR: {s_stderr}"
                 )
             try:
                 with urllib.request.urlopen(health_url, timeout=0.5) as resp:
