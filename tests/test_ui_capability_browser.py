@@ -13,7 +13,6 @@ Verifies via real Chromium browser:
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 import pytest
@@ -176,11 +175,6 @@ def test_capability_reader_browser_unavailable_banner(ui_harness: UIHarness):
         assert screenshot_path.is_file()
         assert w == 1280
         assert h == 800
-
-        # Refresh documentation screenshot
-        doc_img_path = Path("docs/images/dashboard-checks-unavailable.png")
-        if doc_img_path.parent.is_dir():
-            shutil.copyfile(screenshot_path, doc_img_path)
     finally:
         page.close()
 
@@ -232,7 +226,12 @@ def test_capability_check_selection_retention_and_tabs(ui_harness: UIHarness):
         returned_selected = set(page.evaluate("() => getSelectedChecks()"))
         assert returned_selected == {"csrf", "sqli"}, f"Expected {{'csrf', 'sqli'}}, got {returned_selected}"
 
-        # 6. Explicit Deselect All and tab switching (must not restore defaults)
+        # 6. Asynchronous manifest (re)load must not reset a custom selection
+        page.evaluate("() => window.loadScannerCapabilities(window.currentScanMode)")
+        reloaded_selected = set(page.evaluate("() => getSelectedChecks()"))
+        assert reloaded_selected == {"csrf", "sqli"}, f"Expected custom selection to survive async load, got {reloaded_selected}"
+
+        # 7. Explicit Deselect All and tab switching (must not restore defaults)
         page.click('button[onclick="selectAllChecks(false)"]')
         assert page.evaluate("() => getSelectedChecks()") == []
         for tab_name in ["basic", "agent", "hybrid", "auth", "checks"]:
@@ -240,7 +239,11 @@ def test_capability_check_selection_retention_and_tabs(ui_harness: UIHarness):
             page.wait_for_timeout(30)
         assert page.evaluate("() => getSelectedChecks()") == [], "Explicit deselect all must be retained across tabs"
 
-        # 7. LocalStorage Save and Restore
+        # 8. Explicit empty selection must also survive an asynchronous manifest reload
+        page.evaluate("() => window.loadScannerCapabilities(window.currentScanMode)")
+        assert page.evaluate("() => getSelectedChecks()") == [], "Explicit empty selection must survive async load"
+
+        # 9. LocalStorage Save and Restore
         page.click('.cfg-check-item[data-check="nosql"]')
         assert set(page.evaluate("() => getSelectedChecks()")) == {"nosql"}
         page.evaluate("() => saveConfigToStorage()")
@@ -385,3 +388,59 @@ def test_capability_submission_guards_and_agent_nonregression(ui_harness: UIHarn
         assert sent_hybrid[1]["config"]["hybrid_mode"] is True
     finally:
         page4.close()
+
+    # Scenario E: Manifest is invalid (schema version mismatch) -> unavailable, no partial launch
+    page5 = ui_harness.new_page(width=1280, height=800)
+    try:
+        page5.route(
+            "**/api/capability-manifest*",
+            lambda route: route.fulfill(
+                status=200,
+                body='{"schema_version": "0.0.1", "manifest_kind": "scanner_capability_manifest"}',
+                headers={"content-type": "application/json"},
+            ),
+        )
+        page5.goto(f"{ui_harness.server_url}/monitor")
+        page5.wait_for_selector(".main")
+        page5.evaluate("""() => {
+            if (typeof openConfigOverlay === 'function') openConfigOverlay();
+            else document.getElementById('scanConfigOverlay').classList.add('active');
+            document.getElementById('cfgInputUrl').value = 'http://127.0.0.1:8000';
+            window.__sentMessages = [];
+            if (state.ws) {
+                state.ws.send = (msg) => { window.__sentMessages.push(JSON.parse(msg)); };
+            }
+        }""")
+        page5.wait_for_function("() => window.VulixCapabilityReader.defaultReader.isUnavailable()")
+        assert page5.evaluate("() => document.querySelectorAll('.cfg-check-item').length") == 0
+        page5.evaluate("() => submitScanConfig()")
+        assert len(page5.evaluate("() => window.__sentMessages")) == 0
+        page5.evaluate("() => submitHybridScan()")
+        assert len(page5.evaluate("() => window.__sentMessages")) == 0
+    finally:
+        page5.close()
+
+    # Scenario F: Reader object is missing entirely -> no submission
+    page6 = ui_harness.new_page(width=1280, height=800)
+    try:
+        page6.goto(f"{ui_harness.server_url}/monitor")
+        page6.wait_for_selector(".main")
+        page6.wait_for_function("() => window.VulixCapabilityReader && window.VulixCapabilityReader.defaultReader.isReady()")
+        page6.evaluate("""() => {
+            if (typeof openConfigOverlay === 'function') openConfigOverlay();
+            else document.getElementById('scanConfigOverlay').classList.add('active');
+            document.getElementById('cfgInputUrl').value = 'http://127.0.0.1:8000';
+            window.__sentMessages = [];
+            window.__savedReader = window.VulixCapabilityReader;
+            if (state.ws) {
+                state.ws.send = (msg) => { window.__sentMessages.push(JSON.parse(msg)); };
+            }
+            delete window.VulixCapabilityReader;
+        }""")
+        page6.evaluate("() => submitScanConfig()")
+        assert len(page6.evaluate("() => window.__sentMessages")) == 0
+        page6.evaluate("() => submitHybridScan()")
+        assert len(page6.evaluate("() => window.__sentMessages")) == 0
+        page6.evaluate("() => { window.VulixCapabilityReader = window.__savedReader; }")
+    finally:
+        page6.close()
