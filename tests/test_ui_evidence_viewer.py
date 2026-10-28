@@ -113,6 +113,16 @@ class EvidenceViewerDashboardTests(unittest.TestCase):
                 page.evaluate("""() => handleEvent({type:'finding', timestamp:4, data:{finding_id:'json-body-sqli', check_type:'sqli', evidence_type:'sqli_error', injection_location:'json_body', request:{post_data:'{"email":"probe"}'}, evidence:'database error'}})""")
                 self.assertEqual(page.locator('#findingsPanel [data-evidence-kind="json"]').count(), 1)
                 self.assertIn("JSON/API evidence", page.locator('#findingsPanel [data-evidence-kind="json"]').text_content())
+                self.assertTrue(page.evaluate("""() => {
+                  const rawFinding = {finding_id:'field-redaction', check_type:'sqli', evidence_type:'sqli_error', field_name:'token=FIELD_SENTINEL', evidence:'database error'};
+                  handleEvent({type:'finding', timestamp:5, data:rawFinding});
+                  const log = document.querySelector('#eventLog');
+                  return rawFinding.field_name === 'token=FIELD_SENTINEL' &&
+                    !document.body.innerHTML.includes('FIELD_SENTINEL') &&
+                    !document.body.innerText.includes('FIELD_SENTINEL') &&
+                    [...document.body.querySelectorAll('*')].every(el => [...el.attributes].every(attr => !attr.value.includes('FIELD_SENTINEL'))) &&
+                    log.textContent.includes('<redacted>');
+                }"""))
                 self.assertFalse(page.evaluate("""() => addFinding({url:'http://example.test/dummy', check_type:'custom', evidence_type:'dummy_kind', evidence:'duplicate'})"""))
                 page.locator('#findingsPanel .finding-card:has([data-evidence-kind="http"]) summary').click()
                 self.assertIn("HTTP evidence", page.locator("#findingsPanel").inner_text())

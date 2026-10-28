@@ -5511,7 +5511,8 @@ function dispatchLegacyEvent(event) {
       state.findingCount++;
       updateFindingCounters();
       const safeEvidence = EvidenceViewerRegistry.cleanText(data.evidence || '', '', findingViewerHelpers);
-      addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${String(safeEvidence).substring(0,60)}`);
+      const safeField = EvidenceViewerRegistry.cleanText(data.field_name || '', '', findingViewerHelpers);
+      addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${safeField}" — ${String(safeEvidence).substring(0,60)}`);
       if (data.url) state.urlFindingCounts[data.url] = (state.urlFindingCounts[data.url] || 0) + 1;
       if (data.url) markSiteMapVuln(data.url);
       // Mark the finding's URL as vuln in the URL list
@@ -6105,7 +6106,7 @@ function addFinding(data) {
       <span class="fc-confidence fc-confidence-${confidence}">${confidence}</span>
       <span class="fc-verify-badge ${verificationClass}">${verificationLabel}</span>
       <span class="fc-type">${escapeHtml(data.check_type?.toUpperCase() || '')}</span>
-      <span class="fc-field">Field: ${escapeHtml(data.field_name || '')}</span>
+      <span class="fc-field">Field: ${escapeHtml(EvidenceViewerRegistry.cleanText(data.field_name || '', '', viewerHelpers))}</span>
     </div>
     <div class="fc-meta-grid">
       <div class="fc-meta"><div class="fc-meta-label">Evidence Type</div><div class="fc-meta-value">${escapeHtml(evidenceType)}</div></div>
