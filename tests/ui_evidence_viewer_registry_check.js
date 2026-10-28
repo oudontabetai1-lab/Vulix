@@ -18,6 +18,14 @@ for (const [type, expected] of [['xss_dialog', 'dom'], ['mass_assignment', 'json
   assert(html.includes('&lt;img'));
 }
 
+const serializedJsonFinding = {
+  evidence_type: 'sqli_error', injection_location: 'json_body',
+  request: { post_data: '{"email":"probe"}' }, evidence: 'database error',
+};
+assert.strictEqual(registry.evidenceKind(serializedJsonFinding), 'json');
+assert(registry.render(serializedJsonFinding, helpers).includes('data-evidence-kind="json"'));
+assert.strictEqual(registry.evidenceKind({ evidence_type: 'unseen_signal', injection_location: 'unknown', request: { post_data: '{}' } }), 'http');
+
 registry.register('dummy_kind', ({ finding }) => finding.evidence);
 const dummy = registry.render({ evidence_type: 'dummy_kind', evidence: '<svg onload=alert(1)>' }, helpers);
 assert(dummy.includes('data-evidence-kind="dummy_kind"'));

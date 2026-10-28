@@ -48,6 +48,7 @@
     if (/(?:dom|html|xss|reflection|dialog|sink)/.test(type)) return 'dom';
     if (/(?:json|graphql|mass_assignment|nosql|api)/.test(type)) return 'json';
     if (/(?:http|request|response|trace|websocket)/.test(type)) return 'http';
+    if (finding.injection_location === 'json_body') return 'json';
     if (Object.keys(finding.request || {}).length || Object.keys(finding.response || {}).length) return 'http';
     return 'fallback';
   }
