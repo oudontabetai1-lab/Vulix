@@ -1,0 +1,24 @@
+.................................                                     [100%]
+=============================== warnings summary ===============================
+../../../../../../opt/anaconda3/lib/python3.12/site-packages/starlette/formparsers.py:12
+  /opt/anaconda3/lib/python3.12/site-packages/starlette/formparsers.py:12: PendingDeprecationWarning: Please use `import python_multipart` instead.
+    import multipart
+
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_4401_auth_expiry_halts_reconnect_and_renders_login_prompt
+  /opt/anaconda3/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_4401_auth_expiry_halts_reconnect_and_renders_login_prompt
+  /opt/anaconda3/lib/python3.12/site-packages/uvicorn/protocols/websockets/websockets_impl.py:17: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+    from websockets.server import WebSocketServerProtocol
+
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_4401_auth_expiry_halts_reconnect_and_renders_login_prompt
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_event_stream_single_socket_across_navigation
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_malformed_durable_event_is_explicitly_stale
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_multitab_nonce_correlation_prevents_cross_context_promotion
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_samews_command_sending
+  /opt/anaconda3/lib/python3.12/site-packages/websockets/legacy/server.py:1178: DeprecationWarning: remove second argument of ws_handler
+    warnings.warn("remove second argument of ws_handler", DeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+33 passed, 8 warnings, 3 subtests passed in 12.70s

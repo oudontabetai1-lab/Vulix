@@ -1,0 +1,83 @@
+.......F.........................                                     [100%]
+=================================== FAILURES ===================================
+_ EventStreamNodeUnitTests.test_event_stream_gap_reconnects_once_without_duplicate_socket _
+
+self = <tests.test_ui_event_stream.EventStreamNodeUnitTests testMethod=test_event_stream_gap_reconnects_once_without_duplicate_socket>
+
+    def test_event_stream_gap_reconnects_once_without_duplicate_socket(self):
+        """A sequence gap forces a single reconnect; a late close of the old socket must not add another."""
+        script = """
+        const instances = [];
+        class MockWebSocket {
+            constructor(url) {
+                this.url = url;
+                this.readyState = 1;
+                instances.push(this);
+            }
+            close(code) {
+                this.readyState = 3;
+                if (this.onclose) this.onclose({ code: code || 1000 });
+            }
+        }
+    
+        const state = { serverInstanceId: 'srv-1', scanRunId: 'run-1', lastEventSequence: 5 };
+        const received = [];
+        const client = new EventStreamClient({
+            WebSocket: MockWebSocket,
+            reconnectDelay: 20,
+            stateAccessor: () => state,
+            onEvent: (evt) => received.push(evt.type),
+        });
+    
+        client.connect();
+        const oldWs = client.ws;
+        client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 7, backend_version: '1.0.0', data: { url: 'http://gap' } });
+    
+        setTimeout(() => {
+            const afterGap = instances.length;
+            const newWs = client.ws;
+            // The replaced socket's close arrives late.
+            oldWs.onclose({ code: 1006 });
+    
+            setTimeout(() => {
+                console.log(JSON.stringify({
+                    afterGap: afterGap,
+                    finalInstances: instances.length,
+                    reconnected: oldWs !== newWs,
+                    received: received,
+                    lastSeq: state.lastEventSequence,
+                }));
+            }, 80);
+        }, 80);
+        """
+        data = _run_node_script(script)
+>       self.assertEqual(data["afterGap"], 2)  # gap で 1 回だけ再接続
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: 1 != 2
+
+tests/test_ui_event_stream.py:673: AssertionError
+=============================== warnings summary ===============================
+../../../../../../opt/anaconda3/lib/python3.12/site-packages/starlette/formparsers.py:12
+  /opt/anaconda3/lib/python3.12/site-packages/starlette/formparsers.py:12: PendingDeprecationWarning: Please use `import python_multipart` instead.
+    import multipart
+
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_4401_auth_expiry_halts_reconnect_and_renders_login_prompt
+  /opt/anaconda3/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_4401_auth_expiry_halts_reconnect_and_renders_login_prompt
+  /opt/anaconda3/lib/python3.12/site-packages/uvicorn/protocols/websockets/websockets_impl.py:17: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+    from websockets.server import WebSocketServerProtocol
+
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_4401_auth_expiry_halts_reconnect_and_renders_login_prompt
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_event_stream_single_socket_across_navigation
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_malformed_durable_event_is_explicitly_stale
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_multitab_nonce_correlation_prevents_cross_context_promotion
+tests/test_ui_event_stream.py::EventStreamChromiumIntegrationTests::test_browser_samews_command_sending
+  /opt/anaconda3/lib/python3.12/site-packages/websockets/legacy/server.py:1178: DeprecationWarning: remove second argument of ws_handler
+    warnings.warn("remove second argument of ws_handler", DeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_ui_event_stream.py::EventStreamNodeUnitTests::test_event_stream_gap_reconnects_once_without_duplicate_socket
+1 failed, 32 passed, 8 warnings, 3 subtests passed in 12.65s

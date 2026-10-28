@@ -1,0 +1,40 @@
+{
+  "source_transition": {
+    "from_head": "5a690926e354cbeeff5a678431e77fbee747609f",
+    "from_tree": "8fd035b2fa3a316c8aa1474516b71146db922da2",
+    "to_implementation_head": "c343f7f8da580681d3de4918030ff0b1513e5620",
+    "to_implementation_tree": "3b14bb5e52d6c7b39ffedf92775d21c9169e115a"
+  },
+  "runs": [
+    {
+      "argv": ["/opt/anaconda3/bin/python", "-m", "pytest", "-q", "tests/test_ui_event_stream.py", "tests/test_ui_capability_browser.py"],
+      "cwd": "/Users/Owner/orca/workspaces/Vulix/oud32-ledger-wiring",
+      "numeric_exit": 0,
+      "git_head_at_execution": "5a690926e354cbeeff5a678431e77fbee747609f",
+      "git_head_tree_at_execution": "8fd035b2fa3a316c8aa1474516b71146db922da2",
+      "tested_worktree_tree": "3b14bb5e52d6c7b39ffedf92775d21c9169e115a",
+      "log": "focused-final-20261029.log",
+      "log_sha256": "5715648fdef4e56e3c2cccd76e1e64a1a7b4f579017a62d75684288b9b7432df",
+      "result": "33 passed, 8 warnings, 3 subtests passed"
+    },
+    {
+      "argv": ["/opt/anaconda3/bin/python", "-m", "pytest", "-q", "--ignore=tests/test_end_to_end_scan.py"],
+      "cwd": "/Users/Owner/orca/workspaces/Vulix/oud32-ledger-wiring",
+      "numeric_exit": 0,
+      "git_head_at_execution": "5a690926e354cbeeff5a678431e77fbee747609f",
+      "git_head_tree_at_execution": "8fd035b2fa3a316c8aa1474516b71146db922da2",
+      "tested_worktree_tree": "3b14bb5e52d6c7b39ffedf92775d21c9169e115a",
+      "log": "full-non-e2e-20261029.log",
+      "log_sha256": "47e49351fe619a3b5e7cf75f05e7f3e7d127807db9803ee3047cc87b69139864",
+      "result": "4828 passed, 67 skipped, 80 warnings, 580 subtests passed"
+    }
+  ],
+  "source_sha256": {
+    "templates/ui/event-stream.js": "98667262e0efa05cc7859cfe19fd6bd5ebe3f658fcbe03e1e731704952d857ae",
+    "tests/test_ui_event_stream.py": "ead198d8aaec5e65b60b0a9e7c9cc2c4bfac5ecb582d63c18fc3d46cb6e93000"
+  },
+  "other_attempts": [
+    {"argv": ["/opt/anaconda3/bin/python", "-m", "pytest", "-q", "tests/test_ui_event_stream.py", "tests/test_ui_capability_browser.py"], "numeric_exit": 1, "log": "focused-20261029.log", "log_sha256": "9645075fc0b30701ad612ce79feb43dea4c714200573531657c58a39c5c3e9ee", "note": "Initial focused run exposed a test fixture that omitted backendVersion for the sequence-gap case; fixture was corrected to provide the manifest version, retaining the reconnect assertions."},
+    {"argv": ["/opt/anaconda3/bin/python", "-m", "pytest", "-q", "tests/test_ui_event_stream.py", "tests/test_ui_capability_browser.py"], "numeric_exit": 1, "log": "focused-rerun-20261029.log", "log_sha256": "ad3e744125ced4445073a78bb01ce35dfa60a80337deb54c5ff83de19e605c3e", "note": "Same stale fixture remained because the first edit matched a different MockWebSocket test; corrected the exact sequence-gap fixture before the passing run."}
+  ]
+}
