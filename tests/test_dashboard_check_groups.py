@@ -25,8 +25,11 @@ def _run_node_script(script: str) -> dict:
     const {{ CapabilityReader, defaultReader }} = require('{CAPABILITY_READER_JS}');
     {script}
     """
+    # 大規模 JS（manifest JSON 埋め込みで 128KiB 超）を単一引数で渡すと Linux の
+    # MAX_ARG_STRLEN を超えて E2BIG になるため、node の stdin 読み込み（`node -`）を使う。
     res = subprocess.run(
-        ["node", "-e", full_script],
+        ["node", "-"],
+        input=full_script,
         cwd=ROOT,
         check=True,
         capture_output=True,
