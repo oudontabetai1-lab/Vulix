@@ -98,7 +98,14 @@ Target URL を入力し、目的に近いプロファイルを選びます。
 
 ![検査設定の入力例](images/dashboard-configured.png)
 
-「検査項目」タブでは、SCANNERS レジストリに登録された全 check をカテゴリ別に選択できます。既定で有効なのは SQLi・OS インジェクション・XSS です。
+「検査項目」タブでは、バックエンドの機能マニフェスト（`/api/capability-manifest`）から動的に取得された全 check をカテゴリ別に選択できます。既定で有効なのは SQLi・OS インジェクション・XSS です。
+
+![検査項目タブの設定画面](images/dashboard-checks-capability.png)
+
+- **モード別ゲーティング（Mode Gating）**: 通常モードと Hybrid モードでは決定論スキャナが利用できます。Agent Browser モードでは、Agent 非対応のスキャナは自動的に淡色表示（無効化）され、マウスホバー時に非対応の理由が表示されます。
+- **安全な Unavailable 状態**: 認証エラー（HTTP 401）や通信障害、マニフェスト不整合の発生時は、検査項目上部に警告バナーを表示します。未取得の検査能力を推測で有効化することはなく、安全な状態を維持します。
+
+![機能マニフェスト取得失敗時の安全な警告表示](images/dashboard-checks-unavailable.png)
 
 ### 入力経路ごとの対応を確認する
 
