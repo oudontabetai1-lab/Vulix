@@ -63,6 +63,94 @@
     return `/login?next=${encodeURIComponent(getSafeReturnUrl(loc))}`;
   }
 
+  // Backend-owned payloads stay opaque here (notably scan config and findings).
+  // The references are the server contracts; keep this layer to the wire envelope
+  // and the fields the dashboard directly dereferences.
+  const BACKEND_WIRE_REFS = Object.freeze({
+    envelope: 'wscan.monitor.MonitorServer.emit',
+    snapshot: 'wscan.monitor.MonitorServer._scan_snapshot_event',
+    config: 'wscan.monitor.MonitorServer.emit_scan_config',
+    finding: 'wscan.scanners.base.Finding',
+    probeAttempt: 'wscan.verification_model.ProbeAttempt',
+  });
+
+  const KNOWN_EVENTS = new Set([
+    'status', 'page_start', 'scan_config', 'payload_test', 'phase', 'page_graph_update',
+    'page_graph_vuln', 'subphase', 'phase_timing', 'url_start', 'url_complete',
+    'screenshot', 'finding', 'finding_update', 'scan_gap', 'request', 'response',
+    'progress', 'scan_complete', 'plan_review', 'crawl_review', 'intervention_state',
+    'manual_crawl_status', 'manual_crawl_frame', 'ai_analysis', 'waf_detected',
+    'awaiting_config', 'scan_rejected', 'scan_started', 'scan_snapshot', 'ping',
+  ]);
+
+  function _isRecord(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function _validKnownPayload(type, data) {
+    if (!_isRecord(data)) return false;
+    const stringFields = {
+      status: ['message'], page_start: ['url'], phase: ['phase'],
+      page_graph_update: ['url'], page_graph_vuln: ['url'], subphase: ['subphase'],
+      phase_timing: ['phase'], url_start: ['url'], url_complete: ['url'],
+      screenshot: ['image'], progress: [], ai_analysis: ['text'],
+      manual_crawl_frame: ['data'],
+    }[type] || [];
+    if (stringFields.some((key) => typeof data[key] !== 'string')) return false;
+    if (type === 'scan_config' && data.checks !== undefined &&
+        (!Array.isArray(data.checks) || data.checks.some((item) => typeof item !== 'string'))) return false;
+    if (type === 'payload_test' &&
+        ['field', 'payload', 'check_type'].some((key) => typeof data[key] !== 'string')) return false;
+    if (type === 'page_graph_update' && data.depth !== undefined && !Number.isFinite(data.depth)) return false;
+    if (type === 'phase_timing' && data.elapsed_sec !== undefined && !Number.isFinite(data.elapsed_sec)) return false;
+    if (type === 'progress' && ['percent', 'current', 'total'].some((key) =>
+      data[key] !== undefined && !Number.isFinite(data[key]))) return false;
+    if (type === 'scan_complete' && (typeof data.status !== 'string' ||
+        !Number.isSafeInteger(data.total_findings) || !Array.isArray(data.findings))) return false;
+    if (type === 'intervention_state' && typeof data.paused !== 'boolean') return false;
+    if (type === 'plan_review' && data.plans !== undefined && !Array.isArray(data.plans)) return false;
+    if (type === 'crawl_review' && data.pages !== undefined && !Array.isArray(data.pages)) return false;
+    if (type === 'scan_snapshot' && (typeof data.status !== 'string' || !Array.isArray(data.findings) ||
+        !Number.isSafeInteger(data.findings_count) || !Number.isSafeInteger(data.confirmed_findings_count) ||
+        !Number.isSafeInteger(data.hypothesis_count))) return false;
+    if ((type === 'finding' || type === 'finding_update') &&
+        ['check_type', 'severity', 'url', 'field_name', 'payload', 'evidence'].some((key) =>
+          typeof data[key] !== 'string')) return false;
+    return true;
+  }
+
+  /** Validate an event before it reaches the cursor or legacy UI handlers. */
+  function validateWireEvent(event, options = {}) {
+    const cursorDeclared = _isRecord(event) && ['server_id', 'run_id', 'sequence']
+      .some((key) => event[key] !== undefined);
+    if (!_isRecord(event) || typeof event.type !== 'string' || !event.type) {
+      return { valid: false, durable: cursorDeclared, reason: 'invalid_envelope' };
+    }
+    if (!_isRecord(event.data)) {
+      return { valid: false, durable: cursorDeclared, reason: 'invalid_data' };
+    }
+    const hasCursorPart = ['server_id', 'run_id', 'sequence'].some((key) => event[key] !== undefined);
+    const durable = hasCursorPart;
+    if (options.requireDurable && event.type !== 'ping' && event.type !== 'manual_crawl_frame' && !durable) {
+      return { valid: false, durable: true, reason: 'missing_cursor' };
+    }
+    if (durable && (typeof event.server_id !== 'string' || !event.server_id ||
+        typeof event.run_id !== 'string' || !Number.isSafeInteger(event.sequence) || event.sequence < 0 ||
+        (event.type !== 'scan_snapshot' && event.sequence === 0))) {
+      return { valid: false, durable: true, reason: 'invalid_cursor' };
+    }
+    if (event.timestamp !== undefined && !Number.isFinite(event.timestamp)) {
+      return { valid: false, durable, reason: 'invalid_timestamp' };
+    }
+    if (KNOWN_EVENTS.has(event.type) && !_validKnownPayload(event.type, event.data)) {
+      return { valid: false, durable, reason: 'invalid_known_payload' };
+    }
+    if (!KNOWN_EVENTS.has(event.type) && !durable) {
+      return { valid: false, durable: false, reason: 'unknown_unsequenced_event' };
+    }
+    return { valid: true, durable, known: KNOWN_EVENTS.has(event.type) };
+  }
+
   /**
    * CursorProjection: Validates event envelope against scan cursor state.
    * Evaluates sequence gaps, deduplication, server identity, and new run resets.
@@ -201,6 +289,7 @@
       this.onAuthRequired = typeof options.onAuthRequired === 'function' ? options.onAuthRequired : null;
       this.onResetLiveScan = typeof options.onResetLiveScan === 'function' ? options.onResetLiveScan : null;
       this.onApplySnapshot = typeof options.onApplySnapshot === 'function' ? options.onApplySnapshot : null;
+      this.onWireStale = typeof options.onWireStale === 'function' ? options.onWireStale : null;
 
       this.stateAccessor = options.stateAccessor || (() => options.state || (global.state || null));
       this.cursorProjection = options.cursorProjection || new CursorProjection(this.stateAccessor);
@@ -214,6 +303,7 @@
       this._rafPending = false;
       this._stopped = false;
       this._disposed = false;
+      this._wireStale = false;
 
       this._flushBound = this._flushMsgQueue.bind(this);
     }
@@ -296,10 +386,10 @@
         try {
           const raw = evt && evt.data;
           const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          if (parsed && typeof parsed === 'object') {
-            this.enqueueMessage(parsed);
-          }
-        } catch (_) {}
+          this.enqueueMessage(parsed);
+        } catch (_) {
+          this._markWireStale('invalid_json', null);
+        }
       };
     }
 
@@ -329,7 +419,7 @@
 
       const batch = this._msgQueue.splice(0, this.batchSize);
       for (let i = 0; i < batch.length; i++) {
-        this.processEvent(batch[i]);
+        this.processEvent(batch[i], true);
       }
 
       if (this._msgQueue.length > 0 && !this._disposed) {
@@ -342,8 +432,19 @@
      * Process a single event through the cursor projection gate, then dispatch to legacy handler.
      * @param {Object} event
      */
-    processEvent(event) {
-      if (!event || typeof event !== 'object') return;
+    processEvent(event, fromWire = false) {
+      if (!event || typeof event !== 'object') {
+        if (fromWire) this._markWireStale('invalid_envelope', null);
+        return;
+      }
+      const ingress = fromWire
+        ? validateWireEvent(event, { requireDurable: true })
+        : { valid: true, durable: false };
+      if (!ingress.valid) {
+        if (fromWire || ingress.durable) this._markWireStale(ingress.reason, event.type || null);
+        return;
+      }
+      if (this._wireStale && event.type !== 'scan_snapshot') return;
       const evaluation = this.cursorProjection.evaluate(event);
 
       if (evaluation.action === 'ignore' || evaluation.action === 'drop') {
@@ -351,6 +452,9 @@
       }
 
       if (evaluation.action === 'apply_snapshot') {
+        this._wireStale = false;
+        const state = this.stateAccessor();
+        if (state) state.eventStreamStale = null;
         if (this.onApplySnapshot) {
           this.onApplySnapshot(event);
         }
@@ -381,6 +485,14 @@
       if (this.onEvent) {
         this.onEvent(event);
       }
+    }
+
+    _markWireStale(reason, type) {
+      this._wireStale = true;
+      const state = this.stateAccessor();
+      if (state) state.eventStreamStale = { reason: reason, type: type };
+      if (this.onWireStale) this.onWireStale({ reason: reason, type: type });
+      if (this.ws) this.reconnect();
     }
 
     /**
@@ -481,6 +593,8 @@
   const exportsObj = {
     CursorProjection,
     EventStreamClient,
+    BACKEND_WIRE_REFS,
+    validateWireEvent,
     getSafeReturnUrl,
     getLoginUrl,
   };
