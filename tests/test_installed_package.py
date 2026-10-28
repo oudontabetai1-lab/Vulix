@@ -54,6 +54,7 @@ assert Path(main.__file__).parent.name == "site"
 assert main._CONFIG_PATH.is_file()
 assert report.TEMPLATES_DIR.joinpath("dashboard.html").is_file()
 assert monitor.TEMPLATES_DIR.joinpath("ui", "tokens.css").is_file()
+assert monitor.TEMPLATES_DIR.joinpath("ui", "components.css").is_file()
 assert engine.OUTPUT_BASE == agent.OUTPUT_BASE == monitor.OUTPUT_BASE == Path.cwd() / "output"
 scan = engine.ScanEngine("http://127.0.0.1:1", llm_provider="none", checks=["xss"], open_report=False)
 assert scan.default_payloads["xss"]
@@ -68,4 +69,6 @@ with TestClient(monitor.MonitorServer().app) as client:
     assert "Dashboard not found" not in response.text
     css = client.get("/ui/tokens.css")
     assert css.status_code == 200 and "text/css" in css.headers["content-type"]
+    comp = client.get("/ui/components.css")
+    assert comp.status_code == 200 and "text/css" in comp.headers["content-type"]
 '''], cwd=tmp_path, env=env, check=True, capture_output=True, text=True)
