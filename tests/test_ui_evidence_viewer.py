@@ -123,6 +123,16 @@ class EvidenceViewerDashboardTests(unittest.TestCase):
                     [...document.body.querySelectorAll('*')].every(el => [...el.attributes].every(attr => !attr.value.includes('FIELD_SENTINEL'))) &&
                     log.textContent.includes('<redacted>');
                 }"""))
+                self.assertTrue(page.evaluate("""() => {
+                  const rawFinding = {finding_id:'type-redaction', check_type:'custom', evidence_type:'unknown token=TYPE_SENTINEL', evidence:'unknown evidence'};
+                  handleEvent({type:'finding', timestamp:6, data:rawFinding});
+                  const log = document.querySelector('#eventLog');
+                  return rawFinding.evidence_type === 'unknown token=TYPE_SENTINEL' &&
+                    !document.body.innerHTML.includes('TYPE_SENTINEL') &&
+                    !document.body.innerText.includes('TYPE_SENTINEL') &&
+                    [...document.body.querySelectorAll('*')].every(el => [...el.attributes].every(attr => !attr.value.includes('TYPE_SENTINEL'))) &&
+                    !log.textContent.includes('TYPE_SENTINEL');
+                }"""))
                 self.assertFalse(page.evaluate("""() => addFinding({url:'http://example.test/dummy', check_type:'custom', evidence_type:'dummy_kind', evidence:'duplicate'})"""))
                 page.locator('#findingsPanel .finding-card:has([data-evidence-kind="http"]) summary').click()
                 self.assertIn("HTTP evidence", page.locator("#findingsPanel").inner_text())

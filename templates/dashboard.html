@@ -6073,6 +6073,7 @@ function addFinding(data) {
   const evidenceType = data.evidence_type || data.check_type || '';
   const details = data.evidence_details || {};
   const viewerHelpers = findingViewerHelpers;
+  const safeEvidenceType = EvidenceViewerRegistry.cleanText(evidenceType, '', viewerHelpers);
   const evidenceViewer = EvidenceViewerRegistry.render(data, viewerHelpers);
   const screenshotHtml = EvidenceViewerRegistry.screenshot(data.screenshot_b64, data.dialog_confirmed);
   const steps = (data.reproduction_steps || []).slice(0, 6).map((s, i) =>
@@ -6109,7 +6110,7 @@ function addFinding(data) {
       <span class="fc-field">Field: ${escapeHtml(EvidenceViewerRegistry.cleanText(data.field_name || '', '', viewerHelpers))}</span>
     </div>
     <div class="fc-meta-grid">
-      <div class="fc-meta"><div class="fc-meta-label">Evidence Type</div><div class="fc-meta-value">${escapeHtml(evidenceType)}</div></div>
+      <div class="fc-meta"><div class="fc-meta-label">Evidence Type</div><div class="fc-meta-value">${escapeHtml(safeEvidenceType)}</div></div>
       <div class="fc-meta"><div class="fc-meta-label">Signal</div><div class="fc-meta-value">${escapeHtml(EvidenceViewerRegistry.cleanText(details.execution_signal || details.matched_error || details.context || 'response analysis', '', viewerHelpers))}</div></div>
     </div>
     <div class="fc-evidence">${escapeHtml(EvidenceViewerRegistry.cleanText(data.evidence || '', '', viewerHelpers))}</div>
