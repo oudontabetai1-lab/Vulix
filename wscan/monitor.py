@@ -1985,6 +1985,7 @@ class MonitorServer:
     def _scan_snapshot_event(self) -> dict:
         """Return the canonical UI state at the latest per-scan event cursor."""
         from wscan.scanners.base import finding_dict_confirmed
+        from wscan.capability_manifest import SCHEMA_VERSION
         total = len(self.api_findings)
         confirmed = sum(1 for f in self.api_findings if finding_dict_confirmed(f))
         return {
@@ -1994,6 +1995,7 @@ class MonitorServer:
             "scan_id": self.api_scan_id,
             "sequence": self._scan_sequence,
             "timestamp": time.time(),
+            "backend_version": SCHEMA_VERSION,
             "data": {
                 "status": self.api_scan_status,
                 "status_message": self._scan_status_message,
@@ -2106,6 +2108,7 @@ class MonitorServer:
             "scan_id": self.api_scan_id,
             "sequence": self._scan_sequence,
             "timestamp": time.time(),
+            "backend_version": self._capability_schema_version(),
             "data": event_data,
         }
         self.event_history.append(event)
@@ -2120,6 +2123,11 @@ class MonitorServer:
             except Exception:
                 dead.add(client)
         self.clients -= dead
+
+    @staticmethod
+    def _capability_schema_version() -> str:
+        from wscan.capability_manifest import SCHEMA_VERSION
+        return SCHEMA_VERSION
 
     async def broadcast_ephemeral(self, event_type: str, data: Any = None):
         """履歴に残さず接続中クライアントへ送る（高頻度・大容量イベント用）。

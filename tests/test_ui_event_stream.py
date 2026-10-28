@@ -100,8 +100,8 @@ class EventStreamNodeUnitTests(unittest.TestCase):
         data = _run_node_script("""
         const state = { serverInstanceId: 'srv-1', scanRunId: 'run-1', lastEventSequence: 5, eventCount: 5 };
         const received = [];
-        const client = new EventStreamClient({ stateAccessor: () => state, onEvent: (e) => received.push(e.type) });
-        const event = { type: 'future_wire_event', server_id: 'srv-1', run_id: 'run-1', sequence: 6, data: { marker: true } };
+        const client = new EventStreamClient({ stateAccessor: () => state, backendVersion: '1.0.0', onEvent: (e) => received.push(e.type) });
+        const event = { type: 'future_wire_event', server_id: 'srv-1', run_id: 'run-1', sequence: 6, backend_version: '1.0.0', data: { marker: true } };
         const valid = validateWireEvent(event);
         client.processEvent(event, true);
         console.log(JSON.stringify({ valid, received, state }));
@@ -116,10 +116,10 @@ class EventStreamNodeUnitTests(unittest.TestCase):
         const state = { serverInstanceId: 'srv-1', scanRunId: 'run-1', lastEventSequence: 5, eventCount: 5 };
         const stale = [];
         const received = [];
-        const client = new EventStreamClient({ stateAccessor: () => state,
+        const client = new EventStreamClient({ stateAccessor: () => state, backendVersion: '1.0.0',
           onEvent: (e) => received.push(e.type), onWireStale: (e) => stale.push(e) });
-        client.processEvent({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 6, data: { url: 7 } }, true);
-        client.processEvent({ type: 'page_end', server_id: 'srv-1', run_id: 'run-1', sequence: 7, data: { url: 'http://ok' } }, true);
+        client.processEvent({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 6, backend_version: '1.0.0', data: { url: 7 } }, true);
+        client.processEvent({ type: 'page_end', server_id: 'srv-1', run_id: 'run-1', sequence: 7, backend_version: '1.0.0', data: { url: 'http://ok' } }, true);
         console.log(JSON.stringify({ stale, received, state }));
         """)
         self.assertEqual(data["stale"][0]["reason"], "invalid_known_payload")
@@ -136,6 +136,45 @@ class EventStreamNodeUnitTests(unittest.TestCase):
         self.assertEqual(data["snapshot"]["reason"], "missing_cursor")
         self.assertEqual(data["finding"]["reason"], "invalid_known_payload")
 
+    def test_wire_ingress_uses_backend_manifest_version(self):
+        data = _run_node_script("""
+        const outcomes = [];
+        for (const backendVersion of ['1.0.0', '2.0.0', null]) {
+          const state = { serverInstanceId: 'srv-1', scanRunId: 'run-1', lastEventSequence: 5 };
+          const stale = [];
+          const received = [];
+          const client = new EventStreamClient({ stateAccessor: () => state, backendVersion,
+            onWireStale: (event) => stale.push(event.reason), onEvent: (event) => received.push(event.type) });
+          client.processEvent({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1',
+            sequence: 6, backend_version: '1.0.0', data: { url: 'http://t' } }, true);
+          outcomes.push({ stale, received, sequence: state.lastEventSequence });
+        }
+        console.log(JSON.stringify(outcomes));
+        """)
+        self.assertEqual(data[0], {"stale": [], "received": ["page_start"], "sequence": 6})
+        self.assertEqual(data[1]["stale"], ["backend_version_mismatch"])
+        self.assertEqual(data[1]["received"], [])
+        self.assertEqual(data[1]["sequence"], 5)
+        self.assertEqual(data[2]["stale"], ["backend_version_unavailable"])
+        self.assertEqual(data[2]["received"], [])
+        self.assertEqual(data[2]["sequence"], 5)
+
+    def test_wire_ingress_reads_ready_capability_reader_manifest(self):
+        data = _run_node_script("""
+        global.VulixCapabilityReader = { defaultReader: { status: 'ready', manifest: { schema_version: '1.0.0' } } };
+        const state = { serverInstanceId: 'srv-1', scanRunId: 'run-1', lastEventSequence: 0 };
+        const received = [];
+        const client = new EventStreamClient({ stateAccessor: () => state, onEvent: (event) => received.push(event.type) });
+        client.processEvent({ type: 'scan_started', server_id: 'srv-1', run_id: 'run-1', sequence: 1,
+          backend_version: '1.0.0', data: {} }, true);
+        global.VulixCapabilityReader.defaultReader.status = 'unavailable';
+        client.processEvent({ type: 'status', server_id: 'srv-1', run_id: 'run-1', sequence: 2,
+          backend_version: '1.0.0', data: { message: 'next' } }, true);
+        console.log(JSON.stringify({ received, stale: state.eventStreamStale }));
+        """)
+        self.assertEqual(data["received"], ["scan_started"])
+        self.assertEqual(data["stale"]["reason"], "backend_version_unavailable")
+
     def test_unknown_and_malformed_wire_fixtures(self):
         for name in ("unknown_stream.json", "malformed_stream.json"):
             fixture = json.loads((EVENT_STREAM_FIXTURES / name).read_text(encoding="utf-8"))
@@ -146,10 +185,11 @@ class EventStreamNodeUnitTests(unittest.TestCase):
             const stale = [];
             const client = new EventStreamClient({{
               stateAccessor: () => state,
+              backendVersion: '1.0.0',
               onEvent: (event) => received.push(event.type),
               onWireStale: (event) => stale.push(event),
             }});
-            for (const event of fixture.events) client.processEvent(event, true);
+            for (const event of fixture.events) {{ if (event) event.backend_version = '1.0.0'; client.processEvent(event, true); }}
             console.log(JSON.stringify({{ state, received, stale }}));
             """
             result = _run_node_script(script)
@@ -266,6 +306,7 @@ class EventStreamNodeUnitTests(unittest.TestCase):
         const client = new EventStreamClient({
             WebSocket: MockWebSocket,
             host: 'test.local',
+            backendVersion: '1.0.0',
             stateAccessor: () => state,
             onEvent: (evt) => received.push(evt.type),
         });
@@ -274,9 +315,9 @@ class EventStreamNodeUnitTests(unittest.TestCase):
 
         setTimeout(() => {
             // Enqueue 3 events
-            client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 1, data: { url: 'http://a/1' } });
-            client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 2, data: { url: 'http://a/2' } });
-            client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 3, data: { url: 'http://a/3' } });
+            client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 1, backend_version: '1.0.0', data: { url: 'http://a/1' } });
+            client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 2, backend_version: '1.0.0', data: { url: 'http://a/2' } });
+            client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 3, backend_version: '1.0.0', data: { url: 'http://a/3' } });
 
             // Send command
             const sendOk = client.send({ action: 'pause' });
@@ -478,7 +519,7 @@ class EventStreamNodeUnitTests(unittest.TestCase):
         // Trigger a network close so a reconnect timer exists, then queue events before the RAF flush.
         oldWs.onclose({ code: 1006 });
         const hadTimer = client._reconnectTimer !== null;
-        client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 1 });
+        client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 1, backend_version: '1.0.0', data: {} });
         const hadRaf = client._rafPending;
 
         client.dispose();
@@ -537,6 +578,7 @@ class EventStreamNodeUnitTests(unittest.TestCase):
         const client = new EventStreamClient({
             WebSocket: MockWebSocket,
             reconnectDelay: 20,
+            backendVersion: '1.0.0',
             onEvent: (evt) => received.push(evt.type),
         });
 
@@ -549,7 +591,7 @@ class EventStreamNodeUnitTests(unittest.TestCase):
             const newWs = client.ws;
             // Late traffic from the replaced socket must not be observed twice.
             oldWs.onmessage({ data: JSON.stringify({ type: 'stale_event' }) });
-            newWs.onmessage({ data: JSON.stringify({ type: 'fresh_event', server_id: 'srv-1', run_id: 'run-1', sequence: 1, data: {} }) });
+            newWs.onmessage({ data: JSON.stringify({ type: 'fresh_event', server_id: 'srv-1', run_id: 'run-1', sequence: 1, backend_version: '1.0.0', data: {} }) });
 
             setTimeout(() => {
                 console.log(JSON.stringify({
@@ -594,7 +636,7 @@ class EventStreamNodeUnitTests(unittest.TestCase):
 
         client.connect();
         const oldWs = client.ws;
-        client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 7 });
+        client.enqueueMessage({ type: 'page_start', server_id: 'srv-1', run_id: 'run-1', sequence: 7, backend_version: '1.0.0', data: { url: 'http://gap' } });
 
         setTimeout(() => {
             const afterGap = instances.length;

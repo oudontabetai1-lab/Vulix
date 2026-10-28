@@ -129,6 +129,15 @@
     if (!_isRecord(event.data)) {
       return { valid: false, durable: cursorDeclared, reason: 'invalid_data' };
     }
+    if (options.requireBackendVersion) {
+      const version = options.backendVersion;
+      if (typeof version !== 'string' || !version) {
+        return { valid: false, durable: cursorDeclared, reason: 'backend_version_unavailable' };
+      }
+      if (version !== event.backend_version) {
+        return { valid: false, durable: cursorDeclared, reason: 'backend_version_mismatch' };
+      }
+    }
     const hasCursorPart = ['server_id', 'run_id', 'sequence'].some((key) => event[key] !== undefined);
     const durable = hasCursorPart;
     if (options.requireDurable && event.type !== 'ping' && event.type !== 'manual_crawl_frame' && !durable) {
@@ -304,6 +313,10 @@
       this._stopped = false;
       this._disposed = false;
       this._wireStale = false;
+      this.backendVersion = options.backendVersion || (() => {
+        const reader = global.VulixCapabilityReader && global.VulixCapabilityReader.defaultReader;
+        return reader && reader.status === 'ready' && reader.manifest ? reader.manifest.schema_version : null;
+      });
 
       this._flushBound = this._flushMsgQueue.bind(this);
     }
@@ -438,7 +451,8 @@
         return;
       }
       const ingress = fromWire
-        ? validateWireEvent(event, { requireDurable: true })
+        ? validateWireEvent(event, { requireDurable: true, requireBackendVersion: true,
+          backendVersion: typeof this.backendVersion === 'function' ? this.backendVersion() : this.backendVersion })
         : { valid: true, durable: false };
       if (!ingress.valid) {
         if (fromWire || ingress.durable) this._markWireStale(ingress.reason, event.type || null);
