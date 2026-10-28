@@ -18,11 +18,13 @@ from unittest.mock import patch
 import pytest
 
 from tests.ui_harness import (
+    build_sanitized_env,
     find_free_port,
     get_baseline_monitor_events,
     is_chromium_available,
     parse_png_dimensions,
     require_browser,
+    reset_chromium_cache,
     seed_baseline_audit_log,
     seed_baseline_scans,
     seed_baseline_settings,
@@ -205,3 +207,117 @@ def test_ui_harness_lifecycle_and_isolation():
 
     # After exit, temp directory should be cleaned up
     assert not temp_dir_path.exists()
+
+
+def test_gating_skip_behavior_on_playwright_missing(monkeypatch):
+    """Verify gating cleanly skips if playwright is not importable."""
+    monkeypatch.delenv("WSCAN_SKIP_BROWSER", raising=False)
+    monkeypatch.delenv("WSCAN_NO_BROWSER", raising=False)
+    monkeypatch.delenv("WSCAN_E2E", raising=False)
+    reset_chromium_cache()
+
+    import builtins
+    real_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if "playwright" in name:
+            raise ImportError("No module named 'playwright'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+    available, reason = is_chromium_available(force_refresh=True)
+    assert available is False
+    assert "playwright" in reason.lower()
+
+    with pytest.raises(pytest.skip.Exception):
+        require_browser()
+    reset_chromium_cache()
+
+
+def test_gating_skip_behavior_on_launch_failure(monkeypatch):
+    """Verify gating cleanly skips if Chromium launch fails (e.g. missing binary in CI)."""
+    monkeypatch.delenv("WSCAN_SKIP_BROWSER", raising=False)
+    monkeypatch.delenv("WSCAN_NO_BROWSER", raising=False)
+    monkeypatch.delenv("WSCAN_E2E", raising=False)
+    reset_chromium_cache()
+
+    class MockChromium:
+        def launch(self, **kwargs):
+            raise RuntimeError("Executable doesn't exist at /root/.cache/ms-playwright/chromium")
+
+    class MockPlaywright:
+        chromium = MockChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    import playwright.sync_api
+    monkeypatch.setattr(playwright.sync_api, "sync_playwright", lambda: MockPlaywright())
+
+    available, reason = is_chromium_available(force_refresh=True)
+    assert available is False
+    assert "Chromium launch failed" in reason
+
+    with pytest.raises(pytest.skip.Exception):
+        require_browser()
+    reset_chromium_cache()
+
+
+def test_build_sanitized_env(tmp_path: Path, monkeypatch):
+    """Verify build_sanitized_env strips secrets and retains essential variables."""
+    monkeypatch.setenv("GEMINI_API_KEY", "secret-gemini-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "secret-openai-key")
+    monkeypatch.setenv("WSCAN_AUTH_TOKEN", "secret-auth-token")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret-aws")
+    monkeypatch.setenv("CUSTOM_SENSITIVE_SECRET", "super-secret")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    sanitized = build_sanitized_env(tmp_path)
+
+    # Secrets must NOT be leaked to child process
+    assert "GEMINI_API_KEY" not in sanitized
+    assert "ANTHROPIC_API_KEY" not in sanitized
+    assert "OPENAI_API_KEY" not in sanitized
+    assert "WSCAN_AUTH_TOKEN" not in sanitized
+    assert "SLACK_WEBHOOK_URL" not in sanitized
+    assert "AWS_SECRET_ACCESS_KEY" not in sanitized
+    assert "CUSTOM_SENSITIVE_SECRET" not in sanitized
+
+    # Essential variables must be preserved / configured
+    assert sanitized.get("PATH") == "/usr/bin:/bin"
+    assert sanitized.get("PYTHONPATH") == str(tmp_path)
+    assert sanitized.get("PYTHONUNBUFFERED") == "1"
+    assert sanitized.get("PYTHONIOENCODING") == "utf-8"
+
+
+def test_ui_harness_cleanup_on_enter_failure(monkeypatch):
+    """Verify resources (temp dir, server proc) are cleaned up if __enter__ fails."""
+    require_browser()
+
+    harness = UIHarness(seed_fixtures=False)
+
+    def mock_wait_for_server(self, timeout=12.0):
+        raise RuntimeError("Simulated server startup failure")
+
+    monkeypatch.setattr(UIHarness, "_wait_for_server", mock_wait_for_server)
+
+    with pytest.raises(RuntimeError, match="Simulated server startup failure"):
+        with harness:
+            pass
+
+    # Verify everything was cleaned up immediately
+    assert harness._temp_dir is None
+    assert harness.server_proc is None
+
+
+def test_ui_harness_cleanup_idempotent():
+    """Verify cleanup can be called multiple times without error."""
+    harness = UIHarness()
+    harness.cleanup()
+    harness.cleanup()
+    harness.close()

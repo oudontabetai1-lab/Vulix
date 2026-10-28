@@ -46,13 +46,24 @@ def find_free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def is_chromium_available() -> tuple[bool, str]:
+_CHROMIUM_AVAILABLE_CACHE: tuple[bool, str] | None = None
+
+
+def reset_chromium_cache() -> None:
+    """Clear cached Chromium availability result (primarily for testing)."""
+    global _CHROMIUM_AVAILABLE_CACHE
+    _CHROMIUM_AVAILABLE_CACHE = None
+
+
+def is_chromium_available(force_refresh: bool = False) -> tuple[bool, str]:
     """Check if Chromium is launchable via Playwright.
 
     Returns:
         (True, "") if Chromium can be launched.
         (False, reason) if Playwright is missing or Chromium fails to launch.
     """
+    global _CHROMIUM_AVAILABLE_CACHE
+
     if os.environ.get("WSCAN_SKIP_BROWSER", "").strip().lower() in ("1", "true", "yes"):
         return False, "Browser tests explicitly disabled via WSCAN_SKIP_BROWSER"
     if os.environ.get("WSCAN_NO_BROWSER", "").strip().lower() in ("1", "true", "yes"):
@@ -60,12 +71,19 @@ def is_chromium_available() -> tuple[bool, str]:
     if os.environ.get("WSCAN_E2E", "").strip().lower() in ("0", "false", "no", "off"):
         return False, "E2E disabled via WSCAN_E2E=0"
 
+    if not force_refresh and _CHROMIUM_AVAILABLE_CACHE is not None:
+        return _CHROMIUM_AVAILABLE_CACHE
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        return False, "playwright package is not installed"
+        res = (False, "playwright package is not installed")
+        _CHROMIUM_AVAILABLE_CACHE = res
+        return res
     except Exception as exc:
-        return False, f"playwright import error: {exc}"
+        res = (False, f"playwright import error: {exc}")
+        _CHROMIUM_AVAILABLE_CACHE = res
+        return res
 
     result: dict[str, Any] = {}
 
@@ -75,7 +93,7 @@ def is_chromium_available() -> tuple[bool, str]:
                 browser = pw.chromium.launch(headless=True)
                 browser.close()
             result["ok"] = True
-        except Exception as exc:
+        except BaseException as exc:
             result["ok"] = False
             result["reason"] = f"Chromium launch failed: {exc}"
 
@@ -84,10 +102,14 @@ def is_chromium_available() -> tuple[bool, str]:
     thread.join(timeout=10.0)
 
     if thread.is_alive():
-        return False, "Chromium launch probe timed out after 10s"
-    if result.get("ok"):
-        return True, ""
-    return False, result.get("reason", "Chromium launch failed")
+        res = (False, "Chromium launch probe timed out after 10s")
+    elif result.get("ok"):
+        res = (True, "")
+    else:
+        res = (False, result.get("reason", "Chromium launch failed"))
+
+    _CHROMIUM_AVAILABLE_CACHE = res
+    return res
 
 
 def require_browser() -> None:
@@ -95,6 +117,69 @@ def require_browser() -> None:
     available, reason = is_chromium_available()
     if not available:
         pytest.skip(reason)
+
+
+def build_sanitized_env(
+    repo_root: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Create a minimal sanitized environment for isolated serve subprocess.
+
+    Excludes parent credentials, API keys, tokens, and secrets while retaining
+    essential system and runtime variables.
+    """
+    safe_passthrough_keys = {
+        # Execution & paths
+        "PATH",
+        # Windows system paths
+        "SYSTEMROOT",
+        "WINDIR",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+        "HOMEPATH",
+        "HOMEDRIVE",
+        "COMSPEC",
+        "PATHEXT",
+        # Temporary directories
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        # Locale & encoding
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        # Terminal
+        "TERM",
+        # Python / Conda environment markers
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+        "CONDA_DEFAULT_ENV",
+        "PYTHONHOME",
+        # TLS / CA certificates if configured
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    }
+
+    env: dict[str, str] = {}
+    for key in safe_passthrough_keys:
+        val = os.environ.get(key)
+        if val is not None:
+            env[key] = val
+
+    # Deterministic test settings
+    root = repo_root or REPO_ROOT
+    env["PYTHONPATH"] = str(root)
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+
+    if extra_env:
+        env.update(extra_env)
+
+    return env
 
 
 def parse_png_dimensions(data: bytes) -> tuple[int, int]:
@@ -366,11 +451,13 @@ class UIHarness:
         seed_fixtures: bool = True,
         auth_token: str | None = None,
         repo_root: Path | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self.port = port or find_free_port()
         self.seed_fixtures = seed_fixtures
         self.auth_token = auth_token
         self.repo_root = repo_root or REPO_ROOT
+        self.extra_env = extra_env
 
         self._temp_dir: tempfile.TemporaryDirectory | None = None
         self.output_dir: Path | None = None
@@ -382,56 +469,8 @@ class UIHarness:
         self._contexts: list[Any] = []
         self._page_errors: dict[Any, list[str]] = {}
 
-    def __enter__(self) -> "UIHarness":
-        require_browser()
-        from playwright.sync_api import sync_playwright
-
-        # 1. Create isolated temporary working directory
-        self._temp_dir = tempfile.TemporaryDirectory(prefix="wscan_ui_harness_")
-        tmp_path = Path(self._temp_dir.name)
-        self.output_dir = tmp_path / "output"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        # 2. Seed baseline fixtures if requested
-        if self.seed_fixtures:
-            seed_baseline_scans(self.output_dir)
-            seed_baseline_audit_log(self.output_dir)
-            seed_baseline_settings(self.output_dir)
-
-        # 3. Launch python main.py serve --no-open-browser in isolated cwd
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(self.repo_root)
-
-        cmd = [
-            sys.executable,
-            str(self.repo_root / "main.py"),
-            "serve",
-            "--host", "127.0.0.1",
-            "--port", str(self.port),
-            "--no-open-browser",
-        ]
-        if self.auth_token:
-            cmd.extend(["--auth-token", self.auth_token])
-
-        self.server_proc = subprocess.Popen(
-            cmd,
-            cwd=str(tmp_path),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        # 4. Wait for server to come up and answer /health
-        self._wait_for_server(timeout=12.0)
-
-        # 5. Initialize Playwright and launch Chromium
-        self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=True)
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        # Close all browser contexts and browser
+    def cleanup(self) -> None:
+        """Safely release all allocated resources (contexts, browser, playwright, server, tempdir)."""
         for ctx in list(self._contexts):
             try:
                 ctx.close()
@@ -453,26 +492,97 @@ class UIHarness:
                 pass
             self._playwright = None
 
-        # Stop server subprocess
         if self.server_proc:
             try:
-                self.server_proc.terminate()
-                self.server_proc.wait(timeout=5.0)
+                if self.server_proc.poll() is None:
+                    self.server_proc.terminate()
+                    try:
+                        self.server_proc.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        self.server_proc.kill()
+                        self.server_proc.wait(timeout=2.0)
             except Exception:
-                try:
-                    self.server_proc.kill()
-                    self.server_proc.wait(timeout=2.0)
-                except Exception:
-                    pass
-            self.server_proc = None
+                pass
+            finally:
+                if self.server_proc.stdout:
+                    try:
+                        self.server_proc.stdout.close()
+                    except Exception:
+                        pass
+                if self.server_proc.stderr:
+                    try:
+                        self.server_proc.stderr.close()
+                    except Exception:
+                        pass
+                self.server_proc = None
 
-        # Clean up temporary directory
         if self._temp_dir:
             try:
                 self._temp_dir.cleanup()
             except Exception:
                 pass
             self._temp_dir = None
+        self.output_dir = None
+
+    def close(self) -> None:
+        """Alias for cleanup to support manual lifecycle management."""
+        self.cleanup()
+
+    def __enter__(self) -> "UIHarness":
+        require_browser()
+        try:
+            # 1. Create isolated temporary working directory
+            self._temp_dir = tempfile.TemporaryDirectory(prefix="wscan_ui_harness_")
+            tmp_path = Path(self._temp_dir.name)
+            self.output_dir = tmp_path / "output"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+
+            # 2. Seed baseline fixtures if requested
+            if self.seed_fixtures:
+                seed_baseline_scans(self.output_dir)
+                seed_baseline_audit_log(self.output_dir)
+                seed_baseline_settings(self.output_dir)
+
+            # 3. Launch python main.py serve --no-open-browser in isolated cwd with sanitized env
+            env = build_sanitized_env(self.repo_root, extra_env=self.extra_env)
+
+            cmd = [
+                sys.executable,
+                str(self.repo_root / "main.py"),
+                "serve",
+                "--host", "127.0.0.1",
+                "--port", str(self.port),
+                "--no-open-browser",
+            ]
+            if self.auth_token:
+                cmd.extend(["--auth-token", self.auth_token])
+
+            self.server_proc = subprocess.Popen(
+                cmd,
+                cwd=str(tmp_path),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            # 4. Wait for server to come up and answer /health
+            self._wait_for_server(timeout=12.0)
+
+            # 5. Initialize Playwright and launch Chromium
+            from playwright.sync_api import sync_playwright
+            try:
+                self._playwright = sync_playwright().start()
+                self._browser = self._playwright.chromium.launch(headless=True)
+            except Exception as exc:
+                pytest.skip(f"Chromium launch failed during UI harness setup: {exc}")
+
+            return self
+        except BaseException:
+            self.cleanup()
+            raise
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.cleanup()
 
     def _wait_for_server(self, timeout: float = 10.0) -> None:
         """Poll /health endpoint until it answers 200 or timeout expires."""
@@ -613,5 +723,9 @@ class UIHarness:
 def ui_harness() -> Generator[UIHarness, None, None]:
     """Pytest fixture providing an isolated UIHarness instance."""
     require_browser()
-    with UIHarness() as harness:
-        yield harness
+    harness = UIHarness()
+    try:
+        with harness:
+            yield harness
+    finally:
+        harness.cleanup()

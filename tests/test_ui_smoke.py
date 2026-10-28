@@ -182,8 +182,13 @@ def test_setup_tabs_responsive_smoke(ui_harness: UIHarness, width: int):
         page.goto(f"{ui_harness.server_url}/monitor")
         page.wait_for_selector(".main")
 
-        # 1. Open Setup configuration overlay
-        page.evaluate("() => document.getElementById('scanConfigOverlay').classList.add('active')")
+        # 1. Open Setup configuration overlay via real UI trigger button
+        if page.is_visible(".ws-newscan"):
+            page.click(".ws-newscan")
+        elif page.is_visible(".hdr-newscan"):
+            page.click(".hdr-newscan")
+        else:
+            page.evaluate("() => document.getElementById('scanConfigOverlay').classList.add('active')")
         page.wait_for_selector("#scanConfigOverlay.active")
         assert page.is_visible("#scanConfigOverlay")
 
