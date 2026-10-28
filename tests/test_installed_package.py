@@ -54,6 +54,7 @@ assert Path(main.__file__).parent.name == "site"
 assert main._CONFIG_PATH.is_file()
 assert report.TEMPLATES_DIR.joinpath("dashboard.html").is_file()
 assert monitor.TEMPLATES_DIR.joinpath("ui", "tokens.css").is_file()
+assert monitor.TEMPLATES_DIR.joinpath("ui", "components.css").is_file()
 assert monitor.TEMPLATES_DIR.joinpath("ui", "vulix-logo.png").is_file()
 assert monitor.TEMPLATES_DIR.joinpath("ui", "vulix-logo-mark.png").is_file()
 assert monitor.TEMPLATES_DIR.joinpath("ui", "favicon.png").is_file()
@@ -71,6 +72,8 @@ with TestClient(monitor.MonitorServer().app) as client:
     assert "Dashboard not found" not in response.text
     css = client.get("/ui/tokens.css")
     assert css.status_code == 200 and "text/css" in css.headers["content-type"]
+    comp = client.get("/ui/components.css")
+    assert comp.status_code == 200 and "text/css" in comp.headers["content-type"]
     logo = client.get("/ui/vulix-logo.png")
     assert logo.status_code == 200 and "image/png" in logo.headers["content-type"]
     mark = client.get("/ui/vulix-logo-mark.png")
