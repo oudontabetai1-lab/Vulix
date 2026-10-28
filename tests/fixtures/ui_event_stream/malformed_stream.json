@@ -1,0 +1,27 @@
+{
+  "state": {
+    "serverInstanceId": "srv-a",
+    "scanRunId": "run-1",
+    "scanId": "scan-1",
+    "lastEventSequence": 2,
+    "eventCount": 2
+  },
+  "events": [
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 3,
+      "data": { "url": 42 }
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 4,
+      "data": { "url": "http://t/after-malformed" }
+    }
+  ],
+  "expected_stale": { "type": "page_start", "reason": "invalid_known_payload" },
+  "expected_sequence": 2
+}
