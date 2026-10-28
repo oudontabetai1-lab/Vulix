@@ -237,6 +237,45 @@ def test_schema_fixture_coverage_claiming_rejection():
         assert_valid_capability_manifest(data)
 
 
+@pytest.mark.parametrize(
+    "mutation_fn,expected_keyword",
+    [
+        (lambda d: d.update({"tested": True}), "tested"),
+        (lambda d: d.update({"coverage": "41/41"}), "coverage"),
+        (lambda d: d.update({"passed": True}), "passed"),
+        (lambda d: d.update({"verified": True}), "verified"),
+        (lambda d: d["scanners"]["sqli"].update({"tested": True}), "tested"),
+        (lambda d: d["scanners"]["sqli"].update({"coverage": "41/41"}), "coverage"),
+        (lambda d: d["scanners"]["sqli"]["declared_carriers"]["query"].update({"tested": True}), "tested"),
+        (lambda d: d["scanners"]["sqli"]["declared_carriers"]["query"].update({"coverage": "100%"}), "coverage"),
+        (lambda d: d.update({"unauthorized_extra_field": "val"}), "unauthorized_extra_field"),
+        (lambda d: d["scanners"]["sqli"].update({"unexpected_field": 123}), "unexpected_field"),
+        (lambda d: d["scanners"]["sqli"]["cvss"].update({"extra_metric": 1}), "extra_metric"),
+        (
+            lambda d: d["scanners"]["sqli"]["declared_carriers"]["query"].update({"extra_carrier_meta": "bad"}),
+            "extra_carrier_meta",
+        ),
+    ],
+)
+def test_strict_schema_rejects_extra_and_coverage_claiming_fields(mutation_fn, expected_keyword):
+    """Strict schema validation rejects any injected extra or coverage-claiming fields on valid manifest."""
+    fixture_path = FIXTURES_DIR / "valid_manifest.json"
+    data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    # Baseline valid fixture passes with 0 errors
+    assert validate_capability_manifest(data) == []
+
+    # Apply mutation (inject extra / coverage / tested field)
+    mutation_fn(data)
+
+    errors = validate_capability_manifest(data)
+    assert len(errors) >= 1, f"Expected validation errors after injecting '{expected_keyword}'"
+    assert any(expected_keyword in err for err in errors), f"Error list did not mention '{expected_keyword}': {errors}"
+
+    with pytest.raises(ValueError, match="failed schema validation"):
+        assert_valid_capability_manifest(data)
+
+
 def test_cached_manifest_accessor_isolation():
     """get_capability_manifest returns isolated deep copies preventing cache mutation."""
     manifest_1 = get_capability_manifest()
@@ -247,17 +286,69 @@ def test_cached_manifest_accessor_isolation():
 
 
 def test_backward_compatibility_matrix_unchanged():
-    """Existing capability_matrix and capability_matrix_html remain 100% unchanged."""
+    """Existing capability_matrix, rendered HTML, and config defaults remain strictly invariant."""
+    from wscan.engine import ScanEngine
+
+    # 1. Baseline: capture legacy capability_matrix, HTML renderings, and config defaults
     contracts = {name: cls.CONTRACT for name, cls in SCANNERS.items()}
-    matrix = build_capability_matrix(contracts)
+    matrix_before = build_capability_matrix(contracts)
+    html_ja_before = render_capability_matrix_html(matrix_before, lang="ja")
+    html_en_before = render_capability_matrix_html(matrix_before, lang="en")
 
-    assert "carriers" in matrix
-    assert "scanners" in matrix
-    assert len(matrix["scanners"]) == len(SCANNERS)
+    # Engine default checks baseline (must be ["sqli", "xss", "os"])
+    engine_before = ScanEngine("http://127.0.0.1:9")
+    engine_default_checks_before = list(engine_before.checks)
 
-    html = render_capability_matrix_html(matrix)
-    assert "Scanner capability matrix" in html or "table" in html
-    assert "sqli" in html
+    # Monitor server /api/config/defaults baseline
+    server = MonitorServer()
+    server.default_scan_cfg = {
+        "checks": ["sqli", "xss", "os"],
+        "capability_matrix_html": html_ja_before,
+    }
+    client = TestClient(server.app)
+    resp_cfg_before = client.get("/api/config/defaults")
+    assert resp_cfg_before.status_code == 200
+    cfg_defaults_before = resp_cfg_before.json()
+
+    # 2. Derive manifest (both built and cached), and query manifest endpoint
+    manifest_built = build_capability_manifest()
+    manifest_cached = get_capability_manifest(refresh=True)
+    assert manifest_built == manifest_cached
+
+    resp_manifest = client.get("/api/capability-manifest")
+    assert resp_manifest.status_code == 200
+
+    # 3. Post-manifest check: re-evaluate legacy matrix, HTML renderings, engine checks, and config defaults
+    matrix_after = build_capability_matrix(contracts)
+    html_ja_after = render_capability_matrix_html(matrix_after, lang="ja")
+    html_en_after = render_capability_matrix_html(matrix_after, lang="en")
+    engine_after = ScanEngine("http://127.0.0.1:9")
+    engine_default_checks_after = list(engine_after.checks)
+
+    resp_cfg_after = client.get("/api/config/defaults")
+    assert resp_cfg_after.status_code == 200
+    cfg_defaults_after = resp_cfg_after.json()
+
+    # 4. Invariance assertions: matrix and HTML must be strictly identical before and after
+    assert matrix_before == matrix_after
+    assert html_ja_before == html_ja_after
+    assert html_en_before == html_en_after
+
+    # 5. Invariance assertions: config defaults and engine default checks
+    assert engine_default_checks_before == ["sqli", "xss", "os"]
+    assert engine_default_checks_after == ["sqli", "xss", "os"]
+    assert engine_default_checks_before == engine_default_checks_after
+    assert manifest_cached["default_checks"] == ["sqli", "xss", "os"]
+    assert manifest_cached["default_checks"] == engine_default_checks_after
+    assert cfg_defaults_before == cfg_defaults_after
+    assert cfg_defaults_after["checks"] == ["sqli", "xss", "os"]
+    assert cfg_defaults_after["capability_matrix_html"] == html_ja_after
+
+    # 6. Negative assertions: manifest declaration-only metadata must not pollute legacy matrix
+    assert "schema_version" not in matrix_after
+    assert "manifest_kind" not in matrix_after
+    assert "declaration_only" not in matrix_after
+    assert "execution_coverage_claimed" not in matrix_after
 
 
 def test_monitor_api_capability_manifest_endpoint_no_auth():

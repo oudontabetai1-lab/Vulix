@@ -84,6 +84,21 @@ REQUIRED_CARRIER_FIELDS: tuple[str, ...] = (
     "declaration_only",
 )
 
+ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(REQUIRED_TOP_LEVEL_FIELDS)
+ALLOWED_SCANNER_FIELDS: frozenset[str] = frozenset(REQUIRED_SCANNER_FIELDS)
+ALLOWED_CARRIER_FIELDS: frozenset[str] = frozenset(REQUIRED_CARRIER_FIELDS)
+ALLOWED_CVSS_FIELDS: frozenset[str] = frozenset(("score", "vector"))
+
+FORBIDDEN_COVERAGE_KEYWORDS: tuple[str, ...] = (
+    "coverage",
+    "tested",
+    "passed",
+    "verified",
+    "runtime_coverage",
+    "execution_count",
+    "test_passed",
+)
+
 
 def _extract_carrier_capability(cap: CarrierCapability | None, carrier: Carrier) -> dict[str, Any]:
     """Extract a carrier declaration entry without asserting runtime coverage."""
@@ -258,6 +273,20 @@ def validate_capability_manifest(
         if field not in manifest:
             errors.append(f"Missing required top-level field '{field}'")
 
+    # Strict schema validation: reject any unexpected extra top-level fields
+    extra_top_fields = sorted(set(manifest.keys()) - ALLOWED_TOP_LEVEL_FIELDS)
+    for field in extra_top_fields:
+        if any(kw in field.lower() for kw in FORBIDDEN_COVERAGE_KEYWORDS):
+            errors.append(
+                f"Manifest contains forbidden runtime execution/coverage claim field '{field}' "
+                "(declaration-only schema strictly prohibits coverage/tested assertions)"
+            )
+        else:
+            errors.append(
+                f"Manifest contains unexpected extra top-level field '{field}' "
+                "(strict schema violation)"
+            )
+
     if manifest.get("manifest_kind") != MANIFEST_KIND:
         errors.append(
             f"Invalid manifest_kind: expected '{MANIFEST_KIND}', "
@@ -328,6 +357,19 @@ def validate_capability_manifest(
             if req_field not in sc:
                 errors.append(f"Scanner '{scanner_id}' missing required field '{req_field}'")
 
+        # Strict schema validation: reject unexpected extra fields on scanner entry
+        extra_sc_fields = sorted(set(sc.keys()) - ALLOWED_SCANNER_FIELDS)
+        for field in extra_sc_fields:
+            if any(kw in field.lower() for kw in FORBIDDEN_COVERAGE_KEYWORDS):
+                errors.append(
+                    f"Scanner '{scanner_id}' contains forbidden runtime execution/coverage claim field '{field}' "
+                    "(declaration-only schema strictly prohibits coverage/tested assertions)"
+                )
+            else:
+                errors.append(
+                    f"Scanner '{scanner_id}' has unexpected extra field '{field}' (strict schema violation)"
+                )
+
         if "cvss" in sc:
             cvss = sc.get("cvss")
             if not isinstance(cvss, dict):
@@ -337,6 +379,11 @@ def validate_capability_manifest(
                     errors.append(f"Scanner '{scanner_id}' cvss missing numeric 'score'")
                 if "vector" not in cvss or not isinstance(cvss.get("vector"), str):
                     errors.append(f"Scanner '{scanner_id}' cvss missing string 'vector'")
+                extra_cvss_fields = sorted(set(cvss.keys()) - ALLOWED_CVSS_FIELDS)
+                for field in extra_cvss_fields:
+                    errors.append(
+                        f"Scanner '{scanner_id}' cvss has unexpected extra field '{field}' (strict schema violation)"
+                    )
 
         if "applicable_modes" in sc:
             modes = sc.get("applicable_modes")
@@ -360,6 +407,19 @@ def validate_capability_manifest(
                         if req_cfield not in ccap:
                             errors.append(
                                 f"Scanner '{scanner_id}' carrier '{carrier_name}' missing required field '{req_cfield}'"
+                            )
+                    extra_carrier_fields = sorted(set(ccap.keys()) - ALLOWED_CARRIER_FIELDS)
+                    for field in extra_carrier_fields:
+                        if any(kw in field.lower() for kw in FORBIDDEN_COVERAGE_KEYWORDS):
+                            errors.append(
+                                f"Scanner '{scanner_id}' carrier '{carrier_name}' contains forbidden runtime "
+                                f"execution/coverage claim field '{field}' "
+                                "(declaration-only schema strictly prohibits coverage/tested assertions)"
+                            )
+                        else:
+                            errors.append(
+                                f"Scanner '{scanner_id}' carrier '{carrier_name}' has unexpected extra field "
+                                f"'{field}' (strict schema violation)"
                             )
 
     return errors
