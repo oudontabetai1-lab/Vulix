@@ -2841,6 +2841,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
   <img id="lbImg" src="" alt="">
 </div>
 
+<script src="/ui/api-client.js"></script>
 <script src="/ui/app-shell.js"></script>
 <script>
 // ─── State ─────────────────────────────────────────────────────
@@ -7094,20 +7095,55 @@ function setHistoryViewState(stateName, errorMsg) {
   }
 }
 
+// Scan History 専用の API Client Scope（ライフサイクル / unmount 時の stale read キャンセル管理）
+const historyApiClient = (typeof VulixApiClient !== 'undefined' && VulixApiClient.createScope)
+  ? VulixApiClient.createScope()
+  : null;
+
+function cancelScanHistory() {
+  if (historyApiClient) {
+    historyApiClient.cancelAll();
+  }
+}
+
 async function loadScanHistory() {
+  if (historyApiClient) {
+    historyApiClient.cancelAll();
+  }
   setHistoryViewState('loading');
   try {
-    const res = await fetch('/api/v1/scans');
-    if (!res.ok) {
-      if (res.status === 401) {
-        throw new Error('認証が必要です (HTTP 401 Unauthorized)。ログインするか認証トークンを確認してください。');
+    let result;
+    if (historyApiClient) {
+      result = await historyApiClient.get('/api/v1/scans');
+    } else {
+      const res = await fetch('/api/v1/scans');
+      if (!res.ok) {
+        if (res.status === 401) {
+          throw new Error('認証が必要です (HTTP 401 Unauthorized)。ログインするか認証トークンを確認してください。');
+        }
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       }
-      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      const data = await res.json();
+      result = { ok: true, isAborted: () => false, data: data };
     }
-    const data = await res.json();
-    currentHistoryData = Array.isArray(data.scans) ? data.scans : [];
+
+    if (result.isAborted && result.isAborted()) {
+      // unmount や再読み込みによってキャンセルされた stale read はビューを更新しない
+      return;
+    }
+
+    if (!result.ok) {
+      const msg = result.errorMessage || (result.error && result.error.message) || '通信エラーが発生しました';
+      setHistoryViewState('error', 'スキャン履歴の取得に失敗しました: ' + msg);
+      return;
+    }
+
+    currentHistoryData = Array.isArray(result.data && result.data.scans) ? result.data.scans : [];
     renderHistoryTable();
   } catch (err) {
+    if (err && err.name === 'AbortError') {
+      return;
+    }
     console.error('Failed to load scan history:', err);
     setHistoryViewState('error', 'スキャン履歴の取得に失敗しました: ' + (err.message || String(err)));
   }
