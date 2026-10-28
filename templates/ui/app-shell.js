@@ -28,8 +28,8 @@
      * @param {string} [def.title] - title / header text
      * @param {string} [def.route] - hash route (e.g. '#live')
      * @param {Array<string>} [def.capabilities] - required capabilities
-     * @param {Function} [def.mount] - lifecycle mount callback: (container, ctx) => void
-     * @param {Function} [def.unmount] - lifecycle unmount callback: (container, ctx) => void
+     * @param {Function} [def.mount] - lifecycle mount callback: (ctx) => void
+     * @param {Function} [def.unmount] - lifecycle unmount callback: (ctx) => void
      */
     register(def) {
       if (!def || typeof def.id !== 'string' || !def.id.trim()) {

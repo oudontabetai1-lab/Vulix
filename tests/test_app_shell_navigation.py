@@ -297,3 +297,377 @@ def test_server_auth_protects_app_shell_js():
     auth_res = client.get("/ui/app-shell.js")
     assert auth_res.status_code == 200
     assert "ModuleRegistry" in auth_res.text
+
+
+def test_app_shell_direct_link_initialization():
+    """Verify direct-link behavior: initial location.hash selects corresponding view (#history, #audit)."""
+    script = """
+    function runDirectLinkTest(initialHash) {
+        const events = [];
+        const listeners = {};
+        const elements = {};
+
+        function makeElement(id) {
+            return {
+                id: id,
+                style: { display: '' },
+                classList: {
+                    _classes: new Set(),
+                    add: function(c) { this._classes.add(c); },
+                    remove: function(c) { this._classes.delete(c); },
+                    contains: function(c) { return this._classes.has(c); },
+                },
+                _attrs: {},
+                setAttribute: function(k, v) { this._attrs[k] = v; },
+                removeAttribute: function(k) { delete this._attrs[k]; },
+                getAttribute: function(k) { return this._attrs[k]; },
+                textContent: '',
+            };
+        }
+
+        [
+            'viewLiveMonitor', 'viewScanHistory', 'viewAuditLog',
+            'navLiveMonitor', 'navScanHistory', 'navAuditLog',
+            'hdrBtnLive', 'hdrBtnHistory', 'hdrBtnAudit',
+            'headerTitle'
+        ].forEach(id => {
+            elements[id] = makeElement(id);
+        });
+
+        const mockDoc = {
+            getElementById: function(id) {
+                return elements[id] || null;
+            }
+        };
+
+        const mockWindow = {
+            document: mockDoc,
+            location: { hash: initialHash },
+            addEventListener: function(event, handler) {
+                listeners[event] = listeners[event] || [];
+                listeners[event].push(handler);
+            },
+            removeEventListener: function(event, handler) {
+                if (listeners[event]) {
+                    listeners[event] = listeners[event].filter(h => h !== handler);
+                }
+            },
+            loadScanHistory: () => { events.push('fetch:history'); },
+            loadAuditLog: () => { events.push('fetch:audit'); },
+        };
+
+        const shell = setupAppShell({ global: mockWindow });
+
+        return {
+            activeId: shell.registry.getActiveId(),
+            historyDisplay: elements['viewScanHistory'].style.display,
+            auditDisplay: elements['viewAuditLog'].style.display,
+            liveDisplay: elements['viewLiveMonitor'].style.display,
+            historyAria: elements['navScanHistory'].getAttribute('aria-current'),
+            auditAria: elements['navAuditLog'].getAttribute('aria-current'),
+            liveAria: elements['navLiveMonitor'].getAttribute('aria-current'),
+            headerTitle: elements['headerTitle'].textContent,
+            events: events,
+        };
+    }
+
+    console.log(JSON.stringify({
+        historyCase: runDirectLinkTest('#history'),
+        auditCase: runDirectLinkTest('#audit'),
+        defaultCase: runDirectLinkTest(''),
+    }));
+    """
+    data = _run_node_script(script)
+
+    # #history direct link
+    hist = data["historyCase"]
+    assert hist["activeId"] == "history"
+    assert hist["historyDisplay"] == "flex"
+    assert hist["liveDisplay"] == "none"
+    assert hist["historyAria"] == "page"
+    assert hist["headerTitle"] == "スキャン履歴"
+    assert hist["events"] == ["fetch:history"]
+
+    # #audit direct link
+    audit = data["auditCase"]
+    assert audit["activeId"] == "audit"
+    assert audit["auditDisplay"] == "flex"
+    assert audit["liveDisplay"] == "none"
+    assert audit["auditAria"] == "page"
+    assert audit["headerTitle"] == "監査ログ"
+    assert audit["events"] == ["fetch:audit"]
+
+    # default (empty / #live) direct link
+    default = data["defaultCase"]
+    assert default["activeId"] is None  # default remains live in DOM if not transitioned or transitions upon user action
+    assert default["liveDisplay"] == ""
+
+
+def test_app_shell_browser_history_back_forward_navigation():
+    """Verify back/forward simulation: hashchange events transition views correctly back and forth."""
+    script = """
+    const listeners = {};
+    const elements = {};
+
+    function makeElement(id) {
+        return {
+            id: id,
+            style: { display: '' },
+            classList: {
+                _classes: new Set(),
+                add: function(c) { this._classes.add(c); },
+                remove: function(c) { this._classes.delete(c); },
+                contains: function(c) { return this._classes.has(c); },
+            },
+            _attrs: {},
+            setAttribute: function(k, v) { this._attrs[k] = v; },
+            removeAttribute: function(k) { delete this._attrs[k]; },
+            getAttribute: function(k) { return this._attrs[k]; },
+            textContent: '',
+        };
+    }
+
+    [
+        'viewLiveMonitor', 'viewScanHistory', 'viewAuditLog',
+        'navLiveMonitor', 'navScanHistory', 'navAuditLog',
+        'hdrBtnLive', 'hdrBtnHistory', 'hdrBtnAudit',
+        'headerTitle'
+    ].forEach(id => {
+        elements[id] = makeElement(id);
+    });
+
+    const mockDoc = {
+        getElementById: function(id) {
+            return elements[id] || null;
+        }
+    };
+
+    const mockWindow = {
+        document: mockDoc,
+        location: { hash: '#live' },
+        addEventListener: function(event, handler) {
+            listeners[event] = listeners[event] || [];
+            listeners[event].push(handler);
+        },
+        removeEventListener: function(event, handler) {
+            if (listeners[event]) {
+                listeners[event] = listeners[event].filter(h => h !== handler);
+            }
+        },
+        loadScanHistory: () => {},
+        loadAuditLog: () => {},
+    };
+
+    const origWindow = global.window;
+    global.window = mockWindow;
+
+    const shell = setupAppShell({ global: mockWindow });
+
+    function fireHashChange(newHash) {
+        mockWindow.location.hash = newHash;
+        if (listeners['hashchange']) {
+            listeners['hashchange'].forEach(fn => fn());
+        }
+    }
+
+    // Forward to #history
+    fireHashChange('#history');
+    const step1Active = shell.registry.getActiveId();
+    const step1Title = elements['headerTitle'].textContent;
+
+    // Forward to #audit
+    fireHashChange('#audit');
+    const step2Active = shell.registry.getActiveId();
+    const step2Title = elements['headerTitle'].textContent;
+
+    // Back to #history
+    fireHashChange('#history');
+    const step3Active = shell.registry.getActiveId();
+    const step3Title = elements['headerTitle'].textContent;
+
+    // Back to #live
+    fireHashChange('#live');
+    const step4Active = shell.registry.getActiveId();
+    const step4Title = elements['headerTitle'].textContent;
+
+    global.window = origWindow;
+
+    console.log(JSON.stringify({
+        step1: { active: step1Active, title: step1Title },
+        step2: { active: step2Active, title: step2Title },
+        step3: { active: step3Active, title: step3Title },
+        step4: { active: step4Active, title: step4Title },
+    }));
+    """
+    data = _run_node_script(script)
+    assert data["step1"] == {"active": "history", "title": "スキャン履歴"}
+    assert data["step2"] == {"active": "audit", "title": "監査ログ"}
+    assert data["step3"] == {"active": "history", "title": "スキャン履歴"}
+    assert data["step4"] == {"active": "live", "title": "ライブモニター"}
+
+
+def test_app_shell_unknown_hash_fallback_to_live():
+    """Verify that unknown or malformed hash fragments safely fall back to live view."""
+    script = """
+    const listeners = {};
+    const elements = {};
+
+    function makeElement(id) {
+        return {
+            id: id,
+            style: { display: '' },
+            classList: {
+                _classes: new Set(),
+                add: function(c) { this._classes.add(c); },
+                remove: function(c) { this._classes.delete(c); },
+                contains: function(c) { return this._classes.has(c); },
+            },
+            _attrs: {},
+            setAttribute: function(k, v) { this._attrs[k] = v; },
+            removeAttribute: function(k) { delete this._attrs[k]; },
+            getAttribute: function(k) { return this._attrs[k]; },
+            textContent: '',
+        };
+    }
+
+    [
+        'viewLiveMonitor', 'viewScanHistory', 'viewAuditLog',
+        'navLiveMonitor', 'navScanHistory', 'navAuditLog',
+        'hdrBtnLive', 'hdrBtnHistory', 'hdrBtnAudit',
+        'headerTitle'
+    ].forEach(id => {
+        elements[id] = makeElement(id);
+    });
+
+    const mockDoc = {
+        getElementById: function(id) {
+            return elements[id] || null;
+        }
+    };
+
+    const mockWindow = {
+        document: mockDoc,
+        location: { hash: '#audit' },
+        addEventListener: function(event, handler) {
+            listeners[event] = listeners[event] || [];
+            listeners[event].push(handler);
+        },
+        removeEventListener: function(event, handler) {
+            if (listeners[event]) {
+                listeners[event] = listeners[event].filter(h => h !== handler);
+            }
+        },
+        loadScanHistory: () => {},
+        loadAuditLog: () => {},
+    };
+
+    const origWindow = global.window;
+    global.window = mockWindow;
+
+    const shell = setupAppShell({ global: mockWindow });
+    // Starts at audit
+    const initialActive = shell.registry.getActiveId();
+
+    function fireHashChange(newHash) {
+        mockWindow.location.hash = newHash;
+        if (listeners['hashchange']) {
+            listeners['hashchange'].forEach(fn => fn());
+        }
+    }
+
+    // Transition with unknown hashes
+    fireHashChange('#unknown-screen-xyz');
+    const fallbackActive1 = shell.registry.getActiveId();
+    const fallbackTitle1 = elements['headerTitle'].textContent;
+
+    // Transition back to audit first
+    fireHashChange('#audit');
+    const backToAudit = shell.registry.getActiveId();
+
+    // Transition with malformed hash
+    fireHashChange('#/../../etc/shadow');
+    const fallbackActive2 = shell.registry.getActiveId();
+    const fallbackTitle2 = elements['headerTitle'].textContent;
+
+    global.window = origWindow;
+
+    console.log(JSON.stringify({
+        initialActive: initialActive,
+        fallback1: { active: fallbackActive1, title: fallbackTitle1 },
+        backToAudit: backToAudit,
+        fallback2: { active: fallbackActive2, title: fallbackTitle2 },
+    }));
+    """
+    data = _run_node_script(script)
+    assert data["initialActive"] == "audit"
+    assert data["fallback1"] == {"active": "live", "title": "ライブモニター"}
+    assert data["backToAudit"] == "audit"
+    assert data["fallback2"] == {"active": "live", "title": "ライブモニター"}
+
+
+def test_app_shell_dispatcher_stop_teardown_listener():
+    """Verify dispatcher.stop and registry.destroy remove listeners and unmount active modules."""
+    script = """
+    const listeners = {};
+    const unmounted = [];
+
+    const mockWindow = {
+        addEventListener: function(event, handler) {
+            listeners[event] = listeners[event] || [];
+            listeners[event].push(handler);
+        },
+        removeEventListener: function(event, handler) {
+            if (listeners[event]) {
+                listeners[event] = listeners[event].filter(h => h !== handler);
+            }
+        },
+        location: { hash: '#live' },
+    };
+
+    const reg = new ModuleRegistry();
+    reg.register({
+        id: 'viewA',
+        mount: (ctx) => {},
+        unmount: (ctx) => { unmounted.push('viewA'); },
+    });
+    reg.register({
+        id: 'viewB',
+        mount: (ctx) => {},
+        unmount: (ctx) => { unmounted.push('viewB'); },
+    });
+
+    // In a browser-like global environment:
+    const origWindow = global.window;
+    global.window = mockWindow;
+
+    const disp = new NavigationDispatcher(reg);
+    disp.start();
+    const listenerCountStarted = (listeners['hashchange'] || []).length;
+
+    disp.navigateTo('viewA');
+    disp.navigateTo('viewB');
+
+    // Teardown dispatcher (stops listener)
+    disp.stop();
+    const listenerCountStopped = (listeners['hashchange'] || []).length;
+
+    // Teardown registry active module
+    reg.destroy();
+    const finalActive = reg.getActiveId();
+
+    // Restore global
+    global.window = origWindow;
+
+    console.log(JSON.stringify({
+        listenerCountStarted: listenerCountStarted,
+        listenerCountStopped: listenerCountStopped,
+        unmounted: unmounted,
+        finalActive: finalActive,
+    }));
+    """
+    data = _run_node_script(script)
+    assert data["listenerCountStarted"] == 1
+    assert data["listenerCountStopped"] == 0
+    assert data["unmounted"] == ["viewA", "viewB"]
+    assert data["finalActive"] is None
+
