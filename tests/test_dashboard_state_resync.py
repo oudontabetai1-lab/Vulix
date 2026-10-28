@@ -24,6 +24,16 @@ def _chromium_available() -> bool:
 
 
 class ScanSnapshotTests(unittest.TestCase):
+    def test_backend_version_is_on_live_events_and_reconnect_snapshot(self):
+        from wscan.capability_manifest import SCHEMA_VERSION
+        monitor = MonitorServer(port=0)
+        monitor._begin_scan_snapshot()
+
+        import asyncio
+        asyncio.run(monitor.emit("status", {"message": "versioned"}))
+        self.assertEqual(monitor.event_history[-1]["backend_version"], SCHEMA_VERSION)
+        self.assertEqual(monitor._scan_snapshot_event()["backend_version"], SCHEMA_VERSION)
+
     def test_progress_metadata_matches_live_event_and_snapshot(self):
         monitor = MonitorServer(port=0)
         monitor.api_scan_id = "eta-progress"
