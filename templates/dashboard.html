@@ -2903,18 +2903,246 @@ const state = {
   findingCards: new Map(),
 };
 
-// スキャン開始時に呼ぶ: config に一意な nonce を刻み、受理確認までは pending に置く。
-// scan_started は config の非秘匿フィールドを echo するため、この nonce で「自分の開始」を
-// 識別でき、ブロードキャストされる他タブのイベントに惑わされずに済む。
+// スキャン開始時に呼ぶ: config に一意な nonce を刻み、受理確認までは nonsecret な descriptor を pending に置く。
+// UI 状態（pending/last）には秘密情報や full config を保持しない（nonce 相関のみ維持）。
 function _markOwnScan(config) {
-  const nonce = (self.crypto && crypto.randomUUID)
+  const nonce = (typeof crypto !== 'undefined' && crypto.randomUUID)
     ? crypto.randomUUID()
-    : (Date.now() + '-' + Math.random().toString(16).slice(2));
+    : ((typeof self !== 'undefined' && self.crypto && self.crypto.randomUUID)
+        ? self.crypto.randomUUID()
+        : (Date.now() + '-' + Math.random().toString(16).slice(2)));
   state.myScanNonce = nonce;
   config._client_nonce = nonce;
-  // フル config(認証情報込み)は、受理後にだけ lastScanConfig へ昇格する。
-  state.pendingScanConfig = JSON.parse(JSON.stringify(config));
+  // UI 状態には認証情報等の秘密値を保持せず、nonsecret descriptor のみを pending に置く。
+  state.pendingScanConfig = _createNonsecretDescriptor(config);
   return config;
+}
+
+// ─── Nonsecret descriptor & credential sanitization ─────────────
+const KNOWN_SECRET_EXACT_KEYS = new Set([
+  'auth_pass',
+  'cookies',
+  'low_priv_cookies',
+  'tls_client_cert_password',
+  'bearer',
+  'headers',
+  'mfa_totp_uri',
+  'mfa_totp_secret',
+  'mfa_totp_qr',
+  'mfa_email_imap_password',
+  'password',
+  'passwd',
+  'pwd',
+  'secret',
+  'token',
+  'api_key',
+  'apikey',
+  'access_token',
+  'private_key',
+  'client_secret',
+  'credential',
+  'credentials',
+]);
+
+const _SENSITIVE_URL_KEY_FALLBACK = /(?:^key$|(?:api|access|auth)[_-]?key|password|passwd|pwd|secret|token|session[_-]?id|csrf|xsrf|credentials?|signature|samlresponse|(?:^|[._-])(?:sid|sessid|jwt|sig|jsessionid|phpsessid|bearer)(?:$|[._-])|(?:^|[._-])aspsessionid[a-z]*(?:$|[._-])|(?:^|[._-])(?:auth|authorization|session|otp|ticket)$)/i;
+
+function isSecretKeyName(key) {
+  if (typeof key !== 'string') return false;
+  const lower = key.toLowerCase().trim();
+  if (KNOWN_SECRET_EXACT_KEYS.has(lower)) return true;
+  if (lower.endsWith('_field') || lower.endsWith('_indicator') || lower.endsWith('_pattern') || lower.endsWith('_type')) {
+    return false;
+  }
+  if (
+    lower.endsWith('_pass') ||
+    lower.endsWith('_password') ||
+    lower.endsWith('_secret') ||
+    lower.endsWith('_token') ||
+    lower.endsWith('_cookie') ||
+    lower.endsWith('_cookies') ||
+    lower.endsWith('_credential') ||
+    lower.endsWith('_credentials')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function sanitizeUrlForExport(raw) {
+  if (typeof raw !== 'string') return raw;
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  const sensitiveRegex = (typeof CONFIG_SENSITIVE_URL_KEY !== 'undefined')
+    ? CONFIG_SENSITIVE_URL_KEY
+    : _SENSITIVE_URL_KEY_FALLBACK;
+  try {
+    const parsed = new URL(trimmed);
+    parsed.username = '';
+    parsed.password = '';
+    const keysToDelete = [];
+    for (const key of parsed.searchParams.keys()) {
+      if (sensitiveRegex.test(key)) {
+        keysToDelete.push(key);
+      }
+    }
+    keysToDelete.forEach(k => parsed.searchParams.delete(k));
+    if (parsed.hash) {
+      const fragment = parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash;
+      try {
+        const fragParams = new URLSearchParams(fragment);
+        let changed = false;
+        const fragKeysToDelete = [];
+        for (const k of fragParams.keys()) {
+          if (sensitiveRegex.test(k)) {
+            fragKeysToDelete.push(k);
+            changed = true;
+          }
+        }
+        if (changed) {
+          fragKeysToDelete.forEach(k => fragParams.delete(k));
+          const newFrag = fragParams.toString();
+          parsed.hash = newFrag ? '#' + newFrag : '';
+        }
+      } catch (_) {}
+    }
+    if (parsed.pathname && /;[^/?#]+/i.test(parsed.pathname)) {
+      parsed.pathname = parsed.pathname.replace(/;([a-zA-Z0-9_-]+)=[^;/?#]*/g, (match, paramName) => {
+        return sensitiveRegex.test(paramName) ? '' : match;
+      });
+    }
+    let res = parsed.toString();
+    if (!trimmed.endsWith('/') && res.endsWith('/') && parsed.pathname === '/' && !parsed.search && !parsed.hash) {
+      res = res.slice(0, -1);
+    }
+    return res;
+  } catch (_) {
+    return trimmed
+      .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#]*@/i, m => m.replace(/\/\/.*@/, '//'))
+      .replace(/([?&])(?:key|access_key|api_key|auth(?:_token)?|password|secret|token|sig|signature|jwt|sid|session_id)=[^&#]*/gi, '$1')
+      .replace(/[?&]+$/, '');
+  }
+}
+
+function sanitizeUrlListForExport(raw) {
+  if (typeof raw !== 'string') return raw;
+  return raw.split('\n').map(sanitizeUrlForExport).join('\n');
+}
+
+function recursiveSanitizeNonsecret(val) {
+  if (val === null || val === undefined) return val;
+  if (typeof val === 'string') {
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(val)) {
+      return sanitizeUrlForExport(val);
+    }
+    return val;
+  }
+  if (Array.isArray(val)) {
+    return val.map(item => recursiveSanitizeNonsecret(item));
+  }
+  if (typeof val === 'object') {
+    const res = {};
+    for (const [k, v] of Object.entries(val)) {
+      const lower = k.toLowerCase();
+      if (isSecretKeyName(k)) continue;
+
+      if (lower === 'accounts' && Array.isArray(v)) {
+        res[k] = v.map(a => {
+          if (!a || typeof a !== 'object') return a;
+          const cleanA = { ...a };
+          delete cleanA.password;
+          delete cleanA.secret;
+          delete cleanA.token;
+          return recursiveSanitizeNonsecret(cleanA);
+        });
+        continue;
+      }
+
+      if (lower === 'flows' && Array.isArray(v)) {
+        res[k] = v.map(flow => {
+          if (!flow || typeof flow !== 'object') return flow;
+          const cleanFlow = { ...flow };
+          if (Array.isArray(flow.steps)) {
+            cleanFlow.steps = flow.steps.map(step => {
+              if (!step || typeof step !== 'object') return step;
+              const cleanStep = { ...step };
+              if (cleanStep.action === 'navigate' && cleanStep.url) {
+                cleanStep.url = sanitizeUrlForExport(cleanStep.url);
+              }
+              if (cleanStep.action === 'fill') {
+                const fld = String(cleanStep.field || '').toLowerCase();
+                if (isSecretKeyName(cleanStep.field) || /(?:pass(?:word)?|pwd|secret|token|cred|auth)/i.test(fld)) {
+                  cleanStep.value = '';
+                }
+              }
+              return cleanStep;
+            });
+          }
+          return cleanFlow;
+        });
+        continue;
+      }
+
+      if (lower === 'target_urls' || lower === 'access_urls' || lower === 'exclude_urls') {
+        if (typeof v === 'string') {
+          res[k] = sanitizeUrlListForExport(v);
+        } else if (Array.isArray(v)) {
+          res[k] = v.map(sanitizeUrlForExport);
+        } else {
+          res[k] = recursiveSanitizeNonsecret(v);
+        }
+        continue;
+      }
+
+      res[k] = recursiveSanitizeNonsecret(v);
+    }
+    return res;
+  }
+  return val;
+}
+
+function hasCredentialsInConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') return false;
+  const directSecretFields = [
+    'auth_pass', 'cookies', 'low_priv_cookies', 'tls_client_cert_password',
+    'bearer', 'mfa_totp_uri', 'mfa_totp_secret', 'mfa_totp_qr', 'mfa_email_imap_password',
+  ];
+  for (const f of directSecretFields) {
+    if (cfg[f] !== undefined && cfg[f] !== null && String(cfg[f]).trim() !== '') return true;
+  }
+  if (cfg.headers) {
+    if (typeof cfg.headers === 'object' && Object.keys(cfg.headers).length > 0) return true;
+    if (typeof cfg.headers === 'string' && cfg.headers.trim() !== '') return true;
+  }
+  if (Array.isArray(cfg.accounts) && cfg.accounts.some(a => a && a.password && String(a.password).trim() !== '')) return true;
+  if (Array.isArray(cfg.flows)) {
+    for (const fl of cfg.flows) {
+      if (Array.isArray(fl?.steps)) {
+        for (const st of fl.steps) {
+          if (st?.action === 'fill' && st?.value && (isSecretKeyName(st.field) || /(?:pass(?:word)?|pwd|secret|token|cred|auth)/i.test(String(st.field || '')))) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function _createNonsecretDescriptor(config) {
+  if (!config || typeof config !== 'object') return {};
+  const reqCreds = hasCredentialsInConfig(config);
+  const desc = recursiveSanitizeNonsecret(config);
+  if (config._client_nonce) desc._client_nonce = config._client_nonce;
+  if (reqCreds) desc.requires_credentials = true;
+  return desc;
+}
+
+function _sanitizeConfigForExport(cfg) {
+  if (!cfg || typeof cfg !== 'object') return {};
+  const meta = cfg._meta ? { ...cfg._meta } : undefined;
+  const sanitized = recursiveSanitizeNonsecret(cfg);
+  if (meta) sanitized._meta = meta;
+  return sanitized;
 }
 
 function containsRedactedValues(cfg) {
@@ -2928,6 +3156,8 @@ function containsRedactedValues(cfg) {
 
 const REDACTED_RERUN_MESSAGE =
   'この画面は実行結果を観測しているため、認証情報を含む再巡回はできません。設定画面から再度スキャンを開始してください。';
+const CREDENTIAL_RERUN_MESSAGE =
+  '前回のスキャンには認証情報が含まれていたため、設定画面で認証情報を再入力してください。';
 
 function _discardRejectedPendingScan(data) {
   // scan_rejected は全タブへ配信されるため、nonce が一致する自分の要求だけを破棄する。
@@ -2945,8 +3175,8 @@ function _promotePendingScan(data) {
       state.pendingScanConfig = null;
     }
   } else {
-    // 他タブ/REST が開始したスキャンの観測では、従来どおり配信データを採用する。
-    state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
+    // 他タブ/REST が開始したスキャンの観測では、配信データを nonsecret 化して採用する。
+    state.lastScanConfig = _createNonsecretDescriptor(data || {});
     state.lastScanConfigRedacted = containsRedactedValues(data);
   }
 }
@@ -3697,7 +3927,13 @@ function showPostScanActions(show) {
   if (rerunBtn) {
     const blocked = Boolean(state.lastScanConfigRedacted);
     rerunBtn.disabled = blocked;
-    rerunBtn.title = blocked ? REDACTED_RERUN_MESSAGE : '';
+    if (blocked) {
+      rerunBtn.title = REDACTED_RERUN_MESSAGE;
+    } else if (state.lastScanConfig && state.lastScanConfig.requires_credentials) {
+      rerunBtn.title = CREDENTIAL_RERUN_MESSAGE;
+    } else {
+      rerunBtn.title = '';
+    }
     rerunBtn.style.cursor = blocked ? 'not-allowed' : 'pointer';
     rerunBtn.style.opacity = blocked ? '0.55' : '1';
   }
@@ -3717,11 +3953,22 @@ function rerunLastScan() {
     alert('WebSocket未接続。ページを再読み込みしてください。');
     return;
   }
+  // クライアント状態に secret を保持しないため、認証情報を伴うスキャンだった場合は
+  // 設定画面を開いて再入力を促す（re-entry UX）。
+  if (state.lastScanConfig.requires_credentials) {
+    showPostScanActions(false);
+    const overlay = document.getElementById('scanConfigOverlay');
+    if (overlay) overlay.classList.add('active');
+    setStatus(CREDENTIAL_RERUN_MESSAGE, 'warning');
+    addEventLog('status', CREDENTIAL_RERUN_MESSAGE);
+    return;
+  }
   showPostScanActions(false);
-  // 再実行も「自分の開始」。新しい nonce を刻んで自分の scan_started を識別する
-  // （さもないと直後の伏字 scan_started で lastScanConfig が上書きされ認証情報を失う）。
-  _markOwnScan(state.lastScanConfig);
-  state.ws.send(JSON.stringify({ action: 'start_scan', config: state.lastScanConfig }));
+  // 再実行も「自分の開始」。新しい nonce を刻んで自分の scan_started を識別する。
+  const rerunCfg = JSON.parse(JSON.stringify(state.lastScanConfig));
+  delete rerunCfg.requires_credentials;
+  _markOwnScan(rerunCfg);
+  state.ws.send(JSON.stringify({ action: 'start_scan', config: rerunCfg }));
   setStatus('再巡回を開始しています...', 'running');
   addEventLog('status', '前回設定で再巡回を開始');
 }
@@ -3873,7 +4120,6 @@ function _collectFullConfigForExport() {
     tls_client_cert: collect('cfgTlsClientCert'),
     tls_client_key: collect('cfgTlsClientKey'),
     tls_client_pfx: collect('cfgTlsClientPfx'),
-    tls_client_cert_password: collect('cfgTlsClientCertPassword'),
     tls_ca_cert: collect('cfgTlsCaCert'),
     output_dir: collect('cfgOutputDir'),
     payloads_file: collect('cfgPayloadsFile'),
@@ -3887,7 +4133,6 @@ function _collectFullConfigForExport() {
     openai_base_url: (collect('cfgLlm') === 'openai_compatible' ? collect('cfgLlmBaseUrl') : ''),
     role_models: collectRoleModels(),
     auth_user: collect('cfgAuthUser'),
-    auth_pass: collect('cfgAuthPass'),
     login_url: collect('cfgLoginUrl'),
     login_user_field: collect('cfgLoginUserField'),
     login_pass_field: collect('cfgLoginPassField'),
@@ -3897,10 +4142,7 @@ function _collectFullConfigForExport() {
     mfa_email_account: collect('cfgMfaEmailAccount'),
     ...mfaImapFields(),
     ...mfaTotpFields(),
-    ...authHeaderFields(),
     ...timeWindowFields(),
-    cookies: collect('cfgCookies'),
-    low_priv_cookies: collect('cfgLowPrivCookies'),
     auto_register_count: collect('cfgAutoRegisterCount'),
     exclude_fields: collect('cfgExcludeFields'),
     exclude_urls: collect('cfgExcludeUrls'),
@@ -3912,15 +4154,7 @@ function _collectFullConfigForExport() {
     flows: collectFlows(),
     accounts: (typeof collectAccounts === 'function') ? collectAccounts() : [],
   };
-  // 長期保存するJSONにはTOTP登録情報・Bearer・カスタムヘッダ値を含めない。
-  // （カスタムヘッダには Authorization / X-Api-Key 等の認証情報が入り得る。
-  //   QRパスはシークレットを符号化した画像の所在を示すため同様に除外する）
-  delete cfg.mfa_totp_uri;
-  delete cfg.mfa_totp_secret;
-  delete cfg.mfa_totp_qr;
-  delete cfg.bearer;
-  delete cfg.headers;
-  return cfg;
+  return _sanitizeConfigForExport(cfg);
 }
 
 function _downloadJson(obj, filename) {
@@ -4150,7 +4384,8 @@ const CONFIG_SAVE_ALLOWLIST = [
 // 破棄して allowlist だけで上書き保存する（後方互換の後始末）。
 const CONFIG_SECRET_KEYS = [
   'auth_pass', 'tls_client_cert_password', 'bearer', 'headers', 'cookies',
-  'mfa_totp_uri', 'mfa_totp_secret', 'mfa_totp_qr', 'mfa_email_imap_password',
+  'low_priv_cookies', 'mfa_totp_uri', 'mfa_totp_secret', 'mfa_totp_qr',
+  'mfa_email_imap_password', 'password', 'passwd', 'secret', 'token',
 ];
 
 // 資格情報らしい URL パラメータ名。汎用語（auth/session/otp/ticket）は誤除外を抑えるため

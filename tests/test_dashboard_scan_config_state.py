@@ -34,6 +34,7 @@ if (JSON.stringify(state.lastScanConfig) !== previous) process.exit(11);
 self.crypto.randomUUID = () => 'test-nonce-2';
 const accepted = {{url: 'https://new.example', auth_pass: 'full-value'}};
 _markOwnScan(accepted);
+if (state.pendingScanConfig.auth_pass !== undefined) process.exit(19);
 _promotePendingScan({{
   _client_nonce: state.myScanNonce,
   url: accepted.url,
@@ -41,7 +42,8 @@ _promotePendingScan({{
 }});
 if (state.pendingScanConfig !== null) process.exit(20);
 if (state.lastScanConfig.url !== accepted.url) process.exit(21);
-if (state.lastScanConfig.auth_pass !== 'full-value') process.exit(22);
+if (state.lastScanConfig.auth_pass !== undefined) process.exit(22);
+if (state.lastScanConfig.requires_credentials !== true) process.exit(24);
 if (state.lastScanConfigRedacted !== false) process.exit(23);
 
 _promotePendingScan({{
@@ -49,7 +51,7 @@ _promotePendingScan({{
   auth: [{{password: 'prefix-***REDACTED***-suffix'}}],
 }});
 if (state.lastScanConfig.url !== 'https://observed.example') process.exit(30);
-if (state.lastScanConfig.auth[0].password !== 'prefix-***REDACTED***-suffix') process.exit(31);
+if (state.lastScanConfig.auth?.[0]?.password !== undefined) process.exit(31);
 if (state.lastScanConfigRedacted !== true) process.exit(32);
 """
         result = subprocess.run(
