@@ -404,7 +404,13 @@ def test_app_shell_direct_link_initialization():
 
 
 def test_app_shell_browser_history_back_forward_navigation():
-    """Verify back/forward simulation: hashchange events transition views correctly back and forth."""
+    """Verify back/forward navigation: sequential hashchange events transition views and aria-current correctly.
+
+    Note: Real browser popstate / History API stack traversal is validated in E2E slices (U04/U28).
+    This unit test explicitly simulates browser back/forward history transitions via sequence of hashchange
+    events (#live -> #history -> #audit -> back to #history -> back to #live) and asserts that view visibility,
+    active module state, and navigation element aria-current attributes update accurately at each step.
+    """
     script = """
     const listeners = {};
     const elements = {};
@@ -470,40 +476,92 @@ def test_app_shell_browser_history_back_forward_navigation():
         }
     }
 
-    // Forward to #history
-    fireHashChange('#history');
-    const step1Active = shell.registry.getActiveId();
-    const step1Title = elements['headerTitle'].textContent;
+    function captureState() {
+        return {
+            active: shell.registry.getActiveId(),
+            title: elements['headerTitle'].textContent,
+            liveDisplay: elements['viewLiveMonitor'].style.display,
+            historyDisplay: elements['viewScanHistory'].style.display,
+            auditDisplay: elements['viewAuditLog'].style.display,
+            navLiveAria: elements['navLiveMonitor'].getAttribute('aria-current') || null,
+            navHistoryAria: elements['navScanHistory'].getAttribute('aria-current') || null,
+            navAuditAria: elements['navAuditLog'].getAttribute('aria-current') || null,
+        };
+    }
 
-    // Forward to #audit
+    // Step 0: Initial state before any hashchange navigation
+    const step0 = captureState();
+
+    // Step 1: Forward navigation to #history
+    fireHashChange('#history');
+    const step1 = captureState();
+
+    // Step 2: Forward navigation to #audit
     fireHashChange('#audit');
-    const step2Active = shell.registry.getActiveId();
-    const step2Title = elements['headerTitle'].textContent;
+    const step2 = captureState();
 
-    // Back to #history
+    // Step 3: Back navigation to #history
     fireHashChange('#history');
-    const step3Active = shell.registry.getActiveId();
-    const step3Title = elements['headerTitle'].textContent;
+    const step3 = captureState();
 
-    // Back to #live
+    // Step 4: Back navigation to #live
     fireHashChange('#live');
-    const step4Active = shell.registry.getActiveId();
-    const step4Title = elements['headerTitle'].textContent;
+    const step4 = captureState();
 
     global.window = origWindow;
 
     console.log(JSON.stringify({
-        step1: { active: step1Active, title: step1Title },
-        step2: { active: step2Active, title: step2Title },
-        step3: { active: step3Active, title: step3Title },
-        step4: { active: step4Active, title: step4Title },
+        step0: step0,
+        step1: step1,
+        step2: step2,
+        step3: step3,
+        step4: step4,
     }));
     """
     data = _run_node_script(script)
-    assert data["step1"] == {"active": "history", "title": "スキャン履歴"}
-    assert data["step2"] == {"active": "audit", "title": "監査ログ"}
-    assert data["step3"] == {"active": "history", "title": "スキャン履歴"}
-    assert data["step4"] == {"active": "live", "title": "ライブモニター"}
+
+    # Initial state: #live is not mounted yet by design (contract: initial live DOM left untouched)
+    assert data["step0"]["active"] is None
+
+    # Step 1: forward to #history
+    assert data["step1"]["active"] == "history"
+    assert data["step1"]["title"] == "スキャン履歴"
+    assert data["step1"]["historyDisplay"] == "flex"
+    assert data["step1"]["liveDisplay"] == "none"
+    assert data["step1"]["auditDisplay"] == "none"
+    assert data["step1"]["navHistoryAria"] == "page"
+    assert data["step1"]["navLiveAria"] is None
+    assert data["step1"]["navAuditAria"] is None
+
+    # Step 2: forward to #audit
+    assert data["step2"]["active"] == "audit"
+    assert data["step2"]["title"] == "監査ログ"
+    assert data["step2"]["auditDisplay"] == "flex"
+    assert data["step2"]["historyDisplay"] == "none"
+    assert data["step2"]["liveDisplay"] == "none"
+    assert data["step2"]["navAuditAria"] == "page"
+    assert data["step2"]["navHistoryAria"] is None
+    assert data["step2"]["navLiveAria"] is None
+
+    # Step 3: back to #history
+    assert data["step3"]["active"] == "history"
+    assert data["step3"]["title"] == "スキャン履歴"
+    assert data["step3"]["historyDisplay"] == "flex"
+    assert data["step3"]["auditDisplay"] == "none"
+    assert data["step3"]["liveDisplay"] == "none"
+    assert data["step3"]["navHistoryAria"] == "page"
+    assert data["step3"]["navAuditAria"] is None
+    assert data["step3"]["navLiveAria"] is None
+
+    # Step 4: back to #live
+    assert data["step4"]["active"] == "live"
+    assert data["step4"]["title"] == "ライブモニター"
+    assert data["step4"]["liveDisplay"] == "flex"
+    assert data["step4"]["historyDisplay"] == "none"
+    assert data["step4"]["auditDisplay"] == "none"
+    assert data["step4"]["navLiveAria"] == "page"
+    assert data["step4"]["navHistoryAria"] is None
+    assert data["step4"]["navAuditAria"] is None
 
 
 def test_app_shell_unknown_hash_fallback_to_live():
@@ -606,10 +664,20 @@ def test_app_shell_unknown_hash_fallback_to_live():
 
 
 def test_app_shell_dispatcher_stop_teardown_listener():
-    """Verify dispatcher.stop and registry.destroy remove listeners and unmount active modules."""
+    """Verify dispatcher.stop directly removes the hashchange listener and prevents post-stop transitions.
+
+    Note: app-shell.js does not use any timers or intervals (timer teardown is N/A).
+    This test verifies that:
+    1. dispatcher.start registers window.addEventListener('hashchange', _onHashChange).
+    2. dispatcher.stop calls window.removeEventListener('hashchange', _onHashChange), reducing listener count to 0.
+    3. Firing subsequent hashchange events after dispatcher.stop() does NOT trigger any view transition
+       or callback (listener is reliably unhooked).
+    4. registry.destroy() unmounts any currently active module and clears activeId to null.
+    """
     script = """
     const listeners = {};
     const unmounted = [];
+    const navigationEvents = [];
 
     const mockWindow = {
         addEventListener: function(event, handler) {
@@ -635,21 +703,38 @@ def test_app_shell_dispatcher_stop_teardown_listener():
         mount: (ctx) => {},
         unmount: (ctx) => { unmounted.push('viewB'); },
     });
+    reg.register({
+        id: 'history',
+        mount: (ctx) => {},
+        unmount: (ctx) => { unmounted.push('history'); },
+    });
 
     // In a browser-like global environment:
     const origWindow = global.window;
     global.window = mockWindow;
 
-    const disp = new NavigationDispatcher(reg);
+    const disp = new NavigationDispatcher(reg, {
+        onNavigate: (viewId) => { navigationEvents.push(viewId); }
+    });
     disp.start();
     const listenerCountStarted = (listeners['hashchange'] || []).length;
 
     disp.navigateTo('viewA');
     disp.navigateTo('viewB');
 
-    // Teardown dispatcher (stops listener)
+    // Active is now viewB
+    const activeBeforeStop = reg.getActiveId();
+
+    // Teardown dispatcher (stops listener and removes from window)
     disp.stop();
     const listenerCountStopped = (listeners['hashchange'] || []).length;
+
+    // Direct verification of teardown: firing hashchange event after stop() must NOT trigger navigation
+    mockWindow.location.hash = '#history';
+    if (listeners['hashchange']) {
+        listeners['hashchange'].forEach(fn => fn());
+    }
+    const activeAfterPostStopHashChange = reg.getActiveId();
 
     // Teardown registry active module
     reg.destroy();
@@ -661,6 +746,9 @@ def test_app_shell_dispatcher_stop_teardown_listener():
     console.log(JSON.stringify({
         listenerCountStarted: listenerCountStarted,
         listenerCountStopped: listenerCountStopped,
+        activeBeforeStop: activeBeforeStop,
+        activeAfterPostStopHashChange: activeAfterPostStopHashChange,
+        navigationEvents: navigationEvents,
         unmounted: unmounted,
         finalActive: finalActive,
     }));
@@ -668,6 +756,10 @@ def test_app_shell_dispatcher_stop_teardown_listener():
     data = _run_node_script(script)
     assert data["listenerCountStarted"] == 1
     assert data["listenerCountStopped"] == 0
+    assert data["activeBeforeStop"] == "viewB"
+    # Verification that post-stop hashchange did NOT transition active module (remains viewB, not changed to history)
+    assert data["activeAfterPostStopHashChange"] == "viewB"
+    assert data["navigationEvents"] == ["viewA", "viewB"]
     assert data["unmounted"] == ["viewA", "viewB"]
     assert data["finalActive"] is None
 
