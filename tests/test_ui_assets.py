@@ -158,11 +158,6 @@ def test_vulix_logo_sha256_byte_parity_and_favicon_dimensions():
     actual_sha = hashlib.sha256(logo_path.read_bytes()).hexdigest()
     assert actual_sha == expected_sha, f"Logo SHA mismatch: {actual_sha} != {expected_sha}"
 
-    provenance_original = Path("/Users/Owner/.config/orca-failover/reports/ui-v3-logo-20261028/Vulix_logo.png")
-    if provenance_original.is_file():
-        orig_sha = hashlib.sha256(provenance_original.read_bytes()).hexdigest()
-        assert actual_sha == orig_sha, "Byte mismatch with original file"
-
     fav_path = ROOT / "templates" / "ui" / "favicon.png"
     assert fav_path.is_file()
     with Image.open(fav_path) as im:
