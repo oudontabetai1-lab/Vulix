@@ -1,0 +1,76 @@
+{
+  "description": "敵性ツイン: 別 server / 別 run / 重複 / 欠番 / 不正 envelope。どれも受理せず cursor を動かさない。",
+  "state": {
+    "serverInstanceId": "srv-a",
+    "scanRunId": "run-1",
+    "scanId": "scan-1",
+    "lastEventSequence": 2,
+    "eventCount": 2
+  },
+  "events": [
+    {
+      "type": "page_start",
+      "server_id": "srv-b",
+      "run_id": "run-1",
+      "sequence": 3,
+      "data": {
+        "url": "http://other"
+      }
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-2",
+      "sequence": 3,
+      "data": {
+        "url": "http://stale-run"
+      }
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 2,
+      "data": {
+        "url": "http://dup"
+      }
+    },
+    {
+      "type": "page_start",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 9,
+      "data": {
+        "url": "http://gap"
+      }
+    },
+    {
+      "type": "scan_started",
+      "server_id": "srv-a",
+      "run_id": "run-1",
+      "sequence": 0
+    },
+    null,
+    {
+      "type": "payload_test",
+      "data": {
+        "field": "q"
+      }
+    }
+  ],
+  "expected_actions": [
+    "drop",
+    "drop",
+    "drop",
+    "reconnect_on_gap",
+    "drop",
+    "drop",
+    "process"
+  ],
+  "expected_final": {
+    "serverInstanceId": "srv-a",
+    "scanRunId": "run-1",
+    "lastEventSequence": 2,
+    "eventCount": 3
+  }
+}

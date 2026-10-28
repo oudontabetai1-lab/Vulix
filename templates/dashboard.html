@@ -2850,6 +2850,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
 <script src="/ui/api-client.js"></script>
 <script src="/ui/capability-reader.js"></script>
 <script src="/ui/app-shell.js"></script>
+<script src="/ui/event-stream.js"></script>
 <script>
 // ─── State ─────────────────────────────────────────────────────
 const state = {
@@ -5258,20 +5259,6 @@ function updateETA(current, total, evTimestampSec, phase = '', unit = '', totalK
   }
 }
 
-// ─── WebSocket message queue (requestAnimationFrame batching) ────────────────
-const _msgQueue = [];
-let _rafPending = false;
-
-function _flushMsgQueue() {
-  _rafPending = false;
-  const batch = _msgQueue.splice(0, 50);  // process up to 50 events per frame
-  batch.forEach(handleEvent);
-  if (_msgQueue.length > 0) {
-    _rafPending = true;
-    requestAnimationFrame(_flushMsgQueue);
-  }
-}
-
 // Show the logout control only when the server has a token configured.
 fetch('/api/auth-status').then(r => r.ok ? r.json() : null).then(d => {
   if (d && d.auth_enabled) {
@@ -5280,80 +5267,81 @@ fetch('/api/auth-status').then(r => r.ok ? r.json() : null).then(d => {
   }
 }).catch(() => {});
 
-function connect() {
-  // Use wss:// automatically when the dashboard is served over HTTPS
-  // (e.g. behind a TLS-terminating reverse proxy on the intranet).
-  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
-  state.ws = ws;
+// ─── Event Stream & WebSocket Manager (UI v3 U09) ───────────────────────────
+let _eventStream = null;
 
-  ws.onopen = () => {
-    state.connected = true;
-    document.getElementById('wsBadge').textContent = 'WS: Connected';
-    document.getElementById('wsBadge').className = 'ws-badge connected';
+function _onEventStreamStatusChange(evt) {
+  const badge = document.getElementById('wsBadge');
+  if (evt.connected) {
+    if (badge) {
+      badge.textContent = 'WS: Connected';
+      badge.className = 'ws-badge connected';
+    }
     setStatus('Connected — waiting for scan...', '');
-  };
-
-  ws.onclose = () => {
-    state.connected = false;
-    document.getElementById('wsBadge').textContent = 'WS: Disconnected';
-    document.getElementById('wsBadge').className = 'ws-badge';
+  } else {
+    if (badge) {
+      badge.textContent = 'WS: Disconnected';
+      badge.className = 'ws-badge';
+    }
     setStatus('Disconnected. Reconnecting...', 'error');
-    setTimeout(connect, 3000);
-  };
+  }
+}
 
-  ws.onerror = () => {
-    ws.close();
-  };
+function _onEventStreamAuthRequired(evt) {
+  const badge = document.getElementById('wsBadge');
+  if (badge) {
+    badge.textContent = 'WS: 認証エラー (4401)';
+    badge.className = 'ws-badge error';
+  }
+  const loginUrl = typeof getLoginUrl === 'function' ? getLoginUrl() : '/login';
+  setStatus('認証セッションが失効しました。ログインしてください。', 'error');
 
-  ws.onmessage = (evt) => {
-    try {
-      _msgQueue.push(JSON.parse(evt.data));
-      if (!_rafPending) {
-        _rafPending = true;
-        requestAnimationFrame(_flushMsgQueue);
-      }
-    } catch(e) {}
-  };
+  const el = document.getElementById('logoutLink');
+  if (el) {
+    el.textContent = 'ログイン';
+    el.href = loginUrl;
+    el.style.display = 'inline-block';
+  }
+
+  let authBanner = document.getElementById('wsAuthErrorBanner');
+  if (!authBanner) {
+    authBanner = document.createElement('div');
+    authBanner.id = 'wsAuthErrorBanner';
+    authBanner.style.cssText = 'background:#e2708f;color:#fff;padding:8px 16px;text-align:center;font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:12px;z-index:9999;';
+    authBanner.innerHTML = `<span>認証セッションが失効しました。スキャン状況の購読を再開するにはログインしてください。</span><a href="${loginUrl}" style="color:#fff;text-decoration:underline;">ログイン画面へ</a>`;
+    if (document.body) {
+      document.body.prepend(authBanner);
+    }
+  }
+}
+
+function initEventStream() {
+  if (_eventStream) return _eventStream;
+  _eventStream = new EventStreamClient({
+    stateAccessor: () => state,
+    onStatusChange: _onEventStreamStatusChange,
+    onAuthRequired: _onEventStreamAuthRequired,
+    onResetLiveScan: resetLiveScanState,
+    onApplySnapshot: applyScanSnapshot,
+    onEvent: dispatchLegacyEvent,
+  });
+  window._eventStream = _eventStream;
+  return _eventStream;
+}
+
+function connect() {
+  const es = initEventStream();
+  es.connect();
 }
 
 // ─── Event Handler ──────────────────────────────────────────────
 function handleEvent(event) {
+  const es = initEventStream();
+  es.processEvent(event);
+}
+
+function dispatchLegacyEvent(event) {
   const { type, data, timestamp } = event;
-  if (type === 'ping') return;
-
-  if (type === 'scan_snapshot') {
-    applyScanSnapshot(event);
-    return;
-  }
-
-  if (event.server_id && Number.isInteger(event.sequence)) {
-    if (state.serverInstanceId && event.server_id !== state.serverInstanceId) return;
-    const incomingRunId = event.run_id || null;
-    const newRun = incomingRunId !== state.scanRunId;
-    if (newRun) {
-      if (type !== 'scan_started') return;
-      resetLiveScanState();
-      state.serverInstanceId = event.server_id;
-      state.scanRunId = incomingRunId;
-      state.lastEventSequence = 0;
-    }
-    if (event.sequence <= state.lastEventSequence) return;
-    if (event.sequence !== state.lastEventSequence + 1) {
-      // A sequence gap means some live state was missed; reconnect for a fresh snapshot.
-      if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.close();
-      return;
-    }
-    state.serverInstanceId = event.server_id;
-    state.scanRunId = incomingRunId;
-    state.scanId = event.scan_id || null;
-    state.lastEventSequence = event.sequence;
-    state.eventCount = event.sequence;
-  } else if (type !== 'manual_crawl_frame') {
-    state.eventCount++;
-  }
-  document.getElementById('eventCount').textContent = state.eventCount;
-
   switch (type) {
     case 'status':
       setStatus(data.message, data.state);
