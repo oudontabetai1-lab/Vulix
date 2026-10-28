@@ -208,7 +208,7 @@
     }
 
     /**
-     * Validate manifest structure according to U07 strict schema.
+     * Validate manifest structure according to the strict schema.
      * Pure function returning a list of validation error strings.
      * @param {any} data
      * @returns {string[]}
