@@ -141,6 +141,17 @@ Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traver
 
 ![検査結果を表示したダッシュボード](docs/images/dashboard-results.png)
 
+### オプトインの統合画面
+
+同じサーバーで `/app` を開くと、ポータル、Scan Setup、Monitor を切り替えられます。URL の hash は画面と選択中の scan を表し、戻る/進むや再読み込みでも選択を保ちます。既存の `/` ポータルと `/monitor` は引き続き標準の入口です。
+
+![統合画面のポータル](docs/images/app-portal.png)
+![統合画面の Scan Setup](docs/images/app-setup.png)
+![統合画面の Monitor](docs/images/app-monitor.png)
+
+過去 scan のライブ Monitor は表示できません。存在しない、削除済み、または現在の Monitor と一致しない scan ID は利用不可として表示します。
+認証セッションが切れると明示的な再ログイン案内が表示されます。既存のログイン後の遷移先はポータル (`/`) のため、ログイン後に `/app` を再度開いてください。
+
 ## 3. クイックスタート
 
 > 基本はダッシュボードです。`python3 main.py serve` で起動し、ブラウザから設定・実行するのが標準的な使い方です（[5. ダッシュボード](#5-ダッシュボード)）。以下の CLI 手順は自動化・最短確認用の補助です。
