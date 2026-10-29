@@ -28,7 +28,8 @@ class DashboardVerificationStateTests(unittest.TestCase):
         # カードへの finding_update 適用を防ぐ）。
         html = Path("templates/dashboard.html").read_text(encoding="utf-8")
         self.assertIn("state.findingCards.delete", html)
-        self.assertIn("card.dataset.findingKey = key", html)
+        self.assertIn("findingCardKeys.set(card, key)", html)
+        self.assertIn("findingCardKeys.get(removed)", html)
 
     def test_json_finding_key_preserves_null_vs_root_pointer(self):
         # findingKey は json_body の null（欠落=corrupt）と ""（RFC6901 ルート）を潰さない
