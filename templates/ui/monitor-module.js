@@ -45,7 +45,7 @@
       if (!hasMounted) return true;
       if (!host || host.hidden) return false;
       // scan 指定なしのライブ画面は現行 WS のみを操作する。scan 指定時だけ
-      // U12 の server/run/scan identity を固定して、取り違え送信を防ぐ。
+      // 選択中の server/run/scan identity を固定して、取り違え送信を防ぐ。
       return !selectedScan || sameIdentity(expected, context());
     }
 
