@@ -5309,7 +5309,7 @@ fetch('/api/auth-status').then(r => r.ok ? r.json() : null).then(d => {
   }
 }).catch(() => {});
 
-// ─── Event Stream & WebSocket Manager (UI v3 U09) ───────────────────────────
+// ─── Event Stream & WebSocket Manager ───────────────────────────
 let _eventStream = null;
 
 function _onEventStreamStatusChange(evt) {
