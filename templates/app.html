@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vulix</title>
+  <link rel="icon" href="/ui/favicon.png">
+  <link rel="stylesheet" href="/ui/tokens.css">
+  <link rel="stylesheet" href="/ui/components.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 14px system-ui, sans-serif; }
+    .app { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
+    aside { padding: 20px 14px; background: var(--rail); border-right: 1px solid var(--border); }
+    .brand { display: flex; align-items: center; gap: 9px; padding: 0 8px 22px; font-size: 1.1rem; font-weight: 750; }
+    .brand img { width: 24px; height: 24px; object-fit: contain; }
+    nav { display: grid; gap: 6px; }
+    nav button { width: 100%; justify-content: flex-start; }
+    nav button[aria-current="page"] { color: var(--text); border-color: var(--accent); background: var(--surface); }
+    main { min-width: 0; display: flex; flex-direction: column; }
+    header { min-height: 58px; display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
+    #scanContext { color: var(--text-muted); font-size: .82rem; overflow-wrap: anywhere; }
+    #surface { position: relative; flex: 1; min-height: calc(100vh - 58px); }
+    iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
+    iframe[hidden], #message[hidden] { display: none; }
+    #message { padding: 28px; }
+    #message h2 { margin-top: 0; }
+    @media (max-width: 700px) {
+      .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+      aside { padding: 10px; border-right: 0; border-bottom: 1px solid var(--border); }
+      .brand { padding: 0 6px 10px; }
+      nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      nav button { justify-content: center; padding: 8px 5px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div class="brand"><img src="/ui/vulix-logo-mark.png" alt="">Vulix</div>
+      <nav aria-label="Application">
+        <button class="history-btn" type="button" data-route="portal">ポータル</button>
+        <button class="history-btn" type="button" data-route="setup">Scan Setup</button>
+        <button class="history-btn" type="button" data-route="monitor">Monitor</button>
+      </nav>
+    </aside>
+    <main>
+      <header><strong id="viewTitle">ポータル</strong><span id="scanContext" aria-live="polite"></span></header>
+      <section id="surface" aria-live="polite">
+        <iframe id="portalFrame" title="Vulix Portal" hidden></iframe>
+        <iframe id="monitorFrame" title="Vulix Monitor" hidden></iframe>
+        <div id="message" role="status" hidden></div>
+      </section>
+    </main>
+  </div>
+  <script src="/ui/api-client.js"></script>
+  <script src="/ui/app-shell.js"></script>
+  <script src="/ui/app-entry.js"></script>
+</body>
+</html>
