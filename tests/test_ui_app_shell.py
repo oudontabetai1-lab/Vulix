@@ -278,6 +278,46 @@ def test_selected_scan_pins_complete_live_identity_until_intentional_remount(ui_
     ui_harness.assert_no_errors(page)
 
 
+def test_stale_monitor_load_after_navigation_does_not_unhide(ui_harness: UIHarness):
+    # Finding 1 回帰: monitor iframe の load が、別 route へ遷移した後に発火しても
+    # 旧マウントの onReady が surface を開いたり iframe を un-hide してはならない。
+    # /monitor の読み込みを保留して load タイミングを制御し、遷移後に解放する。
+    page = ui_harness.new_page()
+    held: list = []
+    page.route("**/monitor", lambda route: held.append(route))
+    page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
+    page.wait_for_function("() => document.querySelector('#portalFrame')?.contentDocument?.title.includes('Server Portal')")
+
+    # setup へ遷移 → monitor iframe が /monitor を要求するが、load は保留される。
+    page.evaluate("() => { location.hash = '#/setup'; }")
+    for _ in range(200):
+        if held:
+            break
+        page.wait_for_timeout(20)
+    assert held, "setup mount did not trigger the held /monitor load"
+
+    # load 発火前に portal へ離脱 → unmount が保留 load を解除し iframe を隠す。
+    page.evaluate("() => { location.hash = '#/portal'; }")
+    page.wait_for_function(
+        "() => document.querySelector('#portalFrame')?.contentDocument?.title.includes('Server Portal')"
+        " && document.querySelector('#monitorFrame').hidden"
+    )
+
+    # 保留していた /monitor を解放 → stale な load が発火するが、ガードにより無視される。
+    held[0].continue_()
+    page.wait_for_function("() => document.querySelector('#monitorFrame').contentWindow?.VulixAppBridge")
+    page.wait_for_timeout(150)
+
+    assert page.locator("#monitorFrame").is_hidden(), "stale monitor load un-hid the iframe under /portal"
+    assert page.locator("#portalFrame").is_visible()
+    assert page.locator('[data-route="portal"]').get_attribute("aria-current") == "page"
+    overlay_active = page.frame_locator("#monitorFrame").locator("#scanConfigOverlay").evaluate(
+        "el => el.classList.contains('active')"
+    )
+    assert overlay_active is False, "stale load applied the setup surface after navigating away"
+    ui_harness.assert_no_errors(page)
+
+
 def test_existing_root_and_monitor_routes_remain_compatible(ui_harness: UIHarness):
     page = ui_harness.new_page()
     page.goto(f"{ui_harness.server_url}/")

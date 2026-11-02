@@ -14,6 +14,11 @@
   const context = document.getElementById('scanContext');
   let activeScope = null;
   let contextHandler = null;
+  // マウント世代トークン: ナビゲーションごとに加算する。iframe の load 完了コールバックは
+  // 自分の世代がまだアクティブかを照合し、別 route / 別 scan へ遷移後に発火した stale な
+  // load で hidden/surface/context を書き換えてクロス識別を起こすのを防ぐ。
+  let mountToken = 0;
+  let pendingMonitorLoad = null; // 未発火の monitor load リスナ（unmount で解除する）
 
   function unavailable(text) {
     portal.hidden = true;
@@ -35,13 +40,24 @@
     message.replaceChildren();
   }
 
+  function cancelPendingMonitorLoad() {
+    if (pendingMonitorLoad) {
+      monitor.removeEventListener('load', pendingMonitorLoad);
+      pendingMonitorLoad = null;
+    }
+  }
+
   function ensureMonitor(onReady) {
+    const token = mountToken; // このマウントの世代を固定し、発火時に stale 判定する
     if (monitor.dataset.ready === 'true' && monitor.contentWindow && monitor.contentWindow.VulixAppBridge) {
-      onReady(monitor.contentWindow.VulixAppBridge);
+      if (token === mountToken) onReady(monitor.contentWindow.VulixAppBridge);
       return;
     }
     const loaded = () => {
       monitor.removeEventListener('load', loaded);
+      if (pendingMonitorLoad === loaded) pendingMonitorLoad = null;
+      // 既に別 route / 別 scan へ遷移済みなら stale。hidden/surface/context を一切触らない。
+      if (token !== mountToken) return;
       try {
         const bridge = monitor.contentWindow && monitor.contentWindow.VulixAppBridge;
         if (!bridge || typeof bridge.setSurface !== 'function' || typeof bridge.getContext !== 'function') {
@@ -54,6 +70,7 @@
         unavailable('Monitor bridge を安全に利用できませんでした。');
       }
     };
+    pendingMonitorLoad = loaded;
     monitor.addEventListener('load', loaded, { once: true });
     if (!monitor.src || monitor.src === 'about:blank') monitor.src = '/monitor';
   }
@@ -91,7 +108,7 @@
   registry.register({ id: 'setup', title: 'Scan Setup', route: '#/setup', mount() {
     title.textContent = 'Scan Setup';
     showMonitorSurface('setup');
-  }, unmount() { monitor.hidden = true; } });
+  }, unmount() { cancelPendingMonitorLoad(); monitor.hidden = true; } });
 
   registry.register({ id: 'monitor', title: 'Monitor', route: '#/monitor', mount(route) {
     title.textContent = 'Monitor';
@@ -155,6 +172,7 @@
       if (activeScope === scope && registry.getActiveId() === 'monitor') unavailable('スキャン一覧を確認できません。');
     });
   }, unmount() {
+    cancelPendingMonitorLoad();
     stopContextSubscription();
     if (activeScope) activeScope.cancelAll('Monitor module unmounted');
     activeScope = null;
@@ -176,6 +194,7 @@
   }
 
   function renderRoute() {
+    mountToken += 1; // 遷移ごとに世代を進め、進行中の stale な monitor load を無効化する
     const route = parseRoute(global.location.hash);
     if (!route) {
       registry.destroy();
