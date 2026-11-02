@@ -20,7 +20,7 @@ serve が `main._load_config` から作る `default_scan_cfg` の設定キーに
 `enable_community_payloads` / `enable_component_intel` / `enable_tls_scan`。
 これはフォーム設定契約であり、scan リクエストそのものではない。
 
-モードは U07 と同じ `normal | agent | hybrid`（画面表示は Agent/Hybrid）。
+モードは `normal | agent | hybrid`（画面表示は Agent/Hybrid）。
 Hybrid は偵察と通常検査の両フェーズを含む。適用モードは設定を受け取る経路の宣言で、
 実行や成功の保証ではない。
 
