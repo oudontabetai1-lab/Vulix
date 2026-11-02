@@ -2917,6 +2917,34 @@ const findingViewerHelpers = {
   redactText: value => maskKv(String(value), 0).replace(/\b(https?:\/\/)[^\s/?#@]+(?::[^\s/?#@]*)?@/gi, '$1[redacted]@'),
 };
 
+// /app receives only a small scan identity/status projection; scan config,
+// credentials, socket handles, and event bodies remain inside this document.
+function publishAppScanContext() {
+  if (window.parent === window || !window.parent.postMessage) return;
+  const context = {
+    server_id: typeof state.serverInstanceId === 'string' ? state.serverInstanceId : '',
+    run_id: typeof state.scanRunId === 'string' ? state.scanRunId : '',
+    scan_id: typeof state.scanId === 'string' ? state.scanId : '',
+    status: typeof state.status === 'string' ? state.status : 'unavailable',
+  };
+  window.parent.postMessage({ type: 'vulix:scan-context', context }, window.location.origin);
+}
+
+window.VulixAppBridge = Object.freeze({
+  getContext: () => ({
+    server_id: typeof state.serverInstanceId === 'string' ? state.serverInstanceId : '',
+    run_id: typeof state.scanRunId === 'string' ? state.scanRunId : '',
+    scan_id: typeof state.scanId === 'string' ? state.scanId : '',
+    status: typeof state.status === 'string' ? state.status : 'unavailable',
+  }),
+  setSurface(surface) {
+    const overlay = document.getElementById('scanConfigOverlay');
+    if (!overlay || !['setup', 'monitor'].includes(surface)) return false;
+    overlay.classList.toggle('active', surface === 'setup');
+    return true;
+  },
+});
+
 // スキャン開始時に呼ぶ: config に一意な nonce を刻み、受理確認までは nonsecret な descriptor を pending に置く。
 // UI 状態（pending/last）には秘密情報や full config を保持しない（nonce 相関のみ維持）。
 function _markOwnScan(config) {
@@ -5300,6 +5328,9 @@ function _onEventStreamAuthRequired(evt) {
     badge.className = 'ws-badge error';
   }
   const loginUrl = typeof getLoginUrl === 'function' ? getLoginUrl() : '/login';
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: 'vulix:auth-required' }, window.location.origin);
+  }
   setStatus('認証セッションが失効しました。ログインしてください。', 'error');
 
   const el = document.getElementById('logoutLink');
@@ -5736,6 +5767,7 @@ function dispatchLegacyEvent(event) {
       addEventLog('status', `Scan started: ${data.url || 'target'}`);
       break;
   }
+  publishAppScanContext();
 }
 
 // ─── Phase / URL / Payload helpers ──────────────────────────────
@@ -5928,6 +5960,7 @@ function applyScanSnapshot(event) {
   if (data.pending_interactive) handleEvent(data.pending_interactive);
   state.eventCount = state.lastEventSequence;
   document.getElementById('eventCount').textContent = state.eventCount;
+  publishAppScanContext();
 }
 
 function updatePhaseBar(phase) {

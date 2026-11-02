@@ -578,6 +578,13 @@ class MonitorServer:
                 return html_path.read_text(encoding="utf-8")
             return "<h1>Dashboard not found</h1>"
 
+        @app.get("/app", response_class=HTMLResponse)
+        async def app_shell():
+            html_path = TEMPLATES_DIR / "app.html"
+            if html_path.exists():
+                return html_path.read_text(encoding="utf-8")
+            return HTMLResponse("<h1>Application unavailable</h1>", status_code=503)
+
         @app.websocket("/ws")
         async def websocket_endpoint(ws: WebSocket):
             if not self._ws_authorized(ws):
