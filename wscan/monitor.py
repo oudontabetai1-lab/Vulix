@@ -836,6 +836,31 @@ class MonitorServer:
             """Return config/wscan.yaml-derived defaults for the dashboard form."""
             return JSONResponse(self.default_scan_cfg or {})
 
+        @app.get("/api/v1/settings/schema")
+        async def api_settings_schema(schema_version: Optional[str] = None):
+            """既存設定 API と独立した読取専用の設定宣言。"""
+            from wscan.settings_schema import SCHEMA_VERSION, build_settings_schema
+            if schema_version is not None and schema_version != SCHEMA_VERSION:
+                return JSONResponse({"error": "schema_version_mismatch",
+                                     "schema_version": SCHEMA_VERSION}, status_code=409)
+            return JSONResponse(build_settings_schema())
+
+        @app.get("/api/v1/settings/effective")
+        async def api_settings_effective(
+            mode: str = "normal", profile: Optional[str] = None,
+            schema_version: Optional[str] = None,
+        ):
+            """フォーム初期値へ profile を適用し、秘密値を除いた差分を返す。"""
+            from wscan.settings_schema import SCHEMA_VERSION, build_effective_config
+            if schema_version is not None and schema_version != SCHEMA_VERSION:
+                return JSONResponse({"error": "schema_version_mismatch",
+                                     "schema_version": SCHEMA_VERSION}, status_code=409)
+            try:
+                result = build_effective_config(self.default_scan_cfg, mode=mode, profile=profile)
+            except ValueError:
+                return JSONResponse({"error": "invalid_mode_or_profile"}, status_code=400)
+            return JSONResponse(result)
+
         @app.get("/api/capability-manifest")
         @app.get("/api/v1/capability-manifest")
         async def api_capability_manifest():
