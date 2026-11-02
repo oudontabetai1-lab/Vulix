@@ -226,7 +226,14 @@ def test_selected_scan_pins_complete_live_identity_until_intentional_remount(ui_
     selected = "20261026_100000"
     page.goto(f"{ui_harness.server_url}/app#/monitor?scan={selected}", wait_until="domcontentloaded")
     page.get_by_text("snapshot と一致しません", exact=False).wait_for()
-    page.wait_for_function("() => document.querySelector('#monitorFrame').contentWindow?._eventStream?.connected")
+    # WS connected だけでは接続直後に届く scan_snapshot が未反映で state.serverInstanceId が
+    # 空のままになり、直後の deliver_scan_started が server_id 空=不一致として捨てられてハング
+    # する。snapshot 反映（serverInstanceId 確定）まで待ってから identity を注入する。
+    page.wait_for_function("""() => {
+      const w = document.querySelector('#monitorFrame')?.contentWindow;
+      return w?._eventStream?.connected
+        && w.eval("typeof state.serverInstanceId === 'string' && state.serverInstanceId.length > 0");
+    }""")
 
     def deliver_scan_started(run_id: str, scan_id: str):
         event = (
