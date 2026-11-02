@@ -2852,7 +2852,10 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
 <script src="/ui/capability-reader.js"></script>
 <script src="/ui/app-shell.js"></script>
 <script src="/ui/event-stream.js"></script>
+<script src="/ui/monitor-module.js"></script>
 <script>
+const monitorModule = VulixMonitorModule.createMonitorModule(window.document);
+(function (document) {
 // ─── State ─────────────────────────────────────────────────────
 const state = {
   ws: null,
@@ -2927,6 +2930,7 @@ function publishAppScanContext() {
     scan_id: typeof state.scanId === 'string' ? state.scanId : '',
     status: typeof state.status === 'string' ? state.status : 'unavailable',
   };
+  monitorModule.updateContext();
   window.parent.postMessage({ type: 'vulix:scan-context', context }, window.location.origin);
 }
 
@@ -2937,6 +2941,10 @@ window.VulixAppBridge = Object.freeze({
     scan_id: typeof state.scanId === 'string' ? state.scanId : '',
     status: typeof state.status === 'string' ? state.status : 'unavailable',
   }),
+  mountMonitor(host, scanId) {
+    monitorModule.mount(host, { scanId, getContext: () => window.VulixAppBridge.getContext() });
+  },
+  unmountMonitor() { monitorModule.unmount(); },
   setSurface(surface) {
     const overlay = document.getElementById('scanConfigOverlay');
     if (!overlay || !['setup', 'monitor'].includes(surface)) return false;
@@ -5767,6 +5775,7 @@ function dispatchLegacyEvent(event) {
       addEventLog('status', `Scan started: ${data.url || 'target'}`);
       break;
   }
+  document.getElementById('eventCount').textContent = state.eventCount;
   publishAppScanContext();
 }
 
@@ -6245,11 +6254,13 @@ function escapeHtml(str) {
 
 // ─── Intervention ───────────────────────────────────────────────
 function sendIntervention(command) {
+  if (!monitorModule.canSend()) return;
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
   state.ws.send(JSON.stringify({ action: 'intervention', command }));
 }
 
 function confirmAbort() {
+  if (!monitorModule.canSend()) return;
   if (confirm('スキャンを中断しますか？\n現在までの結果で部分レポートが保存されます。')) {
     setStatus('中断処理中...', 'aborted');
     sendIntervention('abort');
@@ -6318,6 +6329,7 @@ function showPlanModal(plans) {
 }
 
 function confirmPlan() {
+  if (!monitorModule.canSend()) return;
   // Collect edits from the modal
   const edits = {};
   document.querySelectorAll('.pm-page-card').forEach(card => {
@@ -6464,6 +6476,7 @@ function renderCrawlReviewList() {
 }
 
 function sendCrawlReview(command) {
+  if (!monitorModule.canSend()) return;
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
     alert('WebSocket未接続。ページを再読み込みしてください。');
     return;
@@ -6499,11 +6512,13 @@ function openManualCrawlFromReview() {
 
 // ─── U-3: Manual payload execution ──────────────────────────────
 function toggleManualPayload() {
+  if (!monitorModule.canSend()) return;
   const panel = document.getElementById('manualPayloadPanel');
   panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
 }
 
 function sendManualPayload() {
+  if (!monitorModule.canSend()) return;
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
     alert('WebSocket が接続されていません');
     return;
@@ -8024,7 +8039,50 @@ async function bootDashboard() {
   renderCheckProgressBars();
   connect();
 }
+
+Object.assign(window, {
+  publishAppScanContext, _markOwnScan, isSecretKeyName, sanitizeUrlForExport, sanitizeUrlListForExport, recursiveSanitizeNonsecret, hasCredentialsInConfig, _createNonsecretDescriptor, _sanitizeConfigForExport, containsRedactedValues, _discardRejectedPendingScan, _promotePendingScan, findingKey, computeVerification, isFindingConfirmed, updateFindingCounters, renderCheckGroups, initCheckGroups, loadScannerCapabilities, setScanMode, getSelectedChecks, selectAllChecks, setSelectedChecks, setCfgToggle, toggleCfg, showCfgTab, applyScanProfile, updateLlmModelField, collectRoleModels, restoreRoleModels, mfaImapFields, mfaImapPassword, applyMfaImap, mfaTotpFields, parseHeaderText, authHeaderFields, timeWindowFields, applyTimeWindows, applyMfaTotp, applyAuthHeaders, validateTotpReadiness, wireTotpQrPreview, uploadFile, wireUpload, renderManualCrawlStatus, startManualCrawl, stopManualCrawl, importManualCrawl, _wsSend, startRemoteBrowser, remoteNavigate, hasRemoteTotpConfig, armMfaFieldSelection, selectRemoteMfaField, fillRemoteTotp, bindRemoteScreen, useManualCrawlOutput, showPostScanActions, rerunLastScan, openManualCrawlAfterScan, submitScanConfig, _collectFullConfigForExport, _downloadJson, _filenameForConfig, exportConfigToFile, importConfigFromFile, applyImportedConfig, initConfigOverlay, updateAgentModelPlaceholder, submitAgentScan, hasSensitiveMatrixParam, safeUrlForStorage, safeUrlListForStorage, safeExcludeUrl, safeExcludeUrlsForStorage, saveConfigToStorage, loadConfigFromStorage, loadDefaultConfigFromServer, _esc, openScenarioBuilder, scnCloseBuilder, scnDefaultStep, scnAddStep, scnInsertStep, scnDeleteStep, scnDuplicateStep, scnMoveStep, scnChangeAction, scnSetField, scnLoadLoginTemplate, scnRender, scnStepSummary, scnRenderPreview, scnRenderPalette, scnPalNavigate, scnPalFill, scnPalAddForm, scnState_push, scnSaveBuilder, _scnSummaryCard, scnDeleteFlow, renderCfgFlows, renderReviewFlows, addAccount, collectAccounts, collectFlows, restoreFlows, formatDuration, updateETA, _onEventStreamStatusChange, _onEventStreamAuthRequired, _onEventStreamWireStale, initEventStream, connect, handleEvent, dispatchLegacyEvent, resetLiveScanState, applyScanSnapshot, updatePhaseBar, renderUrlList, renderCheckCounters, updatePayloadDisplay, togglePayloadExpand, setStatus, timeStr, addEventLog, updateScreenshot, addFinding, replaceFindings, updateRequest, updateResponse, showNetTab, openLightbox, escapeHtml, sendIntervention, confirmAbort, setPauseState, showPlanModal, confirmPlan, filterFindings, closeInteractiveModals, beginCrawlReview, resetCrawlReviewDetailState, openCrawlReviewDetails, showCrawlReviewModal, renderCrawlReviewList, sendCrawlReview, openManualCrawlFromReview, toggleManualPayload, sendManualPayload, showAiAnalysis, runAutoConfig, applyAutoConfig, submitHybridScan, handleWafDetected, switchCenterTab, loadD3, initSiteMapD3, _smEl, _smShort, _smNorm, _smModel, _sitemapRerender, _smArrowDefs, _smApplyView, _smRenderCompact, _smRenderShots, _smHash, _smRenderExplorer, _smShowPopover, _smHidePopover, smSetMode, smOnSearch, smExpandAll, smZoom, smResetView, _smWirePan, _smNodeColor, addSiteMapNode, markSiteMapVuln, showSiteMapFallback, _updateSiteMapFallback, _showSmTooltip, _hideSmTooltip, updatePhaseTimingStrip, _showSubphase, renderCheckProgressBars, switchMainView, onHistorySearchInput, onHistoryFilterChange, isSensitiveKey, maskPathSecrets, hasUnmaskedSensitivePath, maskNestedKv, maskKv, redactDisplayUrl, formatHistoryBytes, formatHistoryDate, setHistoryViewState, cancelScanHistory, loadScanHistory, renderHistoryTable, getAuditActionMeta, onAuditSearchInput, onAuditFilterChange, formatAuditTimestamp, validateAndSanitizeClientIp, formatSafeAuditDetail, setAuditViewState, loadAuditLog, renderAuditTable, bootDashboard
+});
+Object.defineProperty(window, 'state', { configurable: true, get: () => state });
+Object.defineProperty(window, 'findingCardKeys', { configurable: true, get: () => findingCardKeys });
+Object.defineProperty(window, 'findingViewerHelpers', { configurable: true, get: () => findingViewerHelpers });
+Object.defineProperty(window, 'KNOWN_SECRET_EXACT_KEYS', { configurable: true, get: () => KNOWN_SECRET_EXACT_KEYS });
+Object.defineProperty(window, '_SENSITIVE_URL_KEY_FALLBACK', { configurable: true, get: () => _SENSITIVE_URL_KEY_FALLBACK });
+Object.defineProperty(window, 'REDACTED_RERUN_MESSAGE', { configurable: true, get: () => REDACTED_RERUN_MESSAGE });
+Object.defineProperty(window, 'CREDENTIAL_RERUN_MESSAGE', { configurable: true, get: () => CREDENTIAL_RERUN_MESSAGE });
+Object.defineProperty(window, 'cfgToggles', { configurable: true, get: () => cfgToggles });
+Object.defineProperty(window, 'currentScanMode', { configurable: true, get: () => currentScanMode, set: value => { currentScanMode = value; } });
+Object.defineProperty(window, 'CHECK_GROUPS', { configurable: true, get: () => CHECK_GROUPS });
+Object.defineProperty(window, 'totpPreviewVersion', { configurable: true, get: () => totpPreviewVersion, set: value => { totpPreviewVersion = value; } });
+Object.defineProperty(window, 'totpQrNeedsValidation', { configurable: true, get: () => totpQrNeedsValidation, set: value => { totpQrNeedsValidation = value; } });
+Object.defineProperty(window, '_selectingMfaField', { configurable: true, get: () => _selectingMfaField, set: value => { _selectingMfaField = value; } });
+Object.defineProperty(window, '_remoteBound', { configurable: true, get: () => _remoteBound, set: value => { _remoteBound = value; } });
+Object.defineProperty(window, 'CONFIG_SAVE_ALLOWLIST', { configurable: true, get: () => CONFIG_SAVE_ALLOWLIST });
+Object.defineProperty(window, 'CONFIG_SECRET_KEYS', { configurable: true, get: () => CONFIG_SECRET_KEYS });
+Object.defineProperty(window, 'CONFIG_SENSITIVE_URL_KEY', { configurable: true, get: () => CONFIG_SENSITIVE_URL_KEY });
+Object.defineProperty(window, 'CONFIG_SECRET_FIELD_IDS', { configurable: true, get: () => CONFIG_SECRET_FIELD_IDS });
+Object.defineProperty(window, 'SCN_ACTIONS', { configurable: true, get: () => SCN_ACTIONS });
+Object.defineProperty(window, 'cfgFlows', { configurable: true, get: () => cfgFlows, set: value => { cfgFlows = value; } });
+Object.defineProperty(window, 'reviewFlows', { configurable: true, get: () => reviewFlows, set: value => { reviewFlows = value; } });
+Object.defineProperty(window, 'sbState', { configurable: true, get: () => sbState });
+Object.defineProperty(window, '_accountId', { configurable: true, get: () => _accountId, set: value => { _accountId = value; } });
+Object.defineProperty(window, '_eventStream', { configurable: true, get: () => _eventStream, set: value => { _eventStream = value; } });
+Object.defineProperty(window, '_crawlReviewPages', { configurable: true, get: () => _crawlReviewPages, set: value => { _crawlReviewPages = value; } });
+Object.defineProperty(window, 'SM_NS', { configurable: true, get: () => SM_NS });
+Object.defineProperty(window, 'currentHistoryData', { configurable: true, get: () => currentHistoryData, set: value => { currentHistoryData = value; } });
+Object.defineProperty(window, 'historySearchTerm', { configurable: true, get: () => historySearchTerm, set: value => { historySearchTerm = value; } });
+Object.defineProperty(window, 'historyStatusFilter', { configurable: true, get: () => historyStatusFilter, set: value => { historyStatusFilter = value; } });
+Object.defineProperty(window, '_appShellInstance', { configurable: true, get: () => _appShellInstance });
+Object.defineProperty(window, 'UNSUPPORTED_URL_PLACEHOLDER', { configurable: true, get: () => UNSUPPORTED_URL_PLACEHOLDER });
+Object.defineProperty(window, 'historyApiClient', { configurable: true, get: () => historyApiClient });
+Object.defineProperty(window, 'currentAuditData', { configurable: true, get: () => currentAuditData, set: value => { currentAuditData = value; } });
+Object.defineProperty(window, 'auditSearchTerm', { configurable: true, get: () => auditSearchTerm, set: value => { auditSearchTerm = value; } });
+Object.defineProperty(window, 'auditActionFilter', { configurable: true, get: () => auditActionFilter, set: value => { auditActionFilter = value; } });
+Object.defineProperty(window, 'AUDIT_ACTION_MAP', { configurable: true, get: () => AUDIT_ACTION_MAP });
+Object.defineProperty(window, 'STRICT_IPV4_RE', { configurable: true, get: () => STRICT_IPV4_RE });
+Object.defineProperty(window, 'STRICT_IPV6_RE', { configurable: true, get: () => STRICT_IPV6_RE });
 bootDashboard();
+})(monitorModule.document);
 </script>
 </body>
 </html>

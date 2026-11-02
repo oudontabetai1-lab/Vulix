@@ -9,7 +9,14 @@ from fastapi.testclient import TestClient
 from tests.ui_harness import STANDARD_VIEWPORTS, UIHarness, ui_harness
 from wscan.monitor import MonitorServer, SESSION_COOKIE, _session_value
 
-UI_ASSETS = ["/ui/app-entry.js", "/ui/app-shell.js", "/ui/api-client.js", "/ui/tokens.css", "/ui/components.css"]
+UI_ASSETS = [
+    "/ui/app-entry.js",
+    "/ui/app-shell.js",
+    "/ui/api-client.js",
+    "/ui/monitor-module.js",
+    "/ui/tokens.css",
+    "/ui/components.css",
+]
 
 
 @pytest.mark.parametrize("auth_token", [""])
@@ -119,6 +126,84 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
     page.get_by_text("route または scan identifier が不正", exact=False).wait_for()
     page.goto(f"{ui_harness.server_url}/app#/not-registered", wait_until="domcontentloaded")
     page.get_by_text("route または scan identifier が不正", exact=False).wait_for()
+    ui_harness.assert_no_errors(page)
+
+
+def test_monitor_module_owns_live_panes_and_blocks_stale_actions(ui_harness: UIHarness):
+    page = ui_harness.new_page()
+    page.goto(f"{ui_harness.server_url}/app#/monitor")
+    page.wait_for_function("""() => {
+      const host = document.querySelector('#monitorModule');
+      return host && !host.hidden && host.shadowRoot?.querySelector('#viewLiveMonitor');
+    }""")
+
+    frame = page.frame_locator("#monitorFrame")
+    frame.locator("body").evaluate("""() => {
+      window.__monitorSends = [];
+      state.ws = {
+        readyState: WebSocket.OPEN,
+        send(payload) { window.__monitorSends.push(JSON.parse(payload)); },
+      };
+      state.serverInstanceId = 'server-module';
+      state.scanRunId = 'run-module';
+      state.scanId = 'scan-module';
+      state.status = 'scanning';
+      publishAppScanContext();
+      handleEvent({
+        type: 'scan_snapshot',
+        sequence: 1,
+        data: {
+          status: 'scanning',
+          findings: [{
+            id: 'module-xss',
+            check_type: 'xss',
+            severity: 'high',
+            url: 'https://safe.example.test/search?q=test',
+            confirmed: true,
+            verified: true,
+          }],
+          findings_count: 1,
+          total_findings_count: 1,
+          confirmed_findings_count: 1,
+          page_count: 1,
+          check_counts: { xss: 1 },
+          url_order: ['https://safe.example.test/search?q=test'],
+          phase: 'attack',
+        },
+      });
+      addEventLog('status', 'module live event');
+    }""")
+    module = page.locator("#monitorModule")
+    assert module.locator("#urlList").count() == 1
+    assert module.locator("#eventLog").get_by_text("module live event").count() == 1
+    assert module.locator("#findingsPanel .finding-card").count() == 1
+
+    module.locator("#ibPause").click()
+    frame.locator("body").evaluate("() => setPauseState(true)")
+    module.locator("#ibResume").click()
+    assert [item["command"] for item in frame.locator("body").evaluate(
+        "() => window.__monitorSends"
+    )] == ["pause", "resume"]
+    frame.locator("body").evaluate("() => toggleManualPayload()")
+    module.locator("#mpUrl").fill("https://safe.example.test/search")
+    module.locator("#mpField").fill("q")
+    module.locator("#mpPayload").fill("<x>")
+    module.locator("#manualPayloadPanel").get_by_role("button", name="実行", exact=True).click()
+    sends = frame.locator("body").evaluate("() => window.__monitorSends")
+    assert [item["action"] for item in sends] == ["intervention", "intervention", "manual_payload"]
+    assert [item.get("command") for item in sends[:2]] == ["pause", "resume"]
+
+    page.evaluate("""() => {
+      window.__staleMonitorPause = document.querySelector('#monitorModule')
+        .shadowRoot.getElementById('ibPause');
+      location.hash = '#/portal';
+    }""")
+    page.wait_for_function("() => document.querySelector('#portalFrame').hidden === false")
+    assert page.locator("#monitorModule").is_hidden()
+    frame.locator("body").evaluate("""() => {
+      window.parent.__staleMonitorPause.click();
+    }""")
+    assert len(frame.locator("body").evaluate("() => window.__monitorSends")) == 3
     ui_harness.assert_no_errors(page)
 
 
