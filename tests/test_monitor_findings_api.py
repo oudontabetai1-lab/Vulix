@@ -100,6 +100,19 @@ class ScanFindingsApiTests(unittest.TestCase):
         self.assertEqual(returned_findings[1]["source"], "agent")
         self.assertFalse(returned_findings[1]["agent_verified"])
 
+    def test_preflight_result_read_api(self):
+        scan_dir = self.output_base / "scan-preflight"
+        scan_dir.mkdir(parents=True)
+        expected = {"schema_version": "1.0.0", "verdict": "warning", "checks": []}
+        (scan_dir / "preflight.json").write_text(json.dumps(expected), encoding="utf-8")
+
+        response = self.client.get("/api/v1/scans/scan-preflight/preflight")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), expected)
+
+        missing = self.client.get("/api/v1/scans/scan-preflight/missing/preflight")
+        self.assertEqual(missing.status_code, 404)
+
     def test_live_scan_findings_returned_when_in_progress(self):
         self.server.scan_in_progress = True
         self.server.current_scan_id = "live-scan-001"
