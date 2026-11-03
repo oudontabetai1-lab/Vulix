@@ -389,7 +389,7 @@ def test_selected_scan_pins_complete_live_identity_until_intentional_remount(ui_
 
 
 def test_stale_monitor_load_after_navigation_does_not_unhide(ui_harness: UIHarness):
-    # Finding 1 回帰: monitor iframe の load が、別 route へ遷移した後に発火しても
+    # 回帰: monitor iframe の load が、別 route へ遷移した後に発火しても
     # 旧マウントの onReady が surface を開いたり iframe を un-hide してはならない。
     # /monitor の読み込みを保留して load タイミングを制御し、遷移後に解放する。
     page = ui_harness.new_page()
