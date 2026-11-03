@@ -314,6 +314,7 @@ import_sources:
   - wscan/engine.py
   - wscan/header_manager.py
   - wscan/payload_importer.py
+  - wscan/preflight.py
 external_runtimes:
   python:
     required_version: '>=3.11'

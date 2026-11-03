@@ -141,6 +141,17 @@ def test_preflight_api_auth_and_live_channel_checks(monkeypatch):
     assert checks_out["authentication"]["reason_code"] == "login_url_out_of_scope"
     assert data_out["verdict"] == "fail"
 
+    # 5. Session-only auth -> returns warning with session_not_verified (not pass)
+    res_session = client.post("/api/v1/preflight", json={
+        "url": "http://127.0.0.1:9",
+        "cookie": "sid=xyz123",
+    })
+    assert res_session.status_code == 200
+    checks_session = {c["id"]: c for c in res_session.json()["checks"]}
+    assert checks_session["authentication"]["status"] == "warning"
+    assert checks_session["authentication"]["reason_code"] == "session_not_verified"
+    assert "not verified" in checks_session["authentication"]["detail"]
+
 
 # ─── 2. Pure-Function Status & Verdict Label Mapping Test ────────────────────
 

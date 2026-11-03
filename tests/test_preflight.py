@@ -373,14 +373,153 @@ def test_auth_readiness_secret_non_leak_sentinel():
     assert sentinel not in serialized
 
 
-def test_auth_readiness_session_token_configured():
+def test_auth_readiness_session_token_unverified():
+    # Session-only authentication must not report pass because validity is not verified
     res_cookie = evaluate_auth_readiness(
         "https://target.example",
         cookie="session_id=abc123xyz",
     )
-    assert res_cookie["status"] == "pass"
-    assert res_cookie["reason_code"] == "session_token_configured"
-    assert "Actual session validity is not verified by preflight" in res_cookie["detail"]
+    assert res_cookie["status"] == "warning"
+    assert res_cookie["reason_code"] == "session_not_verified"
+    assert "not verified by preflight" in res_cookie["detail"]
+
+    res_bearer = evaluate_auth_readiness(
+        "https://target.example",
+        bearer="secret_bearer_token",
+    )
+    assert res_bearer["status"] == "warning"
+    assert res_bearer["reason_code"] == "session_not_verified"
+
+    res_header = evaluate_auth_readiness(
+        "https://target.example",
+        headers={"Authorization": "Bearer secret_header_token"},
+    )
+    assert res_header["status"] == "warning"
+    assert res_header["reason_code"] == "session_not_verified"
+
+
+def test_auth_readiness_no_probe_ran():
+    # When no probe ran (status code None), check must not report pass/configured
+    res = evaluate_auth_readiness(
+        "https://target.example",
+        login_url="/login",
+        auth_user="admin",
+        auth_pass="pass123",
+        probe_status_code=None,
+    )
+    assert res["status"] == "warning"
+    assert res["reason_code"] == "not_probed"
+    assert "reachability was not probed" in res["detail"]
+
+
+def test_login_probe_redirect_out_of_scope_is_blocked(monkeypatch):
+    # Scope: probe must use follow_redirects=False and never send a request to an out-of-scope host
+    requested_urls = []
+
+    def handler(request):
+        requested_urls.append(str(request.url))
+        if str(request.url) == "https://target.example/login":
+            return httpx.Response(302, headers={"Location": "https://evil.example/login"})
+        return httpx.Response(200)
+
+    class Client:
+        def __init__(self, **_kwargs):
+            self.transport = httpx.MockTransport(handler)
+        def __enter__(self): return self
+        def __exit__(self, *_): self.transport.close()
+        def get(self, url): return self.transport.handle_request(httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    status_code, _html, error = _probe_login_page(
+        "https://target.example/login",
+        target_url="https://target.example",
+    )
+    assert status_code == 302
+    assert error is not None
+    assert error[0] == "login_redirect_out_of_scope"
+    assert "https://evil.example/login" in error[1]
+    # The out-of-scope host must NEVER have received a request
+    assert "https://evil.example/login" not in requested_urls
+    assert requested_urls == ["https://target.example/login"]
+
+
+def test_login_probe_redirect_in_scope_is_followed(monkeypatch):
+    # In-scope redirect must be followed safely to the in-scope destination
+    requested_urls = []
+
+    def handler(request):
+        requested_urls.append(str(request.url))
+        if str(request.url) == "https://target.example/login":
+            return httpx.Response(302, headers={"Location": "/login/form"})
+        return httpx.Response(200, text="<html><form><input name='username'/></form></html>")
+
+    class Client:
+        def __init__(self, **_kwargs):
+            self.transport = httpx.MockTransport(handler)
+        def __enter__(self): return self
+        def __exit__(self, *_): self.transport.close()
+        def get(self, url): return self.transport.handle_request(httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    status_code, html, error = _probe_login_page(
+        "https://target.example/login",
+        target_url="https://target.example",
+    )
+    assert error is None
+    assert status_code == 200
+    assert "username" in html
+    assert requested_urls == ["https://target.example/login", "https://target.example/login/form"]
+
+
+def test_run_preflight_login_redirect_out_of_scope(monkeypatch, tmp_path):
+    _mock_preflight_deps(monkeypatch)
+    requested_urls = []
+
+    def handler(request):
+        requested_urls.append(str(request.url))
+        if str(request.url) == "http://target.example/login":
+            return httpx.Response(302, headers={"Location": "https://malicious.example/oauth"})
+        return httpx.Response(200)
+
+    class Client:
+        def __init__(self, **_kwargs):
+            self.transport = httpx.MockTransport(handler)
+        def __enter__(self): return self
+        def __exit__(self, *_): self.transport.close()
+        def get(self, url): return self.transport.handle_request(httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "Client", Client)
+
+    report = asyncio.run(run_preflight(
+        "http://target.example",
+        output_dir=tmp_path,
+        checks=["privesc"],
+        login_url="/login",
+        auth_user="admin",
+        auth_pass="pass123",
+    ))
+    auth_check = next(c for c in report["checks"] if c["id"] == "authentication")
+    assert auth_check["status"] == "fail"
+    assert auth_check["reason_code"] == "login_redirect_out_of_scope"
+    assert "malicious.example" in auth_check["detail"]
+    assert "https://malicious.example/oauth" not in requested_urls
+
+
+def test_run_preflight_probing_disabled(monkeypatch, tmp_path):
+    _mock_preflight_deps(monkeypatch)
+
+    report = asyncio.run(run_preflight(
+        "http://target.example",
+        output_dir=tmp_path,
+        checks=[],
+        login_url="/login",
+        auth_user="admin",
+        auth_pass="pass123",
+        probe_login=False,
+    ))
+    auth_check = next(c for c in report["checks"] if c["id"] == "authentication")
+    assert auth_check["status"] == "warning"
+    assert auth_check["reason_code"] == "not_probed"
 
 
 def test_live_channel_readiness():

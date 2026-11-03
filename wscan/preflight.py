@@ -165,8 +165,8 @@ def evaluate_auth_readiness(
 
     if has_session_auth and not has_login_settings:
         return _check(
-            "authentication", "pass", "session_token_configured",
-            "Session authentication (cookie/bearer/header) is configured. Actual session validity is not verified by preflight.",
+            "authentication", "warning", "session_not_verified",
+            "Session authentication (cookie/bearer/header) is configured, but session token validity is not verified by preflight.",
         )
 
     clean_login_url = (login_url or "").strip()
@@ -185,11 +185,22 @@ def evaluate_auth_readiness(
         return _check("authentication", "fail", "required_fields_missing", "Required login field selectors (user_field or pass_field) are empty.")
 
     if probe_error is not None:
-        _reason, detail = probe_error
-        return _check("authentication", "fail", "login_page_unreachable", f"Login page probe failed: {detail}")
+        reason, detail = probe_error
+        reason_code = reason if reason in ("login_redirect_out_of_scope", "too_many_redirects") else "login_page_unreachable"
+        return _check("authentication", "fail", reason_code, f"Login page probe failed: {detail}")
 
     if probe_status_code is not None and probe_status_code >= 400:
         return _check("authentication", "fail", "login_page_http_error", f"Login page probe returned HTTP status {probe_status_code}.")
+
+    if probe_status_code is not None and 300 <= probe_status_code < 400:
+        return _check("authentication", "warning", "login_page_redirect", f"Login page probe returned redirect HTTP status {probe_status_code}.")
+
+    if probe_status_code is None:
+        return _check(
+            "authentication", "warning", "not_probed",
+            "Authentication configuration is complete, but login page reachability was not probed. "
+            "Preflight does not verify credentials or login success (no credentials submitted).",
+        )
 
     surface_detected = False
     if probe_html:
@@ -201,18 +212,11 @@ def evaluate_auth_readiness(
         except Exception:
             pass
 
-    if probe_status_code is not None and probe_status_code < 400:
-        form_note = " (login form detected)" if surface_detected else ""
-        detail = (
-            f"Authentication configuration is complete and login page is reachable{form_note}. "
-            "Preflight does not verify credentials or login success (no credentials submitted)."
-        )
-    else:
-        detail = (
-            "Authentication configuration is complete. "
-            "Preflight does not verify credentials or login success (no credentials submitted)."
-        )
-
+    form_note = " (login form detected)" if surface_detected else ""
+    detail = (
+        f"Authentication configuration is complete and login page is reachable{form_note}. "
+        "Preflight does not verify credentials or login success (no credentials submitted)."
+    )
     return _check("authentication", "pass", "configured", detail)
 
 
@@ -229,20 +233,50 @@ def evaluate_live_channel_readiness(*, monitor_enabled: bool = True) -> dict:
     )
 
 
-def _probe_login_page(login_url: str, proxy: str, verify: bool) -> tuple[int | None, str, tuple[str, str] | None]:
-    """ログインページへの非破壊・副作用なしの GET プローブ（資格情報は一切送信しない）。"""
+def _probe_login_page(
+    login_url: str,
+    proxy: str = "",
+    verify: bool = True,
+    target_url: str = "",
+    scope_urls: list[str] | None = None,
+    max_redirects: int = 5,
+) -> tuple[int | None, str, tuple[str, str] | None]:
+    """ログインページへの非破壊・副作用なしの GET プローブ（資格情報は一切送信しない）。
+
+    follow_redirects=False を使用し、各ホップごとにリダイレクト先スコープを再検証する。
+    スコープ外のホストへは一切リクエストを送信しない。
+    """
     try:
         from types import SimpleNamespace
         from .engine import ScanEngine
         from .tls_config import TLSConfig
 
+        scope_target = target_url or login_url
         engine = SimpleNamespace(proxy=proxy, tls_config=TLSConfig.from_values())
         options = ScanEngine.httpx_client_kwargs(
-            engine, verify=verify, timeout=10, follow_redirects=True, trust_env=False
+            engine, verify=verify, timeout=10, follow_redirects=False, trust_env=False
         )
+        current_url = login_url
         with httpx.Client(**options) as client:
-            resp = client.get(login_url)
-        return resp.status_code, resp.text, None
+            for _ in range(max_redirects + 1):
+                resp = client.get(current_url)
+                if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("location")
+                    if not location:
+                        return resp.status_code, resp.text, None
+                    next_url = urljoin(current_url, location)
+                    if not is_login_url_in_scope(scope_target, next_url, scope_urls):
+                        return resp.status_code, resp.text, (
+                            "login_redirect_out_of_scope",
+                            f"Login page redirect target is out of scope: {next_url}",
+                        )
+                    current_url = next_url
+                else:
+                    return resp.status_code, resp.text, None
+            return resp.status_code, resp.text, (
+                "too_many_redirects",
+                f"Login page exceeded redirect limit ({max_redirects})",
+            )
     except Exception as exc:
         reason, detail = classify_exception(exc)
         return None, "", (reason, detail)
@@ -397,9 +431,14 @@ async def run_preflight(
     scopes = list(target_urls or []) + list(access_urls or [])
     if probe_login and clean_login_url and is_login_url_in_scope(url, clean_login_url, scopes):
         resolved_login_url = urljoin(url, clean_login_url)
-        probe_status_code, probe_html, probe_error = await asyncio.to_thread(
-            _probe_login_page, resolved_login_url, proxy, verify
-        )
+        try:
+            probe_status_code, probe_html, probe_error = await asyncio.to_thread(
+                _probe_login_page, resolved_login_url, proxy, verify, target_url=url, scope_urls=scopes
+            )
+        except TypeError:
+            probe_status_code, probe_html, probe_error = await asyncio.to_thread(
+                _probe_login_page, resolved_login_url, proxy, verify
+            )
 
     auth_row = evaluate_auth_readiness(
         url,
