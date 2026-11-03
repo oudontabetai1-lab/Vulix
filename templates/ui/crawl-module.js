@@ -25,11 +25,11 @@
     unknown: '不明',
   };
 
-  const KIND_COLORS = {
-    page: '#9184d9',
-    form: '#d99a63',
-    param: '#8fb9c9',
-    unknown: '#9397ab',
+  const KIND_CLASSES = {
+    page: 'crawl-kind-page',
+    form: 'crawl-kind-form',
+    param: 'crawl-kind-param',
+    unknown: 'crawl-kind-unknown',
   };
 
   const REASON_LABELS = {
@@ -746,7 +746,7 @@
     }, doc);
     const markerPath = createSvgElement('path', {
       d: 'M0,-5L10,0L0,5',
-      fill: '#4a5568',
+      class: 'crawl-svg-marker-path',
     }, doc);
     marker.appendChild(markerPath);
     defs.appendChild(marker);
@@ -803,7 +803,7 @@
       graphSurface.hidden = mode !== 'graph';
       explorerSurface.hidden = mode !== 'explorer';
       listSurface.hidden = mode !== 'list';
-      zoomGroup.style.display = mode === 'graph' ? 'inline-flex' : 'none';
+      zoomGroup.classList.toggle('crawl-hidden', mode !== 'graph');
 
       if (mode === 'explorer') {
         detailDrawer.hidden = true;
@@ -879,7 +879,7 @@
 
         if (initialScanId) {
           const backWrap = doc.createElement('div');
-          backWrap.style.marginTop = '14px';
+          backWrap.classList.add('crawl-mt-14');
           const backLink = doc.createElement('a');
           backLink.className = 'history-btn';
           backLink.href = `#/findings?scan=${encodeURIComponent(initialScanId)}`;
@@ -1091,7 +1091,7 @@
 
           if (f.id) {
             const fLinkWrap = doc.createElement('div');
-            fLinkWrap.style.marginTop = '6px';
+            fLinkWrap.classList.add('crawl-mt-6');
             const fLink = doc.createElement('a');
             fLink.className = 'crawl-finding-item-link';
             fLink.href = buildFindingsLink(initialScanId, { findingId: f.id });
@@ -1212,9 +1212,7 @@
       layout.edges.forEach((edge) => {
         const path = createSvgElement('path', {
           d: edge.pathData,
-          fill: 'none',
-          stroke: '#4a5568',
-          'stroke-width': '1.5',
+          class: 'crawl-svg-edge',
           'marker-end': 'url(#crawl-arr)',
         }, doc);
         svgViewport.appendChild(path);
@@ -1224,7 +1222,7 @@
           cx: String(edge.x1),
           cy: String(edge.y1),
           r: '3',
-          fill: '#9184d9',
+          class: 'crawl-svg-edge-dot',
         }, doc);
         svgViewport.appendChild(dot);
       });
@@ -1236,18 +1234,15 @@
           class: `crawl-svg-node ${selectedNodeId === n.id ? 'selected' : ''}`,
           'data-id': n.id,
         }, doc);
-        g.style.cursor = 'pointer';
 
-        const strokeColor = KIND_COLORS[n.kind] || KIND_COLORS.unknown;
+        const kindClass = KIND_CLASSES[n.kind] || KIND_CLASSES.unknown;
         const findingsCount = Array.isArray(n.findings) ? n.findings.length : 0;
 
         const rect = createSvgElement('rect', {
           width: String(n.width),
           height: String(n.height),
           rx: '6',
-          fill: '#1c1e2c',
-          stroke: findingsCount > 0 ? '#e2708f' : strokeColor,
-          'stroke-width': selectedNodeId === n.id ? '2.5' : '1.5',
+          class: `crawl-svg-node-rect ${kindClass}${findingsCount > 0 ? ' has-findings' : ''}${selectedNodeId === n.id ? ' is-selected' : ''}`,
         }, doc);
         g.appendChild(rect);
 
@@ -1256,7 +1251,7 @@
           cx: '14',
           cy: String(n.height / 2),
           r: '4',
-          fill: strokeColor,
+          class: `crawl-svg-kind-dot ${kindClass}`,
         }, doc);
         g.appendChild(dot);
 
@@ -1264,8 +1259,7 @@
         const textTitle = createSvgElement('text', {
           x: '24',
           y: String(n.height / 2 - 3),
-          'font-size': '10.5px',
-          fill: '#e9e9ed',
+          class: 'crawl-svg-title',
         }, doc);
         const rawLabel = String(n.label || n.url || n.id);
         textTitle.textContent = rawLabel.length > 18 ? rawLabel.slice(0, 17) + '…' : rawLabel;
@@ -1275,8 +1269,7 @@
         const textSub = createSvgElement('text', {
           x: '24',
           y: String(n.height / 2 + 10),
-          'font-size': '9px',
-          fill: '#9397ab',
+          class: 'crawl-svg-subtitle',
         }, doc);
         const inCount = Array.isArray(n.inputs) ? n.inputs.length : 0;
         textSub.textContent = findingsCount > 0
@@ -1337,8 +1330,7 @@
         row.style.paddingLeft = `${depth * 16 + 8}px`;
 
         const dot = doc.createElement('span');
-        dot.className = 'crawl-tree-dot';
-        dot.style.background = KIND_COLORS[n.kind] || KIND_COLORS.unknown;
+        dot.className = `crawl-tree-dot ${KIND_CLASSES[n.kind] || KIND_CLASSES.unknown}`;
         row.appendChild(dot);
 
         const label = doc.createElement('span');
@@ -1421,8 +1413,8 @@
       const tbody = doc.createElement('tbody');
       filteredNodes.forEach((n) => {
         const tr = doc.createElement('tr');
-        tr.style.cursor = 'pointer';
-        if (selectedNodeId === n.id) tr.className = 'selected-row';
+        tr.classList.add('crawl-clickable');
+        if (selectedNodeId === n.id) tr.classList.add('selected-row');
 
         // Kind
         const tdKind = doc.createElement('td');

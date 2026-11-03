@@ -129,3 +129,24 @@ Vulix `/app` ダッシュボードおよび管理画面群で使用する共通�
 | **Agent Skills** | `#agentSkillsSurface`, `.agent-skills-table` | 機能利用可否（利用可能 / 利用不可 / 未確定） |
 | **Settings** | `#settingsSurface`, `.ui-card`, `.ui-input` | 秘匿情報マスク、明示的保存 |
 | **History & Audit** | `#summarySurface`, `.history-search-input` | 監査ログ操作種別と IP フォーマット |
+
+---
+
+## ビューモジュールのスタイル規約
+
+- `templates/ui/*-module.js` にはハードコードされた16進カラー（`#rrggbb`）を記述しません。色・状態は `tokens.css` のトークン（`var(--...)`）または `components.css` のクラスで表現します。`tests/test_ui_module_no_hardcoded_colors.py` が再混入を検出します（許可リストは現在空）。
+- インライン `style` は、ペイン幅・位置・サイズ・transform・表の列幅などの動的ジオメトリ／レイアウト用途に限定します。色や状態表現には使用しません。
+- 旧エイリアス `--success` / `--warning` / `--running` は `--status-pass` / `--status-warning` / `--status-running` を参照します（値の重複なし、旧名称は引き続き利用可能）。`--success` の解決色は `--status-pass`（`#22c55e`）で、ダッシュボードの `var(--success)` もこの色に従います。
+
+### クロール グラフ用トークン（ステータス色とは分離）
+| トークン | 用途 |
+|---|---|
+| `--graph-node-page` / `--graph-node-form` / `--graph-node-param` / `--graph-node-unknown` | ノード種別の色 |
+| `--graph-node-bg` / `--graph-node-findings` | ノード背景／検出ありの枠線 |
+| `--graph-node-text` / `--graph-node-subtext` | ノードのタイトル／サブテキスト |
+| `--graph-edge` / `--graph-edge-dot` | エッジ線／始点ドット |
+
+種別は `crawl-kind-page|form|param|unknown` クラスで適用し、`components.css` が `--crawl-kind-color` に解決します。
+
+### フォーカス可視性・レスポンシブ検証
+ブラウザE2Eは Portal / Setup / Findings に加え、Crawl / Monitor / Settings / Agent capabilities の各ビューでも、フォーカスリングの可視性と 1440 / 1280 / 768 px での横スクロール非発生を確認します。

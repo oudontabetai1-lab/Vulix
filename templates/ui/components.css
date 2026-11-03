@@ -770,3 +770,31 @@
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* Crawl graph (colors come from --graph-* tokens) */
+.crawl-kind-page { --crawl-kind-color: var(--graph-node-page); }
+.crawl-kind-form { --crawl-kind-color: var(--graph-node-form); }
+.crawl-kind-param { --crawl-kind-color: var(--graph-node-param); }
+.crawl-kind-unknown { --crawl-kind-color: var(--graph-node-unknown); }
+.crawl-tree-dot { background: var(--crawl-kind-color); }
+.crawl-svg-marker-path { fill: var(--graph-edge); }
+.crawl-svg-edge { fill: none; stroke: var(--graph-edge); stroke-width: 1.5; }
+.crawl-svg-edge-dot { fill: var(--graph-edge-dot); }
+.crawl-svg-node { cursor: pointer; }
+.crawl-svg-node-rect { fill: var(--graph-node-bg); stroke: var(--crawl-kind-color); stroke-width: 1.5; }
+.crawl-svg-node-rect.has-findings { stroke: var(--graph-node-findings); }
+.crawl-svg-node-rect.is-selected { stroke-width: 2.5; }
+.crawl-svg-kind-dot { fill: var(--crawl-kind-color); }
+.crawl-svg-title { fill: var(--graph-node-text); font-size: 10.5px; }
+.crawl-svg-subtitle { fill: var(--graph-node-subtext); font-size: 9px; }
+.crawl-clickable { cursor: pointer; }
+.crawl-mt-14 { margin-top: 14px; }
+.crawl-mt-6 { margin-top: 6px; }
+.crawl-zoom-group.crawl-hidden { display: none; }
+
+/* Findings / Setup view state classes */
+.findings-notfound-title { margin: 0 0 6px 0; }
+.findings-notfound-text { margin: 0; }
+.findings-detail-th { width: 25%; }
+.findings-chip-clear { background: transparent; border: none; cursor: pointer; color: var(--text-muted); margin-left: 6px; }
+.setup-search-hidden { display: none !important; }

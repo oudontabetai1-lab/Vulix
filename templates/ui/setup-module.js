@@ -1420,10 +1420,10 @@
         totalFields++;
         if (matches) {
           matchCount++;
-          wrapper.style.display = '';
+          wrapper.classList.remove('setup-search-hidden');
           delete wrapper.dataset.searchFiltered;
         } else {
-          wrapper.style.display = 'none';
+          wrapper.classList.add('setup-search-hidden');
           wrapper.dataset.searchFiltered = 'true';
         }
       });

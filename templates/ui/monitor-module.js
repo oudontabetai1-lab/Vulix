@@ -305,15 +305,15 @@
       if (element.classList.contains('btn-show-shot')) {
         const image = element.nextElementSibling;
         image.src = element.dataset.src;
-        image.style.display = 'block';
-        element.style.display = 'none';
+        image.classList.remove('monitor-screenshot-hidden');
+        element.classList.add('monitor-screenshot-hidden');
         return;
       }
       const close = expression.match(/^document\.getElementById\('([\w-]+)'\)\.(style\.display='none'|classList\.remove\('active'\)|remove\(\))$/);
       if (close) {
         const node = root.getElementById(close[1]);
         if (node) {
-          if (close[2].startsWith('style')) node.style.display = 'none';
+          if (close[2].startsWith('style')) node.classList.add('monitor-screenshot-hidden');
           else if (close[2].startsWith('classList')) node.classList.remove('active');
           else node.remove();
         }
@@ -769,6 +769,7 @@
   color: var(--text);
   overflow: hidden;
 }
+.monitor-screenshot-hidden { display: none !important; }
 .hdr-view-toggle { display: none; }
 .main {
   display: flex !important;

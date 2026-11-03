@@ -18,9 +18,6 @@
   --medium: #c7b96a;
   --low: #8fb9c9;
   --info: #b5abfc;
-  --success: #8fb9c9;
-  --warning: #c7b96a;
-  --running: #d99a63;
 
   /* Semantic status colors (pass / fail / warning / not checked / unknown / unavailable / stale / running) */
   --status-pass: #22c55e;
@@ -55,6 +52,11 @@
   --status-running-bg: rgba(217, 154, 99, 0.12);
   --status-running-border: rgba(217, 154, 99, 0.3);
 
+  /* Legacy aliases: same computed values as --status-*, no second copy of the colour */
+  --success: var(--status-pass);
+  --warning: var(--status-warning);
+  --running: var(--status-running);
+
   /* Spacing scale */
   --space-xs: 4px;
   --space-sm: 8px;
@@ -83,4 +85,16 @@
   --state-error-border: rgba(226, 112, 143, 0.3);
   --state-loading-text: #9397ab;
   --state-empty-text: #9397ab;
+
+  /* Crawl graph palette (separate from status colors) */
+  --graph-node-page: #9184d9;
+  --graph-node-form: #d99a63;
+  --graph-node-param: #8fb9c9;
+  --graph-node-unknown: #9397ab;
+  --graph-node-bg: #1c1e2c;
+  --graph-node-findings: #e2708f;
+  --graph-node-text: #e9e9ed;
+  --graph-node-subtext: #9397ab;
+  --graph-edge: #4a5568;
+  --graph-edge-dot: #9184d9;
 }
