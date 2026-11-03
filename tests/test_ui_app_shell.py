@@ -54,8 +54,8 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
     sockets = []
     page.on("websocket", lambda socket: sockets.append(socket.url))
     page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
-    page.wait_for_function("document.querySelector('#portalFrame').contentDocument?.title.includes('Server Portal')")
-    assert page.locator("#portalFrame").is_visible()
+    page.wait_for_function("document.querySelector('#summarySurface')?.hidden === false")
+    assert page.locator("#summarySurface").is_visible()
     ui_harness.assert_no_horizontal_overflow(page, max_allowed=width + 1)
     ui_harness.capture_screenshot(page, "app-portal", width, dest_dir=ui_harness.output_dir / "screenshots")
 
@@ -105,7 +105,7 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
         page.locator(f'[data-route="{route}"]').click()
         page.wait_for_timeout(80)
     assert len(sockets) == 1, f"expected one persistent dashboard socket, saw {len(sockets)}"
-    assert page.locator("#portalFrame").get_attribute("src") == "about:blank"
+    assert page.locator("#portalFrame").is_hidden()
     page.go_back()
     page.wait_for_timeout(80)
     assert page.url.endswith("#/monitor")
@@ -219,7 +219,7 @@ def test_monitor_module_owns_live_panes_and_blocks_stale_actions(ui_harness: UIH
         .shadowRoot.getElementById('ibPause');
       location.hash = '#/portal';
     }""")
-    page.wait_for_function("() => document.querySelector('#portalFrame').hidden === false")
+    page.wait_for_function("() => document.querySelector('#summarySurface').hidden === false")
     assert page.locator("#monitorModule").is_hidden()
     frame.locator("body").evaluate("""() => {
       window.parent.__staleMonitorPause.click();
@@ -253,7 +253,7 @@ def test_monitor_unmount_cancels_scoped_scan_list_read(ui_harness: UIHarness):
     page.wait_for_function("window.__scanListStarted === true")
     page.evaluate("() => { location.hash = '#/portal'; }")
     page.wait_for_function("window.__scanListAborted === true")
-    assert page.locator("#portalFrame").is_visible()
+    assert page.locator("#summarySurface").is_visible()
     assert page.locator("#message").is_hidden()
     ui_harness.assert_no_errors(page)
 
@@ -282,7 +282,7 @@ def test_monitor_reentry_ignores_stale_scan_list_response(ui_harness: UIHarness)
     page.goto(f"{ui_harness.server_url}/app#/monitor?scan=20261026_110000")
     page.wait_for_function("window.__oldScanListStarted === true")
     page.evaluate("() => { location.hash = '#/portal'; }")
-    page.wait_for_function("() => document.querySelector('#portalFrame').contentDocument?.title.includes('Server Portal')")
+    page.wait_for_function("() => document.querySelector('#summarySurface')?.hidden === false")
     page.evaluate("() => { location.hash = '#/monitor?scan=20261026_100000'; }")
     page.get_by_text("snapshot と一致しません", exact=False).wait_for()
 
@@ -366,7 +366,7 @@ def test_selected_scan_pins_complete_live_identity_until_intentional_remount(ui_
 
     # Explicit navigation remounts against the current validated tuple.
     page.evaluate("() => { location.hash='#/portal'; }")
-    page.locator("#portalFrame").wait_for(state="visible")
+    page.locator("#summarySurface").wait_for(state="visible")
     page.evaluate(f"() => {{ location.hash='#/monitor?scan={selected}'; }}")
     page.wait_for_function("() => { const f=document.querySelector('#monitorFrame'); const c=f.contentWindow?.VulixAppBridge?.getContext(); return c?.run_id==='run-selected-b' && !f.hidden && document.querySelector('#message').hidden; }")
     before_server_change = page.evaluate("() => document.querySelector('#monitorFrame').contentWindow.VulixAppBridge.getContext()")
@@ -385,7 +385,7 @@ def test_selected_scan_pins_complete_live_identity_until_intentional_remount(ui_
 
     # A deliberate route remount accepts the newly current validated tuple.
     page.evaluate("() => { location.hash='#/portal'; }")
-    page.locator("#portalFrame").wait_for(state="visible")
+    page.locator("#summarySurface").wait_for(state="visible")
     page.evaluate(f"() => {{ location.hash='#/monitor?scan={selected}'; }}")
     page.wait_for_function("() => { const f=document.querySelector('#monitorFrame'); const c=f.contentWindow?.VulixAppBridge?.getContext(); return c?.server_id==='server-replacement' && !f.hidden && document.querySelector('#message').hidden; }")
     ui_harness.assert_no_errors(page)
@@ -399,7 +399,7 @@ def test_stale_monitor_load_after_navigation_does_not_unhide(ui_harness: UIHarne
     held: list = []
     page.route("**/monitor", lambda route: held.append(route))
     page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
-    page.wait_for_function("() => document.querySelector('#portalFrame')?.contentDocument?.title.includes('Server Portal')")
+    page.wait_for_function("() => document.querySelector('#summarySurface')?.hidden === false")
 
     # setup へ遷移 → monitor iframe が /monitor を要求するが、load は保留される。
     page.evaluate("() => { location.hash = '#/setup'; }")
@@ -412,7 +412,7 @@ def test_stale_monitor_load_after_navigation_does_not_unhide(ui_harness: UIHarne
     # load 発火前に portal へ離脱 → unmount が保留 load を解除し iframe を隠す。
     page.evaluate("() => { location.hash = '#/portal'; }")
     page.wait_for_function(
-        "() => document.querySelector('#portalFrame')?.contentDocument?.title.includes('Server Portal')"
+        "() => document.querySelector('#summarySurface')?.hidden === false"
         " && document.querySelector('#monitorFrame').hidden"
     )
 
@@ -422,7 +422,7 @@ def test_stale_monitor_load_after_navigation_does_not_unhide(ui_harness: UIHarne
     page.wait_for_timeout(150)
 
     assert page.locator("#monitorFrame").is_hidden(), "stale monitor load un-hid the iframe under /portal"
-    assert page.locator("#portalFrame").is_visible()
+    assert page.locator("#summarySurface").is_visible()
     assert page.locator('[data-route="portal"]').get_attribute("aria-current") == "page"
     overlay_active = page.frame_locator("#monitorFrame").locator("#scanConfigOverlay").evaluate(
         "el => el.classList.contains('active')"
@@ -473,7 +473,7 @@ def test_hidden_monitor_4401_keeps_app_route_and_shows_auth_required(ui_harness:
     page.goto(f"{ui_harness.server_url}/app#/monitor")
     page.wait_for_function("() => document.querySelector('#monitorFrame').contentWindow?._eventStream?.connected")
     page.evaluate("() => { location.hash = '#/portal'; }")
-    page.wait_for_function("() => document.querySelector('#portalFrame').contentDocument?.title.includes('Server Portal')")
+    page.wait_for_function("() => document.querySelector('#summarySurface')?.hidden === false")
 
     monitor = page.frame_locator("#monitorFrame")
     monitor.locator("body").evaluate("() => state.ws.close(4401, 'unauthorized')")
@@ -491,7 +491,7 @@ def test_hidden_monitor_4401_keeps_app_route_and_shows_auth_required(ui_harness:
 def test_app_shell_agent_skills_view_and_screenshot(ui_harness: UIHarness):
     page = ui_harness.new_page(**STANDARD_VIEWPORTS[1440])
     page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
-    page.wait_for_function("document.querySelector('#portalFrame').contentDocument?.title.includes('Server Portal')")
+    page.wait_for_function("document.querySelector('#summarySurface')?.hidden === false")
 
     skills_btn = page.locator('[data-route="agent-skills"]')
     skills_btn.wait_for()
@@ -526,7 +526,7 @@ def test_app_shell_agent_skills_view_and_screenshot(ui_harness: UIHarness):
 def test_app_shell_findings_view_and_screenshot(ui_harness: UIHarness):
     page = ui_harness.new_page(**STANDARD_VIEWPORTS[1440])
     page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
-    page.wait_for_function("document.querySelector('#portalFrame').contentDocument?.title.includes('Server Portal')")
+    page.wait_for_function("document.querySelector('#summarySurface')?.hidden === false")
 
     findings_btn = page.locator('[data-route="findings"]')
     findings_btn.wait_for()
