@@ -1503,6 +1503,7 @@ class MonitorServer:
                 or config.get("mode") == "agent"
                 or config.get("scan_mode") == "agent"
             )
+            monitor_enabled = not bool(config.get("no_monitor", False))
 
             with tempfile.TemporaryDirectory(prefix="preflight_") as tmp_dir:
                 try:
@@ -1518,6 +1519,20 @@ class MonitorServer:
                         accounts_configured=accounts_configured,
                         oob_configured=oob_configured,
                         agent_mode=agent_mode,
+                        login_url=str(config.get("login_url") or "").strip(),
+                        auth_user=str(config.get("auth_user") or "").strip(),
+                        auth_pass=str(config.get("auth_pass") or ""),
+                        login_user_field=str(config.get("login_user_field") or "username").strip(),
+                        login_pass_field=str(config.get("login_pass_field") or "password").strip(),
+                        accounts=config.get("accounts"),
+                        accounts_file=str(config.get("accounts_file") or "").strip(),
+                        auto_register=bool(config.get("auto_register", False)),
+                        cookie=str(config.get("cookie") or config.get("cookies") or "").strip(),
+                        bearer=str(config.get("bearer") or "").strip(),
+                        headers=config.get("header") or config.get("headers"),
+                        target_urls=config.get("target_urls"),
+                        access_urls=config.get("access_urls"),
+                        monitor_enabled=monitor_enabled,
                     )
                 except Exception as exc:
                     return JSONResponse(

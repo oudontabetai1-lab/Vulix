@@ -2476,6 +2476,20 @@ async def run_scan(args):
                                      or getattr(args, "auto_register", False)),
             oob_configured=OOBEmailConfig.from_env().configured,
             agent_mode=False,
+            login_url=getattr(args, "login_url", "") or "",
+            auth_user=getattr(args, "auth_user", "") or "",
+            auth_pass=getattr(args, "auth_pass", "") or "",
+            login_user_field=getattr(args, "login_user_field", "username") or "username",
+            login_pass_field=getattr(args, "login_pass_field", "password") or "password",
+            accounts=getattr(args, "accounts", "") or None,
+            accounts_file=getattr(args, "accounts_file", "") or "",
+            auto_register=getattr(args, "auto_register", False),
+            cookie=getattr(args, "cookie", "") or "",
+            bearer=getattr(args, "bearer", "") or "",
+            headers=getattr(args, "header", None),
+            target_urls=getattr(args, "target_urls", None),
+            access_urls=getattr(args, "access_urls", None),
+            monitor_enabled=not getattr(args, "no_monitor", False),
         )
         try:
             write_result(output_dir, report)

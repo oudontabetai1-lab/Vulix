@@ -9,7 +9,9 @@ import httpx
 import pytest
 
 from wscan.preflight import (
-    _http_check, classify_exception, exit_code, proxy_applied, result, run_preflight, write_result,
+    _http_check, _probe_login_page, classify_exception, evaluate_auth_readiness,
+    evaluate_live_channel_readiness, exit_code, is_login_url_in_scope, parse_accounts,
+    proxy_applied, result, run_preflight, write_result,
 )
 
 
@@ -121,8 +123,8 @@ def test_run_reports_unimplemented_checks_and_saves_output(monkeypatch, tmp_path
     report = asyncio.run(run_preflight("http://target.example", output_dir=tmp_path,
                                        checks=["mass_assignment"], proxy="", verify_tls=False))
     checks_by_id = {row["id"]: row for row in report["checks"]}
-    assert checks_by_id["authentication"]["status"] == "not_checked"
-    assert checks_by_id["websocket"]["status"] == "not_checked"
+    assert checks_by_id["authentication"]["status"] == "not_applicable"
+    assert checks_by_id["websocket"]["status"] == "pass"
     assert checks_by_id["oob"]["status"] == "not_applicable"
     assert checks_by_id["agent_transport"]["status"] in ("pass", "warning")
     assert {row["status"] for row in report["checks"] if row["id"] == "scanner:mass_assignment"} == {"warning"}
@@ -208,3 +210,234 @@ def test_preflight_agent_transport_check(monkeypatch, tmp_path):
     assert agent_row_avail["status"] == "pass"
     assert agent_row_avail["reason_code"] == "available"
     assert "backend is importable" in agent_row_avail["detail"]
+
+
+def test_login_url_in_scope():
+    assert is_login_url_in_scope("https://target.example/app", "/login") is True
+    assert is_login_url_in_scope("https://target.example/app", "https://target.example/login") is True
+    assert is_login_url_in_scope("http://target.example:8080/app", "http://target.example:8080/auth/login") is True
+    assert is_login_url_in_scope("https://target.example/app", "https://evil.example/login") is False
+    assert is_login_url_in_scope("https://target.example/app", "https://auth.example/login",
+                                 scope_urls=["https://auth.example/"]) is True
+    assert is_login_url_in_scope("https://target.example/app", "") is False
+    assert is_login_url_in_scope("https://target.example/app", "javascript:void(0)") is False
+    assert is_login_url_in_scope("https://target.example/app", "ftp://target.example/login") is False
+
+
+def test_parse_accounts_and_secret_redaction(tmp_path):
+    sentinel_pass = "SENTINEL_NEVER_LEAK_SECRET_PASS_999"
+
+    # From list of dicts
+    accounts_list = [
+        {"username": "admin", "password": sentinel_pass, "role": "admin"},
+        {"user": "tester", "password": "other_pass"},
+    ]
+    parsed = parse_accounts(accounts_list)
+    assert len(parsed) == 2
+    assert parsed[0] == {"username": "admin"}
+    assert parsed[1] == {"username": "tester"}
+    assert sentinel_pass not in json.dumps(parsed)
+
+    # From string format
+    accounts_str = f"alice:{sentinel_pass},bob:pass2"
+    parsed_str = parse_accounts(accounts_str)
+    assert len(parsed_str) == 2
+    assert parsed_str[0] == {"username": "alice"}
+    assert parsed_str[1] == {"username": "bob"}
+    assert sentinel_pass not in json.dumps(parsed_str)
+
+    # Fallback to auth_user
+    parsed_single = parse_accounts(None, auth_user="single_user", auth_pass=sentinel_pass)
+    assert len(parsed_single) == 1
+    assert parsed_single[0] == {"username": "single_user"}
+    assert sentinel_pass not in json.dumps(parsed_single)
+
+    # From accounts file
+    af = tmp_path / "accounts.yaml"
+    af.write_text(f"accounts:\n  - username: file_user\n    password: {sentinel_pass}\n", encoding="utf-8")
+    parsed_file = parse_accounts(None, accounts_file=str(af))
+    assert len(parsed_file) == 1
+    assert parsed_file[0] == {"username": "file_user"}
+    assert sentinel_pass not in json.dumps(parsed_file)
+
+
+def test_auth_readiness_not_applicable():
+    res = evaluate_auth_readiness("https://target.example")
+    assert res["id"] == "authentication"
+    assert res["status"] == "not_applicable"
+    assert res["reason_code"] == "auth_not_configured"
+
+
+def test_auth_readiness_missing_login_url():
+    res = evaluate_auth_readiness(
+        "https://target.example",
+        login_url="",
+        auth_user="admin",
+        auth_pass="pass123",
+    )
+    assert res["id"] == "authentication"
+    assert res["status"] == "fail"
+    assert res["reason_code"] == "login_url_missing"
+
+
+def test_auth_readiness_partial_missing_accounts():
+    res = evaluate_auth_readiness(
+        "https://target.example",
+        login_url="/login",
+        accounts=[],
+        auth_user="",
+    )
+    assert res["id"] == "authentication"
+    assert res["status"] == "fail"
+    assert res["reason_code"] == "account_missing"
+
+
+def test_auth_readiness_partial_out_of_scope():
+    res = evaluate_auth_readiness(
+        "https://target.example",
+        login_url="https://external-domain.example/login",
+        auth_user="admin",
+        auth_pass="pass123",
+    )
+    assert res["id"] == "authentication"
+    assert res["status"] == "fail"
+    assert res["reason_code"] == "login_url_out_of_scope"
+
+
+def test_auth_readiness_partial_empty_selectors():
+    res = evaluate_auth_readiness(
+        "https://target.example",
+        login_url="/login",
+        auth_user="admin",
+        auth_pass="pass123",
+        login_user_field="   ",
+    )
+    assert res["id"] == "authentication"
+    assert res["status"] == "fail"
+    assert res["reason_code"] == "required_fields_missing"
+
+
+def test_auth_readiness_partial_probe_failure():
+    # Transport error
+    res_transport = evaluate_auth_readiness(
+        "https://target.example",
+        login_url="/login",
+        auth_user="admin",
+        auth_pass="pass123",
+        probe_error=("connection_refused", "Connection refused"),
+    )
+    assert res_transport["status"] == "fail"
+    assert res_transport["reason_code"] == "login_page_unreachable"
+
+    # HTTP error status
+    res_http = evaluate_auth_readiness(
+        "https://target.example",
+        login_url="/login",
+        auth_user="admin",
+        auth_pass="pass123",
+        probe_status_code=500,
+    )
+    assert res_http["status"] == "fail"
+    assert res_http["reason_code"] == "login_page_http_error"
+
+
+def test_auth_readiness_configured_pass_and_explicit_non_verification():
+    res = evaluate_auth_readiness(
+        "https://target.example",
+        login_url="/login",
+        auth_user="admin",
+        auth_pass="pass123",
+        probe_status_code=200,
+        probe_html="<form action='/login' method='post'><input name='username'/><input type='password' name='password'/><button type='submit'>Login</button></form>",
+    )
+    assert res["id"] == "authentication"
+    assert res["status"] == "pass"
+    assert res["reason_code"] == "configured"
+    # Status is pass for configuration completeness, but explicitly does NOT claim login succeeded
+    assert "Preflight does not verify credentials or login success" in res["detail"]
+    assert "no credentials submitted" in res["detail"]
+    assert "login form detected" in res["detail"]
+
+
+def test_auth_readiness_secret_non_leak_sentinel():
+    sentinel = "EXTREMELY_SECRET_AUTHENTICATION_PASSWORD_XYZ987"
+    res = evaluate_auth_readiness(
+        "https://target.example",
+        login_url="/login",
+        auth_user="admin",
+        auth_pass=sentinel,
+        accounts=[{"username": "user1", "password": sentinel}],
+        probe_status_code=200,
+    )
+    serialized = json.dumps(res)
+    assert sentinel not in serialized
+
+
+def test_auth_readiness_session_token_configured():
+    res_cookie = evaluate_auth_readiness(
+        "https://target.example",
+        cookie="session_id=abc123xyz",
+    )
+    assert res_cookie["status"] == "pass"
+    assert res_cookie["reason_code"] == "session_token_configured"
+    assert "Actual session validity is not verified by preflight" in res_cookie["detail"]
+
+
+def test_live_channel_readiness():
+    res_enabled = evaluate_live_channel_readiness(monitor_enabled=True)
+    assert res_enabled["id"] == "websocket"
+    assert res_enabled["status"] == "pass"
+    assert res_enabled["reason_code"] == "available"
+
+    res_disabled = evaluate_live_channel_readiness(monitor_enabled=False)
+    assert res_disabled["id"] == "websocket"
+    assert res_disabled["status"] == "not_applicable"
+    assert res_disabled["reason_code"] == "monitor_disabled"
+
+
+def test_run_preflight_auth_and_websocket_integration(monkeypatch, tmp_path):
+    _mock_preflight_deps(monkeypatch)
+    sentinel = "SUPER_SECRET_PREFLIGHT_SENTINEL_456"
+
+    # Mock probe login page to return reachable 200
+    monkeypatch.setattr(
+        "wscan.preflight._probe_login_page",
+        lambda url, proxy, verify: (200, "<html><form><input name='username'/></form></html>", None)
+    )
+
+    report = asyncio.run(run_preflight(
+        "http://target.example",
+        output_dir=tmp_path,
+        checks=["privesc"],
+        login_url="/login",
+        auth_user="admin",
+        auth_pass=sentinel,
+        accounts=[{"username": "admin", "password": sentinel}, {"username": "user2", "password": sentinel}],
+        monitor_enabled=True,
+    ))
+    checks_by_id = {row["id"]: row for row in report["checks"]}
+    assert checks_by_id["authentication"]["status"] == "pass"
+    assert checks_by_id["authentication"]["reason_code"] == "configured"
+    assert checks_by_id["websocket"]["status"] == "pass"
+    assert checks_by_id["websocket"]["reason_code"] == "available"
+
+    # Scanner prerequisite for AUTH_SESSION and MULTI_ACCOUNT should pass
+    scanner_rows = [r for r in report["checks"] if r["id"] == "scanner:privesc"]
+    assert all(r["status"] == "pass" for r in scanner_rows)
+
+    # Sentinel password must NEVER leak in preflight report
+    assert sentinel not in json.dumps(report)
+
+
+def test_run_preflight_no_monitor_integration(monkeypatch, tmp_path):
+    _mock_preflight_deps(monkeypatch)
+
+    report = asyncio.run(run_preflight(
+        "http://target.example",
+        output_dir=tmp_path,
+        checks=[],
+        monitor_enabled=False,
+    ))
+    ws_row = next(r for r in report["checks"] if r["id"] == "websocket")
+    assert ws_row["status"] == "not_applicable"
+    assert ws_row["reason_code"] == "monitor_disabled"
