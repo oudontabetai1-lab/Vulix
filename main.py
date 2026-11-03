@@ -2461,6 +2461,7 @@ async def run_scan(args):
 
     preflight_enabled = getattr(args, "preflight", False) or getattr(args, "preflight_only", False)
     if preflight_enabled:
+        from wscan.oob_email import OOBEmailConfig
         from wscan.preflight import exit_code, run_preflight, write_result
         output_dir = Path(args.output) if args.output else Path("output") / datetime.now().strftime("%Y%m%d_%H%M%S")
         report = await run_preflight(
@@ -2473,6 +2474,8 @@ async def run_scan(args):
                                  or getattr(args, "auth_user", "") or getattr(args, "header", [])),
             accounts_configured=bool(getattr(args, "accounts", "") or getattr(args, "accounts_file", "")
                                      or getattr(args, "auto_register", False)),
+            oob_configured=OOBEmailConfig.from_env().configured,
+            agent_mode=False,
         )
         try:
             write_result(output_dir, report)

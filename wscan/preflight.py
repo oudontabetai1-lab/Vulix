@@ -115,6 +115,7 @@ async def run_preflight(
     url: str, *, proxy: str = "", verify_tls: bool = False,
     ca_cert: str = "", output_dir: str | Path, checks: list[str],
     api_spec: str = "", auth_configured: bool = False, accounts_configured: bool = False,
+    oob_configured: bool = False, agent_mode: bool = False,
 ) -> dict:
     """Run non-invasive DNS, HTTP, browser, output and declared-prerequisite checks."""
     rows: list[dict] = []
@@ -214,8 +215,23 @@ async def run_preflight(
             elif prerequisite == Prerequisite.OOB_SINK:
                 rows.append(_check(f"scanner:{check}", "not_checked", "not_implemented", "OOB readiness is not checked in this increment."))
 
-    for check_id in ("authentication", "agent_transport", "websocket", "oob"):
-        rows.append(_check(check_id, "not_checked", "not_implemented", "This readiness check is not implemented."))
+    rows.append(_check("authentication", "not_checked", "not_implemented", "This readiness check is not implemented."))
+
+    try:
+        import browser_use  # noqa: F401
+        rows.append(_check("agent_transport", "pass", "available", "The agent-mode browser automation backend is importable."))
+    except ImportError:
+        if agent_mode:
+            rows.append(_check("agent_transport", "fail", "dependency_missing", "Agent mode is selected but its browser automation backend is not installed."))
+        else:
+            rows.append(_check("agent_transport", "warning", "dependency_missing", "The agent-mode browser automation backend is not installed (only needed for agent mode)."))
+
+    rows.append(_check("websocket", "not_checked", "not_implemented", "This readiness check is not implemented."))
+
+    if oob_configured:
+        rows.append(_check("oob", "pass", "configured", "An out-of-band email sink is configured for blind-vulnerability confirmation."))
+    else:
+        rows.append(_check("oob", "not_applicable", "oob_not_configured", "No out-of-band sink configured; blind checks fall back to heuristic confirmation."))
     return result(rows)
 
 

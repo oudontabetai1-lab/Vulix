@@ -1494,7 +1494,15 @@ class MonitorServer:
                 or config.get("auto_register")
             )
 
+            from wscan.oob_email import OOBEmailConfig
             from wscan.preflight import run_preflight
+
+            oob_configured = OOBEmailConfig.from_env().configured
+            agent_mode = bool(
+                config.get("agent_mode")
+                or config.get("mode") == "agent"
+                or config.get("scan_mode") == "agent"
+            )
 
             with tempfile.TemporaryDirectory(prefix="preflight_") as tmp_dir:
                 try:
@@ -1508,6 +1516,8 @@ class MonitorServer:
                         api_spec=str(config.get("api_spec") or "").strip(),
                         auth_configured=auth_configured,
                         accounts_configured=accounts_configured,
+                        oob_configured=oob_configured,
+                        agent_mode=agent_mode,
                     )
                 except Exception as exc:
                     return JSONResponse(
