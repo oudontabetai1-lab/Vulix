@@ -179,6 +179,8 @@
           '#/agent-skills': 'agent-skills',
           '#settings': 'settings',
           '#/settings': 'settings',
+          '#crawl': 'crawl',
+          '#/crawl': 'crawl',
         },
         options.routeMap || {}
       );
