@@ -80,6 +80,201 @@
     }
   }
 
+  /**
+   * Filter out 'pass' checks and sort non-pass checks by priority:
+   * 1. fail first
+   * 2. warning second
+   * 3. not_checked / unknown / unavailable / not_applicable / others
+   *
+   * @param {Array<Object>|null|undefined} checks
+   * @returns {Array<Object>}
+   */
+  function filterAndSortNonPassChecks(checks) {
+    if (!Array.isArray(checks)) return [];
+    const nonPass = checks.filter((c) => c && c.status !== 'pass');
+    const getPriority = (status) => {
+      if (status === 'fail') return 1;
+      if (status === 'warning') return 2;
+      return 3;
+    };
+    return nonPass.slice().sort((a, b) => {
+      const prioA = getPriority(a.status);
+      const prioB = getPriority(b.status);
+      if (prioA !== prioB) return prioA - prioB;
+      return 0;
+    });
+  }
+
+  /**
+   * Check whether setup config has changed since the last preflight check.
+   *
+   * @param {Object|null|undefined} lastPayload
+   * @param {Object|null|undefined} currentPayload
+   * @returns {boolean}
+   */
+  function isConfigStale(lastPayload, currentPayload) {
+    if (!lastPayload || !currentPayload) return false;
+    try {
+      return JSON.stringify(lastPayload) !== JSON.stringify(currentPayload);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Pure state resolver for the pre-launch readiness summary.
+   *
+   * States:
+   * - never_run -> '未確認' (non-pass styling)
+   * - running -> '確認中...' (non-pass styling)
+   * - result present:
+   *     - verdict 'pass' (when not stale) -> '準備OK' (OK / green styling)
+   *     - verdict 'warning' -> '注意 (一部未確認/警告)' (warning styling)
+   *     - verdict 'fail' -> '失敗' (fail styling)
+   *     - verdict unknown/other -> '不明' (non-pass styling)
+   * - stale (config changed after check) -> '設定変更あり (未確認)' (stale, non-pass styling)
+   * - unavailable (request failed / endpoint error) -> '利用不可' (non-pass styling)
+   *
+   * Hard correctness invariant:
+   * ONLY when status === 'completed' AND verdict === 'pass' AND !isStale
+   * does isPass become true and badgeClass become 'setup-verdict-pass'.
+   * In all other states, isPass MUST be false and badgeClass MUST NOT be 'setup-verdict-pass'.
+   *
+   * @param {Object} options
+   * @param {string} [options.status='never_run']
+   * @param {string} [options.verdict='']
+   * @param {Array} [options.checks=[]]
+   * @param {boolean} [options.isStale=false]
+   * @param {string} [options.errorMessage='']
+   * @returns {Object} Pre-launch summary state descriptor
+   */
+  function computePrelaunchSummaryState(options = {}) {
+    const status = options.status || 'never_run';
+    const verdict = options.verdict || '';
+    const checks = Array.isArray(options.checks) ? options.checks : [];
+    const isStale = Boolean(options.isStale);
+    const errorMessage = options.errorMessage || '';
+
+    const nonPassChecks = filterAndSortNonPassChecks(checks);
+
+    if (status === 'never_run') {
+      return {
+        state: 'never_run',
+        isPass: false,
+        isStale: false,
+        badgeLabel: '未確認',
+        badgeClass: 'setup-status-not-checked',
+        message: 'スキャン準備状態は未確認です。スキャン前に準備チェックを実行してください。',
+        buttonLabel: '⚡ 準備チェック実行',
+        nonPassChecks: [],
+      };
+    }
+
+    if (status === 'running') {
+      return {
+        state: 'running',
+        isPass: false,
+        isStale: false,
+        badgeLabel: '確認中...',
+        badgeClass: 'setup-status-unknown ui-status loading',
+        message: 'スキャン準備状態を確認しています...',
+        buttonLabel: '確認中...',
+        nonPassChecks: nonPassChecks,
+      };
+    }
+
+    if (status === 'unavailable') {
+      const errNote = errorMessage ? ` (${errorMessage})` : ' (利用不可)';
+      return {
+        state: 'unavailable',
+        isPass: false,
+        isStale: false,
+        badgeLabel: '利用不可',
+        badgeClass: 'setup-status-fail',
+        message: `スキャン準備チェックを取得できませんでした${errNote}`,
+        buttonLabel: '⚡ 再試行',
+        nonPassChecks: [],
+      };
+    }
+
+    if (status !== 'completed') {
+      return {
+        state: 'unknown',
+        isPass: false,
+        isStale: false,
+        badgeLabel: '不明',
+        badgeClass: 'setup-verdict-unknown',
+        message: 'スキャン準備チェック結果が不明です。',
+        buttonLabel: '⚡ 再チェック',
+        nonPassChecks: nonPassChecks,
+      };
+    }
+
+    // status === 'completed'
+    if (isStale) {
+      return {
+        state: 'stale',
+        isPass: false,
+        isStale: true,
+        badgeLabel: '設定変更あり (未確認)',
+        badgeClass: 'setup-status-warning',
+        message: '前回の準備チェック後に設定が変更されました。最新設定で再チェックしてください。',
+        buttonLabel: '⚡ 最新設定で再チェック',
+        nonPassChecks: nonPassChecks,
+      };
+    }
+
+    if (verdict === 'pass') {
+      return {
+        state: 'pass',
+        isPass: true,
+        isStale: false,
+        badgeLabel: '準備OK',
+        badgeClass: 'setup-verdict-pass',
+        message: 'すべてのスキャン準備チェックを通過しました。',
+        buttonLabel: '⚡ 再チェック',
+        nonPassChecks: [],
+      };
+    }
+
+    if (verdict === 'warning') {
+      return {
+        state: 'warning',
+        isPass: false,
+        isStale: false,
+        badgeLabel: '注意 (一部未確認/警告)',
+        badgeClass: 'setup-verdict-warning',
+        message: '一部のチェックに警告または未確認項目があります。スキャン開始前に内容を確認してください。',
+        buttonLabel: '⚡ 再チェック',
+        nonPassChecks: nonPassChecks,
+      };
+    }
+
+    if (verdict === 'fail') {
+      return {
+        state: 'fail',
+        isPass: false,
+        isStale: false,
+        badgeLabel: '失敗',
+        badgeClass: 'setup-verdict-fail',
+        message: 'スキャン準備チェックで失敗が検出されました。設定や依存関係の解消を推奨します。',
+        buttonLabel: '⚡ 再チェック',
+        nonPassChecks: nonPassChecks,
+      };
+    }
+
+    return {
+      state: 'unknown',
+      isPass: false,
+      isStale: false,
+      badgeLabel: '不明',
+      badgeClass: 'setup-verdict-unknown',
+      message: 'スキャン準備チェック結果が不明です。',
+      buttonLabel: '⚡ 再チェック',
+      nonPassChecks: nonPassChecks,
+    };
+  }
+
   const TAB_DEFINITIONS = [
     { id: 'crawl', label: 'クロール・スコープ' },
     { id: 'checks', label: '検査項目・ペイロード' },
@@ -801,6 +996,55 @@
     preflightBtn.className = 'history-btn setup-preflight-btn';
     preflightBtn.textContent = '⚡ スキャン準備チェック';
     startSection.appendChild(preflightBtn);
+
+    // Pre-launch Readiness Summary container
+    const prelaunchSummary = doc.createElement('div');
+    prelaunchSummary.id = 'setupPrelaunchSummary';
+    prelaunchSummary.className = 'setup-prelaunch-summary';
+    prelaunchSummary.setAttribute('role', 'region');
+    prelaunchSummary.setAttribute('aria-label', 'スキャン準備状態サマリー');
+
+    const prelaunchHeader = doc.createElement('div');
+    prelaunchHeader.className = 'setup-prelaunch-header';
+
+    const prelaunchTitleGroup = doc.createElement('div');
+    prelaunchTitleGroup.className = 'setup-prelaunch-title-group';
+
+    const prelaunchTitle = doc.createElement('span');
+    prelaunchTitle.className = 'setup-prelaunch-title';
+    prelaunchTitle.textContent = 'スキャン準備状態:';
+
+    const prelaunchBadge = doc.createElement('span');
+    prelaunchBadge.id = 'setupPrelaunchVerdictBadge';
+    prelaunchBadge.className = 'setup-prelaunch-badge setup-status-not-checked';
+    prelaunchBadge.textContent = '未確認';
+
+    prelaunchTitleGroup.appendChild(prelaunchTitle);
+    prelaunchTitleGroup.appendChild(prelaunchBadge);
+
+    const prelaunchRerunBtn = doc.createElement('button');
+    prelaunchRerunBtn.type = 'button';
+    prelaunchRerunBtn.id = 'setupPrelaunchRerunBtn';
+    prelaunchRerunBtn.className = 'setup-prelaunch-rerun-btn';
+    prelaunchRerunBtn.textContent = '⚡ 準備チェック実行';
+
+    prelaunchHeader.appendChild(prelaunchTitleGroup);
+    prelaunchHeader.appendChild(prelaunchRerunBtn);
+
+    const prelaunchMessage = doc.createElement('div');
+    prelaunchMessage.id = 'setupPrelaunchMessage';
+    prelaunchMessage.className = 'setup-prelaunch-message';
+    prelaunchMessage.hidden = true;
+
+    const prelaunchChecksList = doc.createElement('div');
+    prelaunchChecksList.id = 'setupPrelaunchChecksList';
+    prelaunchChecksList.className = 'setup-prelaunch-checks';
+
+    prelaunchSummary.appendChild(prelaunchHeader);
+    prelaunchSummary.appendChild(prelaunchMessage);
+    prelaunchSummary.appendChild(prelaunchChecksList);
+
+    startSection.appendChild(prelaunchSummary);
     controlsRow.appendChild(startSection);
 
     header.appendChild(controlsRow);
@@ -1404,10 +1648,12 @@
 
         renderEffectiveDiff(data, profile);
         presetNote.textContent = `適用済み: ${profile.label || profId}`;
+        handleConfigChange();
         return true;
       } catch (err) {
         renderEffectiveUnavailable(err ? (err.message || String(err)) : 'unavailable');
         presetNote.textContent = `適用失敗: ${profile.label || profId}`;
+        handleConfigChange();
         return false;
       }
     }
@@ -1522,6 +1768,7 @@
           }
         }
       });
+      handleConfigChange();
     }
 
     Object.keys(modeButtons).forEach((m) => {
@@ -1596,6 +1843,112 @@
     });
 
     // ─── Readiness / Preflight On-Demand Handlers ─────────────────
+    let lastPreflightPayload = null;
+    let lastPreflightResult = null;
+    let currentPrelaunchState = null;
+
+    function renderPrelaunchSummary(stateDescriptor) {
+      currentPrelaunchState = stateDescriptor;
+
+      if (prelaunchBadge) {
+        prelaunchBadge.className = `setup-prelaunch-badge ${stateDescriptor.badgeClass}`;
+        prelaunchBadge.textContent = stateDescriptor.badgeLabel;
+      }
+
+      if (prelaunchRerunBtn) {
+        prelaunchRerunBtn.textContent = stateDescriptor.buttonLabel;
+        prelaunchRerunBtn.disabled = stateDescriptor.state === 'running';
+      }
+
+      if (prelaunchMessage) {
+        if (stateDescriptor.message) {
+          prelaunchMessage.textContent = stateDescriptor.message;
+          prelaunchMessage.hidden = false;
+        } else {
+          prelaunchMessage.textContent = '';
+          prelaunchMessage.hidden = true;
+        }
+      }
+
+      if (prelaunchChecksList) {
+        if (typeof prelaunchChecksList.replaceChildren === 'function') {
+          prelaunchChecksList.replaceChildren();
+        } else {
+          while (prelaunchChecksList.firstChild) {
+            prelaunchChecksList.removeChild(prelaunchChecksList.firstChild);
+          }
+        }
+
+        const nonPass = stateDescriptor.nonPassChecks || [];
+        if (nonPass.length > 0) {
+          nonPass.forEach((chk) => {
+            const item = doc.createElement('div');
+            item.className = 'setup-prelaunch-check-item';
+            if (chk.id) item.dataset.checkId = chk.id;
+
+            const idSpan = doc.createElement('span');
+            idSpan.className = 'setup-prelaunch-check-id ui-code';
+            idSpan.textContent = chk.id || '(check)';
+
+            const stInfo = preflightStatusLabel(chk.status);
+            const chip = doc.createElement('span');
+            chip.className = `setup-prelaunch-check-chip ${stInfo.cssClass}`;
+            chip.dataset.status = chk.status;
+            chip.textContent = stInfo.label;
+
+            const detailSpan = doc.createElement('span');
+            detailSpan.className = 'setup-prelaunch-check-detail';
+            detailSpan.textContent = chk.detail || chk.reason_code || '';
+
+            item.appendChild(idSpan);
+            item.appendChild(chip);
+            item.appendChild(detailSpan);
+            prelaunchChecksList.appendChild(item);
+          });
+        } else {
+          const empty = doc.createElement('div');
+          empty.className = 'setup-prelaunch-empty';
+          if (stateDescriptor.state === 'pass') {
+            empty.textContent = 'すべてのチェックを通過しました (問題なし)';
+          } else if (stateDescriptor.state === 'never_run') {
+            empty.textContent = 'スキャン準備チェックはまだ実行されていません';
+          } else if (stateDescriptor.state === 'running') {
+            empty.className = 'setup-prelaunch-empty ui-status loading';
+            empty.textContent = '準備チェックを実行しています...';
+          } else if (stateDescriptor.state === 'unavailable') {
+            empty.textContent = '準備チェック結果を取得できませんでした (利用不可)';
+          } else if (stateDescriptor.state === 'stale') {
+            empty.textContent = '前回のチェック後に設定が変更されました';
+          } else {
+            empty.textContent = '該当するチェック項目はありません';
+          }
+          prelaunchChecksList.appendChild(empty);
+        }
+      }
+    }
+
+    function updatePrelaunchSummary(opts = {}) {
+      const stateDescriptor = computePrelaunchSummaryState(opts);
+      renderPrelaunchSummary(stateDescriptor);
+      return stateDescriptor;
+    }
+
+    function handleConfigChange() {
+      if (!lastPreflightPayload || !lastPreflightResult) return;
+      if (currentPrelaunchState && currentPrelaunchState.state === 'running') return;
+      const currentPayload = buildScanPayload(currentMode, { document: doc });
+      const stale = isConfigStale(lastPreflightPayload, currentPayload);
+      updatePrelaunchSummary({
+        status: 'completed',
+        verdict: lastPreflightResult.verdict,
+        checks: lastPreflightResult.checks,
+        isStale: stale,
+      });
+    }
+
+    root.addEventListener('input', handleConfigChange);
+    root.addEventListener('change', handleConfigChange);
+
     function renderReadinessUnavailable(reason) {
       if (typeof readinessContent.replaceChildren === 'function') {
         readinessContent.replaceChildren();
@@ -1674,8 +2027,14 @@
     async function runPreflight() {
       if (runPreflightBtn) runPreflightBtn.disabled = true;
       if (preflightBtn) preflightBtn.disabled = true;
+      if (prelaunchRerunBtn) prelaunchRerunBtn.disabled = true;
       if (runPreflightBtn) runPreflightBtn.textContent = '準備チェック実行中...';
       if (preflightBtn) preflightBtn.textContent = '準備チェック実行中...';
+
+      updatePrelaunchSummary({
+        status: 'running',
+        checks: lastPreflightResult ? lastPreflightResult.checks : [],
+      });
 
       if (typeof readinessContent.replaceChildren === 'function') {
         readinessContent.replaceChildren();
@@ -1726,9 +2085,27 @@
           throw new Error('無効なレスポンス形式です');
         }
 
+        lastPreflightPayload = JSON.parse(JSON.stringify(payload));
+        lastPreflightResult = data;
         renderReadinessSuccess(data);
+        const currentPayload = buildScanPayload(currentMode, { document: doc });
+        const stale = isConfigStale(lastPreflightPayload, currentPayload);
+        updatePrelaunchSummary({
+          status: 'completed',
+          verdict: data.verdict,
+          checks: data.checks,
+          isStale: stale,
+        });
       } catch (err) {
-        renderReadinessUnavailable(err && err.message ? err.message : '利用不可');
+        lastPreflightPayload = null;
+        lastPreflightResult = null;
+        const reason = err && err.message ? err.message : '利用不可';
+        renderReadinessUnavailable(reason);
+        updatePrelaunchSummary({
+          status: 'unavailable',
+          errorMessage: reason,
+          isStale: false,
+        });
       } finally {
         if (runPreflightBtn) {
           runPreflightBtn.disabled = false;
@@ -1737,6 +2114,9 @@
         if (preflightBtn) {
           preflightBtn.disabled = false;
           preflightBtn.textContent = '⚡ スキャン準備チェック';
+        }
+        if (prelaunchRerunBtn) {
+          prelaunchRerunBtn.disabled = false;
         }
       }
     }
@@ -1747,9 +2127,22 @@
     if (preflightBtn) {
       preflightBtn.addEventListener('click', runPreflight);
     }
+    if (prelaunchRerunBtn) {
+      prelaunchRerunBtn.addEventListener('click', runPreflight);
+    }
 
     if (options.preflightResult) {
+      lastPreflightPayload = buildScanPayload(currentMode, { document: doc });
+      lastPreflightResult = options.preflightResult;
       renderReadinessSuccess(options.preflightResult);
+      updatePrelaunchSummary({
+        status: 'completed',
+        verdict: options.preflightResult.verdict,
+        checks: options.preflightResult.checks,
+        isStale: false,
+      });
+    } else {
+      updatePrelaunchSummary({ status: 'never_run' });
     }
 
     container.appendChild(root);
@@ -1765,9 +2158,13 @@
       buildPayload: () => buildScanPayload(currentMode, { document: doc }),
       effectiveSection: effectiveSection,
       readinessSection: readinessSection,
+      prelaunchSummary: prelaunchSummary,
       runPreflight: runPreflight,
       renderReadinessSuccess: renderReadinessSuccess,
       renderReadinessUnavailable: renderReadinessUnavailable,
+      updatePrelaunchSummary: updatePrelaunchSummary,
+      getPrelaunchState: () => currentPrelaunchState,
+      markConfigDirty: handleConfigChange,
     };
   }
 
@@ -1842,6 +2239,9 @@
       runPreflight() {
         return currentInstance && currentInstance.runPreflight && currentInstance.runPreflight();
       },
+      getPrelaunchState() {
+        return currentInstance && currentInstance.getPrelaunchState && currentInstance.getPrelaunchState();
+      },
       mount(route) {
         const doc = options.document || (typeof document !== 'undefined' ? document : null);
         const container = options.container || (doc ? doc.getElementById('setupSurface') : null);
@@ -1887,6 +2287,9 @@
     validateFieldConstraint: validateFieldConstraint,
     preflightStatusLabel: preflightStatusLabel,
     preflightVerdictLabel: preflightVerdictLabel,
+    filterAndSortNonPassChecks: filterAndSortNonPassChecks,
+    isConfigStale: isConfigStale,
+    computePrelaunchSummaryState: computePrelaunchSummaryState,
     renderSetupView: renderSetupView,
     loadAndRenderSetup: loadAndRenderSetup,
     createSetupModule: createSetupModule,
