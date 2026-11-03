@@ -1,6 +1,7 @@
 """Acceptance checks for the opt-in /app shell and legacy adapters."""
 from __future__ import annotations
 
+from pathlib import Path
 import shutil
 
 import pytest
@@ -14,6 +15,7 @@ UI_ASSETS = [
     "/ui/app-shell.js",
     "/ui/api-client.js",
     "/ui/monitor-module.js",
+    "/ui/agent-skills-module.js",
     "/ui/tokens.css",
     "/ui/components.css",
 ]
@@ -465,3 +467,38 @@ def test_hidden_monitor_4401_keeps_app_route_and_shows_auth_required(ui_harness:
     assert post_requests == []
     assert page.locator("#scanContext").inner_text() == ""
     ui_harness.assert_no_errors(page)
+
+
+def test_app_shell_agent_skills_view_and_screenshot(ui_harness: UIHarness):
+    page = ui_harness.new_page(**STANDARD_VIEWPORTS[1440])
+    page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
+    page.wait_for_function("document.querySelector('#portalFrame').contentDocument?.title.includes('Server Portal')")
+
+    skills_btn = page.locator('[data-route="agent-skills"]')
+    skills_btn.wait_for()
+    skills_btn.click()
+
+    page.wait_for_function("() => document.querySelector('[data-route=agent-skills]').getAttribute('aria-current') === 'page'")
+    assert skills_btn.get_attribute("aria-current") == "page"
+    assert page.locator("#portalFrame").is_hidden()
+    assert page.locator("#monitorFrame").is_hidden()
+    assert page.locator("#agentSkillsSurface").is_visible()
+    assert page.locator("#viewTitle").inner_text() == "Agent Skills"
+
+    table = page.locator("#agentSkillsSurface .agent-skills-table")
+    table.wait_for()
+    rows = page.locator("#agentSkillsSurface .agent-skills-table tbody tr")
+    assert rows.count() >= 6
+
+    # Verify declared skill text rendering
+    assert "ブラウザ自律操作" in page.locator("#agentSkillsSurface").inner_text()
+    assert "セキュリティスコープ制御" in page.locator("#agentSkillsSurface").inner_text()
+
+    ui_harness.assert_no_horizontal_overflow(page, max_allowed=1440 + 1)
+    ui_harness.assert_no_errors(page)
+
+    # Save durable screenshot for documentation
+    doc_img_path = Path(ui_harness.repo_root) / "docs" / "images" / "app-agent-skills.png"
+    doc_img_path.parent.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(doc_img_path), full_page=False)
+    assert doc_img_path.is_file() and doc_img_path.stat().st_size > 0
