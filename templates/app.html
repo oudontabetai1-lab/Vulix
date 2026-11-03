@@ -22,7 +22,7 @@
     #scanContext { color: var(--text-muted); font-size: .82rem; overflow-wrap: anywhere; }
     #surface { position: relative; flex: 1; min-height: calc(100vh - 58px); }
     iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
-    iframe[hidden], #message[hidden], #agentSkillsSurface[hidden], #setupSurface[hidden] { display: none; }
+    iframe[hidden], #message[hidden], #agentSkillsSurface[hidden], #setupSurface[hidden], #settingsSurface[hidden] { display: none; }
     #monitorModule[hidden] { display: none; }
     #monitorFrame.transport-owner { inset: auto; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
     #message { padding: 28px; }
@@ -113,6 +113,7 @@
         <button class="history-btn" type="button" data-route="setup">Scan Setup</button>
         <button class="history-btn" type="button" data-route="monitor">Monitor</button>
         <button class="history-btn" type="button" data-route="agent-skills">Agent Skills</button>
+        <button class="history-btn" type="button" data-route="settings">Settings</button>
       </nav>
     </aside>
     <main>
@@ -123,6 +124,7 @@
         <div id="monitorModule" hidden></div>
         <div id="agentSkillsSurface" hidden></div>
         <div id="setupSurface" hidden></div>
+        <div id="settingsSurface" hidden></div>
         <div id="message" role="status" hidden></div>
       </section>
     </main>
@@ -132,6 +134,7 @@
   <script src="/ui/capability-reader.js"></script>
   <script src="/ui/setup-module.js"></script>
   <script src="/ui/agent-skills-module.js"></script>
+  <script src="/ui/settings-module.js"></script>
   <script src="/ui/app-entry.js"></script>
 </body>
 </html>

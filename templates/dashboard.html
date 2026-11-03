@@ -2863,6 +2863,7 @@ const state = {
   serverInstanceId: null,
   scanRunId: null,
   scanId: null,
+  appSurface: null,
   lastEventSequence: 0,
   eventCount: 0,
   findingCount: 0,
@@ -2948,6 +2949,7 @@ window.VulixAppBridge = Object.freeze({
   setSurface(surface) {
     const overlay = document.getElementById('scanConfigOverlay');
     if (!overlay || !['setup', 'monitor'].includes(surface)) return false;
+    state.appSurface = surface;
     overlay.classList.toggle('active', surface === 'setup');
     return true;
   },
@@ -5756,6 +5758,8 @@ function dispatchLegacyEvent(event) {
       closeInteractiveModals();
       // 次の設定を受け付けても、完了/中断した結果は新規スキャン操作まで保持する。
       if (state.scanDone) break;
+      // 統合画面でモニター表示中は、アイドル状態通知で設定オーバーレイを再表示しない。
+      if (state.appSurface === 'monitor') break;
       document.getElementById('scanConfigOverlay').classList.add('active');
       setStatus('設定フォームに入力してスキャンを開始してください', '');
       break;
