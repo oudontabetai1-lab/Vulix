@@ -541,7 +541,7 @@ def test_run_preflight_auth_and_websocket_integration(monkeypatch, tmp_path):
     # Mock probe login page to return reachable 200
     monkeypatch.setattr(
         "wscan.preflight._probe_login_page",
-        lambda url, proxy, verify: (200, "<html><form><input name='username'/></form></html>", None)
+        lambda url, proxy, verify, **kwargs: (200, "<html><form><input name='username'/></form></html>", None)
     )
 
     report = asyncio.run(run_preflight(

@@ -843,7 +843,7 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
                 output_dir=output_dir, open_report=False,
             )
             self.assertEqual(first._field_budget_retry_limit, 2)
-            first._field_attack_budget_s = 0.001
+            first._field_attack_budget_s = 1.0
             first.adaptive_enabled = False
             slow = _Slow(first)
             later = _Later(first)
@@ -853,35 +853,61 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
                 "http://t/p", "q", 0, False, -1, {"name": "q"}
             )
 
-            for attempt in range(1, 4):
-                first.payload_gen.default_payloads["xss"] = [
-                    f"regenerated-{attempt}", "untried-tail"
-                ]
-                await first._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
-                if attempt == 1:
-                    original_queue = slow.candidate_queues[0]
-                    self.assertIn("untried-tail", original_queue)
-                else:
-                    self.assertEqual(slow.candidate_queues[-1], original_queue)
-                self.assertEqual(
-                    state.truncation_counts[next(iter(state.truncation_counts))], attempt
+            # 決定論的なクロックモック: _scan_field 開始時（deadline 設定）は現在時刻、
+            # slow (xss) 実行中に deadline を超過させ、sqli が中央 gate で弾かれる挙動を再現する。
+            current_virtual_time = [1000.0]
+
+            def virtual_monotonic():
+                return current_virtual_time[0]
+
+            async def slow_scan_injection_point(ip, field):
+                slow.calls += 1
+                slow.candidate_queues.append(
+                    await slow.get_payloads(ip.parameter_id, ip.url, ip=ip)
                 )
-                self.assertFalse(state.is_done_ip(ip, "xss"))
-                self.assertEqual(
-                    state.is_truncation_exhausted_ip(ip, "xss"), attempt == 3
-                )
-                self.assertEqual(first.scan_matrix[-1]["check"], "sqli")
-                self.assertEqual(first.scan_matrix[-1]["status"], "error")
-                xss_rows = [r for r in first.scan_matrix if r.get("check") == "xss"]
-                self.assertEqual(len(xss_rows), attempt)
-                self.assertTrue(all(r["status"] == "error" for r in xss_rows))
-                self.assertFalse(any(r["status"] in {"tested", "safe", "done"} for r in xss_rows))
-                self.assertEqual(xss_rows[0]["finding_count"], 1)
-                first._save_checkpoint()
-                state = load_checkpoint(output_dir)
-                self.assertEqual(state.scan_matrix, first.scan_matrix)
-                first.checkpoint = state
-                first.scan_matrix = list(state.scan_matrix)
+                current_virtual_time[0] += 10.0  # deadline を確実に超過
+                slow._field_budget_gate()
+                if slow.calls == 1:
+                    return [Finding(
+                        check_type="xss", severity="high", url=ip.url,
+                        field_name=ip.parameter_id, payload="<script>",
+                        evidence="reflected before budget expiry",
+                    )]
+                return []
+
+            slow.scan_injection_point = slow_scan_injection_point
+
+            with unittest.mock.patch("time.monotonic", side_effect=virtual_monotonic):
+                for attempt in range(1, 4):
+                    first.payload_gen.default_payloads["xss"] = [
+                        f"regenerated-{attempt}", "untried-tail"
+                    ]
+                    current_virtual_time[0] = 1000.0 * attempt
+                    await first._scan_field("http://t/p", 0, {"name": "q", "type": "text"})
+                    if attempt == 1:
+                        original_queue = slow.candidate_queues[0]
+                        self.assertIn("untried-tail", original_queue)
+                    else:
+                        self.assertEqual(slow.candidate_queues[-1], original_queue)
+                    self.assertEqual(
+                        state.truncation_counts[next(iter(state.truncation_counts))], attempt
+                    )
+                    self.assertFalse(state.is_done_ip(ip, "xss"))
+                    self.assertEqual(
+                        state.is_truncation_exhausted_ip(ip, "xss"), attempt == 3
+                    )
+                    self.assertEqual(first.scan_matrix[-1]["check"], "sqli")
+                    self.assertEqual(first.scan_matrix[-1]["status"], "error")
+                    xss_rows = [r for r in first.scan_matrix if r.get("check") == "xss"]
+                    self.assertEqual(len(xss_rows), attempt)
+                    self.assertTrue(all(r["status"] == "error" for r in xss_rows))
+                    self.assertFalse(any(r["status"] in {"tested", "safe", "done"} for r in xss_rows))
+                    self.assertEqual(xss_rows[0]["finding_count"], 1)
+                    first._save_checkpoint()
+                    state = load_checkpoint(output_dir)
+                    self.assertEqual(state.scan_matrix, first.scan_matrix)
+                    first.checkpoint = state
+                    first.scan_matrix = list(state.scan_matrix)
 
             self.assertEqual(len(state.findings), 1)
             self.assertEqual(state.findings[0]["evidence"], "reflected before budget expiry")

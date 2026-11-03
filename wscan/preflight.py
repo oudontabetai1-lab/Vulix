@@ -431,14 +431,9 @@ async def run_preflight(
     scopes = list(target_urls or []) + list(access_urls or [])
     if probe_login and clean_login_url and is_login_url_in_scope(url, clean_login_url, scopes):
         resolved_login_url = urljoin(url, clean_login_url)
-        try:
-            probe_status_code, probe_html, probe_error = await asyncio.to_thread(
-                _probe_login_page, resolved_login_url, proxy, verify, target_url=url, scope_urls=scopes
-            )
-        except TypeError:
-            probe_status_code, probe_html, probe_error = await asyncio.to_thread(
-                _probe_login_page, resolved_login_url, proxy, verify
-            )
+        probe_status_code, probe_html, probe_error = await asyncio.to_thread(
+            _probe_login_page, resolved_login_url, proxy, verify, target_url=url, scope_urls=scopes
+        )
 
     auth_row = evaluate_auth_readiness(
         url,
