@@ -355,6 +355,7 @@
           if (agentSkillsSurface) agentSkillsSurface.hidden = true;
           if (setupSurface) setupSurface.hidden = true;
           if (settingsSurface) settingsSurface.hidden = true;
+          if (crawlSurface) crawlSurface.hidden = true;
         },
       })
     );
@@ -395,6 +396,7 @@
           portal.hidden = true;
           monitor.hidden = true;
           if (monitorHost) monitorHost.hidden = true;
+          if (findingsSurface) findingsSurface.hidden = true;
           if (agentSkillsSurface) agentSkillsSurface.hidden = true;
           if (setupSurface) setupSurface.hidden = true;
           if (settingsSurface) settingsSurface.hidden = true;
@@ -411,15 +413,78 @@
     const route = parts[0] || '/portal';
     if (!['/portal', '/history', '/audit', '/setup', '/monitor', '/findings', '/crawl', '/agent-skills', '/settings'].includes(route) || parts.length > 2) return null;
     const params = new URLSearchParams(parts[1] || '');
-    if (Array.from(params.keys()).some((key) => key !== 'scan' && key !== 'finding')) return null;
-    if (params.getAll('scan').length > 1 || params.getAll('finding').length > 1) return null;
+
+    const allowed = {
+      '/portal': [],
+      '/history': [],
+      '/audit': [],
+      '/setup': [],
+      '/monitor': ['scan'],
+      '/findings': ['scan', 'finding', 'url', 'search', 'severity', 'checkType', 'verification', 'provenance'],
+      '/crawl': ['scan', 'node', 'url', 'mode', 'kind', 'search'],
+      '/agent-skills': [],
+      '/settings': [],
+    }[route] || [];
+
+    for (const key of params.keys()) {
+      if (!allowed.includes(key)) return null;
+      if (params.getAll(key).length > 1) return null;
+    }
+
     const scanId = params.get('scan');
     if (scanId !== null && (!scanId || scanId.length > 128 || !/^[A-Za-z0-9._-]+$/.test(scanId))) return null;
     if (scanId !== null && route !== '/monitor' && route !== '/findings' && route !== '/crawl') return null;
+
     const findingId = params.get('finding');
     if (findingId !== null && (!findingId || findingId.length > 512)) return null;
     if (findingId !== null && route !== '/findings') return null;
-    return { id: route.slice(1), scanId, findingId };
+
+    const nodeId = params.get('node');
+    if (nodeId !== null && (!nodeId || nodeId.length > 256)) return null;
+    if (nodeId !== null && route !== '/crawl') return null;
+
+    const url = params.get('url');
+    if (url !== null && (!url || url.length > 2048)) return null;
+    if (url !== null && route !== '/crawl' && route !== '/findings') return null;
+
+    const mode = params.get('mode');
+    if (mode !== null && !['graph', 'explorer', 'list'].includes(mode)) return null;
+    if (mode !== null && route !== '/crawl') return null;
+
+    const kind = params.get('kind');
+    if (kind !== null && !['all', 'page', 'form', 'param'].includes(kind)) return null;
+    if (kind !== null && route !== '/crawl') return null;
+
+    const severity = params.get('severity');
+    if (severity !== null && !['all', 'critical', 'high', 'medium', 'low', 'info'].includes(severity)) return null;
+    if (severity !== null && route !== '/findings') return null;
+
+    const checkType = params.get('checkType');
+    if (checkType !== null && (!checkType || checkType.length > 64)) return null;
+    if (checkType !== null && route !== '/findings') return null;
+
+    const verification = params.get('verification');
+    if (verification !== null && !['all', 'reproduced', 'assumed', 'unreproduced', 'skipped'].includes(verification)) return null;
+    if (verification !== null && route !== '/findings') return null;
+
+    const provenance = params.get('provenance');
+    if (provenance !== null && !['all', 'scanner', 'agent', 'agent_verified'].includes(provenance)) return null;
+    if (provenance !== null && route !== '/findings') return null;
+
+    const search = params.get('search');
+    if (search !== null && search.length > 512) return null;
+
+    const result = { id: route.slice(1), scanId, findingId };
+    if (nodeId !== null) result.nodeId = nodeId;
+    if (url !== null) result.url = url;
+    if (mode !== null) result.mode = mode;
+    if (kind !== null) result.kind = kind;
+    if (severity !== null) result.severity = severity;
+    if (checkType !== null) result.checkType = checkType;
+    if (verification !== null) result.verification = verification;
+    if (provenance !== null) result.provenance = provenance;
+    if (search !== null) result.search = search;
+    return result;
   }
 
   function renderRoute() {

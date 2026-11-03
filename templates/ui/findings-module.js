@@ -226,6 +226,7 @@
     const verifyFilter = (filters.verification || 'all').toLowerCase();
     const provFilter = (filters.provenance || 'all').toLowerCase();
     const searchFilter = (filters.search || '').trim().toLowerCase();
+    const urlFilter = (filters.url || '').trim().toLowerCase();
 
     return findings.filter(function (f) {
       if (!f || typeof f !== 'object') return false;
@@ -254,6 +255,16 @@
         if (provFilter === 'agent' && !pInfo.isAgent) return false;
         if (provFilter === 'scanner' && pInfo.isAgent) return false;
         if (provFilter === 'agent_verified' && (!pInfo.isAgent || !pInfo.agentVerified)) return false;
+      }
+
+      // URL filter
+      if (urlFilter) {
+        const fUrl = String(f.url || '').toLowerCase();
+        const normFUrl = fUrl.replace(/\/$/, '');
+        const normFilter = urlFilter.replace(/\/$/, '');
+        if (normFUrl !== normFilter && !fUrl.includes(urlFilter) && !urlFilter.includes(normFUrl)) {
+          return false;
+        }
       }
 
       // Text search
@@ -330,26 +341,122 @@
   }
 
   /**
-   * Parse deep link hash parameters: scan and finding.
+   * Pure function to build a deep link to the Crawl view focused on a URL/node.
+   *
+   * @param {string} [scanId]
+   * @param {string|Object} [findingOrUrl]
+   * @param {string} [nodeId]
+   * @returns {string} Hash string e.g. '#/crawl?scan=123&url=http%3A%2F%2F...'
    */
-  function parseFindingDeepLink(hash) {
-    const raw = (hash || '').replace(/^#/, '');
-    const parts = raw.split('?');
-    const params = new URLSearchParams(parts[1] || '');
-    return {
-      scanId: params.get('scan') || null,
-      findingId: params.get('finding') || null,
-    };
+  function buildCrawlLink(scanId, findingOrUrl, nodeId) {
+    let hash = '#/crawl';
+    const params = new URLSearchParams();
+    if (scanId) params.set('scan', String(scanId).trim());
+
+    let targetUrl = '';
+    let targetNodeId = nodeId ? String(nodeId).trim() : '';
+
+    if (typeof findingOrUrl === 'string') {
+      targetUrl = findingOrUrl.trim();
+    } else if (findingOrUrl && typeof findingOrUrl === 'object') {
+      if (findingOrUrl.url) targetUrl = String(findingOrUrl.url).trim();
+      if (!targetNodeId && findingOrUrl.nodeId) targetNodeId = String(findingOrUrl.nodeId).trim();
+      if (!targetNodeId && findingOrUrl.node_id) targetNodeId = String(findingOrUrl.node_id).trim();
+    }
+
+    if (targetNodeId) params.set('node', targetNodeId);
+    if (targetUrl) params.set('url', targetUrl);
+
+    const qs = params.toString();
+    if (qs) hash += '?' + qs;
+    return hash;
   }
 
   /**
-   * Build hash string for deep link.
+   * Pure function to resolve action entry points for a finding based on
+   * implemented backend capabilities and finding data.
+   *
+   * @param {Object} finding
+   * @param {Object} [options]
+   * @returns {Array<{ id: string, label: string, enabled: boolean, reason: string|null, href?: string, url?: string }>}
    */
-  function buildFindingHash(scanId, findingId) {
+  function resolveFindingActions(finding, options = {}) {
+    const scanId = options.scanId || (finding && finding.scan_id) || null;
+    const url = finding && finding.url ? String(finding.url).trim() : '';
+    const hasValidHttpUrl = Boolean(url && /^https?:\/\//i.test(url));
+
+    const manifest = options.manifest || null;
+    const hasReplayCapability = Boolean(manifest && manifest.capabilities && manifest.capabilities.replay_finding);
+    const hasRequestDetailCapability = Boolean(manifest && manifest.capabilities && manifest.capabilities.request_detail);
+
+    return [
+      {
+        id: 'crawl_graph',
+        label: 'クロールグラフで表示',
+        enabled: Boolean(scanId && url),
+        href: scanId && url ? buildCrawlLink(scanId, url) : null,
+        reason: scanId && url ? null : 'スキャンIDまたはURLがありません',
+      },
+      {
+        id: 'open_browser',
+        label: 'ブラウザで開く',
+        enabled: hasValidHttpUrl,
+        url: hasValidHttpUrl ? url : null,
+        reason: hasValidHttpUrl ? null : '利用可能なHTTP(S) URLがありません',
+      },
+      {
+        id: 'reproduce',
+        label: '再検証 / 再現実行',
+        enabled: hasReplayCapability,
+        reason: hasReplayCapability ? null : 'not available in this version',
+      },
+      {
+        id: 'request_detail',
+        label: 'リクエスト詳細',
+        enabled: hasRequestDetailCapability,
+        reason: hasRequestDetailCapability ? null : 'not available in this version',
+      },
+    ];
+  }
+
+  /**
+   * Parse deep link hash parameters: scan, finding, and filters.
+   */
+  function parseFindingDeepLink(hash) {
+    const raw = (hash || '').replace(/^#\/?/, '/');
+    const parts = raw.split('?');
+    const params = new URLSearchParams(parts[1] || '');
+    const out = {
+      scanId: params.get('scan') || null,
+      findingId: params.get('finding') || null,
+    };
+    if (params.get('url')) out.url = params.get('url');
+    if (params.get('search')) out.search = params.get('search');
+    if (params.get('severity')) out.severity = params.get('severity');
+    if (params.get('checkType')) out.checkType = params.get('checkType');
+    if (params.get('verification')) out.verification = params.get('verification');
+    if (params.get('provenance')) out.provenance = params.get('provenance');
+    return out;
+  }
+
+  /**
+   * Build hash string for deep link with scan, finding, and optional filters.
+   */
+  function buildFindingHash(scanId, findingId, filters) {
     let hash = '#/findings';
     const params = new URLSearchParams();
     if (scanId) params.set('scan', scanId);
     if (findingId) params.set('finding', findingId);
+
+    if (filters && typeof filters === 'object') {
+      if (filters.url) params.set('url', String(filters.url).trim());
+      if (filters.search) params.set('search', String(filters.search).trim());
+      if (filters.severity && filters.severity !== 'all') params.set('severity', String(filters.severity).trim());
+      if (filters.checkType && filters.checkType !== 'all') params.set('checkType', String(filters.checkType).trim());
+      if (filters.verification && filters.verification !== 'all') params.set('verification', String(filters.verification).trim());
+      if (filters.provenance && filters.provenance !== 'all') params.set('provenance', String(filters.provenance).trim());
+    }
+
     const qs = params.toString();
     if (qs) hash += '?' + qs;
     return hash;
@@ -483,7 +590,12 @@
     searchInput.className = 'history-search-input';
     searchInput.placeholder = 'URL / フィールド / ペイロードで検索…';
 
-    row2.append(sevSelect, typeSelect, verifySelect, provSelect, searchInput);
+    const urlChip = document.createElement('span');
+    urlChip.id = 'findingsUrlChip';
+    urlChip.className = 'crawl-url-filter-badge';
+    urlChip.hidden = true;
+
+    row2.append(sevSelect, typeSelect, verifySelect, provSelect, searchInput, urlChip);
     toolbar.append(row1, row2);
     root.appendChild(toolbar);
 
@@ -542,6 +654,7 @@
       verifySelect: verifySelect,
       provSelect: provSelect,
       searchInput: searchInput,
+      urlChip: urlChip,
       listPane: listPane,
       listStatus: listStatus,
       listContent: listContent,
@@ -570,6 +683,7 @@
     let backendMeta = null;
     let selectedFinding = null;
     let selectedFindingId = null;
+    let activeUrlFilter = null;
 
     function getFilters() {
       return {
@@ -578,6 +692,7 @@
         verification: dom.verifySelect.value,
         provenance: dom.provSelect.value,
         search: dom.searchInput.value,
+        url: activeUrlFilter || '',
       };
     }
 
@@ -675,6 +790,48 @@
 
       badgesRow.append(bSev, bVerify, bReview, bProv);
       header.appendChild(badgesRow);
+
+      // Actions row (capability-gated entry points)
+      const actionsRow = document.createElement('div');
+      actionsRow.className = 'findings-actions-row';
+
+      const actions = resolveFindingActions(finding, { scanId: currentScanId });
+      actions.forEach(function (act) {
+        if (act.enabled) {
+          if (act.href) {
+            const a = document.createElement('a');
+            a.className = 'history-btn primary findings-action-btn';
+            a.href = act.href;
+            a.textContent = `🔍 ${act.label} →`;
+            actionsRow.appendChild(a);
+          } else if (act.url) {
+            const a = document.createElement('a');
+            a.className = 'history-btn findings-action-btn';
+            a.href = act.url;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.textContent = `↗ ${act.label}`;
+            actionsRow.appendChild(a);
+          }
+        } else {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'history-btn findings-action-btn disabled';
+          btn.disabled = true;
+          btn.setAttribute('aria-disabled', 'true');
+          btn.title = act.reason || 'not available in this version';
+
+          const labelSpan = document.createElement('span');
+          labelSpan.textContent = act.label;
+          const reasonSpan = document.createElement('span');
+          reasonSpan.className = 'action-disabled-tag';
+          reasonSpan.textContent = ` (${act.reason || 'not available in this version'})`;
+
+          btn.append(labelSpan, reasonSpan);
+          actionsRow.appendChild(btn);
+        }
+      });
+      header.appendChild(actionsRow);
 
       // Agent Callout banner if agent origin
       if (prov.isAgent) {
@@ -863,7 +1020,7 @@
 
           // Update deep link hash without full re-mount
           if (global.location && typeof global.location.hash === 'string') {
-            const nextHash = buildFindingHash(currentScanId, fid);
+            const nextHash = buildFindingHash(currentScanId, fid, getFilters());
             if (global.location.hash !== nextHash) {
               if (global.history && global.history.replaceState) {
                 global.history.replaceState(null, '', nextHash);
@@ -998,6 +1155,42 @@
 
         const targetScanId = route && route.scanId ? route.scanId : null;
         const targetFindingId = route && route.findingId ? route.findingId : null;
+        const targetUrl = route && route.url ? route.url : null;
+        const targetSearch = route && route.search ? route.search : null;
+
+        if (targetUrl) {
+          activeUrlFilter = targetUrl;
+          dom.searchInput.value = targetUrl;
+          if (dom.urlChip) {
+            dom.urlChip.hidden = false;
+            dom.urlChip.replaceChildren();
+            const chipText = document.createElement('span');
+            chipText.textContent = `URLフィルタ: ${targetUrl}`;
+            const chipClear = document.createElement('button');
+            chipClear.type = 'button';
+            chipClear.style.background = 'transparent';
+            chipClear.style.border = 'none';
+            chipClear.style.cursor = 'pointer';
+            chipClear.style.color = 'var(--text-muted)';
+            chipClear.style.marginLeft = '6px';
+            chipClear.textContent = '✕';
+            chipClear.title = 'URLフィルタ解除';
+            chipClear.addEventListener('click', function () {
+              activeUrlFilter = null;
+              dom.searchInput.value = '';
+              dom.urlChip.hidden = true;
+              onFilterChange();
+            });
+            dom.urlChip.append(chipText, chipClear);
+          }
+        } else if (targetSearch) {
+          dom.searchInput.value = targetSearch;
+        }
+
+        if (route && route.severity) dom.sevSelect.value = route.severity;
+        if (route && route.checkType) dom.typeSelect.value = route.checkType;
+        if (route && route.verification) dom.verifySelect.value = route.verification;
+        if (route && route.provenance) dom.provSelect.value = route.provenance;
 
         if (targetScanId) {
           const foundScan = allScans.some(function (s) { return s.id === targetScanId; });
@@ -1021,10 +1214,24 @@
       }
     }
 
+    function onFilterChange() {
+      renderList();
+      if (global.location && typeof global.location.hash === 'string') {
+        const nextHash = buildFindingHash(currentScanId, selectedFindingId, getFilters());
+        if (global.location.hash !== nextHash) {
+          if (global.history && global.history.replaceState) {
+            global.history.replaceState(null, '', nextHash);
+          } else {
+            global.location.hash = nextHash;
+          }
+        }
+      }
+    }
+
     // Attach event listeners
     dom.scanSelect.addEventListener('change', function () {
       const scanId = dom.scanSelect.value;
-      const nextHash = buildFindingHash(scanId, null);
+      const nextHash = buildFindingHash(scanId, null, getFilters());
       if (global.location && global.location.hash !== nextHash) {
         global.location.hash = nextHash;
       } else {
@@ -1036,11 +1243,17 @@
       if (currentScanId) loadFindingsForScan(currentScanId, selectedFindingId);
     });
 
-    dom.sevSelect.addEventListener('change', renderList);
-    dom.typeSelect.addEventListener('change', renderList);
-    dom.verifySelect.addEventListener('change', renderList);
-    dom.provSelect.addEventListener('change', renderList);
-    dom.searchInput.addEventListener('input', renderList);
+    dom.sevSelect.addEventListener('change', onFilterChange);
+    dom.typeSelect.addEventListener('change', onFilterChange);
+    dom.verifySelect.addEventListener('change', onFilterChange);
+    dom.provSelect.addEventListener('change', onFilterChange);
+    dom.searchInput.addEventListener('input', function () {
+      if (activeUrlFilter && dom.searchInput.value !== activeUrlFilter) {
+        activeUrlFilter = null;
+        if (dom.urlChip) dom.urlChip.hidden = true;
+      }
+      onFilterChange();
+    });
 
     return {
       dom: dom,
@@ -1112,6 +1325,8 @@
     findFindingById: findFindingById,
     parseFindingDeepLink: parseFindingDeepLink,
     buildFindingHash: buildFindingHash,
+    buildCrawlLink: buildCrawlLink,
+    resolveFindingActions: resolveFindingActions,
     renderEvidenceContent: renderEvidenceContent,
     buildFindingsDOM: buildFindingsDOM,
     renderFindingsView: renderFindingsView,
