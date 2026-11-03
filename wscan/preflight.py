@@ -7,7 +7,7 @@ import socket
 import ssl
 import tempfile
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlparse, urlsplit
 
 import httpx
 
@@ -45,6 +45,241 @@ def exit_code(report: dict) -> int:
 
 def _check(check_id: str, status: str, reason: str, detail: str) -> dict:
     return {"id": check_id, "status": status, "reason_code": reason, "detail": detail}
+
+
+def is_login_url_in_scope(target_url: str, login_url: str, scope_urls: list[str] | None = None) -> bool:
+    """ログインURLが対象URLまたは指定スコープ内に収まっているかを判定する純粋関数。"""
+    if not (login_url or "").strip():
+        return False
+    login_str = login_url.strip()
+    parsed_login = urlsplit(login_str)
+    if parsed_login.scheme and parsed_login.scheme.lower() not in ("http", "https"):
+        return False
+    # 相対パスは同一対象ホスト内とみなす
+    if not parsed_login.netloc:
+        return bool(not parsed_login.scheme)
+    parsed_target = urlsplit(target_url or "")
+    if parsed_target.netloc and parsed_login.netloc.lower() == parsed_target.netloc.lower():
+        return True
+    from .url_scope import url_in_scope
+    for scope in (scope_urls or []):
+        if url_in_scope(login_str, scope, host_scope=True):
+            return True
+    return False
+
+
+def parse_accounts(
+    accounts: list | str | None = None,
+    auth_user: str = "",
+    auth_pass: str = "",
+    accounts_file: str = "",
+) -> list[dict]:
+    """アカウント設定を純粋に正規化する。秘密情報（パスワード）は一切含めない。"""
+    parsed: list[dict] = []
+    if isinstance(accounts, list):
+        for acc in accounts:
+            if isinstance(acc, dict):
+                u = acc.get("username") or acc.get("user")
+                if u and str(u).strip():
+                    parsed.append({"username": str(u).strip()})
+            elif isinstance(acc, str) and acc.strip():
+                item = acc.strip()
+                user = item.split(":", 1)[0].strip() if ":" in item else item
+                if user:
+                    parsed.append({"username": user})
+    elif isinstance(accounts, str) and accounts.strip():
+        for pair in accounts.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            user = pair.split(":", 1)[0].strip() if ":" in pair else pair
+            if user:
+                parsed.append({"username": user})
+
+    if not parsed and auth_user and auth_user.strip():
+        parsed.append({"username": auth_user.strip()})
+
+    if accounts_file:
+        p = Path(accounts_file)
+        if p.is_file():
+            try:
+                import yaml
+                data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                if isinstance(data, dict):
+                    acc_list = data.get("accounts") or []
+                    for entry in acc_list:
+                        if isinstance(entry, dict):
+                            u = entry.get("username") or entry.get("user")
+                            if u and str(u).strip():
+                                parsed.append({"username": str(u).strip()})
+            except Exception:
+                pass
+
+    return parsed
+
+
+def evaluate_auth_readiness(
+    target_url: str,
+    *,
+    login_url: str = "",
+    auth_user: str = "",
+    auth_pass: str = "",
+    login_user_field: str = "username",
+    login_pass_field: str = "password",
+    accounts: list | str | None = None,
+    accounts_file: str = "",
+    auto_register: bool = False,
+    cookie: str = "",
+    bearer: str = "",
+    headers: list | dict | None = None,
+    target_urls: list[str] | None = None,
+    access_urls: list[str] | None = None,
+    auth_configured: bool = False,
+    accounts_configured: bool = False,
+    probe_status_code: int | None = None,
+    probe_error: tuple[str, str] | None = None,
+    probe_html: str = "",
+) -> dict:
+    """認証準備状態を正直に判定する純粋関数。
+
+    秘密値（パスワード/トークン）は結果・詳細に一切含めない。
+    preflight では実際のログイン成否は検証せず、その旨を明示する。
+    """
+    has_explicit_selectors = bool(
+        (login_user_field and login_user_field != "username")
+        or (login_pass_field and login_pass_field != "password")
+    )
+    has_login_settings = bool(
+        login_url
+        or auth_user
+        or auth_pass
+        or accounts
+        or accounts_file
+        or auto_register
+        or has_explicit_selectors
+    )
+    has_session_auth = bool(cookie or bearer or headers)
+
+    if not has_login_settings and not has_session_auth and not auth_configured and not accounts_configured:
+        return _check("authentication", "not_applicable", "auth_not_configured", "No authentication configured.")
+
+    if has_session_auth and not has_login_settings:
+        return _check(
+            "authentication", "warning", "session_not_verified",
+            "Session authentication (cookie/bearer/header) is configured, but session token validity is not verified by preflight.",
+        )
+
+    clean_login_url = (login_url or "").strip()
+    if not clean_login_url:
+        return _check("authentication", "fail", "login_url_missing", "Login settings are configured but login_url is missing.")
+
+    scopes = list(target_urls or []) + list(access_urls or [])
+    if not is_login_url_in_scope(target_url, clean_login_url, scopes):
+        return _check("authentication", "fail", "login_url_out_of_scope", "The configured login_url is outside the target scope.")
+
+    parsed_accs = parse_accounts(accounts, auth_user=auth_user, auth_pass=auth_pass, accounts_file=accounts_file)
+    if not parsed_accs and not auto_register:
+        return _check("authentication", "fail", "account_missing", "Login URL is configured but at least one user account credential is required.")
+
+    if not (login_user_field or "").strip() or not (login_pass_field or "").strip():
+        return _check("authentication", "fail", "required_fields_missing", "Required login field selectors (user_field or pass_field) are empty.")
+
+    if probe_error is not None:
+        reason, detail = probe_error
+        reason_code = reason if reason in ("login_redirect_out_of_scope", "too_many_redirects") else "login_page_unreachable"
+        return _check("authentication", "fail", reason_code, f"Login page probe failed: {detail}")
+
+    if probe_status_code is not None and probe_status_code >= 400:
+        return _check("authentication", "fail", "login_page_http_error", f"Login page probe returned HTTP status {probe_status_code}.")
+
+    if probe_status_code is not None and 300 <= probe_status_code < 400:
+        return _check("authentication", "warning", "login_page_redirect", f"Login page probe returned redirect HTTP status {probe_status_code}.")
+
+    if probe_status_code is None:
+        return _check(
+            "authentication", "warning", "not_probed",
+            "Authentication configuration is complete, but login page reachability was not probed. "
+            "Preflight does not verify credentials or login success (no credentials submitted).",
+        )
+
+    surface_detected = False
+    if probe_html:
+        try:
+            from . import login_surface as ls
+            surface = ls.classify_surface(probe_html)
+            if surface.kind == ls.LOGIN:
+                surface_detected = True
+        except Exception:
+            pass
+
+    form_note = " (login form detected)" if surface_detected else ""
+    detail = (
+        f"Authentication configuration is complete and login page is reachable{form_note}. "
+        "Preflight does not verify credentials or login success (no credentials submitted)."
+    )
+    return _check("authentication", "pass", "configured", detail)
+
+
+def evaluate_live_channel_readiness(*, monitor_enabled: bool = True) -> dict:
+    """ダッシュボード monitor ライブ通信チャネル（WebSocket）の利用可能性を正直に判定する純粋関数。"""
+    if not monitor_enabled:
+        return _check(
+            "websocket", "not_applicable", "monitor_disabled",
+            "Dashboard live channel is disabled for this scan (--no-monitor or batch mode).",
+        )
+    return _check(
+        "websocket", "pass", "available",
+        "Dashboard monitor live channel is enabled for real-time progress updates.",
+    )
+
+
+def _probe_login_page(
+    login_url: str,
+    proxy: str = "",
+    verify: bool = True,
+    target_url: str = "",
+    scope_urls: list[str] | None = None,
+    max_redirects: int = 5,
+) -> tuple[int | None, str, tuple[str, str] | None]:
+    """ログインページへの非破壊・副作用なしの GET プローブ（資格情報は一切送信しない）。
+
+    follow_redirects=False を使用し、各ホップごとにリダイレクト先スコープを再検証する。
+    スコープ外のホストへは一切リクエストを送信しない。
+    """
+    try:
+        from types import SimpleNamespace
+        from .engine import ScanEngine
+        from .tls_config import TLSConfig
+
+        scope_target = target_url or login_url
+        engine = SimpleNamespace(proxy=proxy, tls_config=TLSConfig.from_values())
+        options = ScanEngine.httpx_client_kwargs(
+            engine, verify=verify, timeout=10, follow_redirects=False, trust_env=False
+        )
+        current_url = login_url
+        with httpx.Client(**options) as client:
+            for _ in range(max_redirects + 1):
+                resp = client.get(current_url)
+                if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("location")
+                    if not location:
+                        return resp.status_code, resp.text, None
+                    next_url = urljoin(current_url, location)
+                    if not is_login_url_in_scope(scope_target, next_url, scope_urls):
+                        return resp.status_code, resp.text, (
+                            "login_redirect_out_of_scope",
+                            f"Login page redirect target is out of scope: {next_url}",
+                        )
+                    current_url = next_url
+                else:
+                    return resp.status_code, resp.text, None
+            return resp.status_code, resp.text, (
+                "too_many_redirects",
+                f"Login page exceeded redirect limit ({max_redirects})",
+            )
+    except Exception as exc:
+        reason, detail = classify_exception(exc)
+        return None, "", (reason, detail)
 
 
 def proxy_applied(client: httpx.Client, url: str, configured_proxy: str) -> bool | None:
@@ -116,6 +351,13 @@ async def run_preflight(
     ca_cert: str = "", output_dir: str | Path, checks: list[str],
     api_spec: str = "", auth_configured: bool = False, accounts_configured: bool = False,
     oob_configured: bool = False, agent_mode: bool = False,
+    login_url: str = "", auth_user: str = "", auth_pass: str = "",
+    login_user_field: str = "username", login_pass_field: str = "password",
+    accounts: list | str | None = None, accounts_file: str = "",
+    auto_register: bool = False, cookie: str = "", bearer: str = "",
+    headers: list | dict | None = None, target_urls: list[str] | None = None,
+    access_urls: list[str] | None = None, monitor_enabled: bool = True,
+    probe_login: bool = True,
 ) -> dict:
     """Run non-invasive DNS, HTTP, browser, output and declared-prerequisite checks."""
     rows: list[dict] = []
@@ -181,6 +423,45 @@ async def run_preflight(
     except OSError:
         rows.append(_check("output_directory", "fail", "output_not_writable", "The scan output directory is not writable."))
 
+    # ログインページプローブ（設定が存在しスコープ内の場合のみ）
+    probe_status_code = None
+    probe_html = ""
+    probe_error = None
+    clean_login_url = (login_url or "").strip()
+    scopes = list(target_urls or []) + list(access_urls or [])
+    if probe_login and clean_login_url and is_login_url_in_scope(url, clean_login_url, scopes):
+        resolved_login_url = urljoin(url, clean_login_url)
+        try:
+            probe_status_code, probe_html, probe_error = await asyncio.to_thread(
+                _probe_login_page, resolved_login_url, proxy, verify, target_url=url, scope_urls=scopes
+            )
+        except TypeError:
+            probe_status_code, probe_html, probe_error = await asyncio.to_thread(
+                _probe_login_page, resolved_login_url, proxy, verify
+            )
+
+    auth_row = evaluate_auth_readiness(
+        url,
+        login_url=clean_login_url,
+        auth_user=auth_user,
+        auth_pass=auth_pass,
+        login_user_field=login_user_field,
+        login_pass_field=login_pass_field,
+        accounts=accounts,
+        accounts_file=accounts_file,
+        auto_register=auto_register,
+        cookie=cookie,
+        bearer=bearer,
+        headers=headers,
+        target_urls=target_urls,
+        access_urls=access_urls,
+        auth_configured=auth_configured,
+        accounts_configured=accounts_configured,
+        probe_status_code=probe_status_code,
+        probe_error=probe_error,
+        probe_html=probe_html,
+    )
+
     from .scanners import SCANNERS
     from .scanner_contract import Prerequisite
     browser_ready = next((r["status"] == "pass" for r in rows if r["id"] == "playwright"), False)
@@ -199,23 +480,26 @@ async def run_preflight(
                 rows.append(_check(f"scanner:{check}", "pass" if present else "warning",
                                    "prerequisite_present" if present else "prerequisite_missing",
                                    "This check declares an API specification prerequisite."))
-            elif prerequisite == Prerequisite.AUTH_SESSION and not auth_configured:
-                rows.append(_check(f"scanner:{check}", "warning", "prerequisite_missing", "This check declares an authenticated session prerequisite."))
             elif prerequisite == Prerequisite.AUTH_SESSION:
-                rows.append(_check(f"scanner:{check}", "not_checked", "not_implemented",
-                                   "Authentication readiness is not checked in this increment."))
-            elif prerequisite == Prerequisite.MULTI_ACCOUNT and not accounts_configured:
-                rows.append(_check(f"scanner:{check}", "warning", "prerequisite_missing", "This check declares a multiple-account prerequisite."))
+                if not auth_configured and auth_row["status"] == "not_applicable":
+                    rows.append(_check(f"scanner:{check}", "warning", "prerequisite_missing", "This check declares an authenticated session prerequisite."))
+                elif auth_row["status"] == "fail":
+                    rows.append(_check(f"scanner:{check}", "fail", "prerequisite_missing", "This check declares an authenticated session prerequisite."))
+                else:
+                    rows.append(_check(f"scanner:{check}", "pass", "available", "This check declares an authenticated session prerequisite."))
             elif prerequisite == Prerequisite.MULTI_ACCOUNT:
-                rows.append(_check(f"scanner:{check}", "not_checked", "not_implemented",
-                                   "Multiple-account readiness is not checked in this increment."))
+                acc_count = len(parse_accounts(accounts, auth_user=auth_user, auth_pass=auth_pass, accounts_file=accounts_file))
+                if auto_register or acc_count >= 2:
+                    rows.append(_check(f"scanner:{check}", "pass", "available", "This check declares a multiple-account prerequisite."))
+                else:
+                    rows.append(_check(f"scanner:{check}", "warning", "prerequisite_missing", "This check declares a multiple-account prerequisite."))
             elif prerequisite == Prerequisite.SECOND_REQUEST:
                 rows.append(_check(f"scanner:{check}", "pass", "available",
                                    "This check declares a multiple-request prerequisite."))
             elif prerequisite == Prerequisite.OOB_SINK:
                 rows.append(_check(f"scanner:{check}", "not_checked", "not_implemented", "OOB readiness is not checked in this increment."))
 
-    rows.append(_check("authentication", "not_checked", "not_implemented", "This readiness check is not implemented."))
+    rows.append(auth_row)
 
     try:
         import browser_use  # noqa: F401
@@ -226,7 +510,8 @@ async def run_preflight(
         else:
             rows.append(_check("agent_transport", "warning", "dependency_missing", "The agent-mode browser automation backend is not installed (only needed for agent mode)."))
 
-    rows.append(_check("websocket", "not_checked", "not_implemented", "This readiness check is not implemented."))
+    ws_row = evaluate_live_channel_readiness(monitor_enabled=monitor_enabled)
+    rows.append(ws_row)
 
     if oob_configured:
         rows.append(_check("oob", "pass", "configured", "An out-of-band email sink is configured for blind-vulnerability confirmation."))

@@ -360,9 +360,13 @@ python3 main.py scan --help
 python3 main.py scan URL [URL ...] [options]
 ```
 
-`--preflight` はスキャン前に DNS、HTTP/proxy、TLS、Playwright Chromium、出力先と宣言済み scanner 前提を確認し、結果を `preflight.json` に保存します。重大な準備失敗があればスキャンを開始せず終了コード 1 を返します。`--preflight-only` は同じ結果を保存してスキャンを行いません。HTTP 確認には対象への GET を使い、対象認証ヘッダー・Cookie・スキャン用ペイロードは送信しません。設定済み proxy の認証情報は proxy 接続時だけ使い、結果には含めません。認証・Agent・WebSocket・OOB の準備状態は未確認として報告します。
+`--preflight` はスキャン前に DNS、HTTP/proxy、TLS、Playwright Chromium、出力先、認証設定、WebSocket ライブ通信チャネルおよび宣言済み scanner 前提を確認し、結果を `preflight.json` に保存します。重大な準備失敗があればスキャンを開始せず終了コード 1 を返します。`--preflight-only` は同じ結果を保存してスキャンを行いません。HTTP 確認には対象への GET を使い、スキャン用ペイロードは送信しません。設定済み proxy の認証情報は proxy 接続時だけ使い、結果には含めません。
 
-保存済みの結果は認証済み read-only API `GET /api/v1/scans/{scan_id}/preflight` から取得できます。
+認証準備確認（`authentication`）では、ログインURL・アカウント・セレクタの設定時に、設定の完全性（ログインURLの指定とスコープ内検証、アカウントの存在、必須フィールドの入力）およびログイン画面への GET 到達性を非破壊で確認します（資格情報の送信は行わず、実際のログイン成否は検証しない旨を明示します。パスワードなどの秘密値は結果・ログへ一切含めません。認証設定がない場合は `not_applicable` となります）。
+
+ライブ通信チャネル（`websocket`）では、ダッシュボード monitor によるリアルタイム進捗配信が利用可能かを判定します（monitor 有効時は `pass`、`--no-monitor` やバッチモード時は `not_applicable` として正直に報告します）。
+
+保存済みの結果は認証済み read-only API `GET /api/v1/scans/{scan_id}/preflight`、およびダッシュボード設定画面の「⚡ スキャン準備チェック」（`POST /api/v1/preflight`）から取得できます。
 
 `URL` は複数指定できる（`scan https://a https://b https://c`）。先頭がクロール起点、
 2 つ目以降は追加攻撃スコープ（`--target-url` と同義）となり、**1 回のスキャン＝同一

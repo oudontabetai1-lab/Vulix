@@ -83,6 +83,76 @@ def test_preflight_api_minimal_and_missing_url(tmp_path):
     assert data["verdict"] in ("pass", "warning", "fail")
 
 
+def test_preflight_api_auth_and_live_channel_checks(monkeypatch):
+    """POST /api/v1/preflight verifies authentication and live channel readiness without leaking secrets."""
+    server = MonitorServer()
+    client = TestClient(server.app)
+
+    # 1. No auth configured -> authentication is not_applicable, websocket is pass
+    res_no_auth = client.post("/api/v1/preflight", json={"url": "http://127.0.0.1:9"})
+    assert res_no_auth.status_code == 200
+    checks_no_auth = {c["id"]: c for c in res_no_auth.json()["checks"]}
+    assert checks_no_auth["authentication"]["status"] == "not_applicable"
+    assert checks_no_auth["authentication"]["reason_code"] == "auth_not_configured"
+    assert checks_no_auth["websocket"]["status"] == "pass"
+    assert checks_no_auth["websocket"]["reason_code"] == "available"
+
+    # 2. Disabled live channel via no_monitor -> websocket is not_applicable
+    res_no_mon = client.post("/api/v1/preflight", json={"url": "http://127.0.0.1:9", "no_monitor": True})
+    assert res_no_mon.status_code == 200
+    checks_no_mon = {c["id"]: c for c in res_no_mon.json()["checks"]}
+    assert checks_no_mon["websocket"]["status"] == "not_applicable"
+    assert checks_no_mon["websocket"]["reason_code"] == "monitor_disabled"
+
+    # 3. Valid auth configuration with reachability probe mock and secret sentinel
+    sentinel = "TOP_SECRET_AUTH_PASSWORD_SENTINEL_654"
+    monkeypatch.setattr(
+        "wscan.preflight._probe_login_page",
+        lambda url, proxy, verify: (200, "<html><form><input name='username'/></form></html>", None)
+    )
+
+    res_auth = client.post("/api/v1/preflight", json={
+        "url": "http://127.0.0.1:9",
+        "login_url": "http://127.0.0.1:9/login",
+        "auth_user": "admin",
+        "auth_pass": sentinel,
+        "accounts": [{"username": "admin", "password": sentinel}],
+    })
+    assert res_auth.status_code == 200
+    data_auth = res_auth.json()
+    checks_auth = {c["id"]: c for c in data_auth["checks"]}
+    assert checks_auth["authentication"]["status"] == "pass"
+    assert checks_auth["authentication"]["reason_code"] == "configured"
+    assert "Preflight does not verify credentials or login success" in checks_auth["authentication"]["detail"]
+    # Secret sentinel must not leak
+    assert sentinel not in json.dumps(data_auth)
+
+    # 4. Out-of-scope login_url -> fails preflight
+    res_out_of_scope = client.post("/api/v1/preflight", json={
+        "url": "http://127.0.0.1:9",
+        "login_url": "https://attacker-controlled.example/login",
+        "auth_user": "admin",
+        "auth_pass": "pass",
+    })
+    assert res_out_of_scope.status_code == 200
+    data_out = res_out_of_scope.json()
+    checks_out = {c["id"]: c for c in data_out["checks"]}
+    assert checks_out["authentication"]["status"] == "fail"
+    assert checks_out["authentication"]["reason_code"] == "login_url_out_of_scope"
+    assert data_out["verdict"] == "fail"
+
+    # 5. Session-only auth -> returns warning with session_not_verified (not pass)
+    res_session = client.post("/api/v1/preflight", json={
+        "url": "http://127.0.0.1:9",
+        "cookie": "sid=xyz123",
+    })
+    assert res_session.status_code == 200
+    checks_session = {c["id"]: c for c in res_session.json()["checks"]}
+    assert checks_session["authentication"]["status"] == "warning"
+    assert checks_session["authentication"]["reason_code"] == "session_not_verified"
+    assert "not verified" in checks_session["authentication"]["detail"]
+
+
 # ─── 2. Pure-Function Status & Verdict Label Mapping Test ────────────────────
 
 def test_preflight_status_label_pure_mapping():
