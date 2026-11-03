@@ -9,6 +9,7 @@
   const api = new ApiClient();
   const portal = document.getElementById('portalFrame');
   const monitor = document.getElementById('monitorFrame');
+  const monitorHost = document.getElementById('monitorModule');
   const message = document.getElementById('message');
   const title = document.getElementById('viewTitle');
   const context = document.getElementById('scanContext');
@@ -23,6 +24,7 @@
   function unavailable(text) {
     portal.hidden = true;
     monitor.hidden = true;
+    monitorHost.hidden = true;
     message.hidden = false;
     message.replaceChildren();
     const heading = document.createElement('h2');
@@ -86,10 +88,15 @@
     monitor.hidden = Boolean(onReady);
     ensureMonitor((bridge) => {
       bridge.setSurface(surface);
+      monitor.classList.toggle('transport-owner', surface === 'monitor');
+      monitor.setAttribute('aria-hidden', String(surface === 'monitor'));
       const current = bridge.getContext();
       context.textContent = `Scan ${current.scan_id || '—'} · ${current.status || 'status unavailable'}`;
       if (onReady) onReady(bridge, current);
-      else monitor.hidden = false;
+      else {
+        monitor.hidden = false;
+        if (surface === 'monitor') bridge.mountMonitor(monitorHost);
+      }
     });
   }
 
@@ -138,6 +145,10 @@
       }
       clearMessage();
       monitor.hidden = false;
+      if (monitorHost.hidden && !monitorHost.shadowRoot?.childElementCount) {
+        monitor.contentWindow.VulixAppBridge.mountMonitor(monitorHost, route.scanId);
+      }
+      monitorHost.hidden = false;
     };
     stopContextSubscription();
     contextHandler = (event) => {
@@ -176,6 +187,9 @@
     stopContextSubscription();
     if (activeScope) activeScope.cancelAll('Monitor module unmounted');
     activeScope = null;
+    const bridge = monitor.contentWindow && monitor.contentWindow.VulixAppBridge;
+    if (bridge && bridge.unmountMonitor) bridge.unmountMonitor();
+    monitorHost.hidden = true;
     monitor.hidden = true;
   } });
   registry.setDefaultId('portal');
