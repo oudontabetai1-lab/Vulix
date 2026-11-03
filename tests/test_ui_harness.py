@@ -614,3 +614,39 @@ def test_ui_harness_cleanup_clears_reference_and_tempdir_on_confirmed_terminatio
     assert harness._temp_dir is None
     assert harness.output_dir is None
 
+
+def test_ui_harness_assert_focus_visible_and_check_viewports():
+    """Verify UIHarness focus visibility assertion and viewport checks on real browser page."""
+    require_browser()
+
+    with UIHarness(seed_fixtures=False) as harness:
+        page = harness.new_page(width=1440, height=900)
+        # Load a page with styled interactive button exhibiting outline on focus
+        page.set_content("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            :focus-visible { outline: 2px solid #9184d9; outline-offset: 2px; }
+            button { padding: 8px 16px; margin: 20px; }
+          </style>
+        </head>
+        <body>
+          <button id="btn1">Action Button</button>
+          <div id="unfocused">Not interactive</div>
+        </body>
+        </html>
+        """)
+
+        # Focus button -> should pass visible focus assertion
+        harness.assert_focus_visible(page, "#btn1")
+
+        # Responsive viewports check across 1440, 1280, 768
+        harness.check_viewports_and_focus(
+            page,
+            focus_selectors=["#btn1"],
+            widths=(1440, 1280, 768),
+        )
+
+        harness.assert_no_errors(page)
+

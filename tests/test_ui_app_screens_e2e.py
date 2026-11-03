@@ -719,3 +719,69 @@ def test_app_session_expiry_401_behavior(e2e_harness: UIHarness):
         e2e_harness.assert_no_errors(page)
     finally:
         page.close()
+
+
+def test_app_shell_keyboard_focus_visibility_and_responsive_widths(e2e_harness: UIHarness):
+    """Verify visible keyboard focus on interactive elements and responsive layouts at 1440, 1280, and 768 px."""
+    require_browser()
+    page = e2e_harness.new_page(**STANDARD_VIEWPORTS[1440])
+
+    try:
+        # Load /app Portal
+        page.goto(f"{e2e_harness.server_url}/app#/portal", wait_until="domcontentloaded")
+        page.locator("#summarySurface").wait_for(state="visible")
+
+        # 1. Focus visibility checks on interactive navigation buttons
+        nav_buttons = [
+            '[data-route="portal"]',
+            '[data-route="history"]',
+            '[data-route="setup"]',
+            '[data-route="findings"]',
+            '[data-route="crawl"]',
+            '[data-route="agent-skills"]',
+            '[data-route="settings"]',
+        ]
+        for sel in nav_buttons:
+            e2e_harness.assert_focus_visible(page, sel)
+
+        # 2. Responsive layout verification across 1440, 1280, 768 px on Portal
+        e2e_harness.check_viewports_and_focus(
+            page,
+            focus_selectors=['[data-route="portal"]', '[data-route="setup"]'],
+            widths=(1440, 1280, 768),
+        )
+
+        # 3. Switch to Setup view and check focus on inputs/buttons and viewports
+        page.locator('[data-route="setup"]').click()
+        page.locator("#setupSurface").wait_for(state="visible")
+        page.wait_for_selector(".setup-url-input")
+
+        # Check focus visibility on setup interactive controls
+        setup_interactive = [
+            ".setup-url-input",
+            ".setup-start-btn",
+            "#setupTab-checks",
+        ]
+        for sel in setup_interactive:
+            e2e_harness.assert_focus_visible(page, sel)
+
+        e2e_harness.check_viewports_and_focus(
+            page,
+            focus_selectors=[".setup-url-input", ".setup-start-btn"],
+            widths=(1440, 1280, 768),
+        )
+
+        # 4. Switch to Findings view and check focus and viewports
+        page.locator('[data-route="findings"]').click()
+        page.locator("#findingsSurface").wait_for(state="visible")
+        page.wait_for_selector(".findings-container")
+
+        e2e_harness.check_viewports_and_focus(
+            page,
+            focus_selectors=['[data-route="findings"]'],
+            widths=(1440, 1280, 768),
+        )
+
+        e2e_harness.assert_no_errors(page)
+    finally:
+        page.close()

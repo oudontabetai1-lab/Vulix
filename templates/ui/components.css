@@ -339,14 +339,14 @@
 }
 .ui-status.error,
 .ui-status.unavailable {
-  color: var(--critical);
-  border-color: rgba(226, 112, 143, 0.3);
-  background: rgba(226, 112, 143, 0.12);
+  color: var(--status-fail, var(--critical));
+  border-color: var(--status-fail-border, rgba(226, 112, 143, 0.3));
+  background: var(--status-fail-bg, rgba(226, 112, 143, 0.12));
 }
 .ui-status.success {
-  color: var(--low);
-  border-color: rgba(143, 185, 201, 0.3);
-  background: rgba(143, 185, 201, 0.12);
+  color: var(--status-pass, var(--low));
+  border-color: var(--status-pass-border, rgba(143, 185, 201, 0.3));
+  background: var(--status-pass-bg, rgba(143, 185, 201, 0.12));
 }
 
 .ui-muted {
@@ -650,27 +650,123 @@
 /* Status colors */
 .setup-status-pass,
 .setup-verdict-pass {
-  color: #22c55e;
-  background: rgba(34, 197, 94, 0.12);
-  border: 1px solid rgba(34, 197, 94, 0.3);
+  color: var(--status-pass, #22c55e);
+  background: var(--status-pass-bg, rgba(34, 197, 94, 0.12));
+  border: 1px solid var(--status-pass-border, rgba(34, 197, 94, 0.3));
 }
 .setup-status-warning,
 .setup-verdict-warning {
-  color: var(--medium, #c7b96a);
-  background: rgba(199, 185, 106, 0.12);
-  border: 1px solid rgba(199, 185, 106, 0.3);
+  color: var(--status-warning, var(--medium, #c7b96a));
+  background: var(--status-warning-bg, rgba(199, 185, 106, 0.12));
+  border: 1px solid var(--status-warning-border, rgba(199, 185, 106, 0.3));
 }
 .setup-status-fail,
 .setup-verdict-fail {
-  color: var(--critical, #e2708f);
-  background: rgba(226, 112, 143, 0.12);
-  border: 1px solid rgba(226, 112, 143, 0.3);
+  color: var(--status-fail, var(--critical, #e2708f));
+  background: var(--status-fail-bg, rgba(226, 112, 143, 0.12));
+  border: 1px solid var(--status-fail-border, rgba(226, 112, 143, 0.3));
 }
 .setup-status-not-checked,
 .setup-status-not-applicable,
 .setup-status-unknown,
 .setup-verdict-unknown {
-  color: var(--text-muted, #9397ab);
-  background: var(--surface2, #232532);
-  border: 1px solid var(--border, #3f424d);
+  color: var(--status-not-checked, var(--text-muted, #9397ab));
+  background: var(--status-not-checked-bg, var(--surface2, #232532));
+  border: 1px solid var(--status-not-checked-border, var(--border, #3f424d));
+}
+
+/* Shared Semantic Status Primitives */
+.ui-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.ui-status-pass,
+.ui-status-badge.pass {
+  color: var(--status-pass);
+  background: var(--status-pass-bg);
+  border: 1px solid var(--status-pass-border);
+}
+.ui-status-fail,
+.ui-status-badge.fail {
+  color: var(--status-fail);
+  background: var(--status-fail-bg);
+  border: 1px solid var(--status-fail-border);
+}
+.ui-status-warning,
+.ui-status-badge.warning {
+  color: var(--status-warning);
+  background: var(--status-warning-bg);
+  border: 1px solid var(--status-warning-border);
+}
+.ui-status-not-checked,
+.ui-status-badge.not-checked {
+  color: var(--status-not-checked);
+  background: var(--status-not-checked-bg);
+  border: 1px solid var(--status-not-checked-border);
+}
+.ui-status-unknown,
+.ui-status-badge.unknown {
+  color: var(--status-unknown);
+  background: var(--status-unknown-bg);
+  border: 1px solid var(--status-unknown-border);
+}
+.ui-status-unavailable,
+.ui-status-badge.unavailable {
+  color: var(--status-unavailable);
+  background: var(--status-unavailable-bg);
+  border: 1px solid var(--status-unavailable-border);
+}
+.ui-status-stale,
+.ui-status-badge.stale {
+  color: var(--status-stale);
+  background: var(--status-stale-bg);
+  border: 1px solid var(--status-stale-border);
+}
+.ui-status-running,
+.ui-status-badge.running {
+  color: var(--status-running);
+  background: var(--status-running-bg);
+  border: 1px solid var(--status-running-border);
+}
+
+/* Shared State Patterns */
+.ui-state-empty {
+  padding: var(--space-2xl) var(--space-lg);
+  text-align: center;
+  color: var(--state-empty-text);
+  font-size: 0.85rem;
+}
+.ui-state-loading {
+  padding: var(--space-xl);
+  text-align: center;
+  color: var(--state-loading-text);
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+}
+.ui-state-error {
+  padding: var(--space-md) var(--space-lg);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  color: var(--state-error-text);
+  background: var(--state-error-bg);
+  border: 1px solid var(--state-error-border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* Focus Ring Primitive */
+.ui-focus-ring:focus-visible,
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
