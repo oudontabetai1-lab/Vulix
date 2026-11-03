@@ -13,6 +13,7 @@
   const settingsSurface = document.getElementById('settingsSurface');
   const message = document.getElementById('message');
   const agentSkillsSurface = document.getElementById('agentSkillsSurface');
+  const setupSurface = document.getElementById('setupSurface');
   const title = document.getElementById('viewTitle');
   const context = document.getElementById('scanContext');
   let activeScope = null;
@@ -28,6 +29,7 @@
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+    if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     message.hidden = false;
     message.replaceChildren();
@@ -90,6 +92,8 @@
     clearMessage();
     portal.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+    if (setupSurface) setupSurface.hidden = true;
+    if (settingsSurface) settingsSurface.hidden = true;
     monitor.hidden = Boolean(onReady);
     ensureMonitor((bridge) => {
       bridge.setSurface(surface);
@@ -111,6 +115,7 @@
     clearMessage();
     if (monitorHost) monitorHost.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+    if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     monitor.hidden = true;
     portal.hidden = false;
@@ -122,9 +127,95 @@
 
   registry.register({ id: 'setup', title: 'Scan Setup', route: '#/setup', mount() {
     title.textContent = 'Scan Setup';
+    context.textContent = '';
+    clearMessage();
+    cancelPendingMonitorLoad();
+    stopContextSubscription();
+    portal.hidden = true;
+    monitor.hidden = true;
+    if (monitorHost) monitorHost.hidden = true;
+    if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
-    showMonitorSurface('setup');
-  }, unmount() { cancelPendingMonitorLoad(); monitor.hidden = true; } });
+
+    if (global.VulixSetupModule && setupSurface) {
+      if (setupSurface.childElementCount > 0) {
+        clearMessage();
+        setupSurface.hidden = false;
+        monitor.hidden = true;
+        ensureMonitor((bridge) => {
+          monitor.classList.add('transport-owner');
+          monitor.setAttribute('aria-hidden', 'true');
+          const current = bridge.getContext();
+          context.textContent = `Scan ${current.scan_id || '—'} · ${current.status || 'status unavailable'}`;
+        });
+        return;
+      }
+      const scope = api.createScope();
+      activeScope = scope;
+      global.VulixSetupModule.loadAndRenderSetup(setupSurface, {
+        api: scope,
+        onUnavailable: (reason) => {
+          if (activeScope !== scope || registry.getActiveId() !== 'setup') return;
+          if (setupSurface) setupSurface.hidden = true;
+          showMonitorSurface('setup', (bridge) => {
+            const frame = monitor.contentWindow;
+            if (frame && frame.document) {
+              let banner = frame.document.getElementById('setupSchemaUnavailableBanner');
+              if (!banner) {
+                banner = frame.document.createElement('div');
+                banner.id = 'setupSchemaUnavailableBanner';
+                banner.className = 'setup-unavailable-banner';
+                const body = frame.document.querySelector('.cfg-body') || frame.document.body;
+                if (body) body.insertBefore(banner, body.firstChild);
+              }
+              banner.textContent = `設定宣言が利用できません (${reason || 'unavailable'})。旧Setup画面を表示しています。`;
+              banner.style.display = 'block';
+            }
+          });
+        },
+        onStartScan: (config) => {
+          ensureMonitor((bridge) => {
+            if (typeof bridge.startScan === 'function') {
+              bridge.startScan(config);
+            } else if (monitor.contentWindow && monitor.contentWindow.state && monitor.contentWindow.state.ws) {
+              const ws = monitor.contentWindow.state.ws;
+              if (ws.readyState === 1) {
+                if (typeof monitor.contentWindow._markOwnScan === 'function') {
+                  monitor.contentWindow._markOwnScan(config);
+                }
+                ws.send(JSON.stringify({ action: 'start_scan', config }));
+              }
+            }
+            global.location.hash = '#/monitor';
+          });
+        },
+      }).then((ok) => {
+        if (activeScope !== scope || registry.getActiveId() !== 'setup') return;
+        if (ok && setupSurface) {
+          clearMessage();
+          setupSurface.hidden = false;
+          monitor.hidden = true;
+          ensureMonitor((bridge) => {
+            monitor.classList.add('transport-owner');
+            monitor.setAttribute('aria-hidden', 'true');
+            const current = bridge.getContext();
+            context.textContent = `Scan ${current.scan_id || '—'} · ${current.status || 'status unavailable'}`;
+          });
+        }
+      });
+    } else {
+      showMonitorSurface('setup');
+    }
+  }, unmount() {
+    cancelPendingMonitorLoad();
+    stopContextSubscription();
+    if (activeScope) activeScope.cancelAll('Setup module unmounted');
+    activeScope = null;
+    if (setupSurface) {
+      setupSurface.hidden = true;
+    }
+    monitor.hidden = true;
+  } });
 
   registry.register({ id: 'monitor', title: 'Monitor', route: '#/monitor', mount(route) {
     title.textContent = 'Monitor';
@@ -212,6 +303,7 @@
     portal.hidden = true;
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
+    if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     if (agentSkillsSurface) {
       agentSkillsSurface.hidden = false;
@@ -244,6 +336,7 @@
           monitor.hidden = true;
           if (monitorHost) monitorHost.hidden = true;
           if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+          if (setupSurface) setupSurface.hidden = true;
         },
       })
     );
