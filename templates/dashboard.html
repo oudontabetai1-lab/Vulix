@@ -2951,6 +2951,17 @@ window.VulixAppBridge = Object.freeze({
     overlay.classList.toggle('active', surface === 'setup');
     return true;
   },
+  startScan(config) {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+      _markOwnScan(config);
+      state.ws.send(JSON.stringify({ action: 'start_scan', config }));
+      saveConfigToStorage();
+      document.getElementById('scanConfigOverlay')?.classList.remove('active');
+      setStatus('スキャン開始リクエスト送信中...', 'running');
+      return true;
+    }
+    return false;
+  },
 });
 
 // スキャン開始時に呼ぶ: config に一意な nonce を刻み、受理確認までは nonsecret な descriptor を pending に置く。
