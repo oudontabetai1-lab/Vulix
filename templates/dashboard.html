@@ -133,8 +133,6 @@ body {
   font-size: 0.8rem;
   line-height: 1.5;
   animation: fadeIn 0.2s ease;
-  word-break: break-all;
-  overflow-wrap: anywhere;
 }
 @keyframes fadeIn { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:none; } }
 .event-item .time { color: var(--text-muted); font-size: 0.7rem; margin-right: 6px; font-family: monospace; }
@@ -2391,7 +2389,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
       Event Log
       <span class="panel-badge" id="eventCount">0</span>
     </div>
-    <div class="panel-content" id="eventLog">
+    <div class="panel-content" id="eventLog" tabindex="0" aria-label="Event log">
       <div class="no-findings-msg">Waiting for scan to start...</div>
     </div>
   </div>
@@ -5866,6 +5864,8 @@ function resetLiveScanState() {
   const findingsPanel = document.getElementById('findingsPanel');
   if (findingsPanel) findingsPanel.innerHTML = '<div class="no-findings-msg">No vulnerabilities detected yet.</div>';
   const eventLog = document.getElementById('eventLog');
+  _eventLogEntries.length = 0;
+  _eventLogWindowStart = 0;
   if (eventLog) eventLog.innerHTML = '<div class="no-findings-msg">Waiting for scan to start...</div>';
   const screenshotArea = document.getElementById('screenshotArea');
   if (screenshotArea) {
@@ -6067,7 +6067,34 @@ function timeStr(ts) {
   return d.toTimeString().split(' ')[0];
 }
 
-let _eventLogScrollScheduled = false;
+const _eventLogEntries = [];
+let _eventLogWindowStart = 0;
+const _eventLogWindowSize = 500;
+const _eventLogPageSize = 250;
+function _renderEventLogWindow(log) {
+  const end = Math.min(_eventLogEntries.length, _eventLogWindowStart + _eventLogWindowSize);
+  const fragment = document.createDocumentFragment();
+  for (let i = _eventLogWindowStart; i < end; i++) {
+    fragment.appendChild(_makeEventLogItem(_eventLogEntries[i]));
+  }
+  log.replaceChildren(fragment);
+}
+function _makeEventLogItem(entry) {
+  const item = document.createElement('div');
+  item.className = 'event-item event-' + entry.type;
+  item.innerHTML = `<span class="time">${entry.ts}</span><span class="ev-type">[${entry.type.toUpperCase()}]</span> ${escapeHtml(entry.message)}`;
+  return item;
+}
+function _loadOlderEventLogEntries(log) {
+  if (_eventLogWindowStart === 0 || log.scrollTop > 0) return;
+  const priorHeight = log.scrollHeight;
+  _eventLogWindowStart = Math.max(0, _eventLogWindowStart - _eventLogPageSize);
+  _renderEventLogWindow(log);
+  log.scrollTop = Math.max(1, log.scrollHeight - priorHeight);
+}
+document.getElementById('eventLog')?.addEventListener('scroll', function () {
+  _loadOlderEventLogEntries(this);
+});
 function addEventLog(type, message) {
   const log = document.getElementById('eventLog');
   if (!log) return;
@@ -6075,23 +6102,17 @@ function addEventLog(type, message) {
   const placeholder = log.querySelector('.no-findings-msg');
   if (placeholder) placeholder.remove();
 
-  const item = document.createElement('div');
-  item.className = 'event-item event-' + type;
   const ts = new Date().toTimeString().split(' ')[0];
-  item.innerHTML = `<span class="time">${ts}</span><span class="ev-type">[${type.toUpperCase()}]</span> ${escapeHtml(message)}`;
-  log.appendChild(item);
-
-  // Keep log trimmed
-  while (log.children.length > 500) log.removeChild(log.firstChild);
-
-  if (state.autoScroll && !_eventLogScrollScheduled) {
-    _eventLogScrollScheduled = true;
-    requestAnimationFrame(() => {
-      _eventLogScrollScheduled = false;
-      const el = document.getElementById('eventLog');
-      if (el && state.autoScroll) el.scrollTop = el.scrollHeight;
-    });
+  const entry = { type, message: String(message), ts };
+  _eventLogEntries.push(entry);
+  if (_eventLogEntries.length <= _eventLogWindowSize) {
+    log.appendChild(_makeEventLogItem(entry));
+  } else {
+    log.removeChild(log.firstElementChild);
+    log.appendChild(_makeEventLogItem(entry));
   }
+  _eventLogWindowStart = Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
+  if (state.autoScroll) log.scrollTop = Number.MAX_SAFE_INTEGER;
 }
 
 function updateScreenshot(b64, label) {
@@ -8070,6 +8091,7 @@ async function bootDashboard() {
 Object.assign(window, {
   publishAppScanContext, _markOwnScan, isSecretKeyName, sanitizeUrlForExport, sanitizeUrlListForExport, recursiveSanitizeNonsecret, hasCredentialsInConfig, _createNonsecretDescriptor, _sanitizeConfigForExport, containsRedactedValues, _discardRejectedPendingScan, _promotePendingScan, findingKey, computeVerification, isFindingConfirmed, updateFindingCounters, renderCheckGroups, initCheckGroups, loadScannerCapabilities, setScanMode, getSelectedChecks, selectAllChecks, setSelectedChecks, setCfgToggle, toggleCfg, showCfgTab, applyScanProfile, updateLlmModelField, collectRoleModels, restoreRoleModels, mfaImapFields, mfaImapPassword, applyMfaImap, mfaTotpFields, parseHeaderText, authHeaderFields, timeWindowFields, applyTimeWindows, applyMfaTotp, applyAuthHeaders, validateTotpReadiness, wireTotpQrPreview, uploadFile, wireUpload, renderManualCrawlStatus, startManualCrawl, stopManualCrawl, importManualCrawl, _wsSend, startRemoteBrowser, remoteNavigate, hasRemoteTotpConfig, armMfaFieldSelection, selectRemoteMfaField, fillRemoteTotp, bindRemoteScreen, useManualCrawlOutput, showPostScanActions, rerunLastScan, openManualCrawlAfterScan, submitScanConfig, _collectFullConfigForExport, _downloadJson, _filenameForConfig, exportConfigToFile, importConfigFromFile, applyImportedConfig, initConfigOverlay, updateAgentModelPlaceholder, submitAgentScan, hasSensitiveMatrixParam, safeUrlForStorage, safeUrlListForStorage, safeExcludeUrl, safeExcludeUrlsForStorage, saveConfigToStorage, loadConfigFromStorage, loadDefaultConfigFromServer, _esc, openScenarioBuilder, scnCloseBuilder, scnDefaultStep, scnAddStep, scnInsertStep, scnDeleteStep, scnDuplicateStep, scnMoveStep, scnChangeAction, scnSetField, scnLoadLoginTemplate, scnRender, scnStepSummary, scnRenderPreview, scnRenderPalette, scnPalNavigate, scnPalFill, scnPalAddForm, scnState_push, scnSaveBuilder, _scnSummaryCard, scnDeleteFlow, renderCfgFlows, renderReviewFlows, addAccount, collectAccounts, collectFlows, restoreFlows, formatDuration, updateETA, _onEventStreamStatusChange, _onEventStreamAuthRequired, _onEventStreamWireStale, initEventStream, connect, handleEvent, dispatchLegacyEvent, resetLiveScanState, applyScanSnapshot, updatePhaseBar, renderUrlList, renderCheckCounters, updatePayloadDisplay, togglePayloadExpand, setStatus, timeStr, addEventLog, updateScreenshot, addFinding, replaceFindings, updateRequest, updateResponse, showNetTab, openLightbox, escapeHtml, sendIntervention, confirmAbort, setPauseState, showPlanModal, confirmPlan, filterFindings, closeInteractiveModals, beginCrawlReview, resetCrawlReviewDetailState, openCrawlReviewDetails, showCrawlReviewModal, renderCrawlReviewList, sendCrawlReview, openManualCrawlFromReview, toggleManualPayload, sendManualPayload, showAiAnalysis, runAutoConfig, applyAutoConfig, submitHybridScan, handleWafDetected, switchCenterTab, loadD3, initSiteMapD3, _smEl, _smShort, _smNorm, _smModel, _sitemapRerender, _smArrowDefs, _smApplyView, _smRenderCompact, _smRenderShots, _smHash, _smRenderExplorer, _smShowPopover, _smHidePopover, smSetMode, smOnSearch, smExpandAll, smZoom, smResetView, _smWirePan, _smNodeColor, addSiteMapNode, markSiteMapVuln, showSiteMapFallback, _updateSiteMapFallback, _showSmTooltip, _hideSmTooltip, updatePhaseTimingStrip, _showSubphase, renderCheckProgressBars, switchMainView, onHistorySearchInput, onHistoryFilterChange, isSensitiveKey, maskPathSecrets, hasUnmaskedSensitivePath, maskNestedKv, maskKv, redactDisplayUrl, formatHistoryBytes, formatHistoryDate, setHistoryViewState, cancelScanHistory, loadScanHistory, renderHistoryTable, getAuditActionMeta, onAuditSearchInput, onAuditFilterChange, formatAuditTimestamp, validateAndSanitizeClientIp, formatSafeAuditDetail, setAuditViewState, loadAuditLog, renderAuditTable, bootDashboard
 });
+Object.assign(window, { _eventLogEntries });
 Object.defineProperty(window, 'state', { configurable: true, get: () => state });
 Object.defineProperty(window, 'findingCardKeys', { configurable: true, get: () => findingCardKeys });
 Object.defineProperty(window, 'findingViewerHelpers', { configurable: true, get: () => findingViewerHelpers });

@@ -42,33 +42,33 @@ def _audit_form_controls(page: Any, surface_name: str) -> list[str]:
     return page.evaluate("""(name) => {
         const violations = [];
         const controls = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea'));
-        
+
         for (const ctrl of controls) {
             // Check visibility (must be within an active/visible surface)
             if (ctrl.offsetParent === null && !ctrl.getClientRects().length) {
                 continue; // hidden element
             }
-            
+
             // Check for explicit or implicit accessible name
             const ariaLabel = ctrl.getAttribute('aria-label');
             const ariaLabelledby = ctrl.getAttribute('aria-labelledby');
             const title = ctrl.getAttribute('title');
             const id = ctrl.id;
-            
+
             let hasLabel = false;
             if (ariaLabel && ariaLabel.trim().length > 0) hasLabel = true;
             if (ariaLabelledby && document.getElementById(ariaLabelledby)) hasLabel = true;
             if (title && title.trim().length > 0) hasLabel = true;
-            
+
             if (id) {
                 const labelFor = document.querySelector(`label[for="${id}"]`);
                 if (labelFor && labelFor.textContent.trim().length > 0) hasLabel = true;
             }
-            
+
             // Check wrapping label
             const parentLabel = ctrl.closest('label');
             if (parentLabel && parentLabel.textContent.trim().length > 0) hasLabel = true;
-            
+
             if (!hasLabel) {
                 violations.push(`${name} -> Unlabeled <${ctrl.tagName.toLowerCase()} id="${id || ''}" type="${ctrl.type || ''}" class="${ctrl.className || ''}">`);
             }
