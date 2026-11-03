@@ -129,6 +129,9 @@ def require_browser(allow_skip_in_ci: bool = False) -> None:
 SAFE_PASSTHROUGH_KEYS = frozenset({
     # Execution & paths
     "PATH",
+    # Playwright browser cache & home
+    "HOME",
+    "PLAYWRIGHT_BROWSERS_PATH",
     # Windows system paths
     "SYSTEMROOT",
     "WINDIR",
