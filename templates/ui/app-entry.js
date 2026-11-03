@@ -10,6 +10,7 @@
   const portal = document.getElementById('portalFrame');
   const monitor = document.getElementById('monitorFrame');
   const monitorHost = document.getElementById('monitorModule');
+  const findingsSurface = document.getElementById('findingsSurface');
   const settingsSurface = document.getElementById('settingsSurface');
   const message = document.getElementById('message');
   const agentSkillsSurface = document.getElementById('agentSkillsSurface');
@@ -28,6 +29,7 @@
     portal.hidden = true;
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
+    if (findingsSurface) findingsSurface.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
@@ -91,6 +93,7 @@
   function showMonitorSurface(surface, onReady) {
     clearMessage();
     portal.hidden = true;
+    if (findingsSurface) findingsSurface.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
@@ -114,6 +117,7 @@
     context.textContent = '';
     clearMessage();
     if (monitorHost) monitorHost.hidden = true;
+    if (findingsSurface) findingsSurface.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
@@ -134,6 +138,7 @@
     portal.hidden = true;
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
+    if (findingsSurface) findingsSurface.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
 
@@ -219,6 +224,7 @@
 
   registry.register({ id: 'monitor', title: 'Monitor', route: '#/monitor', mount(route) {
     title.textContent = 'Monitor';
+    if (findingsSurface) findingsSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     let selectedScanVerified = false;
     let selectedIdentity = null;
@@ -303,6 +309,7 @@
     portal.hidden = true;
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
+    if (findingsSurface) findingsSurface.hidden = true;
     if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     if (agentSkillsSurface) {
@@ -322,6 +329,27 @@
     }
   } });
 
+  if (global.VulixFindingsModule && typeof global.VulixFindingsModule.createFindingsModule === 'function') {
+    registry.register(
+      global.VulixFindingsModule.createFindingsModule({
+        api: api,
+        surfaceEl: findingsSurface,
+        titleEl: title,
+        contextEl: context,
+        unavailable: unavailable,
+        clearMessage: clearMessage,
+        hideOthers: function () {
+          portal.hidden = true;
+          monitor.hidden = true;
+          if (monitorHost) monitorHost.hidden = true;
+          if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+          if (setupSurface) setupSurface.hidden = true;
+          if (settingsSurface) settingsSurface.hidden = true;
+        },
+      })
+    );
+  }
+
   if (global.VulixSettingsModule && typeof global.VulixSettingsModule.createSettingsModule === 'function') {
     registry.register(
       global.VulixSettingsModule.createSettingsModule({
@@ -335,6 +363,7 @@
           portal.hidden = true;
           monitor.hidden = true;
           if (monitorHost) monitorHost.hidden = true;
+          if (findingsSurface) findingsSurface.hidden = true;
           if (agentSkillsSurface) agentSkillsSurface.hidden = true;
           if (setupSurface) setupSurface.hidden = true;
         },
@@ -348,13 +377,17 @@
     const raw = (hash || '').replace(/^#/, '');
     const parts = raw.split('?');
     const route = parts[0] || '/portal';
-    if (!['/portal', '/setup', '/monitor', '/agent-skills', '/settings'].includes(route) || parts.length > 2) return null;
+    if (!['/portal', '/setup', '/monitor', '/findings', '/agent-skills', '/settings'].includes(route) || parts.length > 2) return null;
     const params = new URLSearchParams(parts[1] || '');
-    if (Array.from(params.keys()).some((key) => key !== 'scan') || params.getAll('scan').length > 1) return null;
+    if (Array.from(params.keys()).some((key) => key !== 'scan' && key !== 'finding')) return null;
+    if (params.getAll('scan').length > 1 || params.getAll('finding').length > 1) return null;
     const scanId = params.get('scan');
     if (scanId !== null && (!scanId || scanId.length > 128 || !/^[A-Za-z0-9._-]+$/.test(scanId))) return null;
-    if (scanId !== null && route !== '/monitor') return null;
-    return { id: route.slice(1), scanId };
+    if (scanId !== null && route !== '/monitor' && route !== '/findings') return null;
+    const findingId = params.get('finding');
+    if (findingId !== null && (!findingId || findingId.length > 512)) return null;
+    if (findingId !== null && route !== '/findings') return null;
+    return { id: route.slice(1), scanId, findingId };
   }
 
   function renderRoute() {

@@ -1367,6 +1367,74 @@ class MonitorServer:
                 **result.to_dict(),
             })
 
+        @app.get("/api/v1/scans/{scan_id}/findings")
+        async def api_scan_findings_by_id(scan_id: str):
+            """特定の scan_id の検出結果 (findings) を返す。"""
+            d = self._scan_dir(scan_id)
+            if d is None or not d.is_dir():
+                return JSONResponse({"error": "not found", "scan_id": scan_id}, status_code=404)
+
+            # 実行中の同一スキャンならメモリ上の最新スナップショットを返す
+            if self.scan_in_progress and self.current_scan_id == scan_id:
+                from wscan.scanners.base import finding_dict_confirmed
+                total = len(self.api_findings)
+                confirmed = sum(1 for f in self.api_findings if finding_dict_confirmed(f))
+                return JSONResponse({
+                    "scan_id": scan_id,
+                    "status": self.api_scan_status,
+                    "findings": self.api_findings,
+                    "findings_count": total,
+                    "total_findings_count": total,
+                    "confirmed_findings_count": confirmed,
+                    "hypothesis_count": total - confirmed,
+                    "findings_available": True,
+                })
+
+            evidence_file = d / "evidence.json"
+            if not evidence_file.is_file():
+                return JSONResponse({
+                    "scan_id": scan_id,
+                    "status": "incomplete",
+                    "findings": None,
+                    "findings_available": False,
+                    "error": "evidence.json not found",
+                }, status_code=404)
+
+            try:
+                data = json.loads(evidence_file.read_text(encoding="utf-8"))
+            except Exception as exc:
+                return JSONResponse({
+                    "scan_id": scan_id,
+                    "status": "error",
+                    "findings": None,
+                    "findings_available": False,
+                    "error": f"failed to read evidence.json: {exc}",
+                }, status_code=500)
+
+            findings = data.get("findings")
+            if not isinstance(findings, list):
+                return JSONResponse({
+                    "scan_id": scan_id,
+                    "status": data.get("status", "incomplete"),
+                    "findings": None,
+                    "findings_available": False,
+                    "error": "findings list not found in evidence",
+                }, status_code=404)
+
+            from wscan.scanners.base import finding_dict_confirmed
+            total = len(findings)
+            confirmed = sum(1 for f in findings if isinstance(f, dict) and finding_dict_confirmed(f))
+            return JSONResponse({
+                "scan_id": scan_id,
+                "status": data.get("status", "done"),
+                "findings": findings,
+                "findings_count": total,
+                "total_findings_count": total,
+                "confirmed_findings_count": confirmed,
+                "hypothesis_count": total - confirmed,
+                "findings_available": True,
+            })
+
         @app.get("/api/v1/scans/{scan_id}/crawl-graph")
         async def api_scans_crawl_graph(scan_id: str):
             """Return read-only snapshot projection of the crawl graph for a specific scan ID."""

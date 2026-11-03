@@ -16,6 +16,8 @@ UI_ASSETS = [
     "/ui/app-shell.js",
     "/ui/api-client.js",
     "/ui/monitor-module.js",
+    "/ui/evidence-viewer-registry.js",
+    "/ui/findings-module.js",
     "/ui/agent-skills-module.js",
     "/ui/setup-module.js",
     "/ui/settings-module.js",
@@ -519,6 +521,62 @@ def test_app_shell_agent_skills_view_and_screenshot(ui_harness: UIHarness):
     doc_img_path.parent.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(doc_img_path), full_page=False)
     assert doc_img_path.is_file() and doc_img_path.stat().st_size > 0
+
+
+def test_app_shell_findings_view_and_screenshot(ui_harness: UIHarness):
+    page = ui_harness.new_page(**STANDARD_VIEWPORTS[1440])
+    page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
+    page.wait_for_function("document.querySelector('#portalFrame').contentDocument?.title.includes('Server Portal')")
+
+    findings_btn = page.locator('[data-route="findings"]')
+    findings_btn.wait_for()
+    findings_btn.click()
+
+    page.wait_for_function("() => document.querySelector('[data-route=findings]').getAttribute('aria-current') === 'page'")
+    assert findings_btn.get_attribute("aria-current") == "page"
+    assert page.locator("#portalFrame").is_hidden()
+    assert page.locator("#monitorFrame").is_hidden()
+    assert page.locator("#findingsSurface").is_visible()
+    assert page.locator("#viewTitle").inner_text() == "Findings"
+
+    # Wait for findings list cards to render
+    page.wait_for_function("() => document.querySelectorAll('#findingsListContent .findings-list-card').length > 0")
+    cards = page.locator("#findingsListContent .findings-list-card")
+    assert cards.count() >= 1
+
+    # Select scan 20261026_100000 which has 3 findings
+    page.locator("#findingsScanSelect").select_option("20261026_100000")
+    page.wait_for_function("() => document.querySelectorAll('#findingsListContent .findings-list-card').length === 3")
+    assert page.locator("#findingsListContent .findings-list-card").count() == 3
+
+    # Check detail pane is visible and contains expected elements
+    assert page.locator("#findingsDetailPane").is_visible()
+    assert page.locator("#findingsDetailContent").is_visible()
+
+    # Verify severity, verification, review, and provenance badges exist
+    assert page.locator("#findingsDetailContent .sev-badge").count() >= 1
+    assert page.locator("#findingsDetailContent .verify-badge").count() >= 1
+    assert page.locator("#findingsDetailContent .review-badge").count() >= 1
+    assert page.locator("#findingsDetailContent .provenance-badge").count() >= 1
+
+    ui_harness.assert_no_horizontal_overflow(page, max_allowed=1440 + 1)
+    ui_harness.assert_no_errors(page)
+
+    # Save durable screenshot for documentation
+    doc_img_path = Path(ui_harness.repo_root) / "docs" / "images" / "app-findings.png"
+    doc_img_path.parent.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(doc_img_path), full_page=False)
+    assert doc_img_path.is_file() and doc_img_path.stat().st_size > 0
+
+    # Test deep link with valid finding
+    page.goto(f"{ui_harness.server_url}/app#/findings?scan=20261026_100000&finding=f_sqli_01", wait_until="domcontentloaded")
+    page.wait_for_function("() => document.querySelector('#findingsDetailContent')?.innerText?.includes('SQLI')")
+    assert "SQLI" in page.locator("#findingsDetailContent").inner_text()
+
+    # Test deep link with unknown / stale finding
+    page.goto(f"{ui_harness.server_url}/app#/findings?scan=20261026_100000&finding=stale_nonexistent_id", wait_until="domcontentloaded")
+    page.wait_for_function("() => document.querySelector('#findingsDetailContent')?.innerText?.includes('見つかりません')")
+    assert "見つかりません" in page.locator("#findingsDetailContent").inner_text()
 
 
 def test_app_monitor_pane_layout_adjustable_accessible_and_persisted(ui_harness: UIHarness):
