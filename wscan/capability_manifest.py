@@ -84,9 +84,63 @@ REQUIRED_CARRIER_FIELDS: tuple[str, ...] = (
     "declaration_only",
 )
 
-ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(REQUIRED_TOP_LEVEL_FIELDS)
+REQUIRED_AGENT_CAPABILITY_FIELDS: tuple[str, ...] = (
+    "id",
+    "name",
+    "description",
+    "applicable_modes",
+    "available",
+)
+
+DEFAULT_AGENT_CAPABILITIES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "browser_interaction",
+        "name": "ブラウザ自律操作",
+        "description": "DOM構造と視覚情報を解析し、自律的にページ巡回・クリック・フォーム入力を行う",
+        "applicable_modes": ["agent", "hybrid"],
+        "available": True,
+    },
+    {
+        "id": "security_scope_guard",
+        "name": "セキュリティスコープ制御",
+        "description": "攻撃対象URL・訪問専用URL・除外対象を判定し、許可範囲外へのプローブ送信を抑止",
+        "applicable_modes": ["normal", "agent", "hybrid"],
+        "available": True,
+    },
+    {
+        "id": "sensitive_data_protection",
+        "name": "認証情報・シークレット保護",
+        "description": "認証情報やセッショントークンをドメイン境界で隔離し、不要な外部送信やログ記録を抑止",
+        "applicable_modes": ["normal", "agent", "hybrid"],
+        "available": True,
+    },
+    {
+        "id": "request_scoped_headers",
+        "name": "リクエストスコープHTTPヘッダ",
+        "description": "CDP Fetchドメインを活用し、対象オリジンへのリクエストにのみ指定HTTPヘッダを付与",
+        "applicable_modes": ["agent", "hybrid"],
+        "available": True,
+    },
+    {
+        "id": "vulnerability_hypothesis",
+        "name": "自律的脆弱性仮説の抽出",
+        "description": "LLMによるページ応答の解釈から潜在的な脆弱性仮説を抽出し、未確証ラベル付きで報告・併記",
+        "applicable_modes": ["agent", "hybrid"],
+        "available": True,
+    },
+    {
+        "id": "recon_url_discovery",
+        "name": "偵察・URL収集",
+        "description": "自律探索により動的リンクやエンドポイントを収集し、後続スキャンフェーズへ引き継ぎ",
+        "applicable_modes": ["agent", "hybrid"],
+        "available": True,
+    },
+)
+
+ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(REQUIRED_TOP_LEVEL_FIELDS + ("agent_capabilities",))
 ALLOWED_SCANNER_FIELDS: frozenset[str] = frozenset(REQUIRED_SCANNER_FIELDS)
 ALLOWED_CARRIER_FIELDS: frozenset[str] = frozenset(REQUIRED_CARRIER_FIELDS)
+ALLOWED_AGENT_CAPABILITY_FIELDS: frozenset[str] = frozenset(REQUIRED_AGENT_CAPABILITY_FIELDS)
 ALLOWED_CVSS_FIELDS: frozenset[str] = frozenset(("score", "vector"))
 
 FORBIDDEN_COVERAGE_KEYWORDS: tuple[str, ...] = (
@@ -200,10 +254,16 @@ def _extract_scanner_capability(
     }
 
 
+def build_agent_capabilities() -> list[dict[str, Any]]:
+    """Return declared agent capability metadata list (pure function)."""
+    return [copy.deepcopy(cap) for cap in DEFAULT_AGENT_CAPABILITIES]
+
+
 def build_capability_manifest(
     registry: Mapping[str, type] | None = None,
     *,
     default_checks: Sequence[str] = DEFAULT_CHECKS,
+    agent_capabilities: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a versioned, static capability manifest from scanner registry.
 
@@ -212,6 +272,7 @@ def build_capability_manifest(
     Parameters:
         registry: check_type -> scanner class mapping. If None, imports SCANNERS.
         default_checks: Sequence of check names considered default (sqli, xss, os).
+        agent_capabilities: Optional custom agent capability declarations.
 
     Returns:
         JSON-serializable manifest dict conforming to schema_version 1.0.0.
@@ -230,6 +291,12 @@ def build_capability_manifest(
             default_checks=defaults_list,
         )
 
+    caps = (
+        [copy.deepcopy(c) for c in agent_capabilities]
+        if agent_capabilities is not None
+        else build_agent_capabilities()
+    )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "manifest_kind": MANIFEST_KIND,
@@ -240,6 +307,7 @@ def build_capability_manifest(
         "scanner_count": len(scanners),
         "scanner_ids": sorted(scanners.keys()),
         "scanners": scanners,
+        "agent_capabilities": caps,
     }
 
 
@@ -421,6 +489,31 @@ def validate_capability_manifest(
                                 f"Scanner '{scanner_id}' carrier '{carrier_name}' has unexpected extra field "
                                 f"'{field}' (strict schema violation)"
                             )
+
+    if "agent_capabilities" in manifest:
+        agent_caps = manifest.get("agent_capabilities")
+        if not isinstance(agent_caps, list):
+            errors.append("Field 'agent_capabilities' must be a list")
+        else:
+            for idx, cap in enumerate(agent_caps):
+                if not isinstance(cap, dict):
+                    errors.append(f"Agent capability [{idx}] must be a dict")
+                    continue
+                for req in REQUIRED_AGENT_CAPABILITY_FIELDS:
+                    if req not in cap:
+                        errors.append(f"Agent capability [{idx}] missing required field '{req}'")
+                extra = sorted(set(cap.keys()) - ALLOWED_AGENT_CAPABILITY_FIELDS)
+                for f in extra:
+                    if any(kw in f.lower() for kw in FORBIDDEN_COVERAGE_KEYWORDS):
+                        errors.append(
+                            f"Agent capability [{idx}] contains forbidden runtime coverage claim field '{f}'"
+                        )
+                    else:
+                        errors.append(f"Agent capability [{idx}] contains unexpected extra field '{f}'")
+                if "applicable_modes" in cap and not isinstance(cap["applicable_modes"], list):
+                    errors.append(f"Agent capability [{idx}] 'applicable_modes' must be a list of strings")
+                if "available" in cap and not isinstance(cap["available"], bool):
+                    errors.append(f"Agent capability [{idx}] 'available' must be a boolean")
 
     return errors
 

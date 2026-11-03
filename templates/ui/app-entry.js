@@ -12,6 +12,7 @@
   const monitorHost = document.getElementById('monitorModule');
   const settingsSurface = document.getElementById('settingsSurface');
   const message = document.getElementById('message');
+  const agentSkillsSurface = document.getElementById('agentSkillsSurface');
   const title = document.getElementById('viewTitle');
   const context = document.getElementById('scanContext');
   let activeScope = null;
@@ -25,7 +26,8 @@
   function unavailable(text) {
     portal.hidden = true;
     monitor.hidden = true;
-    monitorHost.hidden = true;
+    if (monitorHost) monitorHost.hidden = true;
+    if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     message.hidden = false;
     message.replaceChildren();
@@ -87,6 +89,7 @@
   function showMonitorSurface(surface, onReady) {
     clearMessage();
     portal.hidden = true;
+    if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     monitor.hidden = Boolean(onReady);
     ensureMonitor((bridge) => {
       bridge.setSurface(surface);
@@ -106,6 +109,8 @@
     title.textContent = 'ポータル';
     context.textContent = '';
     clearMessage();
+    if (monitorHost) monitorHost.hidden = true;
+    if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     monitor.hidden = true;
     portal.hidden = false;
@@ -198,6 +203,33 @@
     monitor.hidden = true;
   } });
 
+  registry.register({ id: 'agent-skills', title: 'Agent Skills', route: '#/agent-skills', mount() {
+    title.textContent = 'Agent Skills';
+    context.textContent = '';
+    clearMessage();
+    cancelPendingMonitorLoad();
+    stopContextSubscription();
+    portal.hidden = true;
+    monitor.hidden = true;
+    if (monitorHost) monitorHost.hidden = true;
+    if (settingsSurface) settingsSurface.hidden = true;
+    if (agentSkillsSurface) {
+      agentSkillsSurface.hidden = false;
+      if (global.VulixAgentSkillsModule && typeof global.VulixAgentSkillsModule.loadAndRenderAgentSkills === 'function') {
+        global.VulixAgentSkillsModule.loadAndRenderAgentSkills(agentSkillsSurface, { api });
+      }
+    }
+  }, unmount() {
+    if (agentSkillsSurface) {
+      agentSkillsSurface.hidden = true;
+      if (typeof agentSkillsSurface.replaceChildren === 'function') {
+        agentSkillsSurface.replaceChildren();
+      } else {
+        while (agentSkillsSurface.firstChild) agentSkillsSurface.removeChild(agentSkillsSurface.firstChild);
+      }
+    }
+  } });
+
   if (global.VulixSettingsModule && typeof global.VulixSettingsModule.createSettingsModule === 'function') {
     registry.register(
       global.VulixSettingsModule.createSettingsModule({
@@ -211,6 +243,7 @@
           portal.hidden = true;
           monitor.hidden = true;
           if (monitorHost) monitorHost.hidden = true;
+          if (agentSkillsSurface) agentSkillsSurface.hidden = true;
         },
       })
     );
@@ -222,7 +255,7 @@
     const raw = (hash || '').replace(/^#/, '');
     const parts = raw.split('?');
     const route = parts[0] || '/portal';
-    if (!['/portal', '/setup', '/monitor', '/settings'].includes(route) || parts.length > 2) return null;
+    if (!['/portal', '/setup', '/monitor', '/agent-skills', '/settings'].includes(route) || parts.length > 2) return null;
     const params = new URLSearchParams(parts[1] || '');
     if (Array.from(params.keys()).some((key) => key !== 'scan') || params.getAll('scan').length > 1) return null;
     const scanId = params.get('scan');
