@@ -143,11 +143,12 @@ Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traver
 
 ### オプトインの統合画面
 
-同じサーバーで `/app` を開くと、ポータル、Scan Setup、Monitor、Agent Skills（Agent機能一覧）、Settings を切り替えられます。Monitor は統合画面内の独立モジュールとして表示され、ポインタードラッグおよびキーボード（矢印キー）によるペイン境界リサイズ、各ペインの折りたたみ・最大化、3種のレイアウトプリセット（標準・ブラウザ優先・ログ優先）、localStorage へのレイアウト保持、狭小画面での縦積み表示に対応します。既存どおり停止・再開・中断、レビュー、手動ペイロード操作を提供し、WebSocket とライブ状態は1つだけ維持します。URL の hash は画面と選択中の scan を表し、戻る/進むや再読み込みでも選択を保ちます。既存の `/` ポータルと `/monitor` は引き続き標準の入口です。
+同じサーバーで `/app` を開くと、ポータル、Scan Setup、Monitor、Findings（検出結果一覧・詳細）、Agent Skills（Agent機能一覧）、Settings を切り替えられます。Monitor は統合画面内の独立モジュールとして表示され、ポインタードラッグおよびキーボード（矢印キー）によるペイン境界リサイズ、各ペインの折りたたみ・最大化、3種のレイアウトプリセット（標準・ブラウザ優先・ログ優先）、localStorage へのレイアウト保持、狭小画面での縦積み表示に対応します。Findings 画面では過去および最新スキャンの脆弱性一覧を重大度・検査種別・確証状態・出自（決定論スキャナ / Agent独自解釈）で絞り込み、エビデンスビューアによる安全な証跡表示、確証・レビュー状態・出自の別バッジ表示、URL hash によるスキャン・Finding のディープリンクに対応します。既存どおり停止・再開・中断、レビュー、手動ペイロード操作を提供し、WebSocket とライブ状態は1つだけ維持します。URL の hash は画面と選択中の scan を表し、戻る/進むや再読み込みでも選択を保ちます。既存の `/` ポータルと `/monitor` は引き続き標準の入口です。
 
 ![統合画面のポータル](docs/images/app-portal.png)
 ![統合画面の Scan Setup](docs/images/app-setup.png)
 ![統合画面の Monitor](docs/images/app-monitor.png)
+![統合画面の Findings](docs/images/app-findings.png)
 ![統合画面の Agent Skills](docs/images/app-agent-skills.png)
 ![統合画面の Settings](docs/images/app-settings.png)
 
