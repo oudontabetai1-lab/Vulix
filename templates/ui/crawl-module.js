@@ -97,6 +97,197 @@
   }
 
   /**
+   * Format finding count and availability for a crawl node.
+   * Invariant: unknown / not loaded is never presented as 0.
+   *
+   * @param {Object} rawNode
+   * @returns {{ loaded: boolean, count: number|null, text: string, isUnknown: boolean }}
+   */
+  function formatNodeFindingCount(rawNode) {
+    if (!rawNode || typeof rawNode !== 'object') {
+      return { loaded: false, count: null, text: '件数不明 (unknown)', isUnknown: true };
+    }
+    if (rawNode.findings_available === false || rawNode.findingsLoaded === false) {
+      return { loaded: false, count: null, text: '件数不明 (unknown)', isUnknown: true };
+    }
+    if (Array.isArray(rawNode.findings)) {
+      const len = rawNode.findings.length;
+      return {
+        loaded: true,
+        count: len,
+        text: len === 0 ? '0 件 (0 findings)' : `${len} 件 (${len} findings)`,
+        isUnknown: false,
+      };
+    }
+    return { loaded: false, count: null, text: '件数不明 (unknown)', isUnknown: true };
+  }
+
+  /**
+   * Pure node lookup by target identifier (nodeId or url).
+   * Supports normalized comparison (ignoring trailing slashes).
+   *
+   * @param {Array<Object>} nodes
+   * @param {Object|string} target
+   * @returns {{ found: boolean, node: Object|null, reason: string|null, target: Object }}
+   */
+  function findCrawlNode(nodes, target) {
+    const list = Array.isArray(nodes) ? nodes : [];
+    let tgt = {};
+    if (typeof target === 'string') {
+      const s = target.trim();
+      tgt = s.startsWith('http://') || s.startsWith('https://') || s.startsWith('/')
+        ? { url: s }
+        : { nodeId: s };
+    } else if (target && typeof target === 'object') {
+      tgt = Object.assign({}, target);
+    }
+
+    const targetId = tgt.nodeId ? String(tgt.nodeId).trim() : '';
+    const targetUrl = tgt.url ? String(tgt.url).trim() : '';
+
+    if (!targetId && !targetUrl) {
+      return { found: false, node: null, reason: 'empty_target', target: tgt };
+    }
+
+    // 1. Match by ID if specified
+    if (targetId) {
+      const match = list.find((n) => n && String(n.id) === targetId);
+      if (match) return { found: true, node: match, reason: null, target: tgt };
+    }
+
+    // 2. Match by URL (exact or normalized trailing slash)
+    if (targetUrl) {
+      const normTargetUrl = targetUrl.toLowerCase().replace(/\/$/, '');
+      const match = list.find((n) => {
+        if (!n || !n.url) return false;
+        const nUrl = String(n.url).toLowerCase().replace(/\/$/, '');
+        return nUrl === normTargetUrl;
+      });
+      if (match) return { found: true, node: match, reason: null, target: tgt };
+
+      // Submatch: pathname matching if target URL has substantial path
+      const subMatch = list.find((n) => {
+        if (!n || !n.url) return false;
+        const nUrl = String(n.url).toLowerCase().replace(/\/$/, '');
+        return nUrl.length > 8 && (normTargetUrl.includes(nUrl) || nUrl.includes(normTargetUrl));
+      });
+      if (subMatch) return { found: true, node: subMatch, reason: null, target: tgt };
+    }
+
+    return { found: false, node: null, reason: 'not_in_crawl_graph', target: tgt };
+  }
+
+  /**
+   * Pure function to build a deep link to the Findings view filtered to a given URL/endpoint.
+   *
+   * @param {string} [scanId]
+   * @param {string|Object} [optionsOrUrl]
+   * @returns {string} Hash string e.g. '#/findings?scan=123&url=http%3A%2F%2F...'
+   */
+  function buildFindingsLink(scanId, optionsOrUrl) {
+    let hash = '#/findings';
+    const params = new URLSearchParams();
+    if (scanId) params.set('scan', String(scanId).trim());
+
+    if (typeof optionsOrUrl === 'string') {
+      const u = optionsOrUrl.trim();
+      if (u) params.set('url', u);
+    } else if (optionsOrUrl && typeof optionsOrUrl === 'object') {
+      if (optionsOrUrl.url) params.set('url', String(optionsOrUrl.url).trim());
+      if (optionsOrUrl.findingId) params.set('finding', String(optionsOrUrl.findingId).trim());
+      if (optionsOrUrl.search) params.set('search', String(optionsOrUrl.search).trim());
+      if (optionsOrUrl.severity && optionsOrUrl.severity !== 'all') params.set('severity', String(optionsOrUrl.severity).trim());
+      if (optionsOrUrl.checkType && optionsOrUrl.checkType !== 'all') params.set('checkType', String(optionsOrUrl.checkType).trim());
+      if (optionsOrUrl.verification && optionsOrUrl.verification !== 'all') params.set('verification', String(optionsOrUrl.verification).trim());
+      if (optionsOrUrl.provenance && optionsOrUrl.provenance !== 'all') params.set('provenance', String(optionsOrUrl.provenance).trim());
+    }
+
+    const qs = params.toString();
+    if (qs) hash += '?' + qs;
+    return hash;
+  }
+
+  /**
+   * Pure function to build URL hash for Crawl view.
+   *
+   * @param {Object} [options]
+   * @returns {string} Hash string e.g. '#/crawl?scan=123&node=...'
+   */
+  function buildCrawlHash(options = {}) {
+    let hash = '#/crawl';
+    const params = new URLSearchParams();
+    if (options.scanId) params.set('scan', String(options.scanId).trim());
+    if (options.nodeId) params.set('node', String(options.nodeId).trim());
+    if (options.url) params.set('url', String(options.url).trim());
+    if (options.mode && options.mode !== 'graph') params.set('mode', String(options.mode).trim());
+    if (options.kind && options.kind !== 'all') params.set('kind', String(options.kind).trim());
+    if (options.search) params.set('search', String(options.search).trim());
+
+    const qs = params.toString();
+    if (qs) hash += '?' + qs;
+    return hash;
+  }
+
+  /**
+   * Pure function to parse Crawl view URL hash.
+   *
+   * @param {string} hash
+   * @returns {{ scanId: string|null, nodeId: string|null, url: string|null, mode: string|null, kind: string|null, search: string|null }}
+   */
+  function parseCrawlHash(hash) {
+    const raw = (hash || '').replace(/^#\/?/, '/');
+    const parts = raw.split('?');
+    const params = new URLSearchParams(parts[1] || '');
+    return {
+      scanId: params.get('scan') || null,
+      nodeId: params.get('node') || null,
+      url: params.get('url') || null,
+      mode: params.get('mode') || null,
+      kind: params.get('kind') || null,
+      search: params.get('search') || null,
+    };
+  }
+
+  /**
+   * Pure function to resolve capability-gated action entry points for a crawl node.
+   *
+   * @param {Object} node
+   * @param {Object} [options]
+   * @returns {Array<{ id: string, label: string, enabled: boolean, reason: string|null, href?: string, url?: string }>}
+   */
+  function resolveCrawlNodeActions(node, options = {}) {
+    const scanId = options.scanId || null;
+    const url = node && node.url ? String(node.url).trim() : '';
+    const hasValidHttpUrl = Boolean(url && /^https?:\/\//i.test(url));
+
+    const manifest = options.manifest || null;
+    const hasActionReplayCapability = Boolean(manifest && manifest.capabilities && manifest.capabilities.replay_action);
+
+    return [
+      {
+        id: 'view_findings',
+        label: '検出事項を表示',
+        enabled: Boolean(scanId && url),
+        href: scanId && url ? buildFindingsLink(scanId, url) : null,
+        reason: scanId && url ? null : 'スキャンIDまたはURLがありません',
+      },
+      {
+        id: 'open_browser',
+        label: 'ブラウザで開く',
+        enabled: hasValidHttpUrl,
+        url: hasValidHttpUrl ? url : null,
+        reason: hasValidHttpUrl ? null : '利用可能なHTTP(S) URLがありません',
+      },
+      {
+        id: 'replay_action',
+        label: 'アクション実行 / 再送',
+        enabled: hasActionReplayCapability,
+        reason: hasActionReplayCapability ? null : 'not available in this version',
+      },
+    ];
+  }
+
+  /**
    * Normalize and format node details with explicit missing-reference fallbacks.
    * Never synthesizes or invents fake actions, inputs, or findings.
    *
@@ -116,6 +307,13 @@
     const findings = Array.isArray(node.findings) ? node.findings.filter((f) => f && typeof f === 'object') : [];
     const metadata = node.metadata && typeof node.metadata === 'object' ? Object.assign({}, node.metadata) : {};
 
+    const countInfo = formatNodeFindingCount(node);
+    const findingsUnavailable = countInfo.loaded
+      ? '関連する検出事項なし (0 findings)'
+      : (node.findings === null || node.findings_available === false || node.findingsLoaded === false
+          ? '検出事項データ未読込 (unknown)'
+          : '関連する検出事項なし (0 findings)');
+
     return {
       id: id,
       kind: KIND_LABELS[kind] ? kind : 'unknown',
@@ -131,7 +329,10 @@
       inputsUnavailableText: '入力/パラメータなし (unavailable)',
       findings: findings,
       hasFindings: findings.length > 0,
-      findingsUnavailableText: '関連する検出事項なし (0 findings)',
+      findingsLoaded: countInfo.loaded,
+      findingsCount: countInfo.count,
+      findingsCountText: countInfo.text,
+      findingsUnavailableText: findingsUnavailable,
       metadata: metadata,
     };
   }
@@ -361,10 +562,12 @@
 
     const api = options.api;
     let initialScanId = options.scanId || null;
+    let targetNodeId = options.nodeId || null;
+    let targetUrl = options.url || null;
     let currentData = null;
-    let currentMode = 'graph'; // 'graph' | 'explorer' | 'list'
-    let currentKindFilter = 'all';
-    let searchQuery = '';
+    let currentMode = (options.mode && ['graph', 'explorer', 'list'].includes(options.mode)) ? options.mode : 'graph';
+    let currentKindFilter = options.kind || 'all';
+    let searchQuery = options.search || '';
     let selectedNodeId = null;
 
     let viewScale = 1.0;
@@ -637,11 +840,56 @@
     }
 
     // ── Helper: Render Node Detail into a Container ──
-    function renderNodeDetailContent(targetContainer, node) {
+    function renderNodeDetailContent(targetContainer, node, notInGraphTarget) {
       if (typeof targetContainer.replaceChildren === 'function') {
         targetContainer.replaceChildren();
       } else {
         while (targetContainer.firstChild) targetContainer.removeChild(targetContainer.firstChild);
+      }
+
+      if (notInGraphTarget) {
+        const notFoundCard = doc.createElement('div');
+        notFoundCard.className = 'crawl-not-found-card';
+
+        const notFoundHdr = doc.createElement('h3');
+        notFoundHdr.className = 'crawl-detail-title';
+        notFoundHdr.textContent = 'ノード未検出 (Not in Crawl Graph)';
+        notFoundCard.appendChild(notFoundHdr);
+
+        const notFoundMsg = doc.createElement('p');
+        notFoundMsg.className = 'crawl-not-found-msg';
+        notFoundMsg.textContent = '指定された URL / ノードは現在のクロールグラフに存在しません (not in crawl graph)。';
+        notFoundCard.appendChild(notFoundMsg);
+
+        const urlRow = doc.createElement('div');
+        urlRow.className = 'crawl-detail-row';
+        const urlLabel = doc.createElement('strong');
+        urlLabel.textContent = '対象: ';
+        urlRow.appendChild(urlLabel);
+        const urlCode = doc.createElement('code');
+        urlCode.className = 'crawl-url-code';
+        urlCode.textContent = notInGraphTarget.url || notInGraphTarget.nodeId || '(unknown)';
+        urlRow.appendChild(urlCode);
+        notFoundCard.appendChild(urlRow);
+
+        const desc = doc.createElement('div');
+        desc.className = 'crawl-unavailable-text';
+        desc.textContent = 'このURLはクロール対象外であるか、スキャンの巡回スコープ外または除外された可能性があります。';
+        notFoundCard.appendChild(desc);
+
+        if (initialScanId) {
+          const backWrap = doc.createElement('div');
+          backWrap.style.marginTop = '14px';
+          const backLink = doc.createElement('a');
+          backLink.className = 'history-btn';
+          backLink.href = `#/findings?scan=${encodeURIComponent(initialScanId)}`;
+          backLink.textContent = '← Findings 画面へ戻る';
+          backWrap.appendChild(backLink);
+          notFoundCard.appendChild(backWrap);
+        }
+
+        targetContainer.appendChild(notFoundCard);
+        return;
       }
 
       if (!node) {
@@ -716,14 +964,30 @@
         actList.className = 'crawl-detail-list';
         formatted.actions.forEach((act) => {
           const item = doc.createElement('li');
+          item.className = 'crawl-action-item';
           const method = doc.createElement('span');
           method.className = 'crawl-method-badge';
           method.textContent = String(act.method || 'GET').toUpperCase();
           item.appendChild(method);
 
           const actUrl = doc.createElement('span');
-          actUrl.textContent = ` ${act.action || ''}`;
+          actUrl.textContent = ` ${act.action || ''} `;
           item.appendChild(actUrl);
+
+          const replayBtn = doc.createElement('button');
+          replayBtn.type = 'button';
+          replayBtn.className = 'history-btn crawl-action-btn disabled';
+          replayBtn.disabled = true;
+          replayBtn.setAttribute('aria-disabled', 'true');
+          replayBtn.title = 'not available in this version';
+          const rText = doc.createElement('span');
+          rText.textContent = 'アクション実行';
+          const rReason = doc.createElement('span');
+          rReason.className = 'action-disabled-tag';
+          rReason.textContent = ' (not available in this version)';
+          replayBtn.append(rText, rReason);
+          item.appendChild(replayBtn);
+
           actList.appendChild(item);
         });
         actionsSec.appendChild(actList);
@@ -769,9 +1033,24 @@
       // ── Linked Findings Section ──
       const findingsSec = doc.createElement('div');
       findingsSec.className = 'crawl-detail-section';
+      const countInfo = formatNodeFindingCount(node);
       const findingsTitle = doc.createElement('h4');
-      findingsTitle.textContent = `検出事項 (${formatted.findings.length})`;
+      findingsTitle.textContent = `検出事項 (${countInfo.text})`;
       findingsSec.appendChild(findingsTitle);
+
+      // Deep link to Findings view filtered to this URL
+      if (formatted.url) {
+        const linkWrap = doc.createElement('div');
+        linkWrap.className = 'crawl-findings-link-wrap';
+        const findingsLink = doc.createElement('a');
+        findingsLink.className = 'history-btn primary crawl-findings-deep-link';
+        findingsLink.href = buildFindingsLink(initialScanId, formatted.url);
+        findingsLink.textContent = countInfo.loaded
+          ? `Findings 画面で確認 (${countInfo.count} 件) →`
+          : `Findings 画面で確認 (件数不明) →`;
+        linkWrap.appendChild(findingsLink);
+        findingsSec.appendChild(linkWrap);
+      }
 
       if (formatted.hasFindings) {
         const fList = doc.createElement('div');
@@ -809,13 +1088,27 @@
             fVer.textContent = '確証済み (verified)';
             card.appendChild(fVer);
           }
+
+          if (f.id) {
+            const fLinkWrap = doc.createElement('div');
+            fLinkWrap.style.marginTop = '6px';
+            const fLink = doc.createElement('a');
+            fLink.className = 'crawl-finding-item-link';
+            fLink.href = buildFindingsLink(initialScanId, { findingId: f.id });
+            fLink.textContent = 'Findings で詳細を開く →';
+            fLinkWrap.appendChild(fLink);
+            card.appendChild(fLinkWrap);
+          }
+
           fList.appendChild(card);
         });
         findingsSec.appendChild(fList);
       } else {
         const unavail = doc.createElement('div');
         unavail.className = 'crawl-unavailable-text';
-        unavail.textContent = formatted.findingsUnavailableText;
+        unavail.textContent = countInfo.loaded
+          ? formatted.findingsUnavailableText
+          : '検出事項データ未読込 (unknown)';
         findingsSec.appendChild(unavail);
       }
       targetContainer.appendChild(findingsSec);
@@ -846,13 +1139,46 @@
     }
 
     // ── Helper: Open Detail Drawer (in Graph & List views) ──
-    function openDetail(node) {
+    function openDetail(node, notInGraphTarget) {
+      if (notInGraphTarget) {
+        selectedNodeId = null;
+        detailDrawer.hidden = false;
+
+        const closeBtn = doc.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'crawl-drawer-close';
+        closeBtn.textContent = '✕';
+        closeBtn.title = '閉じる';
+        closeBtn.addEventListener('click', () => {
+          detailDrawer.hidden = true;
+        });
+
+        renderNodeDetailContent(detailDrawer, null, notInGraphTarget);
+        detailDrawer.insertBefore(closeBtn, detailDrawer.firstChild);
+        return;
+      }
+
       if (!node) {
         detailDrawer.hidden = true;
         return;
       }
       selectedNodeId = node.id;
       detailDrawer.hidden = false;
+
+      // Update URL hash state via history.replaceState (so back/forward & reload restore state)
+      if (typeof window !== 'undefined' && window.location && window.history && window.history.replaceState) {
+        const nextHash = buildCrawlHash({
+          scanId: initialScanId,
+          nodeId: node.id,
+          url: node.url,
+          mode: currentMode !== 'graph' ? currentMode : undefined,
+          kind: currentKindFilter !== 'all' ? currentKindFilter : undefined,
+          search: searchQuery || undefined,
+        });
+        if (window.location.hash !== nextHash) {
+          window.history.replaceState(null, '', nextHash);
+        }
+      }
 
       // Close button
       const closeBtn = doc.createElement('button');
@@ -1220,6 +1546,19 @@
 
         hideBanner();
         renderActiveMode();
+
+        // Node / URL lookup from options or route
+        if (targetUrl || targetNodeId) {
+          const lookup = findCrawlNode(currentData.nodes, { url: targetUrl, nodeId: targetNodeId });
+          if (lookup.found) {
+            selectedNodeId = lookup.node.id;
+            openDetail(lookup.node);
+          } else {
+            showBanner('empty', `指定されたURL/ノードはクロールグラフに存在しません (not in crawl graph): ${targetUrl || targetNodeId}`);
+            openDetail(null, { url: targetUrl, nodeId: targetNodeId });
+          }
+        }
+
         return true;
       } catch (err) {
         showBanner('error', `通信エラーが発生しました: ${err.message || 'Error'}`, '再試行', () => {
@@ -1382,6 +1721,11 @@
           viewInstance = renderCrawlView(options.surfaceEl, {
             api: activeScope,
             scanId: route && route.scanId ? route.scanId : null,
+            nodeId: route && route.nodeId ? route.nodeId : null,
+            url: route && route.url ? route.url : null,
+            mode: route && route.mode ? route.mode : null,
+            kind: route && route.kind ? route.kind : null,
+            search: route && route.search ? route.search : null,
             onContextUpdated: (scanId, completeness) => {
               if (options.contextEl) {
                 options.contextEl.textContent = `Scan ${scanId || '—'} · ${completeness || 'unknown'}`;
@@ -1409,10 +1753,16 @@
   const exportObj = {
     SCHEMA_VERSION: SCHEMA_VERSION,
     formatCompleteness: formatCompleteness,
+    formatNodeFindingCount: formatNodeFindingCount,
     formatNodeDetail: formatNodeDetail,
     searchNodes: searchNodes,
     filterNodesByKind: filterNodesByKind,
+    findCrawlNode: findCrawlNode,
     layoutGraph: layoutGraph,
+    buildFindingsLink: buildFindingsLink,
+    buildCrawlHash: buildCrawlHash,
+    parseCrawlHash: parseCrawlHash,
+    resolveCrawlNodeActions: resolveCrawlNodeActions,
     renderCrawlView: renderCrawlView,
     createCrawlModule: createCrawlModule,
   };

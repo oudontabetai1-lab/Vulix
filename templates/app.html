@@ -249,6 +249,19 @@
     .crawl-meta-dl dt { color: var(--text-muted); font-weight: 600; }
     .crawl-meta-dl dd { color: var(--text); margin: 0; }
     .crawl-detail-empty { color: var(--text-muted); font-size: 0.8rem; padding: 18px; text-align: center; }
+    .findings-actions-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .findings-action-btn { font-size: 0.76rem; text-decoration: none; }
+    .findings-action-btn.disabled, .findings-action-btn:disabled { opacity: 0.6; cursor: not-allowed; border-style: dashed; }
+    .action-disabled-tag { font-size: 0.68rem; color: var(--text-muted); margin-left: 2px; }
+    .crawl-action-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+    .crawl-action-btn { font-size: 0.72rem; padding: 2px 8px; }
+    .crawl-findings-link-wrap { margin-bottom: 10px; }
+    .crawl-findings-deep-link { text-decoration: none; display: inline-flex; width: 100%; justify-content: center; }
+    .crawl-finding-item-link { font-size: 0.72rem; color: var(--accent); text-decoration: none; font-weight: 600; }
+    .crawl-finding-item-link:hover { text-decoration: underline; }
+    .crawl-not-found-card { padding: 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface2); }
+    .crawl-not-found-msg { font-size: 0.82rem; color: var(--high); margin: 6px 0; font-weight: 600; }
+    .crawl-url-filter-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 4px; background: var(--surface2); border: 1px solid var(--accent); font-size: 0.76rem; color: var(--accent); font-weight: 600; }
     @media (max-width: 700px) {
       .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
       aside { padding: 10px; border-right: 0; border-bottom: 1px solid var(--border); }
