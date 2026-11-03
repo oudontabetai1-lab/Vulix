@@ -19,6 +19,20 @@
   const SCHEMA_VERSION = '1.0.0';
   const MANIFEST_KIND = 'settings_schema';
 
+  const MODE_LABELS = {
+    normal: '通常',
+    agent: 'Agent',
+    hybrid: 'Hybrid',
+  };
+
+  function formatValue(v) {
+    if (v === null || v === undefined) return '(なし)';
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    if (Array.isArray(v)) return `[${v.join(', ')}]`;
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  }
+
   const TAB_DEFINITIONS = [
     { id: 'crawl', label: 'クロール・スコープ' },
     { id: 'checks', label: '検査項目・ペイロード' },
@@ -735,6 +749,31 @@
     controlsRow.appendChild(startSection);
 
     header.appendChild(controlsRow);
+
+    // Search row (filters fields across all five tabs by key or label)
+    const searchRow = doc.createElement('div');
+    searchRow.className = 'setup-search-row';
+    const searchInput = doc.createElement('input');
+    searchInput.type = 'search';
+    searchInput.id = 'setupSearchInput';
+    searchInput.className = 'setup-search-input';
+    searchInput.placeholder = '設定項目を検索 (キー・ラベル)...';
+    searchInput.setAttribute('aria-label', '設定項目検索');
+    const searchCount = doc.createElement('span');
+    searchCount.id = 'setupSearchCount';
+    searchCount.className = 'setup-search-count';
+    searchCount.hidden = true;
+    searchRow.appendChild(searchInput);
+    searchRow.appendChild(searchCount);
+    header.appendChild(searchRow);
+
+    // Preset Diff & Effective Config Section
+    const effectiveSection = doc.createElement('div');
+    effectiveSection.id = 'setupEffectiveSection';
+    effectiveSection.className = 'setup-effective-section';
+    effectiveSection.hidden = true;
+    header.appendChild(effectiveSection);
+
     root.appendChild(header);
 
     // ─── Tab Bar (WAI-ARIA Tablist with roving tabindex) ─────────
@@ -1029,60 +1068,194 @@
       targetGrid.appendChild(fieldWrapper);
     });
 
-    // ─── Mode Switching Logic ────────────────────────────────────
-    function applyMode(mode) {
-      currentMode = mode;
-      modes.forEach((m) => {
-        const btn = modeButtons[m.id];
-        const isSelected = m.id === mode;
-        btn.classList.toggle('active', isSelected);
-        btn.setAttribute('aria-checked', isSelected ? 'true' : 'false');
-      });
+    // ─── Search Filtering Logic ──────────────────────────────────
+    function filterFields(query) {
+      const q = (query || '').trim().toLowerCase();
+      let matchCount = 0;
+      let totalFields = 0;
 
-      // Disable scan profiles in agent mode per server contract
-      const isAgent = mode === 'agent';
-      Object.values(presetButtons).forEach((btn) => {
-        btn.disabled = isAgent;
-      });
-      presetNote.textContent = isAgent ? '※ Agent モードではプロファイルは指定できません' : '';
-
-      // Start scan button label
-      if (mode === 'agent') {
-        startBtn.textContent = '▶ Agent スキャン開始';
-      } else if (mode === 'hybrid') {
-        startBtn.textContent = '▶ ハイブリッドスキャン開始';
-      } else {
-        startBtn.textContent = '▶ スキャン開始';
-      }
-
-      // Filter visible fields based on applicable_modes
       fieldWrappers.forEach((wrapper) => {
-        try {
-          const fieldModes = JSON.parse(wrapper.dataset.modes || '[]');
-          if (fieldModes.length && !fieldModes.includes(mode)) {
-            wrapper.style.display = 'none';
-          } else {
-            wrapper.style.display = '';
-          }
-        } catch (_) {
+        const key = wrapper.dataset.fieldKey || '';
+        const field = fieldsByKey[key];
+        const label = (field && field.label ? field.label : '').toLowerCase();
+        const matches = !q || key.toLowerCase().includes(q) || label.includes(q);
+
+        totalFields++;
+        if (matches) {
+          matchCount++;
           wrapper.style.display = '';
+          delete wrapper.dataset.searchFiltered;
+        } else {
+          wrapper.style.display = 'none';
+          wrapper.dataset.searchFiltered = 'true';
         }
       });
+
+      if (q) {
+        searchCount.textContent = `${matchCount} / ${totalFields} 件一致`;
+        searchCount.hidden = false;
+        tabPanels.forEach((panel) => {
+          const details = (panel.querySelector ? panel.querySelector('details') : null) ||
+            Array.from(panel.children || []).find((c) => c && c.tagName === 'details');
+          if (details) {
+            const children = Array.from(details.children || []);
+            const hasMatch = children.some((c) => {
+              if (c && c.classList && (typeof c.classList.contains === 'function' ? c.classList.contains('setup-grid') : c.className?.includes('setup-grid'))) {
+                const subChildren = Array.from(c.children || []);
+                return subChildren.some((w) => w && w.dataset && !w.dataset.searchFiltered);
+              }
+              return c && c.dataset && !c.dataset.searchFiltered;
+            });
+            if (hasMatch) details.open = true;
+          }
+        });
+      } else {
+        searchCount.hidden = true;
+        searchCount.textContent = '';
+      }
+      return matchCount;
     }
 
-    Object.keys(modeButtons).forEach((m) => {
-      modeButtons[m].addEventListener('click', () => applyMode(m));
+    searchInput.addEventListener('input', () => {
+      filterFields(searchInput.value);
     });
 
-    // ─── Preset Application Logic ────────────────────────────────
-    Object.entries(presetButtons).forEach(([profId, btn]) => {
-      btn.addEventListener('click', () => {
-        if (currentMode === 'agent') return;
-        const profile = profiles[profId];
-        if (!profile || !profile.overrides) return;
-        const overrides = profile.overrides;
+    // ─── Preset Diff & Effective Config Display ──────────────────
+    let currentPreset = null;
 
-        for (const [key, value] of Object.entries(overrides)) {
+    function renderEffectiveUnavailable(reason) {
+      if (typeof effectiveSection.replaceChildren === 'function') {
+        effectiveSection.replaceChildren();
+      } else {
+        while (effectiveSection.firstChild) effectiveSection.removeChild(effectiveSection.firstChild);
+      }
+      effectiveSection.hidden = false;
+
+      const unavail = doc.createElement('div');
+      unavail.className = 'setup-effective-unavailable';
+      unavail.setAttribute('role', 'alert');
+      unavail.id = 'setupEffectiveUnavailable';
+      unavail.textContent = `実効設定・プロファイル差分を取得できませんでした (${reason || 'unavailable'})`;
+      effectiveSection.appendChild(unavail);
+    }
+
+    function renderEffectiveDiff(effectiveData, profile) {
+      if (typeof effectiveSection.replaceChildren === 'function') {
+        effectiveSection.replaceChildren();
+      } else {
+        while (effectiveSection.firstChild) effectiveSection.removeChild(effectiveSection.firstChild);
+      }
+      effectiveSection.hidden = false;
+
+      const diff = (effectiveData && effectiveData.diff) || {};
+      const diffKeys = Object.keys(diff);
+      const profLabel = (profile && profile.label) || (effectiveData && effectiveData.profile) || 'プロファイル';
+
+      const secHeader = doc.createElement('div');
+      secHeader.className = 'setup-effective-header';
+      const titleSpan = doc.createElement('span');
+      titleSpan.className = 'setup-effective-title';
+      titleSpan.textContent = `プロファイル変更差分: ${profLabel}`;
+      const badgeSpan = doc.createElement('span');
+      badgeSpan.className = 'setup-effective-badge';
+      badgeSpan.textContent = `${diffKeys.length} 項目変更`;
+      secHeader.appendChild(titleSpan);
+      secHeader.appendChild(badgeSpan);
+      effectiveSection.appendChild(secHeader);
+
+      if (Array.isArray(effectiveData.invalid_keys) && effectiveData.invalid_keys.length > 0) {
+        const incompNote = doc.createElement('div');
+        incompNote.className = 'setup-incompatible-note';
+        incompNote.textContent = `※ 宣言の制約に適合しない現在設定 (${effectiveData.invalid_keys.length} 件: ${effectiveData.invalid_keys.join(', ')}) は宣言既定値に置き換えて解決しました`;
+        effectiveSection.appendChild(incompNote);
+      }
+
+      const diffList = doc.createElement('div');
+      diffList.id = 'setupEffectiveDiffList';
+      diffList.className = 'setup-effective-diff-list';
+
+      if (diffKeys.length === 0) {
+        const empty = doc.createElement('div');
+        empty.className = 'setup-effective-empty';
+        empty.textContent = '既定値からの変更項目はありません';
+        diffList.appendChild(empty);
+      } else {
+        diffKeys.forEach((key) => {
+          const item = diff[key] || {};
+          const field = fieldsByKey[key];
+          const label = field && field.label ? field.label : key;
+
+          const row = doc.createElement('div');
+          row.className = 'setup-effective-diff-item';
+          row.dataset.fieldKey = key;
+
+          const keyEl = doc.createElement('span');
+          keyEl.className = 'setup-diff-key';
+          keyEl.textContent = `${label} (${key}):`;
+
+          const beforeEl = doc.createElement('span');
+          beforeEl.className = 'setup-diff-before';
+          beforeEl.textContent = formatValue(item.before);
+
+          const arrowEl = doc.createElement('span');
+          arrowEl.className = 'setup-diff-arrow';
+          arrowEl.textContent = ' → ';
+
+          const afterEl = doc.createElement('span');
+          afterEl.className = 'setup-diff-after';
+          afterEl.textContent = formatValue(item.after);
+
+          row.appendChild(keyEl);
+          row.appendChild(beforeEl);
+          row.appendChild(arrowEl);
+          row.appendChild(afterEl);
+          diffList.appendChild(row);
+        });
+      }
+      effectiveSection.appendChild(diffList);
+
+      const values = (effectiveData && effectiveData.values) || {};
+      const valKeys = Object.keys(values);
+      if (valKeys.length > 0) {
+        const details = doc.createElement('details');
+        details.className = 'setup-effective-config-details';
+        const summary = doc.createElement('summary');
+        summary.textContent = `実効設定値 (${valKeys.length} 項目)`;
+        const grid = doc.createElement('div');
+        grid.className = 'setup-effective-config-grid';
+
+        valKeys.forEach((k) => {
+          const v = values[k];
+          const field = fieldsByKey[k];
+          const label = field && field.label ? field.label : k;
+
+          const valItem = doc.createElement('div');
+          valItem.className = 'setup-effective-val-item';
+          valItem.dataset.fieldKey = k;
+          valItem.textContent = `${label}: ${formatValue(v)}`;
+          grid.appendChild(valItem);
+        });
+
+        details.appendChild(summary);
+        details.appendChild(grid);
+        effectiveSection.appendChild(details);
+      }
+    }
+
+    async function applyPreset(profId, updateFields = true) {
+      if (currentMode === 'agent') return false;
+      const profile = profiles[profId];
+      if (!profile) return false;
+      currentPreset = profId;
+
+      Object.entries(presetButtons).forEach(([id, b]) => {
+        if (typeof b.classList?.toggle === 'function') {
+          b.classList.toggle('active', id === profId);
+        }
+      });
+
+      if (updateFields && profile.overrides) {
+        for (const [key, value] of Object.entries(profile.overrides)) {
           if (key.startsWith('toggles.')) {
             const toggleKey = key.slice(8);
             const cb = (typeof doc.querySelector === 'function') ? doc.querySelector(`input[data-toggle="${toggleKey}"]`) : null;
@@ -1098,7 +1271,174 @@
             if (el) el.value = value != null ? String(value) : '';
           }
         }
+      }
+
+      presetNote.textContent = `適用中: ${profile.label || profId}`;
+
+      try {
+        let data = null;
+        if (options.effectiveConfig && options.effectiveConfig.profile === profId && options.effectiveConfig.mode === currentMode) {
+          data = options.effectiveConfig;
+        } else if (typeof options.fetchEffectiveConfig === 'function') {
+          data = await options.fetchEffectiveConfig(currentMode, profId);
+        } else if (options.api && typeof options.api.get === 'function') {
+          const endpoint = options.effectiveEndpoint || '/api/v1/settings/effective';
+          const params = `mode=${encodeURIComponent(currentMode)}&profile=${encodeURIComponent(profId)}&schema_version=${encodeURIComponent(SCHEMA_VERSION)}`;
+          const res = await options.api.get(`${endpoint}?${params}`);
+          if (!res || !res.ok || !res.data) {
+            throw new Error(res && res.error ? res.error : 'unavailable');
+          }
+          data = res.data;
+        } else if (typeof fetch === 'function') {
+          const endpoint = options.effectiveEndpoint || '/api/v1/settings/effective';
+          const params = `mode=${encodeURIComponent(currentMode)}&profile=${encodeURIComponent(profId)}&schema_version=${encodeURIComponent(SCHEMA_VERSION)}`;
+          const res = await fetch(`${endpoint}?${params}`);
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+          }
+          data = await res.json();
+        } else {
+          throw new Error('API client unavailable');
+        }
+
+        if (!data || typeof data !== 'object' ||
+            data.schema_version !== SCHEMA_VERSION || data.manifest_kind !== 'effective_config' ||
+            data.mode !== currentMode || data.profile !== profId ||
+            !data.values || typeof data.values !== 'object' || Array.isArray(data.values) ||
+            !data.diff || typeof data.diff !== 'object' || Array.isArray(data.diff)) {
+          throw new Error('設定宣言と一致しない応答です');
+        }
+
+        renderEffectiveDiff(data, profile);
         presetNote.textContent = `適用済み: ${profile.label || profId}`;
+        return true;
+      } catch (err) {
+        renderEffectiveUnavailable(err ? (err.message || String(err)) : 'unavailable');
+        presetNote.textContent = `適用失敗: ${profile.label || profId}`;
+        return false;
+      }
+    }
+
+    // ─── Mode Switching Logic ────────────────────────────────────
+    function applyMode(mode) {
+      currentMode = mode;
+      modes.forEach((m) => {
+        const btn = modeButtons[m.id];
+        const isSelected = m.id === mode;
+        if (typeof btn.classList?.toggle === 'function') {
+          btn.classList.toggle('active', isSelected);
+        }
+        btn.setAttribute('aria-checked', isSelected ? 'true' : 'false');
+      });
+
+      const isAgent = mode === 'agent';
+      Object.entries(presetButtons).forEach(([profId, btn]) => {
+        btn.disabled = isAgent;
+        if (isAgent && typeof btn.classList?.remove === 'function') {
+          btn.classList.remove('active');
+        }
+      });
+
+      if (isAgent) {
+        currentPreset = null;
+        effectiveSection.hidden = true;
+        presetNote.textContent = '※ Agent モードではプロファイルは指定できません';
+      } else {
+        presetNote.textContent = currentPreset ? `適用済み: ${profiles[currentPreset]?.label || currentPreset}` : '';
+        if (currentPreset) {
+          applyPreset(currentPreset, false);
+        }
+      }
+
+      // Start scan button label
+      if (mode === 'agent') {
+        startBtn.textContent = '▶ Agent スキャン開始';
+      } else if (mode === 'hybrid') {
+        startBtn.textContent = '▶ ハイブリッドスキャン開始';
+      } else {
+        startBtn.textContent = '▶ スキャン開始';
+      }
+
+      // Mode applicability: fields not applicable to the selected mode
+      // are shown as not applicable with the reason from the declaration.
+      fieldWrappers.forEach((wrapper) => {
+        const key = wrapper.dataset.fieldKey;
+        const field = fieldsByKey[key];
+        let fieldModes = [];
+        try {
+          fieldModes = JSON.parse(wrapper.dataset.modes || '[]');
+        } catch (_) {
+          fieldModes = field && Array.isArray(field.applicable_modes) ? field.applicable_modes : [];
+        }
+        const isApplicable = !fieldModes.length || fieldModes.includes(mode);
+
+        let naBadge = (typeof wrapper.querySelector === 'function' ? wrapper.querySelector('.setup-na-badge') : null) ||
+          (Array.isArray(wrapper.children) ? wrapper.children.find((c) => c && c.className && c.className.includes('setup-na-badge')) : null);
+
+        if (!isApplicable) {
+          if (typeof wrapper.classList?.add === 'function') wrapper.classList.add('not-applicable');
+          wrapper.dataset.notApplicable = 'true';
+          if (!naBadge) {
+            naBadge = doc.createElement('span');
+            naBadge.className = 'setup-na-badge';
+            naBadge.setAttribute('role', 'note');
+            wrapper.appendChild(naBadge);
+          }
+          const modeName = MODE_LABELS[mode] || mode;
+          const allowedNames = fieldModes.map((m) => MODE_LABELS[m] || m).join('・');
+          naBadge.textContent = `${modeName}非対応（適用対象: ${allowedNames}）`;
+          naBadge.dataset.reason = `${modeName}非対応（適用対象: ${allowedNames}）`;
+          naBadge.hidden = false;
+
+          const control = fieldMap[key];
+          if (control) {
+            if (control.disabled !== undefined) {
+              control.disabled = true;
+              if (typeof control.setAttribute === 'function') control.setAttribute('aria-disabled', 'true');
+            } else if (Array.isArray(control.children)) {
+              control.children.forEach((c) => {
+                const sub = (c.children && c.children[0]) || c;
+                if (sub && sub.disabled !== undefined) {
+                  sub.disabled = true;
+                  if (typeof sub.setAttribute === 'function') sub.setAttribute('aria-disabled', 'true');
+                }
+              });
+            }
+          }
+        } else {
+          if (typeof wrapper.classList?.remove === 'function') wrapper.classList.remove('not-applicable');
+          delete wrapper.dataset.notApplicable;
+          if (naBadge) {
+            naBadge.hidden = true;
+          }
+
+          const control = fieldMap[key];
+          if (control) {
+            if (control.disabled !== undefined) {
+              control.disabled = false;
+              if (typeof control.removeAttribute === 'function') control.removeAttribute('aria-disabled');
+            } else if (Array.isArray(control.children)) {
+              control.children.forEach((c) => {
+                const sub = (c.children && c.children[0]) || c;
+                if (sub && sub.disabled !== undefined) {
+                  sub.disabled = false;
+                  if (typeof sub.removeAttribute === 'function') sub.removeAttribute('aria-disabled');
+                }
+              });
+            }
+          }
+        }
+      });
+    }
+
+    Object.keys(modeButtons).forEach((m) => {
+      modeButtons[m].addEventListener('click', () => applyMode(m));
+    });
+
+    // ─── Preset Application Logic ────────────────────────────────
+    Object.entries(presetButtons).forEach(([profId, btn]) => {
+      btn.addEventListener('click', () => {
+        applyPreset(profId);
       });
     });
 
@@ -1169,8 +1509,11 @@
       root: root,
       switchTab: switchTab,
       applyMode: applyMode,
+      applyPreset: applyPreset,
+      filterFields: filterFields,
       getMode: () => currentMode,
       buildPayload: () => buildScanPayload(currentMode, { document: doc }),
+      effectiveSection: effectiveSection,
     };
   }
 
