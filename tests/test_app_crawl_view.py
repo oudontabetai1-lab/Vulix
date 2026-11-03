@@ -336,9 +336,9 @@ def test_app_entry_parses_crawl_route_and_scan_context():
     console.log(JSON.stringify({{ r1, r2, r3, r4, r5, r6 }}));
     """
     res = _run_node(script)
-    assert res["r1"] == {"id": "crawl", "scanId": None}
-    assert res["r2"] == {"id": "crawl", "scanId": "20261103_120000_abc"}
-    assert res["r3"] == {"id": "crawl", "scanId": None}
+    assert res["r1"] == {"id": "crawl", "scanId": None, "findingId": None}
+    assert res["r2"] == {"id": "crawl", "scanId": "20261103_120000_abc", "findingId": None}
+    assert res["r3"] == {"id": "crawl", "scanId": None, "findingId": None}
     assert res["r4"] is None  # invalid scanId
     assert res["r5"] is None  # unexpected param
     assert res["r6"] is None  # unknown route
