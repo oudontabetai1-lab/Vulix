@@ -21,30 +21,42 @@ def test_transport_exception_classification():
     assert classify_exception(httpx.ConnectError("connection refused"))[0] == "connection_refused"
 
 
-def test_httpx_proxy_is_passed_and_credentials_are_redacted(monkeypatch):
-    seen = []
+def test_httpx_proxy_is_applied_and_credentials_are_redacted(monkeypatch):
+    from types import SimpleNamespace
+
+    class ProxyTransport(httpx.MockTransport):
+        def __init__(self, handler):
+            super().__init__(handler)
+            self._pool = SimpleNamespace(_proxy_url=httpx.URL("http://proxy.example:8080"))
 
     class Client:
-        def __init__(self, **kwargs):
-            seen.append(kwargs.get("proxy"))
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            pass
-
-        def get(self, _url):
-            return httpx.Response(200)
+        def __init__(self, **_kwargs):
+            self.transport = ProxyTransport(lambda request: httpx.Response(200))
+            self._mounts = {httpx._utils.URLPattern("all://"): self.transport}
+        def __enter__(self): return self
+        def __exit__(self, *_): self.transport.close()
+        def get(self, url): return self.transport.handle_request(httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx, "Client", Client)
     proxy = "http://user:secret@proxy.example:8080"
     rows = _http_check("http://target.example", proxy, False)
-    assert seen == [None, proxy]
     assert rows[2]["reason_code"] == "proxy_applied"
     assert "secret" not in json.dumps(rows)
-    assert proxy_applied(proxy, {"proxy": proxy})
-    assert not proxy_applied(proxy, {"proxy": None})
+
+
+def test_configured_proxy_without_selected_proxy_transport_fails(monkeypatch):
+    class Client:
+        def __init__(self, **_kwargs):
+            self.transport = httpx.MockTransport(lambda request: httpx.Response(200))
+            self._mounts = {}
+        def __enter__(self): return self
+        def __exit__(self, *_): self.transport.close()
+        def get(self, url): return self.transport.handle_request(httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    rows = _http_check("http://target.example", "http://proxy.example:8080", False)
+    assert rows[2]["status"] == "fail"
+    assert rows[2]["reason_code"] == "proxy_not_applied"
 
 
 def test_http_status_is_warning_and_hard_failure_is_not_success():

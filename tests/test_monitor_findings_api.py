@@ -113,6 +113,21 @@ class ScanFindingsApiTests(unittest.TestCase):
         missing = self.client.get("/api/v1/scans/scan-preflight/missing/preflight")
         self.assertEqual(missing.status_code, 404)
 
+    def test_preflight_result_read_api_requires_authentication(self):
+        scan_dir = self.output_base / "scan-preflight-auth"
+        scan_dir.mkdir(parents=True)
+        expected = {"schema_version": "1.0.0", "verdict": "pass", "checks": []}
+        (scan_dir / "preflight.json").write_text(json.dumps(expected), encoding="utf-8")
+
+        client = TestClient(MonitorServer(auth_token="preflight-test-token").app)
+        self.assertEqual(client.get("/api/v1/scans/scan-preflight-auth/preflight").status_code, 401)
+        response = client.get(
+            "/api/v1/scans/scan-preflight-auth/preflight",
+            headers={"authorization": "Bearer preflight-test-token"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), expected)
+
     def test_live_scan_findings_returned_when_in_progress(self):
         self.server.scan_in_progress = True
         self.server.current_scan_id = "live-scan-001"

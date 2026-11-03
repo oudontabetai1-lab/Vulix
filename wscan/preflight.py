@@ -47,19 +47,34 @@ def _check(check_id: str, status: str, reason: str, detail: str) -> dict:
     return {"id": check_id, "status": status, "reason_code": reason, "detail": detail}
 
 
-def proxy_applied(configured_proxy: str, client_options: dict) -> bool:
-    """Check that the configured proxy is present in the options given to httpx."""
-    return bool(configured_proxy) and client_options.get("proxy") == configured_proxy
+def proxy_applied(client: httpx.Client, url: str, configured_proxy: str) -> bool | None:
+    """Inspect the transport selected for URL and report whether it uses a proxy."""
+    try:
+        target = httpx.URL(url)
+        matches = [(pattern, transport) for pattern, transport in client._mounts.items()
+                   if pattern.matches(target)]
+        if not matches:
+            return False
+        _, transport = max(matches, key=lambda item: item[0].priority)
+        proxy_url = transport._pool._proxy_url
+        configured = httpx.URL(configured_proxy).copy_with(username="", password="")
+        return proxy_url == configured.copy_with(username="", password="") if proxy_url is not None else False
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _http_check(url: str, proxy: str, verify: bool) -> tuple[dict, dict, dict]:
-    def request(configured_proxy: str) -> tuple[dict, bool]:
-        applied = False
+    def request(configured_proxy: str) -> tuple[dict, bool | None]:
         try:
-            options = {"proxy": configured_proxy or None, "verify": verify,
-                       "timeout": 10, "follow_redirects": False, "trust_env": False}
+            from types import SimpleNamespace
+            from .engine import ScanEngine
+            from .tls_config import TLSConfig
+
+            engine = SimpleNamespace(proxy=configured_proxy, tls_config=TLSConfig.from_values())
+            options = ScanEngine.httpx_client_kwargs(engine, verify=verify, timeout=10,
+                                                     follow_redirects=False, trust_env=False)
             client = httpx.Client(**options)
-            applied = proxy_applied(configured_proxy, options)
+            applied = proxy_applied(client, url, configured_proxy) if configured_proxy else False
             with client:
                 response = client.get(url)
             status = "pass" if response.status_code < 400 else "warning"
@@ -68,7 +83,7 @@ def _http_check(url: str, proxy: str, verify: bool) -> tuple[dict, dict, dict]:
                            f"HTTP GET returned status {response.status_code}."), applied)
         except Exception as exc:
             reason, detail = classify_exception(exc)
-            return _check("reachability", "fail", reason, detail), applied
+            return _check("reachability", "fail", reason, detail), locals().get("applied")
 
     direct, _ = request("")
     if proxy:
@@ -76,11 +91,14 @@ def _http_check(url: str, proxy: str, verify: bool) -> tuple[dict, dict, dict]:
     else:
         proxied = _check("proxy_reachability", "not_applicable", "proxy_not_configured", "No proxy was configured.")
         applied = False
+    proxy_status = "pass" if applied is True else "fail" if applied is False and proxy else "not_checked" if proxy else "not_applicable"
+    proxy_reason = "proxy_applied" if applied is True else "proxy_not_applied" if applied is False and proxy else "proxy_application_unknown" if proxy else "proxy_not_configured"
     proxy_check = _check(
-        "proxy_applied", "pass" if applied else "fail" if proxy else "not_applicable",
-        "proxy_applied" if applied else "proxy_not_applied" if proxy else "proxy_not_configured",
-        "The configured proxy was applied to the httpx transport." if applied
-        else "The configured proxy was not applied to the httpx transport." if proxy
+        "proxy_applied", proxy_status,
+        proxy_reason,
+        "The configured proxy is used by the httpx transport for this request." if applied is True
+        else "The configured proxy is not used by the httpx transport for this request." if applied is False and proxy
+        else "Proxy use could not be determined from the httpx transport." if proxy
         else "No proxy was configured.",
     )
     # Return both transport outcomes; the caller assigns distinct stable IDs.
