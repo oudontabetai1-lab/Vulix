@@ -108,7 +108,7 @@ def test_preflight_api_auth_and_live_channel_checks(monkeypatch):
     sentinel = "TOP_SECRET_AUTH_PASSWORD_SENTINEL_654"
     monkeypatch.setattr(
         "wscan.preflight._probe_login_page",
-        lambda url, proxy, verify: (200, "<html><form><input name='username'/></form></html>", None)
+        lambda url, proxy, verify, **kwargs: (200, "<html><form><input name='username'/></form></html>", None)
     )
 
     res_auth = client.post("/api/v1/preflight", json={
