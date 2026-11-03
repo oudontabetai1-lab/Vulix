@@ -44,6 +44,7 @@ def test_monitor_event_log_10k_entries_benchmark(perf_harness: UIHarness):
     page = perf_harness.new_page(**STANDARD_VIEWPORTS[1440])
 
     try:
+        page.route_web_socket("**/ws", lambda websocket: None)
         page.goto(f"{perf_harness.server_url}/monitor")
         page.wait_for_selector("#eventLog")
         page.wait_for_function("() => typeof addEventLog === 'function'")
@@ -96,6 +97,45 @@ def test_monitor_event_log_10k_entries_benchmark(perf_harness: UIHarness):
         assert "seq=9999" in res["lastVisible"]
         assert "seq=9250" in res["olderFirstVisible"]
         assert "seq=9749" in res["olderLastVisible"]
+    finally:
+        page.close()
+
+
+def test_monitor_event_log_live_entry_preserves_older_window(perf_harness: UIHarness):
+    """Keep an older page stable until the reader activates the latest-events control."""
+    require_browser()
+    page = perf_harness.new_page(**STANDARD_VIEWPORTS[1440])
+
+    try:
+        page.route_web_socket("**/ws", lambda websocket: None)
+        page.goto(f"{perf_harness.server_url}/monitor")
+        page.wait_for_selector("#eventLog")
+        page.wait_for_function("() => typeof addEventLog === 'function'")
+        page.evaluate("""() => {
+            window._eventLogEntries.length = 0;
+            for (let i = 0; i < 10000; i++) addEventLog('status', `Event seq=${i}`);
+            const log = document.getElementById('eventLog');
+            log.scrollTop = 0;
+            log.dispatchEvent(new Event('scroll'));
+        }""")
+        older_window = page.locator("#eventLog .event-item").all_text_contents()
+        assert len(older_window) == 500
+        assert "seq=9250" in older_window[0]
+        assert "seq=9749" in older_window[-1]
+
+        page.evaluate("addEventLog('status', 'Event seq=10000')")
+        assert page.locator("#eventLog .event-item").all_text_contents() == older_window
+        assert page.locator("#eventLogNewEntries").is_visible()
+        assert page.locator("#eventLogNewEntryCount").inner_text() == "1 new entry"
+
+        page.locator("#eventLogNewEntries").focus()
+        page.keyboard.press("Enter")
+        latest_window = page.locator("#eventLog .event-item").all_text_contents()
+        assert len(latest_window) == 500
+        assert "seq=9501" in latest_window[0]
+        assert "seq=10000" in latest_window[-1]
+        assert page.locator("#eventLogNewEntries").is_hidden()
+        assert page.evaluate("window._eventLogWindowStart") == 9501
     finally:
         page.close()
 

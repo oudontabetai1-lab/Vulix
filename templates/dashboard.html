@@ -136,6 +136,7 @@ body {
 }
 @keyframes fadeIn { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:none; } }
 .event-item .time { color: var(--text-muted); font-size: 0.7rem; margin-right: 6px; font-family: monospace; }
+.event-log-new-entry { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
 .event-status { border-left-color: var(--accent); background: var(--accent-glow); }
 .event-finding { border-left-color: var(--critical); background: rgba(226,112,143,0.1); }
 .event-payload { border-left-color: var(--border); background: var(--surface2); }
@@ -2388,6 +2389,9 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
     <div class="panel-header">
       Event Log
       <span class="panel-badge" id="eventCount">0</span>
+      <button class="event-log-new-entry" id="eventLogNewEntries" type="button" hidden aria-label="Jump to latest event">
+        <span id="eventLogNewEntryCount" aria-live="polite"></span> · jump to latest
+      </button>
     </div>
     <div class="panel-content" id="eventLog" tabindex="0" aria-label="Event log">
       <div class="no-findings-msg">Waiting for scan to start...</div>
@@ -5866,6 +5870,11 @@ function resetLiveScanState() {
   const eventLog = document.getElementById('eventLog');
   _eventLogEntries.length = 0;
   _eventLogWindowStart = 0;
+  _eventLogNewEntryCount = 0;
+  const newEntries = document.getElementById('eventLogNewEntries');
+  if (newEntries) newEntries.hidden = true;
+  const newEntryCount = document.getElementById('eventLogNewEntryCount');
+  if (newEntryCount) newEntryCount.textContent = '';
   if (eventLog) eventLog.innerHTML = '<div class="no-findings-msg">Waiting for scan to start...</div>';
   const screenshotArea = document.getElementById('screenshotArea');
   if (screenshotArea) {
@@ -6071,6 +6080,7 @@ const _eventLogEntries = [];
 let _eventLogWindowStart = 0;
 const _eventLogWindowSize = 500;
 const _eventLogPageSize = 250;
+let _eventLogNewEntryCount = 0;
 function _renderEventLogWindow(log) {
   const end = Math.min(_eventLogEntries.length, _eventLogWindowStart + _eventLogWindowSize);
   const fragment = document.createDocumentFragment();
@@ -6095,6 +6105,16 @@ function _loadOlderEventLogEntries(log) {
 document.getElementById('eventLog')?.addEventListener('scroll', function () {
   _loadOlderEventLogEntries(this);
 });
+document.getElementById('eventLogNewEntries')?.addEventListener('click', function () {
+  const log = document.getElementById('eventLog');
+  if (!log) return;
+  _eventLogWindowStart = Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
+  _renderEventLogWindow(log);
+  log.scrollTop = log.scrollHeight;
+  _eventLogNewEntryCount = 0;
+  this.hidden = true;
+  document.getElementById('eventLogNewEntryCount').textContent = '';
+});
 function addEventLog(type, message) {
   const log = document.getElementById('eventLog');
   if (!log) return;
@@ -6104,15 +6124,18 @@ function addEventLog(type, message) {
 
   const ts = new Date().toTimeString().split(' ')[0];
   const entry = { type, message: String(message), ts };
+  const viewingOlderEntries = _eventLogWindowStart < Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
   _eventLogEntries.push(entry);
-  if (_eventLogEntries.length <= _eventLogWindowSize) {
-    log.appendChild(_makeEventLogItem(entry));
+  if (viewingOlderEntries) {
+    _eventLogNewEntryCount += 1;
+    document.getElementById('eventLogNewEntries').hidden = false;
+    document.getElementById('eventLogNewEntryCount').textContent = `${_eventLogNewEntryCount} new ${_eventLogNewEntryCount === 1 ? 'entry' : 'entries'}`;
   } else {
-    log.removeChild(log.firstElementChild);
+    if (_eventLogEntries.length > _eventLogWindowSize) log.removeChild(log.firstElementChild);
     log.appendChild(_makeEventLogItem(entry));
+    _eventLogWindowStart = Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
+    if (state.autoScroll) log.scrollTop = Number.MAX_SAFE_INTEGER;
   }
-  _eventLogWindowStart = Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
-  if (state.autoScroll) log.scrollTop = Number.MAX_SAFE_INTEGER;
 }
 
 function updateScreenshot(b64, label) {
@@ -8092,6 +8115,7 @@ Object.assign(window, {
   publishAppScanContext, _markOwnScan, isSecretKeyName, sanitizeUrlForExport, sanitizeUrlListForExport, recursiveSanitizeNonsecret, hasCredentialsInConfig, _createNonsecretDescriptor, _sanitizeConfigForExport, containsRedactedValues, _discardRejectedPendingScan, _promotePendingScan, findingKey, computeVerification, isFindingConfirmed, updateFindingCounters, renderCheckGroups, initCheckGroups, loadScannerCapabilities, setScanMode, getSelectedChecks, selectAllChecks, setSelectedChecks, setCfgToggle, toggleCfg, showCfgTab, applyScanProfile, updateLlmModelField, collectRoleModels, restoreRoleModels, mfaImapFields, mfaImapPassword, applyMfaImap, mfaTotpFields, parseHeaderText, authHeaderFields, timeWindowFields, applyTimeWindows, applyMfaTotp, applyAuthHeaders, validateTotpReadiness, wireTotpQrPreview, uploadFile, wireUpload, renderManualCrawlStatus, startManualCrawl, stopManualCrawl, importManualCrawl, _wsSend, startRemoteBrowser, remoteNavigate, hasRemoteTotpConfig, armMfaFieldSelection, selectRemoteMfaField, fillRemoteTotp, bindRemoteScreen, useManualCrawlOutput, showPostScanActions, rerunLastScan, openManualCrawlAfterScan, submitScanConfig, _collectFullConfigForExport, _downloadJson, _filenameForConfig, exportConfigToFile, importConfigFromFile, applyImportedConfig, initConfigOverlay, updateAgentModelPlaceholder, submitAgentScan, hasSensitiveMatrixParam, safeUrlForStorage, safeUrlListForStorage, safeExcludeUrl, safeExcludeUrlsForStorage, saveConfigToStorage, loadConfigFromStorage, loadDefaultConfigFromServer, _esc, openScenarioBuilder, scnCloseBuilder, scnDefaultStep, scnAddStep, scnInsertStep, scnDeleteStep, scnDuplicateStep, scnMoveStep, scnChangeAction, scnSetField, scnLoadLoginTemplate, scnRender, scnStepSummary, scnRenderPreview, scnRenderPalette, scnPalNavigate, scnPalFill, scnPalAddForm, scnState_push, scnSaveBuilder, _scnSummaryCard, scnDeleteFlow, renderCfgFlows, renderReviewFlows, addAccount, collectAccounts, collectFlows, restoreFlows, formatDuration, updateETA, _onEventStreamStatusChange, _onEventStreamAuthRequired, _onEventStreamWireStale, initEventStream, connect, handleEvent, dispatchLegacyEvent, resetLiveScanState, applyScanSnapshot, updatePhaseBar, renderUrlList, renderCheckCounters, updatePayloadDisplay, togglePayloadExpand, setStatus, timeStr, addEventLog, updateScreenshot, addFinding, replaceFindings, updateRequest, updateResponse, showNetTab, openLightbox, escapeHtml, sendIntervention, confirmAbort, setPauseState, showPlanModal, confirmPlan, filterFindings, closeInteractiveModals, beginCrawlReview, resetCrawlReviewDetailState, openCrawlReviewDetails, showCrawlReviewModal, renderCrawlReviewList, sendCrawlReview, openManualCrawlFromReview, toggleManualPayload, sendManualPayload, showAiAnalysis, runAutoConfig, applyAutoConfig, submitHybridScan, handleWafDetected, switchCenterTab, loadD3, initSiteMapD3, _smEl, _smShort, _smNorm, _smModel, _sitemapRerender, _smArrowDefs, _smApplyView, _smRenderCompact, _smRenderShots, _smHash, _smRenderExplorer, _smShowPopover, _smHidePopover, smSetMode, smOnSearch, smExpandAll, smZoom, smResetView, _smWirePan, _smNodeColor, addSiteMapNode, markSiteMapVuln, showSiteMapFallback, _updateSiteMapFallback, _showSmTooltip, _hideSmTooltip, updatePhaseTimingStrip, _showSubphase, renderCheckProgressBars, switchMainView, onHistorySearchInput, onHistoryFilterChange, isSensitiveKey, maskPathSecrets, hasUnmaskedSensitivePath, maskNestedKv, maskKv, redactDisplayUrl, formatHistoryBytes, formatHistoryDate, setHistoryViewState, cancelScanHistory, loadScanHistory, renderHistoryTable, getAuditActionMeta, onAuditSearchInput, onAuditFilterChange, formatAuditTimestamp, validateAndSanitizeClientIp, formatSafeAuditDetail, setAuditViewState, loadAuditLog, renderAuditTable, bootDashboard
 });
 Object.assign(window, { _eventLogEntries });
+Object.defineProperty(window, '_eventLogWindowStart', { configurable: true, get: () => _eventLogWindowStart });
 Object.defineProperty(window, 'state', { configurable: true, get: () => state });
 Object.defineProperty(window, 'findingCardKeys', { configurable: true, get: () => findingCardKeys });
 Object.defineProperty(window, 'findingViewerHelpers', { configurable: true, get: () => findingViewerHelpers });
