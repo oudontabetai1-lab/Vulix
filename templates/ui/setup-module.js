@@ -197,6 +197,19 @@
       };
     }
 
+    if (status !== 'completed') {
+      return {
+        state: 'unknown',
+        isPass: false,
+        isStale: false,
+        badgeLabel: '不明',
+        badgeClass: 'setup-verdict-unknown',
+        message: 'スキャン準備チェック結果が不明です。',
+        buttonLabel: '⚡ 再チェック',
+        nonPassChecks: nonPassChecks,
+      };
+    }
+
     // status === 'completed'
     if (isStale) {
       return {
@@ -2075,11 +2088,13 @@
         lastPreflightPayload = JSON.parse(JSON.stringify(payload));
         lastPreflightResult = data;
         renderReadinessSuccess(data);
+        const currentPayload = buildScanPayload(currentMode, { document: doc });
+        const stale = isConfigStale(lastPreflightPayload, currentPayload);
         updatePrelaunchSummary({
           status: 'completed',
           verdict: data.verdict,
           checks: data.checks,
-          isStale: false,
+          isStale: stale,
         });
       } catch (err) {
         lastPreflightPayload = null;

@@ -409,6 +409,44 @@ def test_prelaunch_summary_state_transitions_and_invariants():
         assert st["badgeLabel"] != "準備OK", f"{key} badgeLabel must not be '準備OK'"
 
 
+def test_prelaunch_summary_unrecognised_status_maps_to_unknown_state():
+    """Verify an unrecognised status value maps to non-pass 'unknown' state and never passes."""
+    script = f"""
+    const {{ computePrelaunchSummaryState }} = require('{SETUP_MODULE_JS}');
+
+    const unrecognisedStatuses = [
+        'invalid_status',
+        'foo_bar',
+        'custom_status',
+        'done',
+        'succeeded',
+        'aborted',
+    ];
+
+    const results = {{}};
+    for (const st of unrecognisedStatuses) {{
+      results[st] = computePrelaunchSummaryState({{
+        status: st,
+        verdict: 'pass', // even if verdict is pass, unrecognized status must not pass
+        checks: [{{ id: 'test_check', status: 'pass' }}],
+        isStale: false,
+      }});
+    }}
+
+    console.log(JSON.stringify(results));
+    """
+    res = _run_node(script)
+    for st, descriptor in res.items():
+        assert descriptor["state"] == "unknown", f"{st} should map to state 'unknown'"
+        assert descriptor["isPass"] is False, f"{st} isPass must be False"
+        assert descriptor["isStale"] is False
+        assert descriptor["badgeLabel"] == "不明"
+        assert descriptor["badgeClass"] == "setup-verdict-unknown"
+        assert "pass" not in descriptor["badgeClass"]
+        assert "準備OK" not in descriptor["badgeLabel"]
+        assert "OK" not in descriptor["badgeLabel"]
+
+
 def test_is_config_stale_pure_function():
     """Verify isConfigStale compares payloads deterministically."""
     script = f"""
@@ -436,6 +474,136 @@ def test_is_config_stale_pure_function():
     assert res["changedChecksStale"] is True
     assert res["nullLastStale"] is False
     assert res["nullCurrentStale"] is False
+
+
+def test_render_setup_view_recomputes_staleness_on_preflight_success():
+    """Verify that when runPreflight succeeds, staleness is recomputed against current config.
+
+    If config changed while the check was running, the result must be marked stale (non-pass).
+    """
+    script = f"""
+    const {{ renderSetupView }} = require('{SETUP_MODULE_JS}');
+
+    const elementRegistry = {{}};
+    function makeElement(tag) {{
+      const children = [];
+      const attrs = {{}};
+      const listeners = {{}};
+      let _id = '';
+      const el = {{
+        tagName: tag,
+        children: children,
+        hidden: false,
+        className: '',
+        value: '',
+        dataset: {{}},
+        style: {{}},
+        get id() {{ return _id; }},
+        set id(v) {{
+          _id = String(v);
+          elementRegistry[_id] = el;
+        }},
+        setAttribute(k, v) {{
+          attrs[k] = String(v);
+          if (k === 'id') {{
+            _id = String(v);
+            elementRegistry[v] = el;
+          }}
+        }},
+        getAttribute(k) {{ return attrs[k] !== undefined ? attrs[k] : null; }},
+        removeAttribute(k) {{ delete attrs[k]; }},
+        appendChild(c) {{ children.push(c); }},
+        removeChild(c) {{
+          const idx = children.indexOf(c);
+          if (idx !== -1) children.splice(idx, 1);
+        }},
+        replaceChildren(...c) {{ children.length = 0; children.push(...c); }},
+        addEventListener(evt, fn) {{
+          listeners[evt] = listeners[evt] || [];
+          listeners[evt].push(fn);
+        }},
+        dispatch(evt, data) {{
+          (listeners[evt] || []).forEach(fn => fn(Object.assign({{ preventDefault() {{}} }}, data)));
+        }},
+        focus() {{ this._focused = true; }},
+        classList: {{
+          _classes: new Set(),
+          add(c) {{ this._classes.add(c); }},
+          remove(c) {{ this._classes.delete(c); }},
+          toggle(c, force) {{
+            if (force === undefined) force = !this._classes.has(c);
+            if (force) this._classes.add(c);
+            else this._classes.delete(c);
+          }},
+          contains(c) {{ return this._classes.has(c); }},
+        }},
+        querySelector() {{ return null; }},
+        querySelectorAll() {{ return []; }},
+      }};
+      return el;
+    }}
+
+    const mockDoc = {{
+      createElement: makeElement,
+      getElementById: (id) => elementRegistry[id] || null,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    }};
+
+    const container = makeElement('div');
+    const schema = {{
+      defaults: {{ url: 'https://example.com', depth: 2, checks: ['sqli'] }},
+      schema: {{
+        type: 'object',
+        properties: {{
+          url: {{ type: 'string', title: 'Target URL' }},
+          depth: {{ type: 'integer', title: 'Crawl Depth' }},
+        }},
+      }},
+    }};
+
+    let resolveFetch;
+    const fetchPromise = new Promise((resolve) => {{
+      resolveFetch = resolve;
+    }});
+
+    const instance = renderSetupView(container, schema, {{
+      document: mockDoc,
+      fetchPreflight: async (payload) => {{
+        return fetchPromise;
+      }},
+    }});
+
+    // Set initial URL
+    const urlInput = elementRegistry['cfgInputUrl'];
+    urlInput.value = 'https://example.com';
+
+    // Trigger preflight run
+    const runPromise = instance.runPreflight();
+
+    // While preflight is running, user changes the URL input in the form
+    urlInput.value = 'https://changed-during-run.com';
+
+    // Preflight check finishes successfully
+    resolveFetch({{
+      schema_version: '1.0.0',
+      verdict: 'pass',
+      checks: [{{ id: 'reachability_direct', status: 'pass' }}],
+    }});
+
+    runPromise.then(() => {{
+      const state = instance.getPrelaunchState();
+      console.log(JSON.stringify(state));
+    }});
+    """
+    res = _run_node(script)
+    assert res["state"] == "stale"
+    assert res["isStale"] is True
+    assert res["isPass"] is False
+    assert "設定変更あり" in res["badgeLabel"]
+    assert "setup-status-warning" in res["badgeClass"]
+    assert "setup-verdict-pass" not in res["badgeClass"]
+    assert "準備OK" not in res["badgeLabel"]
 
 
 # ─── 3. UI Harness Test (Playwright) ─────────────────────────────────────────
