@@ -175,6 +175,8 @@
           '#live': 'live',
           '#history': 'history',
           '#audit': 'audit',
+          '#findings': 'findings',
+          '#/findings': 'findings',
           '#agent-skills': 'agent-skills',
           '#/agent-skills': 'agent-skills',
           '#settings': 'settings',
