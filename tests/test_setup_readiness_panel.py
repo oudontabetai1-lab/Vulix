@@ -247,7 +247,8 @@ def test_prelaunch_summary_filter_and_sort_pure_mapping():
       {{ id: 'reachability', status: 'pass', detail: 'OK' }},
       {{ id: 'unknown_check', status: 'unknown', detail: '?' }},
       {{ id: 'playwright', status: 'fail', detail: 'PW missing' }},
-      {{ id: 'auth', status: 'not_checked', detail: 'not checked' }},
+      {{ id: 'authentication', status: 'warning', detail: 'session_not_verified' }},
+      {{ id: 'websocket', status: 'not_checked', detail: 'live channel unverified' }},
       {{ id: 'oob', status: 'warning', detail: 'OOB not configured' }},
       {{ id: 'db_leak', status: 'fail', detail: 'Critical fail' }},
       {{ id: 'proxy_na', status: 'not_applicable', detail: 'N/A' }},
@@ -277,14 +278,15 @@ def test_prelaunch_summary_filter_and_sort_pure_mapping():
 
     # 1. No 'pass' status is in sorted list
     assert not any(c["status"] == "pass" for c in sorted_checks)
-    assert len(sorted_checks) == 6
+    assert len(sorted_checks) == 7
 
-    # 2. fail checks must come first
+    # 2. fail checks must come first, then warnings (including authentication), then others (including websocket)
     statuses = [c["status"] for c in sorted_checks]
     assert statuses[0] == "fail"
     assert statuses[1] == "fail"
     assert statuses[2] == "warning"
-    for s in statuses[3:]:
+    assert statuses[3] == "warning"
+    for s in statuses[4:]:
         assert s in ("unknown", "not_checked", "not_applicable", "unavailable")
 
 
@@ -757,9 +759,15 @@ def test_setup_prelaunch_summary_ui(ui_harness):
         "checks": [
             {
                 "id": "authentication",
+                "status": "warning",
+                "reason_code": "session_not_verified",
+                "detail": "Session cookie specified but not verified.",
+            },
+            {
+                "id": "websocket",
                 "status": "not_checked",
-                "reason_code": "not_implemented",
-                "detail": "Authentication readiness is not checked.",
+                "reason_code": "unverified",
+                "detail": "Live channel readiness unverified.",
             },
             {
                 "id": "playwright",
@@ -818,9 +826,9 @@ def test_setup_prelaunch_summary_ui(ui_harness):
     assert "setup-verdict-warning" in verdict_cls
     assert "setup-verdict-pass" not in verdict_cls
 
-    # Compact list of non-pass checks: fail first, then not_checked; pass is excluded
+    # Compact list of non-pass checks: fail first, then warning, then not_checked; pass is excluded
     items = page.locator(".setup-prelaunch-check-item")
-    assert items.count() == 2
+    assert items.count() == 3
 
     # First check: playwright (fail)
     item0 = items.nth(0)
@@ -830,13 +838,23 @@ def test_setup_prelaunch_summary_ui(ui_harness):
     assert "setup-status-fail" in (chip0.get_attribute("class") or "")
     assert "setup-status-pass" not in (chip0.get_attribute("class") or "")
 
-    # Second check: authentication (not_checked)
+    # Second check: authentication (warning - must stay non-pass)
     item1 = items.nth(1)
     assert item1.get_attribute("data-check-id") == "authentication"
     chip1 = item1.locator(".setup-prelaunch-check-chip")
-    assert "未確認" in chip1.inner_text()
-    assert "setup-status-not-checked" in (chip1.get_attribute("class") or "")
+    assert "警告" in chip1.inner_text()
+    assert "setup-status-warning" in (chip1.get_attribute("class") or "")
     assert "setup-status-pass" not in (chip1.get_attribute("class") or "")
+    assert "OK" not in chip1.inner_text()
+
+    # Third check: websocket (not_checked)
+    item2 = items.nth(2)
+    assert item2.get_attribute("data-check-id") == "websocket"
+    chip2 = item2.locator(".setup-prelaunch-check-chip")
+    assert "未確認" in chip2.inner_text()
+    assert "setup-status-not-checked" in (chip2.get_attribute("class") or "")
+    assert "setup-status-pass" not in (chip2.get_attribute("class") or "")
+    assert "OK" not in chip2.inner_text()
 
     # Pass check 'reachability_direct' must NOT appear in non-pass checks
     summary_html = page.locator("#setupPrelaunchSummary").inner_html()
