@@ -255,6 +255,7 @@
     filterInput.id = 'configFilterInput';
     filterInput.className = 'history-search-input';
     filterInput.placeholder = '設定キー / ラベルで絞り込み…';
+    filterInput.setAttribute('aria-label', '設定項目絞り込み');
     toolbar.appendChild(filterInput);
 
     configCard.appendChild(toolbar);

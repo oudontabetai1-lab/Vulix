@@ -1286,11 +1286,14 @@
         ['planner', 'payload', 'adaptive', 'triage'].forEach((role) => {
           const row = doc.createElement('div');
           row.className = 'setup-subfield';
+          const inpId = 'cfg' + role.charAt(0).toUpperCase() + role.slice(1) + 'Model';
           const lbl = doc.createElement('label');
+          lbl.htmlFor = inpId;
           lbl.textContent = role;
           const inp = doc.createElement('input');
           inp.type = 'text';
-          inp.id = 'cfg' + role.charAt(0).toUpperCase() + role.slice(1) + 'Model';
+          inp.id = inpId;
+          inp.setAttribute('aria-label', `${role} モデル設定`);
           inp.placeholder = '空=全体設定';
           row.appendChild(lbl);
           row.appendChild(inp);

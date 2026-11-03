@@ -499,3 +499,15 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
   `advanced_features.md`・`operation_guide_ja.md` 等）。**UI/表示が変わったら `docs/images/` のスクリーンショットも
   撮り直す**（serve ダッシュボードを起動して撮影。ファイル名は既存を踏襲し参照リンクを維持）。
   「どのモードの話か（通常/Agent/Hybrid）」を明示し、モード別の品質基準（確実性/独自性/中間）に沿って書く。
+
+### UI パフォーマンスベンチマークとアクセシビリティ検証
+
+/app 画面（Portal, Monitor, Findings, Crawl, Setup, Agent Skills, Settings, History, Audit）の品質検証テスト：
+
+1. **パフォーマンスベンチマーク**
+   - 実行: `pytest -q tests/test_ui_perf_benchmark.py`
+   - 内容: Monitor イベントログ（10,000 件）の更新時間・DOM 上限（500 件）、Findings 一覧（10,000 件）の描画時間（目標 <= 250ms、チャンク分割表示）と絞り込み・増分スクロール、および 2,000 文字超の長大 URL・リクエストボディ・ペイロード投入時のレイアウト保持（1440/1280/768 ビューポートでの水平はみ出し防止と一時ディレクトリへの検証用スクリーンショット生成）。
+
+2. **アクセシビリティ (a11y) 自動検証**
+   - 実行: `pytest -q tests/test_ui_app_accessibility.py`
+   - 内容: 全 8 画面のフォームコントロール（input, select, textarea）のアクセシブルなラベル付け（`htmlFor`, `aria-label`, 包含 label）、ランドマーク構造（banner, navigation, main, aside）と WAI-ARIA tablist/tab/tabpanel 構造、キーボード到達性・操作性（Enter/Space でのカード・ツリー行・テーブル行選択、Escape でのドロワー閉鎖）、ライブ更新領域（`aria-live="polite"`）、およびキーボードトラップの不在。

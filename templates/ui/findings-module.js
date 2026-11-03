@@ -539,6 +539,7 @@
     const sevSelect = document.createElement('select');
     sevSelect.id = 'filterSeverity';
     sevSelect.className = 'history-filter-select';
+    sevSelect.setAttribute('aria-label', '重大度フィルタ');
     [
       { v: 'all', l: '重大度: すべて' },
       { v: 'critical', l: 'CRITICAL' },
@@ -557,6 +558,7 @@
     const typeSelect = document.createElement('select');
     typeSelect.id = 'filterCheckType';
     typeSelect.className = 'history-filter-select';
+    typeSelect.setAttribute('aria-label', '検査種別フィルタ');
     const optTypeAll = document.createElement('option');
     optTypeAll.value = 'all';
     optTypeAll.textContent = '検査種別: すべて';
@@ -566,6 +568,7 @@
     const verifySelect = document.createElement('select');
     verifySelect.id = 'filterVerification';
     verifySelect.className = 'history-filter-select';
+    verifySelect.setAttribute('aria-label', '確証状態フィルタ');
     [
       { v: 'all', l: '確証状態: すべて' },
       { v: 'reproduced', l: 'reproduced (確証)' },
@@ -583,6 +586,7 @@
     const provSelect = document.createElement('select');
     provSelect.id = 'filterProvenance';
     provSelect.className = 'history-filter-select';
+    provSelect.setAttribute('aria-label', '出自フィルタ');
     [
       { v: 'all', l: '出自: すべて (Agent含む)' },
       { v: 'scanner', l: '決定論スキャナ' },
@@ -601,6 +605,7 @@
     searchInput.id = 'findingsSearchInput';
     searchInput.className = 'history-search-input';
     searchInput.placeholder = 'URL / フィールド / ペイロードで検索…';
+    searchInput.setAttribute('aria-label', '検出結果の検索');
 
     const urlChip = document.createElement('span');
     urlChip.id = 'findingsUrlChip';
@@ -918,6 +923,8 @@
       dom.detailContent.appendChild(evSection);
     }
 
+    const CHUNK_SIZE = 50;
+
     function renderList() {
       const filters = getFilters();
       const filtered = filterFindings(allFindings, filters);
@@ -945,8 +952,10 @@
       }
 
       let stillSelected = false;
+      let renderedCount = 0;
+      let sentinelEl = null;
 
-      filtered.forEach(function (f, idx) {
+      function createFindingCard(f, idx) {
         const fid = getFindingId(f, idx);
         const card = document.createElement('div');
         card.className = 'findings-list-card';
@@ -1051,8 +1060,80 @@
           }
         });
 
-        dom.listContent.appendChild(card);
-      });
+        return card;
+      }
+
+      function updateSentinel() {
+        if (renderedCount < filtered.length) {
+          if (!sentinelEl) {
+            sentinelEl = document.createElement('div');
+            sentinelEl.className = 'findings-list-sentinel';
+            sentinelEl.style.cssText = 'padding:10px;text-align:center;font-size:0.75rem;color:var(--text-muted);cursor:pointer;';
+            sentinelEl.setAttribute('role', 'button');
+            sentinelEl.tabIndex = 0;
+            const appendMore = () => renderChunk(CHUNK_SIZE);
+            sentinelEl.addEventListener('click', appendMore);
+            sentinelEl.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                appendMore();
+              }
+            });
+          }
+          sentinelEl.textContent = `${filtered.length.toLocaleString()} 件中 ${renderedCount.toLocaleString()} 件を表示中（スクロールまたはクリックで追加）`;
+          dom.listContent.appendChild(sentinelEl);
+        } else if (sentinelEl && sentinelEl.parentNode) {
+          sentinelEl.remove();
+          sentinelEl = null;
+        }
+      }
+
+      function renderChunk(count) {
+        if (sentinelEl && sentinelEl.parentNode) {
+          sentinelEl.remove();
+        }
+        const frag = document.createDocumentFragment();
+        const target = Math.min(filtered.length, renderedCount + count);
+        for (let i = renderedCount; i < target; i++) {
+          const card = createFindingCard(filtered[i], i);
+          frag.appendChild(card);
+        }
+        renderedCount = target;
+        dom.listContent.appendChild(frag);
+        updateSentinel();
+      }
+
+      // Initial chunk: if selected finding is within filtered, ensure initial render includes it
+      let initialCount = CHUNK_SIZE;
+      if (selectedFindingId) {
+        const selIdx = filtered.findIndex((f, idx) => getFindingId(f, idx) === selectedFindingId);
+        if (selIdx >= 0) {
+          initialCount = Math.max(CHUNK_SIZE, selIdx + 1);
+        }
+      }
+
+      renderChunk(initialCount);
+
+      // Scroll listener on dom.listPane for bounded infinite scroll
+      if (!dom.listPane._hasScrollBound) {
+        dom.listPane._hasScrollBound = true;
+        let scrollRaf = false;
+        dom.listPane.addEventListener('scroll', () => {
+          if (scrollRaf) return;
+          scrollRaf = true;
+          requestAnimationFrame(() => {
+            scrollRaf = false;
+            if (dom._activeRenderChunk && dom.listPane.scrollTop + dom.listPane.clientHeight >= dom.listPane.scrollHeight - 300) {
+              dom._activeRenderChunk(CHUNK_SIZE);
+            }
+          });
+        }, { passive: true });
+      }
+      dom._activeRenderChunk = (count) => {
+        if (renderedCount < filtered.length) {
+          renderChunk(count);
+        }
+      };
 
       if (!stillSelected) {
         if (selectedFindingId) {
