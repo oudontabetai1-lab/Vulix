@@ -243,6 +243,40 @@ class FindingsModulePureFunctionsTests(unittest.TestCase):
         self.assertIn("needs review", res["v3"]["text"])
         self.assertEqual(res["r3"]["state"], "needs_review")
 
+    def test_unverified_and_untested_items_never_render_as_reproduced(self):
+        """回帰テスト: not_checked / untested / unknown / unavailable / 未確証 が reproduced として描画されないこと。"""
+        script = f"""
+        const fs = require('fs');
+        const code = fs.readFileSync('{FINDINGS_MODULE_JS}', 'utf-8');
+        eval(code);
+        const FM = global.VulixFindingsModule;
+
+        const cases = [
+          {{ check_type: 'jwt', verification_state: 'not_checked' }},
+          {{ check_type: 'cors', verification_state: 'untested' }},
+          {{ check_type: 'ssrf', verification_state: 'unavailable' }},
+          {{ check_type: 'sqli', verification_state: 'unknown' }},
+          {{ check_type: 'xss', verified: false }},
+          {{ check_type: 'os', verified: null, source: 'agent', agent_verified: false }},
+          {{ check_type: 'rce', verified: null }},
+        ];
+
+        const labels = cases.map(c => FM.getVerificationLabel(c));
+        console.log(JSON.stringify(labels));
+        """
+        labels = _run_node(script)
+        for idx, lbl in enumerate(labels):
+            self.assertNotEqual(
+                lbl["state"],
+                "reproduced",
+                f"Case {idx} must never render as reproduced: {lbl}",
+            )
+            self.assertNotIn(
+                "verify-reproduced",
+                lbl["cls"],
+                f"Case {idx} must never receive verify-reproduced class: {lbl}",
+            )
+
     def test_deep_link_parse_and_lookup_and_not_found(self):
         script = f"""
         const fs = require('fs');

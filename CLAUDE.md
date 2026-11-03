@@ -124,6 +124,7 @@ pip install -r requirements.txt && playwright install chromium
 
 # テスト（CI と同一。push 前に必ず通す）
 pytest -q --ignore=tests/test_end_to_end_scan.py
+pytest -q tests/test_ui_app_screens_e2e.py            # /app 主要8画面 E2E（要 Chromium）
 WSCAN_E2E=1 pytest tests/test_end_to_end_scan.py     # E2E はオプトイン（実ブラウザ）
 
 # 変更の動作確認（スモーク）。フィクスチャの脆弱アプリに対して実行すると速い

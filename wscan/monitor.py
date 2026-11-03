@@ -1645,9 +1645,14 @@ class MonitorServer:
                 if isinstance(ev, dict):
                     data["status"] = ev.get("status") or ("aborted" if ev.get("aborted") else "done")
                     data["target_url"] = ev.get("target") or ""
-                    data["findings"] = ev.get("findings") or []
+                    data["findings"] = ev.get("findings")
+                    if "findings_available" in ev:
+                        data["findings_available"] = ev["findings_available"]
                     data["visited_urls"] = ev.get("visited_urls") or []
                     data["attack_plans"] = ev.get("attack_plans") or []
+                    data["pages"] = ev.get("pages") or ev.get("crawled_pages") or []
+                    data["nodes"] = ev.get("nodes") or []
+                    data["edges"] = ev.get("edges") or []
                     if "page_graph" in ev and isinstance(ev["page_graph"], dict):
                         data["page_graph"] = ev["page_graph"]
             except Exception:
