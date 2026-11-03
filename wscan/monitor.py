@@ -1447,6 +1447,75 @@ class MonitorServer:
             except (OSError, json.JSONDecodeError):
                 return JSONResponse({"error": "preflight result unavailable", "scan_id": scan_id}, status_code=500)
 
+        @app.post("/api/v1/preflight")
+        async def api_preflight(request: Request):
+            """Run readiness checks on demand against current setup config."""
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+            if not isinstance(body, dict):
+                return JSONResponse(
+                    {"error": "request body must be a JSON object"}, status_code=400
+                )
+            config = body.get("config", body)
+            if not isinstance(config, dict):
+                return JSONResponse(
+                    {"error": "config must be a JSON object"}, status_code=400
+                )
+            url = config.get("url")
+            if not isinstance(url, str) or not url.strip():
+                return JSONResponse(
+                    {"error": "url is required and must be a non-empty string"},
+                    status_code=400,
+                )
+
+            raw_checks = config.get("checks")
+            if isinstance(raw_checks, list):
+                checks = [str(c) for c in raw_checks if isinstance(c, str)]
+            else:
+                checks = []
+
+            auth_configured = bool(
+                config.get("auth_configured")
+                or config.get("cookie")
+                or config.get("cookies")
+                or config.get("bearer")
+                or config.get("login_url")
+                or config.get("auth_user")
+                or config.get("headers")
+                or config.get("header")
+            )
+            accounts_configured = bool(
+                config.get("accounts_configured")
+                or config.get("accounts")
+                or config.get("accounts_file")
+                or config.get("auto_register")
+            )
+
+            from wscan.preflight import run_preflight
+
+            with tempfile.TemporaryDirectory(prefix="preflight_") as tmp_dir:
+                try:
+                    report = await run_preflight(
+                        url.strip(),
+                        proxy=str(config.get("proxy") or "").strip(),
+                        verify_tls=bool(config.get("tls_verify", False)),
+                        ca_cert=str(config.get("tls_ca_cert") or "").strip(),
+                        output_dir=tmp_dir,
+                        checks=checks,
+                        api_spec=str(config.get("api_spec") or "").strip(),
+                        auth_configured=auth_configured,
+                        accounts_configured=accounts_configured,
+                    )
+                except Exception as exc:
+                    return JSONResponse(
+                        {"error": f"preflight execution failed: {exc}"}, status_code=500
+                    )
+
+            return JSONResponse(report)
+
         @app.get("/api/v1/scans/{scan_id}/crawl-graph")
         async def api_scans_crawl_graph(scan_id: str):
             """Return read-only snapshot projection of the crawl graph for a specific scan ID."""
