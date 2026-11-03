@@ -19,6 +19,7 @@ UI_ASSETS = [
     "/ui/evidence-viewer-registry.js",
     "/ui/findings-module.js",
     "/ui/agent-skills-module.js",
+    "/ui/setup-module.js",
     "/ui/settings-module.js",
     "/ui/tokens.css",
     "/ui/components.css",
@@ -59,21 +60,24 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
     ui_harness.capture_screenshot(page, "app-portal", width, dest_dir=ui_harness.output_dir / "screenshots")
 
     page.locator('[data-route="setup"]').click()
-    setup = page.frame_locator("#monitorFrame")
-    setup.locator("#scanConfigOverlay.active").wait_for()
+    setup = page.locator("#setupSurface")
+    setup.locator("#cfgInputUrl").wait_for()
     setup.locator("#cfgInputUrl").fill("https://safe.example.test")
-    setup.locator("#cfgTab-basic #cfgDepth").fill("4")
+    setup.locator("#cfgDepth").fill("4")
     ui_harness.capture_screenshot(page, "app-setup", width, dest_dir=ui_harness.output_dir / "screenshots")
+    if width == 1440:
+        doc_setup_img = Path(ui_harness.repo_root) / "docs" / "images" / "app-setup.png"
+        page.screenshot(path=str(doc_setup_img), full_page=False)
     secret_sentinel = "APP_SECRET_SENTINEL_DO_NOT_PERSIST"
-    setup.locator(".cfg-tab").filter(has_text="認証・Cookie").click()
+    setup.locator(".setup-tab").filter(has_text="認証").click()
     setup.locator("#cfgAuthPass").fill(secret_sentinel)
     page.locator('[data-route="monitor"]').click()
     page.wait_for_function("document.querySelector('[data-route=monitor]').getAttribute('aria-current') === 'page'")
     assert page.locator('[data-route="monitor"]').get_attribute("aria-current") == "page"
     assert page.locator('[data-route="setup"]').get_attribute("aria-current") is None
-    page.wait_for_function("() => !document.querySelector('#monitorFrame').contentDocument.querySelector('#scanConfigOverlay').classList.contains('active')")
+    page.wait_for_function("() => document.querySelector('#setupSurface').hidden === true")
     assert setup.locator("#cfgInputUrl").input_value() == "https://safe.example.test"
-    assert setup.locator("#cfgTab-basic #cfgDepth").input_value() == "4"
+    assert setup.locator("#cfgDepth").input_value() == "4"
     frame = page.frame_locator("#monitorFrame")
     context_data = frame.locator("body").evaluate("() => JSON.stringify(VulixAppBridge.getContext())")
     assert secret_sentinel not in context_data
@@ -109,7 +113,7 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
     page.wait_for_timeout(80)
     assert page.url.endswith("#/setup")
     page.reload(wait_until="domcontentloaded")
-    setup.locator("#scanConfigOverlay.active").wait_for()
+    setup.locator("#cfgInputUrl").wait_for()
     assert page.url.endswith("#/setup")
     page.wait_for_function("""() => {
       const frame = document.querySelector('#monitorFrame')?.contentWindow;
@@ -117,9 +121,7 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
         frame.eval("typeof state.serverInstanceId === 'string' && state.serverInstanceId.length > 0");
     }""")
 
-    frame = page.frame_locator("#monitorFrame")
-    frame.locator("#cfgInputUrl").wait_for()
-    frame.locator("#cfgInputUrl").fill("https://safe.example.test")
+    setup.locator("#cfgInputUrl").fill("https://safe.example.test")
     page.evaluate("() => document.querySelector('#monitorFrame').contentWindow.eval(\"state.serverInstanceId='server-demo'; state.scanRunId='run-demo'; state.scanId='20261026_100000'; state.status='scanning'; publishAppScanContext()\")")
     page.evaluate("() => { location.hash = '#/monitor?scan=20261026_100000'; }")
     page.wait_for_function("() => document.querySelector('#scanContext').textContent.includes('20261026_100000') && !document.querySelector('#monitorFrame').hidden")

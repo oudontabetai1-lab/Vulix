@@ -22,7 +22,7 @@
     #scanContext { color: var(--text-muted); font-size: .82rem; overflow-wrap: anywhere; }
     #surface { position: relative; flex: 1; min-height: calc(100vh - 58px); }
     iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
-    iframe[hidden], #message[hidden], #findingsSurface[hidden], #agentSkillsSurface[hidden], #settingsSurface[hidden] { display: none; }
+    iframe[hidden], #message[hidden], #findingsSurface[hidden], #agentSkillsSurface[hidden], #setupSurface[hidden], #settingsSurface[hidden] { display: none; }
     #monitorModule[hidden] { display: none; }
     #monitorFrame.transport-owner { inset: auto; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
     #message { padding: 28px; }
@@ -84,7 +84,7 @@
     @media (max-width: 900px) {
       .findings-split-view { grid-template-columns: 1fr; }
     }
-    #agentSkillsSurface { padding: 24px; overflow-y: auto; max-height: calc(100vh - 58px); }
+    #agentSkillsSurface, #setupSurface { padding: 24px; overflow-y: auto; max-height: calc(100vh - 58px); }
     .agent-skills-header { margin-bottom: 18px; }
     .agent-skills-header h2 { margin: 0 0 6px 0; font-size: 1.15rem; font-weight: 700; color: var(--text); }
     .agent-skills-header p { margin: 0; font-size: 0.82rem; color: var(--text-muted); }
@@ -108,6 +108,50 @@
     .agent-skill-status.status-unknown { color: var(--text-muted); background: var(--surface2); }
     .agent-skills-loading, .agent-skills-empty, .agent-skills-error { padding: 24px; color: var(--text-muted); font-size: 0.85rem; }
     .agent-skills-error h3 { margin: 0 0 8px 0; color: var(--critical); font-size: 1rem; }
+    /* Setup view */
+    .setup-view-root { padding: 0 0 32px 0; max-width: 1100px; }
+    .setup-persistent-header { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 18px; }
+    .setup-url-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+    .setup-url-row label { font-size: 0.74rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .setup-url-input { width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 0.88rem; font-family: monospace; outline: none; transition: border-color 0.15s; box-sizing: border-box; }
+    .setup-url-input:focus { border-color: var(--accent); }
+    .setup-controls-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; }
+    .setup-mode-section, .setup-presets-section { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .setup-section-label { font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .setup-mode-group, .setup-presets-list { display: flex; gap: 6px; flex-wrap: wrap; }
+    .setup-mode-btn, .setup-preset-btn { padding: 5px 12px; border-radius: 5px; font-size: 0.76rem; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: var(--surface2); color: var(--text-muted); transition: all 0.15s; }
+    .setup-mode-btn.active { background: var(--surface); border-color: var(--accent); color: var(--text); font-weight: 700; }
+    .setup-mode-btn:focus-visible, .setup-preset-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .setup-preset-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+    .setup-preset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .setup-preset-note { font-size: 0.72rem; color: var(--accent); margin-left: 6px; }
+    .setup-start-btn { padding: 7px 18px; border-radius: 6px; font-size: 0.82rem; font-weight: 700; cursor: pointer; border: 1px solid var(--accent); background: var(--accent); color: #161826; transition: opacity 0.15s; }
+    .setup-start-btn:hover { opacity: 0.9; }
+    .setup-tabs-bar { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 16px; overflow-x: auto; }
+    .setup-tab { padding: 8px 16px; border-radius: 6px 6px 0 0; border: 1px solid transparent; border-bottom: none; background: transparent; color: var(--text-muted); font-size: 0.82rem; font-weight: 600; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+    .setup-tab.active { background: var(--surface); border-color: var(--border); border-bottom: 1px solid var(--surface); color: var(--text); font-weight: 700; margin-bottom: -1px; }
+    .setup-tab:hover:not(.active) { color: var(--text); }
+    .setup-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .setup-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 0 6px 6px 6px; padding: 20px; outline: none; }
+    .setup-panel[hidden] { display: none; }
+    .setup-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px 18px; }
+    .setup-field { display: flex; flex-direction: column; gap: 5px; }
+    .setup-field label, .setup-field-title { font-size: 0.76rem; font-weight: 600; color: var(--text-muted); }
+    .setup-field input[type="text"], .setup-field input[type="password"], .setup-field input[type="number"], .setup-field select, .setup-field textarea { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 0.82rem; outline: none; transition: border-color 0.15s; width: 100%; box-sizing: border-box; }
+    .setup-field input:focus, .setup-field select:focus, .setup-field textarea:focus { border-color: var(--accent); }
+    .setup-field input[aria-invalid="true"] { border-color: var(--critical) !important; }
+    .setup-checkbox-label { display: flex !important; flex-direction: row !important; align-items: center; gap: 8px; cursor: pointer; font-size: 0.82rem !important; color: var(--text) !important; font-weight: normal !important; padding: 4px 0; }
+    .setup-field-error { font-size: 0.72rem; color: var(--critical); display: block; margin-top: 2px; }
+    .setup-disclosure { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 12px; }
+    .setup-disclosure-summary { font-size: 0.78rem; font-weight: 700; color: var(--accent); cursor: pointer; user-select: none; padding: 4px 0; outline: none; }
+    .setup-disclosure-summary:hover { text-decoration: underline; }
+    .setup-disclosure[open] .setup-disclosure-summary { margin-bottom: 12px; }
+    .setup-checks-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; padding: 8px; border-radius: 6px; background: var(--surface2); border: 1px solid var(--border); max-height: 220px; overflow-y: auto; }
+    .setup-check-item { display: flex; align-items: center; gap: 6px; font-size: 0.76rem; cursor: pointer; color: var(--text); }
+    .setup-unavailable-banner { padding: 10px 14px; border-radius: 6px; background: rgba(226,112,143,0.12); border: 1px solid var(--critical); color: var(--critical); font-size: 0.8rem; margin-bottom: 14px; }
+    .setup-subgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .setup-subfield { display: flex; flex-direction: column; gap: 3px; }
+    .setup-subfield label { font-size: 0.7rem; color: var(--text-muted); }
     @media (max-width: 700px) {
       .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
       aside { padding: 10px; border-right: 0; border-bottom: 1px solid var(--border); }
@@ -138,6 +182,7 @@
         <div id="monitorModule" hidden></div>
         <div id="findingsSurface" hidden></div>
         <div id="agentSkillsSurface" hidden></div>
+        <div id="setupSurface" hidden></div>
         <div id="settingsSurface" hidden></div>
         <div id="message" role="status" hidden></div>
       </section>
@@ -148,6 +193,7 @@
   <script src="/ui/capability-reader.js"></script>
   <script src="/ui/evidence-viewer-registry.js"></script>
   <script src="/ui/findings-module.js"></script>
+  <script src="/ui/setup-module.js"></script>
   <script src="/ui/agent-skills-module.js"></script>
   <script src="/ui/settings-module.js"></script>
   <script src="/ui/app-entry.js"></script>
