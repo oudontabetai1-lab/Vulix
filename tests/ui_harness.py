@@ -831,6 +831,16 @@ class UIHarness:
             f"(window.innerWidth: {overflow_info['winWidth']}px)"
         )
 
+    def save_doc_image(self, page: Any, name: str) -> None:
+        """Capture documentation screenshot only when WSCAN_REFRESH_DOCS_IMAGES is truthy."""
+        val = os.environ.get("WSCAN_REFRESH_DOCS_IMAGES", "").strip().lower()
+        if val not in ("1", "true"):
+            return
+        dest_dir = self.repo_root / "docs" / "images"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out_path = dest_dir / f"{name}.png"
+        page.screenshot(path=str(out_path), full_page=False)
+
     def capture_screenshot(
         self,
         page: Any,
