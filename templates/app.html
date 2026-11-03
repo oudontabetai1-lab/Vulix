@@ -22,7 +22,7 @@
     #scanContext { color: var(--text-muted); font-size: .82rem; overflow-wrap: anywhere; }
     #surface { position: relative; flex: 1; min-height: calc(100vh - 58px); }
     iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
-    iframe[hidden], #message[hidden], #findingsSurface[hidden], #agentSkillsSurface[hidden], #setupSurface[hidden], #settingsSurface[hidden] { display: none; }
+    iframe[hidden], #message[hidden], #findingsSurface[hidden], #agentSkillsSurface[hidden], #setupSurface[hidden], #settingsSurface[hidden], #crawlSurface[hidden] { display: none; }
     #monitorModule[hidden] { display: none; }
     #monitorFrame.transport-owner { inset: auto; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
     #message { padding: 28px; }
@@ -152,11 +152,84 @@
     .setup-subgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
     .setup-subfield { display: flex; flex-direction: column; gap: 3px; }
     .setup-subfield label { font-size: 0.7rem; color: var(--text-muted); }
+    /* Crawl view styles */
+    #crawlSurface { height: calc(100vh - 58px); display: flex; flex-direction: column; }
+    .crawl-graph-surface[hidden], .crawl-explorer-surface[hidden], .crawl-list-surface[hidden], .crawl-detail-drawer[hidden], .crawl-message-banner[hidden] { display: none !important; }
+    .crawl-module-root { display: flex; flex-direction: column; height: 100%; background: var(--bg); overflow: hidden; }
+    .crawl-toolbar { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .crawl-toolbar-group { display: flex; align-items: center; gap: 8px; }
+    .crawl-toolbar-right { margin-left: auto; }
+    .crawl-badge { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 4px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; }
+    .crawl-badge-complete { background: rgba(143,185,201,0.18); color: var(--low); border: 1px solid var(--low); }
+    .crawl-badge-partial { background: rgba(217,154,99,0.18); color: var(--high); border: 1px solid var(--high); }
+    .crawl-badge-unknown { background: rgba(147,151,171,0.15); color: var(--text-muted); border: 1px solid var(--border); }
+    .crawl-reasons-text { font-size: 0.74rem; color: var(--text-muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .crawl-select { padding: 5px 9px; border-radius: 5px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 0.78rem; outline: none; }
+    .crawl-search-wrap { position: relative; width: 200px; }
+    .crawl-search-input { width: 100%; padding: 5px 9px; border-radius: 5px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 0.78rem; outline: none; box-sizing: border-box; }
+    .crawl-search-input:focus { border-color: var(--accent); }
+    .crawl-zoom-group { display: inline-flex; align-items: center; gap: 4px; }
+    .crawl-content-area { position: relative; flex: 1; min-height: 0; overflow: hidden; display: flex; }
+    .crawl-message-banner { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 20; padding: 8px 16px; border-radius: 6px; font-size: 0.8rem; display: flex; align-items: center; gap: 12px; box-shadow: 0 4px 14px rgba(0,0,0,0.3); }
+    .banner-loading { background: var(--surface2); border: 1px solid var(--border); color: var(--text-muted); }
+    .banner-empty { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+    .banner-error { background: rgba(226,112,143,0.15); border: 1px solid var(--critical); color: var(--critical); }
+    .crawl-graph-surface { position: relative; flex: 1; height: 100%; overflow: hidden; background: #0d0f18; }
+    .crawl-svg-canvas { width: 100%; height: 100%; display: block; }
+    .crawl-svg-node text { user-select: none; }
+    .crawl-svg-node.selected rect { stroke: var(--accent) !important; stroke-width: 2.5 !important; }
+    .crawl-explorer-surface { flex: 1; display: flex; height: 100%; overflow: hidden; }
+    .crawl-explorer-tree { width: 340px; flex-shrink: 0; border-right: 1px solid var(--border); background: var(--surface); overflow-y: auto; padding: 8px; }
+    .crawl-tree-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 5px; font-size: 0.78rem; cursor: pointer; color: var(--text); }
+    .crawl-tree-row:hover { background: var(--surface2); }
+    .crawl-tree-row.selected { background: var(--surface2); color: #fff; font-weight: 600; border-left: 3px solid var(--accent); }
+    .crawl-tree-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .crawl-tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .crawl-tree-vuln { font-size: 0.68rem; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: rgba(226,112,143,0.2); color: var(--critical); }
+    .crawl-explorer-detail { flex: 1; overflow-y: auto; padding: 20px; background: var(--bg); }
+    .crawl-list-surface { flex: 1; overflow-y: auto; padding: 18px; }
+    .selected-row td { background: rgba(145,132,217,0.12) !important; }
+    .crawl-detail-drawer { position: absolute; top: 12px; right: 12px; bottom: 12px; width: 380px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 18px; overflow-y: auto; z-index: 15; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
+    .crawl-drawer-close { position: absolute; top: 12px; right: 12px; background: transparent; border: none; color: var(--text-muted); font-size: 1.1rem; cursor: pointer; padding: 4px 8px; border-radius: 4px; }
+    .crawl-drawer-close:hover { color: var(--text); background: var(--surface2); }
+    .crawl-detail-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding-right: 28px; }
+    .crawl-detail-title { margin: 0; font-size: 0.96rem; color: var(--text); word-break: break-all; }
+    .crawl-kind-badge { padding: 2px 7px; border-radius: 4px; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; }
+    .kind-page { background: rgba(145,132,217,0.18); color: var(--accent); }
+    .kind-form { background: rgba(217,154,99,0.18); color: var(--high); }
+    .kind-param { background: rgba(143,185,201,0.18); color: var(--low); }
+    .kind-unknown { background: rgba(147,151,171,0.18); color: var(--text-muted); }
+    .crawl-detail-row { font-size: 0.78rem; color: var(--text-muted); margin-bottom: 8px; word-break: break-all; }
+    .crawl-url-code { font-family: monospace; font-size: 0.74rem; color: var(--text); }
+    .crawl-external-link { color: var(--accent); text-decoration: none; font-weight: 600; margin-left: 4px; }
+    .crawl-external-link:hover { text-decoration: underline; }
+    .crawl-detail-section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .crawl-detail-section h4 { margin: 0 0 8px 0; font-size: 0.8rem; font-weight: 700; color: var(--text-muted); }
+    .crawl-detail-list { margin: 0; padding-left: 18px; font-size: 0.76rem; color: var(--text); }
+    .crawl-detail-list li { margin-bottom: 4px; }
+    .crawl-method-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.65rem; font-weight: 700; background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+    .crawl-input-meta { color: var(--text-muted); font-size: 0.72rem; }
+    .crawl-unavailable-text { font-size: 0.74rem; color: var(--text-muted); font-style: italic; padding: 4px 0; }
+    .crawl-findings-list { display: flex; flex-direction: column; gap: 8px; }
+    .crawl-finding-card { padding: 8px 10px; border-radius: 6px; background: var(--surface2); border: 1px solid var(--border); font-size: 0.76rem; }
+    .crawl-sev-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.65rem; font-weight: 700; }
+    .sev-critical { background: rgba(226,112,143,0.2); color: var(--critical); border: 1px solid var(--critical); }
+    .sev-high { background: rgba(217,154,99,0.2); color: var(--high); border: 1px solid var(--high); }
+    .sev-medium { background: rgba(199,185,106,0.2); color: var(--medium); border: 1px solid var(--medium); }
+    .sev-low { background: rgba(143,185,201,0.2); color: var(--low); border: 1px solid var(--low); }
+    .sev-info { background: rgba(181,171,252,0.2); color: var(--info); border: 1px solid var(--info); }
+    .crawl-finding-id { font-family: monospace; font-size: 0.7rem; color: var(--text-muted); margin-top: 3px; }
+    .crawl-finding-field { font-size: 0.72rem; color: var(--text); margin-top: 2px; }
+    .crawl-verified-pill { display: inline-block; font-size: 0.65rem; color: var(--low); background: rgba(143,185,201,0.15); border-radius: 3px; padding: 1px 5px; margin-top: 4px; }
+    .crawl-meta-dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; font-size: 0.74rem; margin: 0; }
+    .crawl-meta-dl dt { color: var(--text-muted); font-weight: 600; }
+    .crawl-meta-dl dd { color: var(--text); margin: 0; }
+    .crawl-detail-empty { color: var(--text-muted); font-size: 0.8rem; padding: 18px; text-align: center; }
     @media (max-width: 700px) {
       .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
       aside { padding: 10px; border-right: 0; border-bottom: 1px solid var(--border); }
       .brand { padding: 0 6px 10px; }
-      nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       nav button { justify-content: center; padding: 8px 5px; }
     }
   </style>
@@ -170,6 +243,7 @@
         <button class="history-btn" type="button" data-route="setup">Scan Setup</button>
         <button class="history-btn" type="button" data-route="monitor">Monitor</button>
         <button class="history-btn" type="button" data-route="findings">Findings</button>
+        <button class="history-btn" type="button" data-route="crawl">Crawl</button>
         <button class="history-btn" type="button" data-route="agent-skills">Agent Skills</button>
         <button class="history-btn" type="button" data-route="settings">Settings</button>
       </nav>
@@ -181,6 +255,7 @@
         <iframe id="monitorFrame" title="Vulix Monitor" hidden></iframe>
         <div id="monitorModule" hidden></div>
         <div id="findingsSurface" hidden></div>
+        <div id="crawlSurface" hidden></div>
         <div id="agentSkillsSurface" hidden></div>
         <div id="setupSurface" hidden></div>
         <div id="settingsSurface" hidden></div>
@@ -193,6 +268,7 @@
   <script src="/ui/capability-reader.js"></script>
   <script src="/ui/evidence-viewer-registry.js"></script>
   <script src="/ui/findings-module.js"></script>
+  <script src="/ui/crawl-module.js"></script>
   <script src="/ui/setup-module.js"></script>
   <script src="/ui/agent-skills-module.js"></script>
   <script src="/ui/settings-module.js"></script>
