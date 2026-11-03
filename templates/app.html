@@ -22,16 +22,40 @@
     #scanContext { color: var(--text-muted); font-size: .82rem; overflow-wrap: anywhere; }
     #surface { position: relative; flex: 1; min-height: calc(100vh - 58px); }
     iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
-    iframe[hidden], #message[hidden] { display: none; }
+    iframe[hidden], #message[hidden], #agentSkillsSurface[hidden] { display: none; }
     #monitorModule[hidden] { display: none; }
     #monitorFrame.transport-owner { inset: auto; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
     #message { padding: 28px; }
     #message h2 { margin-top: 0; }
+    #agentSkillsSurface { padding: 24px; overflow-y: auto; max-height: calc(100vh - 58px); }
+    .agent-skills-header { margin-bottom: 18px; }
+    .agent-skills-header h2 { margin: 0 0 6px 0; font-size: 1.15rem; font-weight: 700; color: var(--text); }
+    .agent-skills-header p { margin: 0; font-size: 0.82rem; color: var(--text-muted); }
+    .agent-skills-table-card { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+    .agent-skills-table-scroll { overflow-x: auto; }
+    .agent-skills-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.8rem; }
+    .agent-skills-table th { background: var(--surface2); color: var(--text-muted); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+    .agent-skills-table td { padding: 10px 14px; border-bottom: 1px solid rgba(63,66,77,0.35); vertical-align: top; color: var(--text); }
+    .agent-skills-table tbody tr:last-child td { border-bottom: none; }
+    .agent-skills-table tbody tr:hover td { background: rgba(233,233,237,0.02); }
+    .agent-skill-name { font-weight: 600; color: var(--text); margin-bottom: 2px; }
+    .agent-skill-id { font-family: monospace; font-size: 0.72rem; color: var(--accent); }
+    .agent-skill-desc { color: var(--text); font-size: 0.78rem; line-height: 1.4; max-width: 480px; }
+    .agent-skill-modes { display: flex; gap: 6px; flex-wrap: wrap; }
+    .agent-skill-mode-badge { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
+    .agent-skill-mode-badge.mode-agent { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
+    .agent-skill-mode-badge.mode-hybrid { border-color: var(--info); color: var(--info); }
+    .agent-skill-status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; }
+    .agent-skill-status.status-available { color: var(--low); background: rgba(143,185,201,0.12); }
+    .agent-skill-status.status-unavailable { color: var(--critical); background: rgba(226,112,143,0.12); }
+    .agent-skill-status.status-unknown { color: var(--text-muted); background: var(--surface2); }
+    .agent-skills-loading, .agent-skills-empty, .agent-skills-error { padding: 24px; color: var(--text-muted); font-size: 0.85rem; }
+    .agent-skills-error h3 { margin: 0 0 8px 0; color: var(--critical); font-size: 1rem; }
     @media (max-width: 700px) {
       .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
       aside { padding: 10px; border-right: 0; border-bottom: 1px solid var(--border); }
       .brand { padding: 0 6px 10px; }
-      nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       nav button { justify-content: center; padding: 8px 5px; }
     }
   </style>
@@ -44,6 +68,7 @@
         <button class="history-btn" type="button" data-route="portal">ポータル</button>
         <button class="history-btn" type="button" data-route="setup">Scan Setup</button>
         <button class="history-btn" type="button" data-route="monitor">Monitor</button>
+        <button class="history-btn" type="button" data-route="agent-skills">Agent Skills</button>
       </nav>
     </aside>
     <main>
@@ -52,12 +77,15 @@
         <iframe id="portalFrame" title="Vulix Portal" hidden></iframe>
         <iframe id="monitorFrame" title="Vulix Monitor" hidden></iframe>
         <div id="monitorModule" hidden></div>
+        <div id="agentSkillsSurface" hidden></div>
         <div id="message" role="status" hidden></div>
       </section>
     </main>
   </div>
   <script src="/ui/api-client.js"></script>
   <script src="/ui/app-shell.js"></script>
+  <script src="/ui/capability-reader.js"></script>
+  <script src="/ui/agent-skills-module.js"></script>
   <script src="/ui/app-entry.js"></script>
 </body>
 </html>

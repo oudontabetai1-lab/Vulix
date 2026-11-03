@@ -11,6 +11,7 @@
   const monitor = document.getElementById('monitorFrame');
   const monitorHost = document.getElementById('monitorModule');
   const message = document.getElementById('message');
+  const agentSkillsSurface = document.getElementById('agentSkillsSurface');
   const title = document.getElementById('viewTitle');
   const context = document.getElementById('scanContext');
   let activeScope = null;
@@ -24,7 +25,8 @@
   function unavailable(text) {
     portal.hidden = true;
     monitor.hidden = true;
-    monitorHost.hidden = true;
+    if (monitorHost) monitorHost.hidden = true;
+    if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     message.hidden = false;
     message.replaceChildren();
     const heading = document.createElement('h2');
@@ -85,6 +87,7 @@
   function showMonitorSurface(surface, onReady) {
     clearMessage();
     portal.hidden = true;
+    if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     monitor.hidden = Boolean(onReady);
     ensureMonitor((bridge) => {
       bridge.setSurface(surface);
@@ -104,6 +107,8 @@
     title.textContent = 'ポータル';
     context.textContent = '';
     clearMessage();
+    if (monitorHost) monitorHost.hidden = true;
+    if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     monitor.hidden = true;
     portal.hidden = false;
     portal.src = '/';
@@ -192,13 +197,39 @@
     monitorHost.hidden = true;
     monitor.hidden = true;
   } });
+
+  registry.register({ id: 'agent-skills', title: 'Agent Skills', route: '#/agent-skills', mount() {
+    title.textContent = 'Agent Skills';
+    context.textContent = '';
+    clearMessage();
+    cancelPendingMonitorLoad();
+    stopContextSubscription();
+    portal.hidden = true;
+    monitor.hidden = true;
+    if (monitorHost) monitorHost.hidden = true;
+    if (agentSkillsSurface) {
+      agentSkillsSurface.hidden = false;
+      if (global.VulixAgentSkillsModule && typeof global.VulixAgentSkillsModule.loadAndRenderAgentSkills === 'function') {
+        global.VulixAgentSkillsModule.loadAndRenderAgentSkills(agentSkillsSurface, { api });
+      }
+    }
+  }, unmount() {
+    if (agentSkillsSurface) {
+      agentSkillsSurface.hidden = true;
+      if (typeof agentSkillsSurface.replaceChildren === 'function') {
+        agentSkillsSurface.replaceChildren();
+      } else {
+        while (agentSkillsSurface.firstChild) agentSkillsSurface.removeChild(agentSkillsSurface.firstChild);
+      }
+    }
+  } });
   registry.setDefaultId('portal');
 
   function parseRoute(hash) {
     const raw = (hash || '').replace(/^#/, '');
     const parts = raw.split('?');
     const route = parts[0] || '/portal';
-    if (!['/portal', '/setup', '/monitor'].includes(route) || parts.length > 2) return null;
+    if (!['/portal', '/setup', '/monitor', '/agent-skills'].includes(route) || parts.length > 2) return null;
     const params = new URLSearchParams(parts[1] || '');
     if (Array.from(params.keys()).some((key) => key !== 'scan') || params.getAll('scan').length > 1) return null;
     const scanId = params.get('scan');

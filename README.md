@@ -143,11 +143,12 @@ Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traver
 
 ### オプトインの統合画面
 
-同じサーバーで `/app` を開くと、ポータル、Scan Setup、Monitor を切り替えられます。Monitor は統合画面内の独立モジュールとして表示されますが、既存どおりの3ペイン、停止・再開・中断、レビュー、手動ペイロード操作を提供し、WebSocket とライブ状態は1つだけ維持します。URL の hash は画面と選択中の scan を表し、戻る/進むや再読み込みでも選択を保ちます。既存の `/` ポータルと `/monitor` は引き続き標準の入口です。
+同じサーバーで `/app` を開くと、ポータル、Scan Setup、Monitor、Agent Skills（Agent機能一覧）を切り替えられます。Monitor は統合画面内の独立モジュールとして表示されますが、既存どおりの3ペイン、停止・再開・中断、レビュー、手動ペイロード操作を提供し、WebSocket とライブ状態は1つだけ維持します。URL の hash は画面と選択中の scan を表し、戻る/進むや再読み込みでも選択を保ちます。既存の `/` ポータルと `/monitor` は引き続き標準の入口です。
 
 ![統合画面のポータル](docs/images/app-portal.png)
 ![統合画面の Scan Setup](docs/images/app-setup.png)
 ![統合画面の Monitor](docs/images/app-monitor.png)
+![統合画面の Agent Skills](docs/images/app-agent-skills.png)
 
 過去 scan のライブ Monitor は表示できません。存在しない、削除済み、または現在の Monitor と一致しない scan ID は利用不可として表示します。
 認証セッションが切れると明示的な再ログイン案内が表示されます。既存のログイン後の遷移先はポータル (`/`) のため、ログイン後に `/app` を再度開いてください。
