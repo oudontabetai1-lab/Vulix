@@ -238,6 +238,206 @@ def test_preflight_status_label_pure_mapping():
     assert verdicts["warning"]["label"] != verdicts["pass"]["label"]
 
 
+def test_prelaunch_summary_filter_and_sort_pure_mapping():
+    """Verify filterAndSortNonPassChecks priority sorting and removal of pass checks."""
+    script = f"""
+    const {{ filterAndSortNonPassChecks }} = require('{SETUP_MODULE_JS}');
+
+    const inputChecks = [
+      {{ id: 'reachability', status: 'pass', detail: 'OK' }},
+      {{ id: 'unknown_check', status: 'unknown', detail: '?' }},
+      {{ id: 'playwright', status: 'fail', detail: 'PW missing' }},
+      {{ id: 'auth', status: 'not_checked', detail: 'not checked' }},
+      {{ id: 'oob', status: 'warning', detail: 'OOB not configured' }},
+      {{ id: 'db_leak', status: 'fail', detail: 'Critical fail' }},
+      {{ id: 'proxy_na', status: 'not_applicable', detail: 'N/A' }},
+      {{ id: 'dns_pass', status: 'pass', detail: 'DNS resolved' }},
+    ];
+
+    const sorted = filterAndSortNonPassChecks(inputChecks);
+    const emptyResult = filterAndSortNonPassChecks([]);
+    const nullResult = filterAndSortNonPassChecks(null);
+    const allPassResult = filterAndSortNonPassChecks([
+      {{ id: 'c1', status: 'pass' }},
+      {{ id: 'c2', status: 'pass' }},
+    ]);
+
+    console.log(JSON.stringify({{
+      sorted,
+      emptyResult,
+      nullResult,
+      allPassResult,
+    }}));
+    """
+    res = _run_node(script)
+    sorted_checks = res["sorted"]
+    assert res["emptyResult"] == []
+    assert res["nullResult"] == []
+    assert res["allPassResult"] == []
+
+    # 1. No 'pass' status is in sorted list
+    assert not any(c["status"] == "pass" for c in sorted_checks)
+    assert len(sorted_checks) == 6
+
+    # 2. fail checks must come first
+    statuses = [c["status"] for c in sorted_checks]
+    assert statuses[0] == "fail"
+    assert statuses[1] == "fail"
+    assert statuses[2] == "warning"
+    for s in statuses[3:]:
+        assert s in ("unknown", "not_checked", "not_applicable", "unavailable")
+
+
+def test_prelaunch_summary_state_transitions_and_invariants():
+    """Verify computePrelaunchSummaryState across all states and the hard green invariant."""
+    script = f"""
+    const {{ computePrelaunchSummaryState }} = require('{SETUP_MODULE_JS}');
+
+    const checksSample = [
+      {{ id: 'playwright', status: 'fail', detail: 'PW missing' }},
+      {{ id: 'reachability', status: 'pass', detail: 'OK' }},
+    ];
+
+    const states = {{
+      never_run: computePrelaunchSummaryState({{ status: 'never_run' }}),
+      running: computePrelaunchSummaryState({{ status: 'running', checks: checksSample }}),
+      unavailable: computePrelaunchSummaryState({{ status: 'unavailable', errorMessage: 'connection refused' }}),
+      completed_pass: computePrelaunchSummaryState({{
+        status: 'completed',
+        verdict: 'pass',
+        checks: [{{ id: 'reachability', status: 'pass' }}],
+        isStale: false,
+      }}),
+      completed_pass_stale: computePrelaunchSummaryState({{
+        status: 'completed',
+        verdict: 'pass',
+        checks: [{{ id: 'reachability', status: 'pass' }}],
+        isStale: true,
+      }}),
+      completed_warning: computePrelaunchSummaryState({{
+        status: 'completed',
+        verdict: 'warning',
+        checks: [{{ id: 'auth', status: 'not_checked' }}],
+        isStale: false,
+      }}),
+      completed_warning_stale: computePrelaunchSummaryState({{
+        status: 'completed',
+        verdict: 'warning',
+        checks: [{{ id: 'auth', status: 'not_checked' }}],
+        isStale: true,
+      }}),
+      completed_fail: computePrelaunchSummaryState({{
+        status: 'completed',
+        verdict: 'fail',
+        checks: checksSample,
+        isStale: false,
+      }}),
+      completed_unknown: computePrelaunchSummaryState({{
+        status: 'completed',
+        verdict: 'unexpected',
+        checks: [],
+        isStale: false,
+      }}),
+    }};
+
+    console.log(JSON.stringify(states));
+    """
+    res = _run_node(script)
+
+    # 1. Check never_run
+    assert res["never_run"]["state"] == "never_run"
+    assert res["never_run"]["isPass"] is False
+    assert res["never_run"]["badgeLabel"] == "未確認"
+    assert res["never_run"]["badgeClass"] == "setup-status-not-checked"
+    assert "OK" not in res["never_run"]["badgeLabel"]
+
+    # 2. Check running
+    assert res["running"]["state"] == "running"
+    assert res["running"]["isPass"] is False
+    assert "確認中" in res["running"]["badgeLabel"]
+    assert "pass" not in res["running"]["badgeClass"]
+
+    # 3. Check unavailable
+    assert res["unavailable"]["state"] == "unavailable"
+    assert res["unavailable"]["isPass"] is False
+    assert res["unavailable"]["badgeLabel"] == "利用不可"
+    assert "connection refused" in res["unavailable"]["message"]
+    assert "pass" not in res["unavailable"]["badgeClass"]
+
+    # 4. Check completed pass (fresh)
+    assert res["completed_pass"]["state"] == "pass"
+    assert res["completed_pass"]["isPass"] is True
+    assert res["completed_pass"]["badgeLabel"] == "準備OK"
+    assert res["completed_pass"]["badgeClass"] == "setup-verdict-pass"
+    assert len(res["completed_pass"]["nonPassChecks"]) == 0
+
+    # 5. Check completed pass but STALE
+    stale_pass = res["completed_pass_stale"]
+    assert stale_pass["state"] == "stale"
+    assert stale_pass["isPass"] is False
+    assert stale_pass["isStale"] is True
+    assert "設定変更あり" in stale_pass["badgeLabel"]
+    assert "pass" not in stale_pass["badgeClass"]
+    assert "OK" not in stale_pass["badgeLabel"]
+
+    # 6. Check completed warning
+    assert res["completed_warning"]["state"] == "warning"
+    assert res["completed_warning"]["isPass"] is False
+    assert res["completed_warning"]["badgeClass"] == "setup-verdict-warning"
+    assert "pass" not in res["completed_warning"]["badgeClass"]
+    assert len(res["completed_warning"]["nonPassChecks"]) == 1
+
+    # 7. Check completed fail
+    assert res["completed_fail"]["state"] == "fail"
+    assert res["completed_fail"]["isPass"] is False
+    assert res["completed_fail"]["badgeClass"] == "setup-verdict-fail"
+    assert "pass" not in res["completed_fail"]["badgeClass"]
+    assert len(res["completed_fail"]["nonPassChecks"]) == 1
+    assert res["completed_fail"]["nonPassChecks"][0]["id"] == "playwright"
+
+    # 8. Hard Invariant: ONLY completed_pass yields isPass === True and setup-verdict-pass
+    non_passing_state_keys = [
+        "never_run", "running", "unavailable",
+        "completed_pass_stale", "completed_warning",
+        "completed_warning_stale", "completed_fail", "completed_unknown"
+    ]
+    for key in non_passing_state_keys:
+        st = res[key]
+        assert st["isPass"] is False, f"{key} must have isPass === False"
+        assert st["badgeClass"] != "setup-verdict-pass", f"{key} must not have setup-verdict-pass"
+        assert "pass" not in st["badgeClass"] or "compass" in st["badgeClass"], f"{key} badgeClass must not contain 'pass'"
+        assert st["badgeLabel"] != "準備OK", f"{key} badgeLabel must not be '準備OK'"
+
+
+def test_is_config_stale_pure_function():
+    """Verify isConfigStale compares payloads deterministically."""
+    script = f"""
+    const {{ isConfigStale }} = require('{SETUP_MODULE_JS}');
+
+    const base = {{ url: 'https://example.com', depth: 2, checks: ['sqli', 'xss'] }};
+    const identical = {{ url: 'https://example.com', depth: 2, checks: ['sqli', 'xss'] }};
+    const changedUrl = {{ url: 'https://example.org', depth: 2, checks: ['sqli', 'xss'] }};
+    const changedDepth = {{ url: 'https://example.com', depth: 3, checks: ['sqli', 'xss'] }};
+    const changedChecks = {{ url: 'https://example.com', depth: 2, checks: ['sqli'] }};
+
+    console.log(JSON.stringify({{
+      identicalStale: isConfigStale(base, identical),
+      changedUrlStale: isConfigStale(base, changedUrl),
+      changedDepthStale: isConfigStale(base, changedDepth),
+      changedChecksStale: isConfigStale(base, changedChecks),
+      nullLastStale: isConfigStale(null, base),
+      nullCurrentStale: isConfigStale(base, null),
+    }}));
+    """
+    res = _run_node(script)
+    assert res["identicalStale"] is False
+    assert res["changedUrlStale"] is True
+    assert res["changedDepthStale"] is True
+    assert res["changedChecksStale"] is True
+    assert res["nullLastStale"] is False
+    assert res["nullCurrentStale"] is False
+
+
 # ─── 3. UI Harness Test (Playwright) ─────────────────────────────────────────
 
 def test_setup_readiness_panel_ui(ui_harness):
@@ -372,3 +572,152 @@ def test_setup_readiness_panel_ui(ui_harness):
     errors = ui_harness.get_errors(page)
     assert all("Failed to load resource" in err or "500" in err for err in errors)
     assert not any("pageerror" in err for err in errors)
+
+
+def test_setup_prelaunch_summary_ui(ui_harness):
+    """Verify Setup pre-launch summary consumes readiness preflight, staleness, and advisory launch."""
+    pytest.importorskip("playwright")
+    from tests.ui_harness import require_browser, STANDARD_VIEWPORTS
+
+    require_browser()
+    vp = STANDARD_VIEWPORTS[1440]
+    page = ui_harness.new_page(width=vp["width"], height=vp["height"])
+
+    stubbed_response = {
+        "schema_version": "1.0.0",
+        "verdict": "warning",
+        "checks": [
+            {
+                "id": "authentication",
+                "status": "not_checked",
+                "reason_code": "not_implemented",
+                "detail": "Authentication readiness is not checked.",
+            },
+            {
+                "id": "playwright",
+                "status": "fail",
+                "reason_code": "dependency_missing",
+                "detail": "Playwright Chromium is unavailable.",
+            },
+            {
+                "id": "reachability_direct",
+                "status": "pass",
+                "reason_code": "reachable",
+                "detail": "HTTP GET returned status 200.",
+            },
+        ],
+    }
+
+    page.route(
+        "**/api/v1/preflight",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(stubbed_response),
+        ),
+    )
+
+    page.goto(f"{ui_harness.server_url}/app#/setup")
+    page.wait_for_selector("#setupSurface:not([hidden])")
+    page.wait_for_selector("#setupPrelaunchSummary")
+
+    # 1. Initial State: never run -> not_checked
+    verdict_badge = page.locator("#setupPrelaunchVerdictBadge")
+    assert verdict_badge.inner_text() == "未確認"
+    badge_classes = verdict_badge.get_attribute("class") or ""
+    assert "setup-status-not-checked" in badge_classes
+    assert "setup-verdict-pass" not in badge_classes
+    assert "OK" not in verdict_badge.inner_text()
+
+    rerun_btn = page.locator("#setupPrelaunchRerunBtn")
+    assert "準備チェック実行" in rerun_btn.inner_text()
+
+    checks_list = page.locator("#setupPrelaunchChecksList")
+    assert "まだ実行されていません" in checks_list.inner_text()
+
+    # 2. Run readiness via pre-launch summary button
+    url_input = page.locator("#cfgInputUrl")
+    url_input.fill("https://example.com/target")
+
+    rerun_btn.click()
+    page.wait_for_selector(".setup-prelaunch-check-item")
+
+    # Verdict badge updates to warning (amber / non-pass)
+    verdict_text = verdict_badge.inner_text()
+    verdict_cls = verdict_badge.get_attribute("class") or ""
+    assert "注意 (一部未確認/警告)" in verdict_text
+    assert "準備OK" not in verdict_text
+    assert "setup-verdict-warning" in verdict_cls
+    assert "setup-verdict-pass" not in verdict_cls
+
+    # Compact list of non-pass checks: fail first, then not_checked; pass is excluded
+    items = page.locator(".setup-prelaunch-check-item")
+    assert items.count() == 2
+
+    # First check: playwright (fail)
+    item0 = items.nth(0)
+    assert item0.get_attribute("data-check-id") == "playwright"
+    chip0 = item0.locator(".setup-prelaunch-check-chip")
+    assert "失敗" in chip0.inner_text()
+    assert "setup-status-fail" in (chip0.get_attribute("class") or "")
+    assert "setup-status-pass" not in (chip0.get_attribute("class") or "")
+
+    # Second check: authentication (not_checked)
+    item1 = items.nth(1)
+    assert item1.get_attribute("data-check-id") == "authentication"
+    chip1 = item1.locator(".setup-prelaunch-check-chip")
+    assert "未確認" in chip1.inner_text()
+    assert "setup-status-not-checked" in (chip1.get_attribute("class") or "")
+    assert "setup-status-pass" not in (chip1.get_attribute("class") or "")
+
+    # Pass check 'reachability_direct' must NOT appear in non-pass checks
+    summary_html = page.locator("#setupPrelaunchSummary").inner_html()
+    assert "reachability_direct" not in summary_html
+
+    # 3. Staleness: modifying setup config marks summary as stale (non-pass)
+    depth_input = page.locator("#cfgDepth")
+    depth_input.fill("5")
+
+    page.wait_for_function(
+        "() => document.getElementById('setupPrelaunchVerdictBadge').textContent.includes('設定変更あり')"
+    )
+    stale_text = verdict_badge.inner_text()
+    stale_cls = verdict_badge.get_attribute("class") or ""
+    assert "設定変更あり" in stale_text
+    assert "準備OK" not in stale_text
+    assert "setup-status-warning" in stale_cls
+    assert "setup-verdict-pass" not in stale_cls
+
+    assert "最新設定で再チェック" in rerun_btn.inner_text()
+
+    # 4. Advisory launch: clicking scan start is NOT blocked by non-pass readiness
+    start_btn = page.locator("#setupStartScanBtn")
+    start_btn.click()
+    page.wait_for_function("() => window.location.hash === '#/monitor'")
+    assert page.url.endswith("#/monitor")
+
+    # 5. Unavailable state fallback
+    page.goto(f"{ui_harness.server_url}/app#/setup")
+    page.wait_for_selector("#setupPrelaunchSummary")
+
+    page.unroute("**/api/v1/preflight")
+    page.route(
+        "**/api/v1/preflight",
+        lambda route: route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"error": "Preflight endpoint unavailable"}),
+        ),
+    )
+
+    page.locator("#cfgInputUrl").fill("https://example.com/target")
+    page.locator("#setupPrelaunchRerunBtn").click()
+
+    page.wait_for_function(
+        "() => document.getElementById('setupPrelaunchVerdictBadge').textContent.includes('利用不可')"
+    )
+    unavail_badge = page.locator("#setupPrelaunchVerdictBadge")
+    assert "利用不可" in unavail_badge.inner_text()
+    assert "setup-status-fail" in (unavail_badge.get_attribute("class") or "")
+    assert "setup-verdict-pass" not in (unavail_badge.get_attribute("class") or "")
+    assert "準備OK" not in unavail_badge.inner_text()

@@ -540,6 +540,113 @@
   flex: 1;
 }
 
+/* Pre-launch Scan Readiness Summary */
+.setup-prelaunch-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+.setup-prelaunch-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.setup-prelaunch-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.setup-prelaunch-title {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.setup-prelaunch-badge {
+  font-size: 0.74rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+}
+.setup-prelaunch-rerun-btn {
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  transition: all 0.15s;
+}
+.setup-prelaunch-rerun-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.setup-prelaunch-rerun-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.setup-prelaunch-message {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.setup-prelaunch-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.setup-prelaunch-check-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.74rem;
+}
+.setup-prelaunch-check-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  color: var(--text);
+  min-width: 120px;
+}
+.setup-prelaunch-check-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  min-width: 48px;
+  justify-content: center;
+}
+.setup-prelaunch-check-detail {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  flex: 1;
+}
+.setup-prelaunch-empty {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* Status colors */
 .setup-status-pass,
 .setup-verdict-pass {
