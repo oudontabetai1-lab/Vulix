@@ -121,6 +121,7 @@
     'scanner_count',
     'scanner_ids',
     'scanners',
+    'agent_capabilities',
   ]);
 
   const ALLOWED_SCANNER_FIELDS = new Set([
@@ -425,6 +426,18 @@
     }
 
     /**
+     * Get declared agent capabilities list.
+     * Returns empty array if unavailable or not declared.
+     * @returns {Array<Object>}
+     */
+    getAgentCapabilities() {
+      if (this.status !== 'ready' || !this.manifest || !Array.isArray(this.manifest.agent_capabilities)) {
+        return [];
+      }
+      return [...this.manifest.agent_capabilities];
+    }
+
+    /**
      * Check if a scanner is applicable under the given scan mode and permissions.
      *
      * INVARIANT: Never guess capability when missing or unavailable.
@@ -609,6 +622,9 @@
     },
     getDefaultChecks: function () {
       return defaultReader.getDefaultChecks();
+    },
+    getAgentCapabilities: function () {
+      return defaultReader.getAgentCapabilities();
     },
     isScannerApplicable: function (scannerId, mode, permissions) {
       return defaultReader.isScannerApplicable(scannerId, mode, permissions);

@@ -175,6 +175,7 @@
           '#live': 'live',
           '#history': 'history',
           '#audit': 'audit',
+          '#agent-skills': 'agent-skills',
         },
         options.routeMap || {}
       );
