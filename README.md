@@ -143,7 +143,7 @@ Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traver
 
 ### オプトインの統合画面
 
-同じサーバーで `/app` を開くと、ポータル、Scan Setup、Monitor を切り替えられます。URL の hash は画面と選択中の scan を表し、戻る/進むや再読み込みでも選択を保ちます。既存の `/` ポータルと `/monitor` は引き続き標準の入口です。
+同じサーバーで `/app` を開くと、ポータル、Scan Setup、Monitor を切り替えられます。Monitor は統合画面内の独立モジュールとして表示されますが、既存どおりの3ペイン、停止・再開・中断、レビュー、手動ペイロード操作を提供し、WebSocket とライブ状態は1つだけ維持します。URL の hash は画面と選択中の scan を表し、戻る/進むや再読み込みでも選択を保ちます。既存の `/` ポータルと `/monitor` は引き続き標準の入口です。
 
 ![統合画面のポータル](docs/images/app-portal.png)
 ![統合画面の Scan Setup](docs/images/app-setup.png)
