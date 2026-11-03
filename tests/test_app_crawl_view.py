@@ -18,7 +18,7 @@ import subprocess
 
 import pytest
 
-from tests.ui_harness import parse_png_dimensions, require_browser, STANDARD_VIEWPORTS, UIHarness, ui_harness
+from tests.ui_harness import require_browser, STANDARD_VIEWPORTS, UIHarness, ui_harness
 
 ROOT = Path(__file__).resolve().parents[1]
 CRAWL_MODULE_JS = ROOT / "templates" / "ui" / "crawl-module.js"
@@ -387,10 +387,4 @@ def test_crawl_view_chromium_ui(ui_harness):
     ui_harness.assert_no_errors(page)
 
     # Capture documentation screenshot
-    doc_img_path = Path(ui_harness.repo_root) / "docs" / "images" / "app-crawl.png"
-    doc_img_path.parent.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(doc_img_path), full_page=False)
-    assert doc_img_path.is_file() and doc_img_path.stat().st_size > 0
-    img_bytes = doc_img_path.read_bytes()
-    w, h = parse_png_dimensions(img_bytes)
-    assert w == 1440
+    ui_harness.save_doc_image(page, "app-crawl")

@@ -1,7 +1,6 @@
 """Acceptance checks for the opt-in /app shell and legacy adapters."""
 from __future__ import annotations
 
-from pathlib import Path
 import json
 import shutil
 
@@ -66,8 +65,7 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
     setup.locator("#cfgDepth").fill("4")
     ui_harness.capture_screenshot(page, "app-setup", width, dest_dir=ui_harness.output_dir / "screenshots")
     if width == 1440:
-        doc_setup_img = Path(ui_harness.repo_root) / "docs" / "images" / "app-setup.png"
-        page.screenshot(path=str(doc_setup_img), full_page=False)
+        ui_harness.save_doc_image(page, "app-setup")
     secret_sentinel = "APP_SECRET_SENTINEL_DO_NOT_PERSIST"
     setup.locator(".setup-tab").filter(has_text="認証").click()
     setup.locator("#cfgAuthPass").fill(secret_sentinel)
@@ -98,8 +96,7 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
     assert page.locator("#monitorFrame").is_hidden()
     ui_harness.capture_screenshot(page, "app-settings", width, dest_dir=ui_harness.output_dir / "screenshots")
     if width == 1440:
-        docs_img = ui_harness.repo_root / "docs" / "images" / "app-settings.png"
-        page.screenshot(path=str(docs_img), full_page=False)
+        ui_harness.save_doc_image(page, "app-settings")
 
     for route in ["setup", "monitor", "portal", "settings", "monitor", "setup"]:
         page.locator(f'[data-route="{route}"]').click()
@@ -517,10 +514,7 @@ def test_app_shell_agent_skills_view_and_screenshot(ui_harness: UIHarness):
     ui_harness.assert_no_errors(page)
 
     # Save durable screenshot for documentation
-    doc_img_path = Path(ui_harness.repo_root) / "docs" / "images" / "app-agent-skills.png"
-    doc_img_path.parent.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(doc_img_path), full_page=False)
-    assert doc_img_path.is_file() and doc_img_path.stat().st_size > 0
+    ui_harness.save_doc_image(page, "app-agent-skills")
 
 
 def test_app_shell_findings_view_and_screenshot(ui_harness: UIHarness):
@@ -563,10 +557,7 @@ def test_app_shell_findings_view_and_screenshot(ui_harness: UIHarness):
     ui_harness.assert_no_errors(page)
 
     # Save durable screenshot for documentation
-    doc_img_path = Path(ui_harness.repo_root) / "docs" / "images" / "app-findings.png"
-    doc_img_path.parent.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(doc_img_path), full_page=False)
-    assert doc_img_path.is_file() and doc_img_path.stat().st_size > 0
+    ui_harness.save_doc_image(page, "app-findings")
 
     # Test deep link with valid finding
     page.goto(f"{ui_harness.server_url}/app#/findings?scan=20261026_100000&finding=f_sqli_01", wait_until="domcontentloaded")
@@ -720,7 +711,5 @@ def test_app_monitor_pane_layout_adjustable_accessible_and_persisted(ui_harness:
     # 7. Capture updated screenshot
     monitor_frame = next(frame for frame in page.frames if frame.url.endswith("/monitor"))
     ui_harness.populate_live_monitor(monitor_frame)
-    doc_img_path = Path(ui_harness.repo_root) / "docs" / "images" / "app-monitor.png"
-    page.screenshot(path=str(doc_img_path), full_page=False)
-    assert doc_img_path.is_file() and doc_img_path.stat().st_size > 0
+    ui_harness.save_doc_image(page, "app-monitor")
     ui_harness.assert_no_errors(page)
