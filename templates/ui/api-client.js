@@ -250,7 +250,7 @@
      */
     constructor(options = {}) {
       this.baseUrl = options.baseUrl || '';
-      this._fetch = options.fetch || (typeof fetch !== 'undefined' ? fetch.bind(global) : null);
+      this._fetch = options.fetch || null;
       this.defaultHeaders = Object.assign(
         {
           Accept: 'application/json',
@@ -283,7 +283,7 @@
      * @returns {Promise<ApiResult>}
      */
     async request(path, options = {}) {
-      const fetchImpl = this._fetch || (typeof fetch !== 'undefined' ? fetch.bind(global) : null);
+      const fetchImpl = this._fetch || (typeof global !== 'undefined' && global && typeof global.fetch === 'function' ? global.fetch.bind(global) : (typeof fetch !== 'undefined' ? fetch.bind(global) : null));
       if (typeof fetchImpl !== 'function') {
         return ApiResult.networkError(new Error('No fetch implementation available'));
       }
