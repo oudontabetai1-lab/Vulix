@@ -10,6 +10,7 @@
   const portal = document.getElementById('portalFrame');
   const monitor = document.getElementById('monitorFrame');
   const monitorHost = document.getElementById('monitorModule');
+  const settingsSurface = document.getElementById('settingsSurface');
   const message = document.getElementById('message');
   const agentSkillsSurface = document.getElementById('agentSkillsSurface');
   const title = document.getElementById('viewTitle');
@@ -27,6 +28,7 @@
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+    if (settingsSurface) settingsSurface.hidden = true;
     message.hidden = false;
     message.replaceChildren();
     const heading = document.createElement('h2');
@@ -109,6 +111,7 @@
     clearMessage();
     if (monitorHost) monitorHost.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+    if (settingsSurface) settingsSurface.hidden = true;
     monitor.hidden = true;
     portal.hidden = false;
     portal.src = '/';
@@ -119,11 +122,13 @@
 
   registry.register({ id: 'setup', title: 'Scan Setup', route: '#/setup', mount() {
     title.textContent = 'Scan Setup';
+    if (settingsSurface) settingsSurface.hidden = true;
     showMonitorSurface('setup');
   }, unmount() { cancelPendingMonitorLoad(); monitor.hidden = true; } });
 
   registry.register({ id: 'monitor', title: 'Monitor', route: '#/monitor', mount(route) {
     title.textContent = 'Monitor';
+    if (settingsSurface) settingsSurface.hidden = true;
     let selectedScanVerified = false;
     let selectedIdentity = null;
     const unavailableText = '指定された scan のライブ Monitor は現在の server snapshot と一致しません。過去 scan は履歴から確認してください。';
@@ -207,6 +212,7 @@
     portal.hidden = true;
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
+    if (settingsSurface) settingsSurface.hidden = true;
     if (agentSkillsSurface) {
       agentSkillsSurface.hidden = false;
       if (global.VulixAgentSkillsModule && typeof global.VulixAgentSkillsModule.loadAndRenderAgentSkills === 'function') {
@@ -223,13 +229,33 @@
       }
     }
   } });
+
+  if (global.VulixSettingsModule && typeof global.VulixSettingsModule.createSettingsModule === 'function') {
+    registry.register(
+      global.VulixSettingsModule.createSettingsModule({
+        api: api,
+        surfaceEl: settingsSurface,
+        titleEl: title,
+        contextEl: context,
+        unavailable: unavailable,
+        clearMessage: clearMessage,
+        hideOthers: function () {
+          portal.hidden = true;
+          monitor.hidden = true;
+          if (monitorHost) monitorHost.hidden = true;
+          if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+        },
+      })
+    );
+  }
+
   registry.setDefaultId('portal');
 
   function parseRoute(hash) {
     const raw = (hash || '').replace(/^#/, '');
     const parts = raw.split('?');
     const route = parts[0] || '/portal';
-    if (!['/portal', '/setup', '/monitor', '/agent-skills'].includes(route) || parts.length > 2) return null;
+    if (!['/portal', '/setup', '/monitor', '/agent-skills', '/settings'].includes(route) || parts.length > 2) return null;
     const params = new URLSearchParams(parts[1] || '');
     if (Array.from(params.keys()).some((key) => key !== 'scan') || params.getAll('scan').length > 1) return null;
     const scanId = params.get('scan');
