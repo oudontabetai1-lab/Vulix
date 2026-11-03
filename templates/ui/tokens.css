@@ -1,4 +1,5 @@
 :root {
+  /* Surface & Base */
   --bg: #161826;
   --surface: #1c1e2c;
   --surface2: #232532;
@@ -6,13 +7,94 @@
   --border: #3f424d;
   --text: #e9e9ed;
   --text-muted: #9397ab;
+
+  /* Brand (isolated from status) */
   --accent: #9184d9;
   --accent-glow: rgba(145,132,217,0.18);
+
+  /* Severities */
   --critical: #e2708f;
   --high: #d99a63;
   --medium: #c7b96a;
   --low: #8fb9c9;
   --info: #b5abfc;
-  --success: #8fb9c9;
-  --running: #d99a63;
+
+  /* Semantic status colors (pass / fail / warning / not checked / unknown / unavailable / stale / running) */
+  --status-pass: #22c55e;
+  --status-pass-bg: rgba(34, 197, 94, 0.12);
+  --status-pass-border: rgba(34, 197, 94, 0.3);
+
+  --status-fail: #e2708f;
+  --status-fail-bg: rgba(226, 112, 143, 0.12);
+  --status-fail-border: rgba(226, 112, 143, 0.3);
+
+  --status-warning: #c7b96a;
+  --status-warning-bg: rgba(199, 185, 106, 0.12);
+  --status-warning-border: rgba(199, 185, 106, 0.3);
+
+  --status-not-checked: #9397ab;
+  --status-not-checked-bg: #232532;
+  --status-not-checked-border: #3f424d;
+
+  --status-unknown: #9397ab;
+  --status-unknown-bg: #232532;
+  --status-unknown-border: #3f424d;
+
+  --status-unavailable: #e2708f;
+  --status-unavailable-bg: rgba(226, 112, 143, 0.12);
+  --status-unavailable-border: rgba(226, 112, 143, 0.3);
+
+  --status-stale: #d99a63;
+  --status-stale-bg: rgba(217, 154, 99, 0.12);
+  --status-stale-border: rgba(217, 154, 99, 0.3);
+
+  --status-running: #d99a63;
+  --status-running-bg: rgba(217, 154, 99, 0.12);
+  --status-running-border: rgba(217, 154, 99, 0.3);
+
+  /* Legacy aliases: same computed values as --status-*, no second copy of the colour */
+  --success: var(--status-pass);
+  --warning: var(--status-warning);
+  --running: var(--status-running);
+
+  /* Spacing scale */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+  --space-2xl: 24px;
+  --space-3xl: 32px;
+
+  /* Density scale */
+  --density-compact-padding: 4px 8px;
+  --density-compact-gap: 4px;
+  --density-comfortable-padding: 8px 14px;
+  --density-comfortable-gap: 8px;
+  --density-spacious-padding: 16px 20px;
+  --density-spacious-gap: 16px;
+
+  /* Focus ring */
+  --focus-ring: 0 0 0 2px var(--accent);
+  --focus-ring-offset: 2px;
+  --focus-outline: 2px solid var(--accent);
+
+  /* State patterns */
+  --state-error-text: #e2708f;
+  --state-error-bg: rgba(226, 112, 143, 0.12);
+  --state-error-border: rgba(226, 112, 143, 0.3);
+  --state-loading-text: #9397ab;
+  --state-empty-text: #9397ab;
+
+  /* Crawl graph palette (separate from status colors) */
+  --graph-node-page: #9184d9;
+  --graph-node-form: #d99a63;
+  --graph-node-param: #8fb9c9;
+  --graph-node-unknown: #9397ab;
+  --graph-node-bg: #1c1e2c;
+  --graph-node-findings: #e2708f;
+  --graph-node-text: #e9e9ed;
+  --graph-node-subtext: #9397ab;
+  --graph-edge: #4a5568;
+  --graph-edge-dot: #9184d9;
 }

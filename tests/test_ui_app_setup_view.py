@@ -761,11 +761,14 @@ def test_effective_config_readout_search_applicability_and_payload():
 const {{ renderSetupView }} = require('./templates/ui/setup-module.js');
 function el(tag) {{
   const listeners = {{}};
+  const classes = new Set();
   return {{ tagName: tag, children: [], dataset: {{}}, style: {{}}, className: '', hidden: false,
     setAttribute() {{}}, removeAttribute() {{}}, getAttribute() {{ return null; }},
     appendChild(child) {{ this.children.push(child); }}, replaceChildren(...children) {{ this.children = children; }},
     addEventListener(name, fn) {{ listeners[name] = fn; }}, dispatch(name) {{ listeners[name]?.(); }},
-    classList: {{ add() {{}}, remove() {{}}, toggle() {{}}, contains() {{ return false; }} }} }};
+    classList: {{ add(name) {{ classes.add(name); }}, remove(name) {{ classes.delete(name); }},
+      toggle(name, force) {{ const on = force === undefined ? !classes.has(name) : force; on ? classes.add(name) : classes.delete(name); return on; }},
+      contains(name) {{ return classes.has(name); }} }} }};
 }}
 const doc = {{ createElement: el, getElementById() {{ return null; }}, querySelector() {{ return null; }}, querySelectorAll() {{ return []; }} }};
 function find(node, predicate) {{ if (predicate(node)) return node; for (const child of node.children || []) {{ const found = find(child, predicate); if (found) return found; }} return null; }}
@@ -791,8 +794,8 @@ Promise.all([view.applyPreset('triage', false), unavailable.applyPreset('triage'
     hasEffectiveValue: allText(view.effectiveSection).includes('クロール深度: 1'),
     unavailable: allText(unavailable.effectiveSection).includes('取得できませんでした'),
     unavailableHasNoGuessedDiff: !allText(unavailable.effectiveSection).includes('2'),
-    searchMatches: matches, searchDepthVisible: depthField.style.display !== 'none',
-    searchHidesOtherFields: hiddenOtherField.style.display === 'none',
+    searchMatches: matches, searchDepthVisible: !depthField.classList.contains('setup-search-hidden'),
+    searchHidesOtherFields: hiddenOtherField.classList.contains('setup-search-hidden'),
     searchMfaCount: authMatches,
     notApplicable: Boolean(find(depthField, n => (n.className || '').includes('setup-na-badge'))),
     reasonListsApplicableModes: allText(depthField).includes('通常') && allText(depthField).includes('Hybrid'),

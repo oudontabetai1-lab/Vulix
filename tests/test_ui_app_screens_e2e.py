@@ -719,3 +719,127 @@ def test_app_session_expiry_401_behavior(e2e_harness: UIHarness):
         e2e_harness.assert_no_errors(page)
     finally:
         page.close()
+
+
+def test_app_shell_keyboard_focus_visibility_and_responsive_widths(e2e_harness: UIHarness):
+    """Verify visible keyboard focus on interactive elements and responsive layouts at 1440, 1280, and 768 px."""
+    require_browser()
+    page = e2e_harness.new_page(**STANDARD_VIEWPORTS[1440])
+
+    try:
+        # Load /app Portal
+        page.goto(f"{e2e_harness.server_url}/app#/portal", wait_until="domcontentloaded")
+        page.locator("#summarySurface").wait_for(state="visible")
+
+        # 1. Focus visibility checks on interactive navigation buttons
+        nav_buttons = [
+            '[data-route="portal"]',
+            '[data-route="history"]',
+            '[data-route="setup"]',
+            '[data-route="findings"]',
+            '[data-route="crawl"]',
+            '[data-route="agent-skills"]',
+            '[data-route="settings"]',
+        ]
+        for sel in nav_buttons:
+            e2e_harness.assert_focus_visible(page, sel)
+
+        # 2. Responsive layout verification across 1440, 1280, 768 px on Portal
+        e2e_harness.check_viewports_and_focus(
+            page,
+            focus_selectors=['[data-route="portal"]', '[data-route="setup"]'],
+            widths=(1440, 1280, 768),
+        )
+
+        # 3. Switch to Setup view and check focus on inputs/buttons and viewports
+        page.locator('[data-route="setup"]').click()
+        page.locator("#setupSurface").wait_for(state="visible")
+        page.wait_for_selector(".setup-url-input")
+
+        # Check focus visibility on setup interactive controls
+        setup_interactive = [
+            ".setup-url-input",
+            ".setup-start-btn",
+            "#setupTab-checks",
+        ]
+        for sel in setup_interactive:
+            e2e_harness.assert_focus_visible(page, sel)
+
+        e2e_harness.check_viewports_and_focus(
+            page,
+            focus_selectors=[".setup-url-input", ".setup-start-btn"],
+            widths=(1440, 1280, 768),
+        )
+
+        # 4. Switch to Findings view and check focus and viewports
+        page.locator('[data-route="findings"]').click()
+        page.locator("#findingsSurface").wait_for(state="visible")
+        page.wait_for_selector(".findings-container")
+
+        e2e_harness.check_viewports_and_focus(
+            page,
+            focus_selectors=['[data-route="findings"]'],
+            widths=(1440, 1280, 768),
+        )
+
+        # 5. Crawl view
+        page.goto(f"{e2e_harness.server_url}/app#/crawl?scan=20261026_100000", wait_until="domcontentloaded")
+        page.locator("#crawlSurface").wait_for(state="visible")
+        page.wait_for_selector(".crawl-svg-canvas")
+        e2e_harness.assert_focus_visible(page, ".crawl-search-input")
+        e2e_harness.check_viewports_and_focus(
+            page,
+            focus_selectors=['[data-route="crawl"]', ".crawl-search-input"],
+            widths=(1440, 1280, 768),
+        )
+
+        # 6. Monitor view (shadow DOM: check separator focus ring inside the shadow root)
+        page.goto(f"{e2e_harness.server_url}/app#/monitor", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => Boolean(document.querySelector('#monitorModule')?.shadowRoot?.querySelector('#sepLeft'))"
+        )
+        for w in (1440, 1280, 768):
+            page.set_viewport_size({"width": w, "height": 900})
+            page.wait_for_timeout(100)
+            e2e_harness.assert_no_horizontal_overflow(page, max_allowed=w + 1)
+            e2e_harness.assert_focus_visible(page, '[data-route="monitor"]')
+            info = page.evaluate(
+                """() => {
+                    const root = document.querySelector('#monitorModule').shadowRoot;
+                    const el = root.querySelector('#sepLeft');
+                    if (!el) return { found: false };
+                    try { el.focus({ focusVisible: true }); } catch (_) { el.focus(); }
+                    const cs = getComputedStyle(el);
+                    return {
+                        found: true,
+                        visible: (cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0) ||
+                            (cs.boxShadow && cs.boxShadow !== 'none'),
+                    };
+                }"""
+            )
+            assert info["found"] and info["visible"], f"monitor separator focus not visible at {w}: {info}"
+
+        # 7. Settings view
+        page.goto(f"{e2e_harness.server_url}/app#/settings", wait_until="domcontentloaded")
+        page.locator("#settingsSurface").wait_for(state="visible")
+        page.locator("#saveSettingsBtn").wait_for(state="visible")
+        e2e_harness.assert_focus_visible(page, "#webhookUrlInput")
+        e2e_harness.check_viewports_and_focus(
+            page,
+            focus_selectors=["#webhookUrlInput", "#configFilterInput"],
+            widths=(1440, 1280, 768),
+        )
+
+        # 8. Agent capabilities view
+        page.goto(f"{e2e_harness.server_url}/app#/agent-skills", wait_until="domcontentloaded")
+        page.locator("#agentSkillsSurface").wait_for(state="visible")
+        page.wait_for_selector(".agent-skills-table")
+        e2e_harness.check_viewports_and_focus(
+            page,
+            focus_selectors=['[data-route="agent-skills"]'],
+            widths=(1440, 1280, 768),
+        )
+
+        e2e_harness.assert_no_errors(page)
+    finally:
+        page.close()

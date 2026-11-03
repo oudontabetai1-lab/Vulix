@@ -1141,6 +1141,52 @@ class UIHarness:
             f"(window.innerWidth: {overflow_info['winWidth']}px)"
         )
 
+    def assert_focus_visible(self, page: Any, selector: str) -> None:
+        """Assert the target interactive element exhibits a visible focus indicator upon focus."""
+        page.focus(selector)
+        page.locator(selector).evaluate("""(el) => {
+            try { el.focus({ focusVisible: true }); } catch (_) { el.focus(); }
+        }""")
+        info = page.evaluate("""(sel) => {
+            const el = document.querySelector(sel);
+            if (!el) return { found: false, visible: false, reason: "Element not found" };
+            const cs = window.getComputedStyle(el);
+            const outlineStyle = cs.outlineStyle;
+            const outlineWidth = parseFloat(cs.outlineWidth) || 0;
+            const outlineColor = cs.outlineColor;
+            const isOutlineVisible = outlineStyle !== 'none' && outlineWidth > 0 &&
+                outlineColor !== 'transparent' && outlineColor !== 'rgba(0, 0, 0, 0)';
+            const boxShadow = cs.boxShadow;
+            const isBoxShadowVisible = boxShadow && boxShadow !== 'none';
+            return {
+                found: true,
+                visible: isOutlineVisible || Boolean(isBoxShadowVisible),
+                outlineStyle: outlineStyle,
+                outlineWidth: outlineWidth,
+                outlineColor: outlineColor,
+                boxShadow: boxShadow,
+            };
+        }""", selector)
+        assert info["found"], f"Element {selector} not found"
+        assert info["visible"], f"Element {selector} does not have a visible focus indicator: {info}"
+
+    def check_viewports_and_focus(
+        self,
+        page: Any,
+        focus_selectors: list[str] | None = None,
+        widths: tuple[int, ...] = (1440, 1280, 768),
+    ) -> None:
+        """Assert document layout fits within width limits for standard viewports and verify focus visibility."""
+        selectors = focus_selectors or []
+        for w in widths:
+            preset = STANDARD_VIEWPORTS.get(w, {"width": w, "height": 900})
+            page.set_viewport_size({"width": preset["width"], "height": preset["height"]})
+            page.wait_for_timeout(100)
+            self.assert_no_horizontal_overflow(page, max_allowed=preset["width"] + 1)
+            for sel in selectors:
+                if page.locator(sel).is_visible():
+                    self.assert_focus_visible(page, sel)
+
     def save_doc_image(self, page: Any, name: str) -> None:
         """Capture documentation screenshot only when WSCAN_REFRESH_DOCS_IMAGES is truthy."""
         val = os.environ.get("WSCAN_REFRESH_DOCS_IMAGES", "").strip().lower()

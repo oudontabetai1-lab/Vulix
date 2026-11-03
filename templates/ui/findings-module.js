@@ -744,10 +744,10 @@
         const errBox = document.createElement('div');
         errBox.className = 'ui-status error';
         const h = document.createElement('h3');
-        h.style.margin = '0 0 6px 0';
+        h.className = 'findings-notfound-title';
         h.textContent = '指定された Finding は見つかりません';
         const p = document.createElement('p');
-        p.style.margin = '0';
+        p.className = 'findings-notfound-text';
         p.textContent = `ID: "${notFoundId}" は現在のスキャンデータに存在しないか、既に変更された可能性があります。一覧から選択してください。`;
         errBox.append(h, p);
         dom.detailContent.appendChild(errBox);
@@ -884,7 +884,7 @@
       rows.forEach(function (r) {
         const tr = document.createElement('tr');
         const th = document.createElement('th');
-        th.style.width = '25%';
+        th.className = 'findings-detail-th';
         th.textContent = r.label;
         const td = document.createElement('td');
         if (r.isCode) {
@@ -1180,11 +1180,7 @@
             chipText.textContent = `URLフィルタ: ${targetUrl}`;
             const chipClear = document.createElement('button');
             chipClear.type = 'button';
-            chipClear.style.background = 'transparent';
-            chipClear.style.border = 'none';
-            chipClear.style.cursor = 'pointer';
-            chipClear.style.color = 'var(--text-muted)';
-            chipClear.style.marginLeft = '6px';
+            chipClear.className = 'findings-chip-clear';
             chipClear.textContent = '✕';
             chipClear.title = 'URLフィルタ解除';
             chipClear.addEventListener('click', function () {

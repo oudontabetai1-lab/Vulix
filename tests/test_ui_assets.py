@@ -25,8 +25,64 @@ EXPECTED_TOKENS = {
     "--medium": "#c7b96a",
     "--low": "#8fb9c9",
     "--info": "#b5abfc",
-    "--success": "#8fb9c9",
-    "--running": "#d99a63",
+    "--success": "var(--status-pass)",
+    "--warning": "var(--status-warning)",
+    "--running": "var(--status-running)",
+    "--status-pass": "#22c55e",
+    "--status-pass-bg": "rgba(34, 197, 94, 0.12)",
+    "--status-pass-border": "rgba(34, 197, 94, 0.3)",
+    "--status-fail": "#e2708f",
+    "--status-fail-bg": "rgba(226, 112, 143, 0.12)",
+    "--status-fail-border": "rgba(226, 112, 143, 0.3)",
+    "--status-warning": "#c7b96a",
+    "--status-warning-bg": "rgba(199, 185, 106, 0.12)",
+    "--status-warning-border": "rgba(199, 185, 106, 0.3)",
+    "--status-not-checked": "#9397ab",
+    "--status-not-checked-bg": "#232532",
+    "--status-not-checked-border": "#3f424d",
+    "--status-unknown": "#9397ab",
+    "--status-unknown-bg": "#232532",
+    "--status-unknown-border": "#3f424d",
+    "--status-unavailable": "#e2708f",
+    "--status-unavailable-bg": "rgba(226, 112, 143, 0.12)",
+    "--status-unavailable-border": "rgba(226, 112, 143, 0.3)",
+    "--status-stale": "#d99a63",
+    "--status-stale-bg": "rgba(217, 154, 99, 0.12)",
+    "--status-stale-border": "rgba(217, 154, 99, 0.3)",
+    "--status-running": "#d99a63",
+    "--status-running-bg": "rgba(217, 154, 99, 0.12)",
+    "--status-running-border": "rgba(217, 154, 99, 0.3)",
+    "--space-xs": "4px",
+    "--space-sm": "8px",
+    "--space-md": "12px",
+    "--space-lg": "16px",
+    "--space-xl": "20px",
+    "--space-2xl": "24px",
+    "--space-3xl": "32px",
+    "--density-compact-padding": "4px 8px",
+    "--density-compact-gap": "4px",
+    "--density-comfortable-padding": "8px 14px",
+    "--density-comfortable-gap": "8px",
+    "--density-spacious-padding": "16px 20px",
+    "--density-spacious-gap": "16px",
+    "--focus-ring": "0 0 0 2px var(--accent)",
+    "--focus-ring-offset": "2px",
+    "--focus-outline": "2px solid var(--accent)",
+    "--state-error-text": "#e2708f",
+    "--state-error-bg": "rgba(226, 112, 143, 0.12)",
+    "--state-error-border": "rgba(226, 112, 143, 0.3)",
+    "--state-loading-text": "#9397ab",
+    "--state-empty-text": "#9397ab",
+    "--graph-node-page": "#9184d9",
+    "--graph-node-form": "#d99a63",
+    "--graph-node-param": "#8fb9c9",
+    "--graph-node-unknown": "#9397ab",
+    "--graph-node-bg": "#1c1e2c",
+    "--graph-node-findings": "#e2708f",
+    "--graph-node-text": "#e9e9ed",
+    "--graph-node-subtext": "#9397ab",
+    "--graph-edge": "#4a5568",
+    "--graph-edge-dot": "#9184d9",
 }
 
 EXPECTED_COMPONENT_SELECTORS = [
@@ -124,6 +180,43 @@ EXPECTED_COMPONENT_SELECTORS = [
     ".setup-status-warning, .setup-verdict-warning",
     ".setup-status-fail, .setup-verdict-fail",
     ".setup-status-not-checked, .setup-status-not-applicable, .setup-status-unknown, .setup-verdict-unknown",
+    ".ui-status-badge",
+    ".ui-status-pass, .ui-status-badge.pass",
+    ".ui-status-fail, .ui-status-badge.fail",
+    ".ui-status-warning, .ui-status-badge.warning",
+    ".ui-status-not-checked, .ui-status-badge.not-checked",
+    ".ui-status-unknown, .ui-status-badge.unknown",
+    ".ui-status-unavailable, .ui-status-badge.unavailable",
+    ".ui-status-stale, .ui-status-badge.stale",
+    ".ui-status-running, .ui-status-badge.running",
+    ".ui-state-empty",
+    ".ui-state-loading",
+    ".ui-state-error",
+    ".ui-focus-ring:focus-visible, :focus-visible",
+    ".crawl-kind-page",
+    ".crawl-kind-form",
+    ".crawl-kind-param",
+    ".crawl-kind-unknown",
+    ".crawl-tree-dot",
+    ".crawl-svg-marker-path",
+    ".crawl-svg-edge",
+    ".crawl-svg-edge-dot",
+    ".crawl-svg-node",
+    ".crawl-svg-node-rect",
+    ".crawl-svg-node-rect.has-findings",
+    ".crawl-svg-node-rect.is-selected",
+    ".crawl-svg-kind-dot",
+    ".crawl-svg-title",
+    ".crawl-svg-subtitle",
+    ".crawl-clickable",
+    ".crawl-mt-14",
+    ".crawl-mt-6",
+    ".crawl-zoom-group.crawl-hidden",
+    ".findings-notfound-title",
+    ".findings-notfound-text",
+    ".findings-detail-th",
+    ".findings-chip-clear",
+    ".setup-search-hidden",
 ]
 
 
@@ -341,3 +434,109 @@ def test_vulix_logo_sha256_byte_parity_and_favicon_dimensions():
     ico_path = ROOT / "templates" / "ui" / "favicon.ico"
     assert ico_path.is_file()
     assert ico_path.stat().st_size > 0
+
+
+def test_semantic_state_tokens_presence_and_structure():
+    """Verify presence of all semantic status, spacing, density, and state tokens."""
+    token_dict = _token_map(TOKENS.read_text(encoding="utf-8"))
+
+    # 1. Status colours: pass, fail, warning, not checked, unknown, unavailable, stale, running
+    required_status_keys = [
+        "pass", "fail", "warning", "not-checked", "unknown", "unavailable", "stale", "running"
+    ]
+    for key in required_status_keys:
+        assert f"--status-{key}" in token_dict, f"Missing status token: --status-{key}"
+        assert f"--status-{key}-bg" in token_dict, f"Missing status bg token: --status-{key}-bg"
+        assert f"--status-{key}-border" in token_dict, f"Missing status border token: --status-{key}-border"
+
+    # Brand colours isolated from status
+    assert token_dict["--accent"] == "#9184d9"
+    assert token_dict["--accent-glow"] == "rgba(145,132,217,0.18)"
+    assert token_dict["--status-pass"] != token_dict["--accent"]
+
+    # 2. Spacing scale
+    for sp in ["xs", "sm", "md", "lg", "xl", "2xl", "3xl"]:
+        assert f"--space-{sp}" in token_dict, f"Missing spacing token: --space-{sp}"
+
+    # 3. Density scale
+    for density in ["compact", "comfortable", "spacious"]:
+        assert f"--density-{density}-padding" in token_dict
+        assert f"--density-{density}-gap" in token_dict
+
+    # 4. Focus ring
+    assert "--focus-ring" in token_dict
+    assert "--focus-ring-offset" in token_dict
+    assert "--focus-outline" in token_dict
+
+    # 5. State patterns
+    assert "--state-error-text" in token_dict
+    assert "--state-error-bg" in token_dict
+    assert "--state-error-border" in token_dict
+    assert "--state-loading-text" in token_dict
+    assert "--state-empty-text" in token_dict
+
+
+def test_token_usage_in_components_and_app_shell():
+    """Verify components.css and app.html utilize semantic tokens rather than raw colors."""
+    components_css = COMPONENTS.read_text(encoding="utf-8")
+    app_html = (ROOT / "templates" / "app.html").read_text(encoding="utf-8")
+
+    # Tokens referenced in components.css
+    assert "var(--status-pass" in components_css
+    assert "var(--status-fail" in components_css
+    assert "var(--status-warning" in components_css
+    assert "var(--status-not-checked" in components_css
+    assert "var(--status-unknown" in components_css
+    assert "var(--status-unavailable" in components_css
+    assert "var(--status-stale" in components_css
+    assert "var(--status-running" in components_css
+    assert "var(--space-" in components_css
+    assert "var(--state-error-" in components_css
+    assert "var(--state-loading-" in components_css
+    assert "var(--state-empty-" in components_css
+
+    # Tokens referenced in app.html
+    assert "var(--status-pass" in app_html
+    assert "var(--status-fail" in app_html
+    assert "var(--status-warning" in app_html
+    assert "var(--status-not-checked" in app_html
+    assert "var(--status-unknown" in app_html
+    assert "var(--status-stale" in app_html
+    assert "var(--focus-outline" in app_html or "outline: 2px solid var(--accent)" in app_html
+
+
+def test_all_status_states_have_text_labels():
+    """Verify that every semantic status state corresponds to an explicit text label (never colour alone)."""
+    # 1. Setup module readiness status mappings
+    setup_code = (ROOT / "templates" / "ui" / "setup-module.js").read_text(encoding="utf-8")
+    expected_setup_mappings = {
+        "pass": "✓ OK",
+        "warning": "警告",
+        "fail": "✗ 失敗",
+        "not_checked": "未確認",
+        "not_applicable": "非該当",
+        "unknown": "不明",
+    }
+    for state_key, text_label in expected_setup_mappings.items():
+        assert text_label in setup_code, f"Setup module missing text label for {state_key}: {text_label}"
+
+    # 2. Crawl module completeness badges
+    crawl_code = (ROOT / "templates" / "ui" / "crawl-module.js").read_text(encoding="utf-8")
+    expected_crawl_labels = ["完全 (Complete)", "一部のみ (Partial)", "未確定 (Unknown)"]
+    for label in expected_crawl_labels:
+        assert label in crawl_code, f"Crawl module missing text label: {label}"
+
+    # 3. Agent Skills availability badges
+    skills_code = (ROOT / "templates" / "ui" / "agent-skills-module.js").read_text(encoding="utf-8")
+    assert "availableLabel" in skills_code
+    for label in ["利用可能", "利用不可", "unavailable"]:
+        assert label in skills_code, f"Agent skills module missing text label: {label}"
+
+    # 4. Findings module verification state badges
+    findings_code = (ROOT / "templates" / "ui" / "findings-module.js").read_text(encoding="utf-8")
+    expected_findings_labels = [
+        "reproduced", "assumed（推定）", "not reproduced", "skipped (needs review)",
+        "not tested（未検査）", "unknown（未確定）", "not verified（未確証）"
+    ]
+    for label in expected_findings_labels:
+        assert label in findings_code, f"Findings module missing text label: {label}"
