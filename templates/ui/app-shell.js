@@ -176,11 +176,25 @@
           '#history': 'history',
           '#audit': 'audit',
           '#agent-skills': 'agent-skills',
+          '#/agent-skills': 'agent-skills',
+          '#settings': 'settings',
+          '#/settings': 'settings',
         },
         options.routeMap || {}
       );
       this._listening = false;
       this._onHashChange = this._handleHashChange.bind(this);
+    }
+
+    /**
+     * Register an additional route mapping to a view ID.
+     * @param {string} hash
+     * @param {string} viewId
+     */
+    registerRoute(hash, viewId) {
+      if (typeof hash === 'string' && typeof viewId === 'string') {
+        this.routeMap[hash.trim()] = viewId.trim();
+      }
     }
 
     /**
