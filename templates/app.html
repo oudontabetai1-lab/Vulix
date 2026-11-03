@@ -44,6 +44,7 @@
         <button class="history-btn" type="button" data-route="portal">ポータル</button>
         <button class="history-btn" type="button" data-route="setup">Scan Setup</button>
         <button class="history-btn" type="button" data-route="monitor">Monitor</button>
+        <button class="history-btn" type="button" data-route="settings">Settings</button>
       </nav>
     </aside>
     <main>
@@ -52,12 +53,14 @@
         <iframe id="portalFrame" title="Vulix Portal" hidden></iframe>
         <iframe id="monitorFrame" title="Vulix Monitor" hidden></iframe>
         <div id="monitorModule" hidden></div>
+        <div id="settingsSurface" hidden></div>
         <div id="message" role="status" hidden></div>
       </section>
     </main>
   </div>
   <script src="/ui/api-client.js"></script>
   <script src="/ui/app-shell.js"></script>
+  <script src="/ui/settings-module.js"></script>
   <script src="/ui/app-entry.js"></script>
 </body>
 </html>

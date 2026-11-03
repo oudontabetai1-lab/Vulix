@@ -14,6 +14,7 @@ UI_ASSETS = [
     "/ui/app-shell.js",
     "/ui/api-client.js",
     "/ui/monitor-module.js",
+    "/ui/settings-module.js",
     "/ui/tokens.css",
     "/ui/components.css",
 ]
@@ -78,7 +79,20 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
     ui_harness.populate_live_monitor(monitor_frame)
     ui_harness.capture_screenshot(page, "app-monitor", width, dest_dir=ui_harness.output_dir / "screenshots")
 
-    for route in ["setup", "monitor", "portal", "monitor", "setup"]:
+    page.locator('[data-route="settings"]').click()
+    page.wait_for_function("document.querySelector('[data-route=settings]').getAttribute('aria-current') === 'page'")
+    assert page.locator('[data-route="settings"]').get_attribute("aria-current") == "page"
+    assert page.locator("#settingsSurface").is_visible()
+    assert page.locator("#notificationCard").is_visible()
+    assert page.locator("#configCard").is_visible()
+    assert page.locator("#portalFrame").is_hidden()
+    assert page.locator("#monitorFrame").is_hidden()
+    ui_harness.capture_screenshot(page, "app-settings", width, dest_dir=ui_harness.output_dir / "screenshots")
+    if width == 1440:
+        docs_img = ui_harness.repo_root / "docs" / "images" / "app-settings.png"
+        page.screenshot(path=str(docs_img), full_page=False)
+
+    for route in ["setup", "monitor", "portal", "settings", "monitor", "setup"]:
         page.locator(f'[data-route="{route}"]').click()
         page.wait_for_timeout(80)
     assert len(sockets) == 1, f"expected one persistent dashboard socket, saw {len(sockets)}"
