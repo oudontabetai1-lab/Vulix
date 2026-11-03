@@ -246,6 +246,7 @@ import_sources:
   - wscan/notification.py
   - wscan/payload_gen.py
   - wscan/payload_importer.py
+  - wscan/preflight.py
   - wscan/request_logger.py
   - wscan/scanners/base.py
   - wscan/scanners/cache_poisoning.py
@@ -281,6 +282,7 @@ import_sources:
   - wscan/flow_recorder.py
   - wscan/flow_runner.py
   - wscan/manual_crawl.py
+  - wscan/preflight.py
   - wscan/triage.py
   rich:
   - wscan/adaptive_payload.py
@@ -399,6 +401,7 @@ features:
     sources:
     - wscan/engine.py
     - wscan/browser.py
+    - wscan/preflight.py
     note: Ordinary scan, deterministic scanners, report generation, adaptive payloads and chain scans.
       LLM enrichment is provider-dependent and can be disabled.
   agent:

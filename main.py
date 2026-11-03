@@ -801,6 +801,8 @@ Examples:
         "--report-lang", choices=("ja", "en"), default=_CFG.get("report_lang", "ja"),
         help="HTML/SARIF レポートの言語 (既定: ja)",
     )
+    scan.add_argument("--preflight", action="store_true", help="Run setup readiness checks before scanning.")
+    scan.add_argument("--preflight-only", action="store_true", help="Run readiness checks and stop without scanning.")
     scan.add_argument(
         "url", nargs="+",
         help="対象 URL。複数指定すると 1 回のスキャン（＝同一ログインセッション）で "
@@ -2456,6 +2458,35 @@ async def run_scan(args):
                 no_sitemap_crawl=getattr(args, "no_sitemap_crawl", False),
             )
         )
+
+    preflight_enabled = getattr(args, "preflight", False) or getattr(args, "preflight_only", False)
+    if preflight_enabled:
+        from wscan.preflight import exit_code, run_preflight, write_result
+        output_dir = Path(args.output) if args.output else Path("output") / datetime.now().strftime("%Y%m%d_%H%M%S")
+        report = await run_preflight(
+            args.url, proxy=getattr(args, "proxy", "") or "",
+            verify_tls=getattr(args, "tls_verify", False),
+            ca_cert=getattr(args, "tls_ca_cert", "") or "", output_dir=output_dir,
+            checks=_effective_checks(args), api_spec=getattr(args, "api_spec", "") or "",
+            auth_configured=bool(getattr(args, "cookie", "") or getattr(args, "bearer", "")
+                                 or getattr(args, "login_url", "")
+                                 or getattr(args, "auth_user", "") or getattr(args, "header", [])),
+            accounts_configured=bool(getattr(args, "accounts", "") or getattr(args, "accounts_file", "")
+                                     or getattr(args, "auto_register", False)),
+        )
+        try:
+            write_result(output_dir, report)
+        except OSError as exc:
+            print(f"Preflight result could not be saved: {exc}", file=sys.stderr)
+            print("Preflight could not be recorded; scan was not started.", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        if exit_code(report):
+            print("Preflight failed; scan was not started.", file=sys.stderr)
+            raise SystemExit(1)
+        if getattr(args, "preflight_only", False):
+            return
+        args.output = str(output_dir)
 
     await _resolve_ollama_model(args, console)
 
