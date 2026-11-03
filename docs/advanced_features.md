@@ -122,6 +122,7 @@ WordPress, Drupal, Django, Laravel, EC-CUBE, Joomla, Magento
 | `GET` | `/api/v1/scan/findings` | 検出済み脆弱性リスト取得（全 findings 配列・メトリクス） |
 | `GET` | `/api/v1/scan/report` | HTML レポートのパスを返す |
 | `GET` | `/api/v1/scan/results` | 全結果サマリー（status + findings + CI 用メトリクス）を取得 |
+| `GET` | `/api/v1/scan/crawl-graph` | クロールグラフのスナップショット（ノード・エッジ・完全性保証・伏字化）を取得 |
 
 #### メトリクスフィールドの仕様
 
@@ -157,7 +158,18 @@ curl http://localhost:8765/api/v1/scan/findings
 
 # 4. CI/CD 結果サマリー取得（確証済み脆弱性・仮説件数の内訳を含む）
 curl http://localhost:8765/api/v1/scan/results
+
+# 5. クロールグラフのスナップショット取得（ノード・エッジ・完全性保証）
+curl http://localhost:8765/api/v1/scan/crawl-graph
 ```
+
+#### クロールグラフ API (`/api/v1/scan/crawl-graph`, `/api/v1/scans/{scan_id}/crawl-graph`)
+
+スキャン巡回構造の投影スナップショットを安全に取得するための読取専用 API です。
+- **決定論的ノードID**: URL・kind（page/form/param/unknown）から導出された安定した識別子。
+- **完全性保証 (`completeness`)**: `complete`（全巡回完了）、`partial`（実行中・中断・欠落あり）、`unknown`（未実行・空スキャン）と判定理由（`completeness_reasons`）を明示。実行中や切り詰められたスキャンを `complete` として返却しません。
+- **機微情報の伏字化**: URL、パラメータ、トークンは伏字化処理（`<redacted>`）を通過し、認証情報やシークレットは出力に含まれません。
+- **ノード別参照**: 既存データ内に存在する actions、inputs、findings への参照をノード単位で保持します。
 
 ---
 

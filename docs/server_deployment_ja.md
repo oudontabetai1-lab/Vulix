@@ -46,6 +46,7 @@ Vulix（旧称 WScan）のダッシュボードをサーバー上で常時起動
 | `GET /api/v1/scans/{scan_id}/download` | 成果物フォルダを zip でダウンロード |
 | `DELETE /api/v1/scans/{scan_id}` | スキャン成果物を削除（実行中スキャンは不可） |
 | `GET /api/v1/scans/{scan_id}/diff` | 同一対象の前回スキャンとの差分（新規/修正済み/継続） |
+| `GET /api/v1/scans/{scan_id}/crawl-graph` | 指定スキャンのクロールグラフ（ノード・エッジ・完全性保証）を取得 |
 | `POST /api/v1/scans/prune` | 保持ポリシーを今すぐ適用し古いスキャンを削除（ポータルの「🧹 整理」ボタン） |
 | `POST /api/v1/scan/abort` | 実行中スキャンの停止を要求 |
 | `GET/POST /api/v1/settings` | 通知(Slack/Webhook)設定の取得・更新（`POST /api/v1/settings/test` でテスト送信） |
