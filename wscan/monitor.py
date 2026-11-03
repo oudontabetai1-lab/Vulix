@@ -288,6 +288,8 @@ class MonitorServer:
         self._scan_status_message = ""
         self._scan_paused = False
         self._scan_gaps: list[dict] = []
+        self._scan_page_graph: dict[str, dict] = {}
+        self._scan_crawl_review_pages: list[dict] = []
         # 一過性の操作待ちモーダルは履歴ではなく、未解決の1件だけを
         # 状態 snapshot に含める。None なら未解決のモーダルは無い。
         self.pending_interactive: Optional[dict] = None
@@ -1066,6 +1068,25 @@ class MonitorServer:
                 "aborted": self.api_scan_status in ("aborted", "aborting"),
             })
 
+        @app.get("/api/v1/scan/crawl-graph")
+        async def api_scan_crawl_graph(scan_id: Optional[str] = None):
+            """Return read-only snapshot projection of the crawl graph for the active or requested scan."""
+            from wscan.crawl_graph import project_crawl_graph
+
+            target_id = (scan_id or "").strip()
+            if target_id:
+                if target_id == self.current_scan_id or target_id == self.api_scan_id:
+                    data = self._get_live_crawl_graph_data()
+                    return JSONResponse(project_crawl_graph(data))
+                d = self._scan_dir(target_id)
+                if d is None or not d.is_dir():
+                    return JSONResponse({"error": "not found"}, status_code=404)
+                data = self._load_crawl_graph_data_from_dir(d, target_id)
+                return JSONResponse(project_crawl_graph(data))
+
+            data = self._get_live_crawl_graph_data()
+            return JSONResponse(project_crawl_graph(data))
+
         @app.post("/api/v1/manual-crawl/start")
         async def api_manual_crawl_start(request: Request):
             """Start a visible manual crawl recorder."""
@@ -1346,6 +1367,22 @@ class MonitorServer:
                 **result.to_dict(),
             })
 
+        @app.get("/api/v1/scans/{scan_id}/crawl-graph")
+        async def api_scans_crawl_graph(scan_id: str):
+            """Return read-only snapshot projection of the crawl graph for a specific scan ID."""
+            from wscan.crawl_graph import project_crawl_graph
+
+            target_id = (scan_id or "").strip()
+            if target_id and (target_id == self.current_scan_id or target_id == self.api_scan_id):
+                data = self._get_live_crawl_graph_data()
+                return JSONResponse(project_crawl_graph(data))
+
+            d = self._scan_dir(target_id)
+            if d is None or not d.is_dir():
+                return JSONResponse({"error": "not found"}, status_code=404)
+            data = self._load_crawl_graph_data_from_dir(d, target_id)
+            return JSONResponse(project_crawl_graph(data))
+
         @app.delete("/api/v1/scans/{scan_id}")
         async def api_scan_delete(scan_id: str, request: Request):
             """Delete a scan's artifact folder."""
@@ -1403,6 +1440,63 @@ class MonitorServer:
         except ValueError:
             return None
         return d
+
+    def _get_live_crawl_graph_data(self) -> dict[str, Any]:
+        """Collect live scan state on the server into a crawl graph input dict."""
+        return {
+            "scan_id": self.api_scan_id or self.current_scan_id,
+            "target_url": self.api_target,
+            "status": self.api_scan_status,
+            "phase": self.api_phase,
+            "findings": list(self.api_findings),
+            "scan_gaps": list(self._scan_gaps),
+            "page_graph": dict(self._scan_page_graph),
+            "pages": list(self._scan_crawl_review_pages),
+        }
+
+    def _load_crawl_graph_data_from_dir(self, d: Path, scan_id: str = "") -> dict[str, Any]:
+        """Load crawl graph input data from a scan output directory."""
+        data: dict[str, Any] = {
+            "scan_id": scan_id or d.name,
+            "status": "done",
+            "findings": [],
+            "visited_urls": [],
+            "page_graph": {},
+            "pages": [],
+        }
+        ev_file = d / "evidence.json"
+        if ev_file.is_file():
+            try:
+                ev = json.loads(ev_file.read_text(encoding="utf-8"))
+                if isinstance(ev, dict):
+                    data["status"] = ev.get("status") or ("aborted" if ev.get("aborted") else "done")
+                    data["target_url"] = ev.get("target") or ""
+                    data["findings"] = ev.get("findings") or []
+                    data["visited_urls"] = ev.get("visited_urls") or []
+                    data["attack_plans"] = ev.get("attack_plans") or []
+                    if "page_graph" in ev and isinstance(ev["page_graph"], dict):
+                        data["page_graph"] = ev["page_graph"]
+            except Exception:
+                pass
+
+        cp_file = d / "checkpoint.json"
+        if cp_file.is_file():
+            try:
+                cp = json.loads(cp_file.read_text(encoding="utf-8"))
+                if isinstance(cp, dict):
+                    if not data.get("target_url"):
+                        data["target_url"] = cp.get("target_url") or ""
+                    if not data.get("findings") and cp.get("findings"):
+                        data["findings"] = cp.get("findings")
+                    if cp.get("reached_urls"):
+                        data.setdefault("visited_urls", []).extend(cp["reached_urls"])
+                    if cp.get("truncation_counts"):
+                        data["truncation_counts"] = cp["truncation_counts"]
+                    if cp.get("exhausted_truncations"):
+                        data["exhausted_truncations"] = cp["exhausted_truncations"]
+            except Exception:
+                pass
+        return data
 
     def _list_scans(self) -> list[dict]:
         """Index the output directory into a list of scan summaries."""
@@ -2012,6 +2106,8 @@ class MonitorServer:
         self._scan_status_message = ""
         self._scan_paused = False
         self._scan_gaps = []
+        self._scan_page_graph = {}
+        self._scan_crawl_review_pages = []
         self.event_history.clear()
 
     def _scan_snapshot_event(self) -> dict:
@@ -2121,6 +2217,14 @@ class MonitorServer:
                     self._scan_url_order.append(url)
                 self._scan_url_statuses[url] = "error"
             self._scan_gaps.append(dict(event_data))
+        elif event_type == "page_graph_update":
+            if isinstance(event_data, dict):
+                url = event_data.get("url")
+                if url:
+                    self._scan_page_graph[url] = dict(event_data)
+        elif event_type == "crawl_review":
+            if isinstance(event_data, dict) and "pages" in event_data:
+                self._scan_crawl_review_pages = list(event_data.get("pages") or [])
         elif event_type == "finding":
             url = event_data.get("url")
             if url and url in self._scan_url_statuses:
