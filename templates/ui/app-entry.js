@@ -10,6 +10,7 @@
   const portal = document.getElementById('portalFrame');
   const monitor = document.getElementById('monitorFrame');
   const monitorHost = document.getElementById('monitorModule');
+  const summarySurface = document.getElementById('summarySurface');
   const findingsSurface = document.getElementById('findingsSurface');
   const settingsSurface = document.getElementById('settingsSurface');
   const crawlSurface = document.getElementById('crawlSurface');
@@ -30,6 +31,7 @@
     portal.hidden = true;
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
+    if (summarySurface) summarySurface.hidden = true;
     if (findingsSurface) findingsSurface.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (setupSurface) setupSurface.hidden = true;
@@ -115,23 +117,24 @@
     });
   }
 
-  registry.register({ id: 'portal', title: 'ポータル', route: '#/portal', mount() {
-    title.textContent = 'ポータル';
-    context.textContent = '';
-    clearMessage();
-    if (monitorHost) monitorHost.hidden = true;
-    if (findingsSurface) findingsSurface.hidden = true;
-    if (agentSkillsSurface) agentSkillsSurface.hidden = true;
-    if (setupSurface) setupSurface.hidden = true;
-    if (settingsSurface) settingsSurface.hidden = true;
-    if (crawlSurface) crawlSurface.hidden = true;
-    monitor.hidden = true;
-    portal.hidden = false;
-    portal.src = '/';
-  }, unmount() {
-    portal.hidden = true;
-    portal.src = 'about:blank';
-  } });
+  const summaryModules = global.VulixSummaryModules.createSummaryModules({
+    api,
+    surfaceEl: summarySurface,
+    titleEl: title,
+    contextEl: context,
+    clearMessage,
+    hideOthers() {
+      portal.hidden = true;
+      monitor.hidden = true;
+      if (monitorHost) monitorHost.hidden = true;
+      if (findingsSurface) findingsSurface.hidden = true;
+      if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+      if (setupSurface) setupSurface.hidden = true;
+      if (settingsSurface) settingsSurface.hidden = true;
+      if (crawlSurface) crawlSurface.hidden = true;
+    },
+  });
+  summaryModules.forEach((module) => registry.register(module));
 
   registry.register({ id: 'setup', title: 'Scan Setup', route: '#/setup', mount() {
     title.textContent = 'Scan Setup';
@@ -406,7 +409,7 @@
     const raw = (hash || '').replace(/^#\/?/, '/');
     const parts = raw.split('?');
     const route = parts[0] || '/portal';
-    if (!['/portal', '/setup', '/monitor', '/findings', '/crawl', '/agent-skills', '/settings'].includes(route) || parts.length > 2) return null;
+    if (!['/portal', '/history', '/audit', '/setup', '/monitor', '/findings', '/crawl', '/agent-skills', '/settings'].includes(route) || parts.length > 2) return null;
     const params = new URLSearchParams(parts[1] || '');
     if (Array.from(params.keys()).some((key) => key !== 'scan' && key !== 'finding')) return null;
     if (params.getAll('scan').length > 1 || params.getAll('finding').length > 1) return null;

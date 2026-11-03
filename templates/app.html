@@ -27,7 +27,7 @@
     #monitorFrame.transport-owner { inset: auto; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
     #message { padding: 28px; }
     #message h2 { margin-top: 0; }
-    #findingsSurface { padding: 18px 24px; overflow-y: auto; max-height: calc(100vh - 58px); }
+    #findingsSurface, #summarySurface { padding: 18px 24px; overflow-y: auto; max-height: calc(100vh - 58px); }
     .findings-container { display: flex; flex-direction: column; gap: 16px; max-width: 1400px; margin: 0 auto; width: 100%; }
     .findings-toolbar { display: flex; flex-direction: column; gap: 12px; }
     .findings-toolbar-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -264,6 +264,8 @@
       <div class="brand"><img src="/ui/vulix-logo-mark.png" alt="">Vulix</div>
       <nav aria-label="Application">
         <button class="history-btn" type="button" data-route="portal">ポータル</button>
+        <button class="history-btn" type="button" data-route="history">スキャン履歴</button>
+        <button class="history-btn" type="button" data-route="audit">監査ログ</button>
         <button class="history-btn" type="button" data-route="setup">Scan Setup</button>
         <button class="history-btn" type="button" data-route="monitor">Monitor</button>
         <button class="history-btn" type="button" data-route="findings">Findings</button>
@@ -278,6 +280,7 @@
         <iframe id="portalFrame" title="Vulix Portal" hidden></iframe>
         <iframe id="monitorFrame" title="Vulix Monitor" hidden></iframe>
         <div id="monitorModule" hidden></div>
+        <div id="summarySurface" hidden></div>
         <div id="findingsSurface" hidden></div>
         <div id="crawlSurface" hidden></div>
         <div id="agentSkillsSurface" hidden></div>
@@ -288,6 +291,8 @@
     </main>
   </div>
   <script src="/ui/api-client.js"></script>
+  <script src="/ui/summary-reader.js"></script>
+  <script src="/ui/summary-modules.js"></script>
   <script src="/ui/app-shell.js"></script>
   <script src="/ui/capability-reader.js"></script>
   <script src="/ui/evidence-viewer-registry.js"></script>
