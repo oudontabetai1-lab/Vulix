@@ -33,6 +33,53 @@
     return String(v);
   }
 
+  /**
+   * Pure Status Label Mapper for readiness checks.
+   *
+   * Hard correctness invariant:
+   * Only 'pass' yields the pass/green cssClass and OK label.
+   * not_checked, not_applicable, warning, fail, and unknown must NEVER
+   * receive pass/green styling or an OK label.
+   *
+   * @param {string} status
+   * @returns {{ label: string, cssClass: string }}
+   */
+  function preflightStatusLabel(status) {
+    switch (status) {
+      case 'pass':
+        return { label: '✓ OK', cssClass: 'setup-status-pass' };
+      case 'warning':
+        return { label: '警告', cssClass: 'setup-status-warning' };
+      case 'fail':
+        return { label: '✗ 失敗', cssClass: 'setup-status-fail' };
+      case 'not_checked':
+        return { label: '未確認', cssClass: 'setup-status-not-checked' };
+      case 'not_applicable':
+        return { label: '非該当', cssClass: 'setup-status-not-applicable' };
+      default:
+        return { label: '不明', cssClass: 'setup-status-unknown' };
+    }
+  }
+
+  /**
+   * Pure Verdict Label Mapper for overall readiness.
+   *
+   * @param {string} verdict
+   * @returns {{ label: string, cssClass: string }}
+   */
+  function preflightVerdictLabel(verdict) {
+    switch (verdict) {
+      case 'pass':
+        return { label: '準備OK', cssClass: 'setup-verdict-pass' };
+      case 'warning':
+        return { label: '注意 (一部未確認/警告)', cssClass: 'setup-verdict-warning' };
+      case 'fail':
+        return { label: '失敗', cssClass: 'setup-verdict-fail' };
+      default:
+        return { label: '不明', cssClass: 'setup-verdict-unknown' };
+    }
+  }
+
   const TAB_DEFINITIONS = [
     { id: 'crawl', label: 'クロール・スコープ' },
     { id: 'checks', label: '検査項目・ペイロード' },
@@ -740,12 +787,20 @@
     // Start Scan Button
     const startSection = doc.createElement('div');
     startSection.className = 'setup-start-section';
+
     const startBtn = doc.createElement('button');
     startBtn.type = 'button';
     startBtn.id = 'setupStartScanBtn';
     startBtn.className = 'setup-start-btn';
     startBtn.textContent = '▶ スキャン開始';
     startSection.appendChild(startBtn);
+
+    const preflightBtn = doc.createElement('button');
+    preflightBtn.type = 'button';
+    preflightBtn.id = 'setupPreflightBtn';
+    preflightBtn.className = 'history-btn setup-preflight-btn';
+    preflightBtn.textContent = '⚡ スキャン準備チェック';
+    startSection.appendChild(preflightBtn);
     controlsRow.appendChild(startSection);
 
     header.appendChild(controlsRow);
@@ -773,6 +828,44 @@
     effectiveSection.className = 'setup-effective-section';
     effectiveSection.hidden = true;
     header.appendChild(effectiveSection);
+
+    // Readiness / Preflight Panel Section
+    const readinessSection = doc.createElement('div');
+    readinessSection.id = 'setupReadinessSection';
+    readinessSection.className = 'setup-readiness-section';
+
+    const readinessHeader = doc.createElement('div');
+    readinessHeader.className = 'setup-readiness-header';
+
+    const readinessTitleRow = doc.createElement('div');
+    readinessTitleRow.className = 'setup-readiness-title-row';
+
+    const readinessTitle = doc.createElement('h3');
+    readinessTitle.className = 'setup-readiness-title';
+    readinessTitle.textContent = 'スキャン準備チェック (readiness)';
+
+    const runPreflightBtn = doc.createElement('button');
+    runPreflightBtn.type = 'button';
+    runPreflightBtn.id = 'setupRunPreflightBtn';
+    runPreflightBtn.className = 'history-btn setup-preflight-btn';
+    runPreflightBtn.textContent = '⚡ 準備チェック実行';
+
+    readinessTitleRow.appendChild(readinessTitle);
+    readinessTitleRow.appendChild(runPreflightBtn);
+    readinessHeader.appendChild(readinessTitleRow);
+
+    const readinessDesc = doc.createElement('div');
+    readinessDesc.className = 'setup-readiness-desc';
+    readinessDesc.textContent = '現在の設定値に対して接続性・依存関係・前提条件の診断をオンデマンドで実行します。';
+    readinessHeader.appendChild(readinessDesc);
+
+    const readinessContent = doc.createElement('div');
+    readinessContent.id = 'setupReadinessContent';
+    readinessContent.className = 'setup-readiness-content';
+
+    readinessSection.appendChild(readinessHeader);
+    readinessSection.appendChild(readinessContent);
+    header.appendChild(readinessSection);
 
     root.appendChild(header);
 
@@ -1502,6 +1595,163 @@
       }
     });
 
+    // ─── Readiness / Preflight On-Demand Handlers ─────────────────
+    function renderReadinessUnavailable(reason) {
+      if (typeof readinessContent.replaceChildren === 'function') {
+        readinessContent.replaceChildren();
+      } else {
+        while (readinessContent.firstChild) readinessContent.removeChild(readinessContent.firstChild);
+      }
+      const unavail = doc.createElement('div');
+      unavail.className = 'setup-readiness-unavailable';
+      unavail.setAttribute('role', 'alert');
+      unavail.id = 'setupReadinessUnavailable';
+      unavail.textContent = `readiness を取得できませんでした (利用不可)${reason ? ' (' + reason + ')' : ''}`;
+      readinessContent.appendChild(unavail);
+    }
+
+    function renderReadinessSuccess(report) {
+      if (typeof readinessContent.replaceChildren === 'function') {
+        readinessContent.replaceChildren();
+      } else {
+        while (readinessContent.firstChild) readinessContent.removeChild(readinessContent.firstChild);
+      }
+
+      const verdict = report && report.verdict;
+      const vInfo = preflightVerdictLabel(verdict);
+
+      const verdictBar = doc.createElement('div');
+      verdictBar.className = 'setup-readiness-verdict-bar';
+      verdictBar.id = 'setupReadinessVerdictBar';
+
+      const verdictTitle = doc.createElement('span');
+      verdictTitle.className = 'setup-readiness-verdict-title';
+      verdictTitle.textContent = '総合判定:';
+
+      const verdictBadge = doc.createElement('span');
+      verdictBadge.id = 'setupReadinessVerdictBadge';
+      verdictBadge.className = `setup-readiness-verdict-badge ${vInfo.cssClass}`;
+      verdictBadge.dataset.verdict = verdict || '';
+      verdictBadge.textContent = vInfo.label;
+
+      verdictBar.appendChild(verdictTitle);
+      verdictBar.appendChild(verdictBadge);
+      readinessContent.appendChild(verdictBar);
+
+      const checksList = doc.createElement('div');
+      checksList.id = 'setupReadinessChecksList';
+      checksList.className = 'setup-readiness-checks-list';
+
+      const checks = Array.isArray(report.checks) ? report.checks : [];
+      checks.forEach((chk) => {
+        const row = doc.createElement('div');
+        row.className = 'setup-readiness-check-item';
+        row.dataset.checkId = chk.id;
+
+        const idSpan = doc.createElement('span');
+        idSpan.className = 'setup-readiness-check-id ui-code';
+        idSpan.textContent = chk.id;
+
+        const stInfo = preflightStatusLabel(chk.status);
+        const chip = doc.createElement('span');
+        chip.className = `setup-readiness-status-chip ${stInfo.cssClass}`;
+        chip.dataset.status = chk.status;
+        chip.textContent = stInfo.label;
+
+        const detailSpan = doc.createElement('span');
+        detailSpan.className = 'setup-readiness-check-detail';
+        detailSpan.textContent = chk.detail || chk.reason_code || '';
+
+        row.appendChild(idSpan);
+        row.appendChild(chip);
+        row.appendChild(detailSpan);
+        checksList.appendChild(row);
+      });
+
+      readinessContent.appendChild(checksList);
+    }
+
+    async function runPreflight() {
+      if (runPreflightBtn) runPreflightBtn.disabled = true;
+      if (preflightBtn) preflightBtn.disabled = true;
+      if (runPreflightBtn) runPreflightBtn.textContent = '準備チェック実行中...';
+      if (preflightBtn) preflightBtn.textContent = '準備チェック実行中...';
+
+      if (typeof readinessContent.replaceChildren === 'function') {
+        readinessContent.replaceChildren();
+      } else {
+        while (readinessContent.firstChild) readinessContent.removeChild(readinessContent.firstChild);
+      }
+      const loading = doc.createElement('div');
+      loading.className = 'ui-status loading';
+      loading.textContent = '準備チェックを実行しています...';
+      readinessContent.appendChild(loading);
+
+      try {
+        let data = null;
+        const payload = buildScanPayload(currentMode, { document: doc });
+        if (options.preflightResult) {
+          data = options.preflightResult;
+        } else if (typeof options.fetchPreflight === 'function') {
+          data = await options.fetchPreflight(payload);
+        } else if (options.api && typeof options.api.post === 'function') {
+          const endpoint = options.preflightEndpoint || '/api/v1/preflight';
+          const res = await options.api.post(endpoint, payload);
+          if (!res || !res.ok || !res.data) {
+            const msg = (res && (res.errorMessage || (res.data && res.data.error))) || (res ? `HTTP ${res.status}` : '利用不可');
+            throw new Error(msg);
+          }
+          data = res.data;
+        } else if (typeof fetch === 'function') {
+          const endpoint = options.preflightEndpoint || '/api/v1/preflight';
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) {
+            let errText = `HTTP ${res.status}`;
+            try {
+              const errJson = await res.json();
+              if (errJson && errJson.error) errText = errJson.error;
+            } catch (_) {}
+            throw new Error(errText);
+          }
+          data = await res.json();
+        } else {
+          throw new Error('API client unavailable');
+        }
+
+        if (!data || typeof data !== 'object' || !Array.isArray(data.checks) || typeof data.verdict !== 'string') {
+          throw new Error('無効なレスポンス形式です');
+        }
+
+        renderReadinessSuccess(data);
+      } catch (err) {
+        renderReadinessUnavailable(err && err.message ? err.message : '利用不可');
+      } finally {
+        if (runPreflightBtn) {
+          runPreflightBtn.disabled = false;
+          runPreflightBtn.textContent = '⚡ 準備チェック実行';
+        }
+        if (preflightBtn) {
+          preflightBtn.disabled = false;
+          preflightBtn.textContent = '⚡ スキャン準備チェック';
+        }
+      }
+    }
+
+    if (runPreflightBtn) {
+      runPreflightBtn.addEventListener('click', runPreflight);
+    }
+    if (preflightBtn) {
+      preflightBtn.addEventListener('click', runPreflight);
+    }
+
+    if (options.preflightResult) {
+      renderReadinessSuccess(options.preflightResult);
+    }
+
     container.appendChild(root);
     applyMode('normal');
 
@@ -1514,6 +1764,10 @@
       getMode: () => currentMode,
       buildPayload: () => buildScanPayload(currentMode, { document: doc }),
       effectiveSection: effectiveSection,
+      readinessSection: readinessSection,
+      runPreflight: runPreflight,
+      renderReadinessSuccess: renderReadinessSuccess,
+      renderReadinessUnavailable: renderReadinessUnavailable,
     };
   }
 
@@ -1565,8 +1819,8 @@
         return false;
       }
 
-      renderSetupView(container, schema, options);
-      return true;
+      const instance = renderSetupView(container, schema, options);
+      return instance || true;
     } catch (err) {
       if (typeof options.onUnavailable === 'function') {
         options.onUnavailable(err && err.message ? err.message : '設定宣言の読み込みに失敗しました');
@@ -1585,6 +1839,9 @@
       title: 'Scan Setup',
       route: '#/setup',
       capabilities: ['scan-setup'],
+      runPreflight() {
+        return currentInstance && currentInstance.runPreflight && currentInstance.runPreflight();
+      },
       mount(route) {
         const doc = options.document || (typeof document !== 'undefined' ? document : null);
         const container = options.container || (doc ? doc.getElementById('setupSurface') : null);
@@ -1598,8 +1855,9 @@
                 options.onUnavailable(reason);
               }
             },
-          })).then((ok) => {
-            if (!ok && container) container.hidden = true;
+          })).then((res) => {
+            if (!res && container) container.hidden = true;
+            if (res && typeof res === 'object') currentInstance = res;
           });
         }
       },
@@ -1627,6 +1885,8 @@
     KEY_TO_ID_MAP: KEY_TO_ID_MAP,
     buildScanPayload: buildScanPayload,
     validateFieldConstraint: validateFieldConstraint,
+    preflightStatusLabel: preflightStatusLabel,
+    preflightVerdictLabel: preflightVerdictLabel,
     renderSetupView: renderSetupView,
     loadAndRenderSetup: loadAndRenderSetup,
     createSetupModule: createSetupModule,
