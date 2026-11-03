@@ -1435,6 +1435,18 @@ class MonitorServer:
                 "findings_available": True,
             })
 
+        @app.get("/api/v1/scans/{scan_id}/preflight")
+        async def api_scan_preflight(scan_id: str):
+            """Return the saved read-only readiness result for a scan."""
+            d = self._scan_dir(scan_id)
+            path = d / "preflight.json" if d else None
+            if path is None or not path.is_file():
+                return JSONResponse({"error": "preflight result not found", "scan_id": scan_id}, status_code=404)
+            try:
+                return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                return JSONResponse({"error": "preflight result unavailable", "scan_id": scan_id}, status_code=500)
+
         @app.get("/api/v1/scans/{scan_id}/crawl-graph")
         async def api_scans_crawl_graph(scan_id: str):
             """Return read-only snapshot projection of the crawl graph for a specific scan ID."""
