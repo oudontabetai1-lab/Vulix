@@ -755,6 +755,66 @@ console.log(JSON.stringify({{
     assert res["hybridMode"] == "hybrid"
 
 
+def test_effective_config_readout_search_applicability_and_payload():
+    schema = build_settings_schema()
+    script = f"""
+const {{ renderSetupView }} = require('./templates/ui/setup-module.js');
+function el(tag) {{
+  const listeners = {{}};
+  return {{ tagName: tag, children: [], dataset: {{}}, style: {{}}, className: '', hidden: false,
+    setAttribute() {{}}, removeAttribute() {{}}, getAttribute() {{ return null; }},
+    appendChild(child) {{ this.children.push(child); }}, replaceChildren(...children) {{ this.children = children; }},
+    addEventListener(name, fn) {{ listeners[name] = fn; }}, dispatch(name) {{ listeners[name]?.(); }},
+    classList: {{ add() {{}}, remove() {{}}, toggle() {{}}, contains() {{ return false; }} }} }};
+}}
+const doc = {{ createElement: el, getElementById() {{ return null; }}, querySelector() {{ return null; }}, querySelectorAll() {{ return []; }} }};
+function find(node, predicate) {{ if (predicate(node)) return node; for (const child of node.children || []) {{ const found = find(child, predicate); if (found) return found; }} return null; }}
+function allText(node) {{ return [node.textContent || '', ...(node.children || []).map(allText)].join(' '); }}
+const container = el('div');
+const response = {{ schema_version: '1.0.0', manifest_kind: 'effective_config', mode: 'normal', profile: 'triage',
+  values: {{ depth: 1 }}, diff: {{ depth: {{ before: 2, after: 1 }} }}, invalid_keys: [] }};
+const view = renderSetupView(container, {json.dumps(schema)}, {{ document: doc, fetchEffectiveConfig: async () => response }});
+const payloadBefore = JSON.stringify(view.buildPayload());
+const matches = view.filterFields('depth');
+const payloadAfter = JSON.stringify(view.buildPayload());
+const depthField = find(view.root, n => n.dataset && n.dataset.fieldKey === 'depth' && (n.className || '').includes('setup-field'));
+const hiddenOtherField = find(view.root, n => n.dataset && n.dataset.fieldKey === 'max_forms' && (n.className || '').includes('setup-field'));
+const authMatches = view.filterFields('mfa');
+view.filterFields('depth');
+const unavailable = renderSetupView(el('div'), {json.dumps(schema)}, {{ document: doc, fetchEffectiveConfig: async () => {{ throw new Error('offline'); }} }});
+Promise.all([view.applyPreset('triage', false), unavailable.applyPreset('triage')]).then(([loaded]) => {{
+  const payloadUnchangedByReadout = payloadBefore === payloadAfter && payloadBefore === JSON.stringify(view.buildPayload());
+  view.applyMode('agent');
+  const diffRow = find(view.effectiveSection, n => n.className === 'setup-effective-diff-item');
+  console.log(JSON.stringify({{
+    loaded, diffText: diffRow.children.map(n => n.textContent).join(''),
+    hasEffectiveValue: allText(view.effectiveSection).includes('クロール深度: 1'),
+    unavailable: allText(unavailable.effectiveSection).includes('取得できませんでした'),
+    unavailableHasNoGuessedDiff: !allText(unavailable.effectiveSection).includes('2'),
+    searchMatches: matches, searchDepthVisible: depthField.style.display !== 'none',
+    searchHidesOtherFields: hiddenOtherField.style.display === 'none',
+    searchMfaCount: authMatches,
+    notApplicable: Boolean(find(depthField, n => (n.className || '').includes('setup-na-badge'))),
+    reasonListsApplicableModes: allText(depthField).includes('通常') && allText(depthField).includes('Hybrid'),
+    payloadUnchangedByReadout,
+  }}));
+}});
+"""
+    result = _run_node(script)
+    assert result["loaded"] is True
+    assert result["diffText"] == "クロール深度 (depth):2 → 1"
+    assert result["hasEffectiveValue"] is True
+    assert result["unavailable"] is True
+    assert result["unavailableHasNoGuessedDiff"] is True
+    assert result["searchMatches"] > 0
+    assert result["searchDepthVisible"] is True
+    assert result["searchHidesOtherFields"] is True
+    assert result["searchMfaCount"] > 0
+    assert result["notApplicable"] is True
+    assert result["reasonListsApplicableModes"] is True
+    assert result["payloadUnchangedByReadout"] is True
+
+
 def test_start_scan_validation_and_submission():
     """Verify URL validation and scan payload submission callback."""
     schema = build_settings_schema()
