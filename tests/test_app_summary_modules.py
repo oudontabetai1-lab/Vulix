@@ -25,6 +25,12 @@ def test_app_summary_modules_contracts():
     }
     global.document = { createElement: tag => new Element(tag) };
     globalThis.confirm = () => true;
+    const dashboard = fs.readFileSync('templates/dashboard.html', 'utf8');
+    const legacyIpGuard = dashboard.match(/function validateAndSanitizeClientIp\(ipStr\) \{[\s\S]*?\n\}/)[0];
+    const legacyIpContext = {};
+    vm.runInNewContext(dashboard.match(/const STRICT_IPV4_RE = .*?;\nconst STRICT_IPV6_RE = .*?;/)[0].replace(/const /g, 'var '), legacyIpContext);
+    vm.runInNewContext(legacyIpGuard, legacyIpContext);
+    legacyIpContext.validateAndSanitizeClientIp = legacyIpContext.validateAndSanitizeClientIp.bind(legacyIpContext);
     vm.runInThisContext(fs.readFileSync('templates/ui/summary-reader.js', 'utf8'));
     vm.runInThisContext(fs.readFileSync('templates/ui/summary-modules.js', 'utf8'));
     const reader = VulixSummaryReader.createSummaryReader({ get: async () => ({ ok: true, data: { scans: [{ findings_count: null }, { findings_count: 0 }], storage: {} } }) });
@@ -51,6 +57,8 @@ def test_app_summary_modules_contracts():
       const counts = await reader.scans(); await modules[0].mount();
       const report = []; const walk = node => { if (node.tagName === 'a') report.push(node.href); for (const child of node.children) walk(child); }; walk(surface);
       const rendered = surface.textContent; const routes = modules.map(m => [m.id, m.route]);
+      const ipCases = ['192.168.1.1', '256.1.1.1', '2001:db8::1', '1:2:3:4:5:6:7:8:9', '<svg onload=alert(1)>'];
+      const ipParity = ipCases.map(ip => [VulixSummaryModules.validIp(ip), legacyIpContext.validateAndSanitizeClientIp(ip), (ip.match(/:/g) || []).length]);
       const all = []; const collect = node => { all.push(node); for (const child of node.children) collect(child); }; collect(surface);
       const click = async label => { const item = all.find(n => n.tagName === 'button' && n.textContent === label); if (item && item.events.click) await item.events.click(); };
       const scheduleUrl = all.find(n => n.tagName === 'input' && n.placeholder === 'https://example.com'); scheduleUrl.value = 'https://scheduled.example';
@@ -63,7 +71,7 @@ def test_app_summary_modules_contracts():
           VulixSummaryReader.redactDisplayUrl('https://example.test/?next=%3Ftoken%3Dsecret'),
           VulixSummaryReader.redactDisplayUrl('https://example.test/#next=%3Fkey%3Dsecret')
         ], report, rendered, auditText, inert: surface.innerHTML === undefined,
-        apiReads: calls.map(c => c.slice(0, 2)) }));
+        ipParity, apiReads: calls.map(c => c.slice(0, 2)) }));
     })().catch(e => { console.error(e); process.exitCode = 1; });
     """
     result = subprocess.run([node, "-"], input=script, text=True, capture_output=True, cwd=ROOT, timeout=20)
@@ -71,6 +79,7 @@ def test_app_summary_modules_contracts():
     data = json.loads(result.stdout)
     assert data["counts"] == [None, 0]
     assert data["routes"] == [["portal", "#/portal"], ["history", "#/history"], ["audit", "#/audit"]]
+    assert data["ipParity"] == [["192.168.1.1", "192.168.1.1", 0], ["—", "—", 0], ["2001:db8::1", "2001:db8::1", 3], ["—", "—", 8], ["—", "—", 0]]
     assert "<redacted>@example.test" in data["urls"][0] and "token=<redacted>" in data["urls"][0]
     assert data["urls"][1] == "http://example.test/p?password=<redacted>"
     assert "secret" not in data["urls"][2] and "secret" not in data["urls"][3]

@@ -11,7 +11,11 @@
     if (typeof value !== 'string') return '—';
     const ip = value.trim();
     if (/^(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/.test(ip)) return ip;
-    return ip.includes(':') && /^[0-9a-fA-F:]{2,39}$/.test(ip) && (ip.match(/:/g) || []).length >= 2 ? ip : '—';
+    if (ip.includes(':') && /^[0-9a-fA-F:]{2,39}$/.test(ip)) {
+      const colons = (ip.match(/:/g) || []).length;
+      if (colons >= 2 && colons <= 7) return ip;
+    }
+    return '—';
   };
   const auditActions = { scan_start: 'スキャン開始', scan_abort: 'スキャン中断', scan_delete: 'スキャン削除', scans_prune: '履歴手動整理', schedule_add: '定期追加', schedule_toggle: '定期切替', schedule_delete: '定期削除', upload: 'ファイル配置', settings_update: '設定変更' };
 
