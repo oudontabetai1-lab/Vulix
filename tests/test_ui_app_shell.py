@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import shutil
 
 import pytest
@@ -516,3 +517,150 @@ def test_app_shell_agent_skills_view_and_screenshot(ui_harness: UIHarness):
     doc_img_path.parent.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(doc_img_path), full_page=False)
     assert doc_img_path.is_file() and doc_img_path.stat().st_size > 0
+
+
+def test_app_monitor_pane_layout_adjustable_accessible_and_persisted(ui_harness: UIHarness):
+    page = ui_harness.new_page(**STANDARD_VIEWPORTS[1440])
+    sockets = []
+    page.on("websocket", lambda socket: sockets.append(socket.url))
+    page.goto(f"{ui_harness.server_url}/app#/monitor", wait_until="domcontentloaded")
+
+    # Wait for Monitor module to mount in shadow root
+    page.wait_for_function(
+        "() => Boolean(document.querySelector('#monitorModule')?.shadowRoot?.querySelector('#sepLeft'))"
+    )
+
+    # 1. Separators role, tabindex, aria attributes
+    sep_left = page.evaluate("""() => {
+        const sep = document.querySelector('#monitorModule').shadowRoot.querySelector('#sepLeft');
+        return {
+            role: sep.getAttribute('role'),
+            tabindex: sep.getAttribute('tabindex'),
+            orientation: sep.getAttribute('aria-orientation'),
+            valuenow: Number(sep.getAttribute('aria-valuenow')),
+            valuemin: Number(sep.getAttribute('aria-valuemin')),
+            valuemax: Number(sep.getAttribute('aria-valuemax')),
+        };
+    }""")
+    assert sep_left["role"] == "separator"
+    assert sep_left["tabindex"] == "0"
+    assert sep_left["orientation"] == "vertical"
+    assert sep_left["valuenow"] == 320
+    assert sep_left["valuemin"] == 160
+    assert sep_left["valuemax"] >= 700
+
+    # 2. Keyboard resize on separator
+    page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('#sepLeft').focus()")
+    page.keyboard.press("ArrowRight")
+    val_after_right = page.evaluate(
+        "() => Number(document.querySelector('#monitorModule').shadowRoot.querySelector('#sepLeft').getAttribute('aria-valuenow'))"
+    )
+    assert val_after_right == 340
+
+    page.keyboard.press("ArrowLeft")
+    val_after_left = page.evaluate(
+        "() => Number(document.querySelector('#monitorModule').shadowRoot.querySelector('#sepLeft').getAttribute('aria-valuenow'))"
+    )
+    assert val_after_left == 320
+
+    # 3. Presets application without remount
+    # Browser-focused preset
+    page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('[data-preset=\"browser-focused\"]').click()")
+    is_left_col = page.evaluate(
+        "() => document.querySelector('#monitorModule').shadowRoot.querySelectorAll('.panel')[0].classList.contains('is-collapsed')"
+    )
+    assert is_left_col is True
+
+    # Standard preset
+    page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('[data-preset=\"standard\"]').click()")
+    is_left_col_std = page.evaluate(
+        "() => document.querySelector('#monitorModule').shadowRoot.querySelectorAll('.panel')[0].classList.contains('is-collapsed')"
+    )
+    assert is_left_col_std is False
+
+    # Log-focused preset
+    page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('[data-preset=\"log-focused\"]').click()")
+    is_right_col = page.evaluate(
+        "() => document.querySelector('#monitorModule').shadowRoot.querySelectorAll('.panel')[2].classList.contains('is-collapsed')"
+    )
+    assert is_right_col is True
+
+    # 4. Collapse and maximize controls
+    # Collapse left pane
+    page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('.btn-collapse[data-pane=\"left\"]').click()")
+    aria_expanded = page.evaluate(
+        "() => document.querySelector('#monitorModule').shadowRoot.querySelector('.btn-collapse[data-pane=\"left\"]').getAttribute('aria-expanded')"
+    )
+    assert aria_expanded == "false"
+
+    # Expand left pane by clicking collapsed bar
+    page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('.pane-collapsed-bar[data-pane=\"left\"]').click()")
+    aria_expanded_after = page.evaluate(
+        "() => document.querySelector('#monitorModule').shadowRoot.querySelector('.btn-collapse[data-pane=\"left\"]').getAttribute('aria-expanded')"
+    )
+    assert aria_expanded_after == "true"
+
+    # Maximize center pane
+    page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('.btn-maximize[data-pane=\"center\"]').click()")
+    is_center_max = page.evaluate(
+        "() => document.querySelector('#monitorModule').shadowRoot.querySelectorAll('.panel')[1].classList.contains('is-maximized')"
+    )
+    assert is_center_max is True
+
+    # Restore center pane
+    page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('.btn-maximize[data-pane=\"center\"]').click()")
+    is_center_max_after = page.evaluate(
+        "() => document.querySelector('#monitorModule').shadowRoot.querySelectorAll('.panel')[1].classList.contains('is-maximized')"
+    )
+    assert is_center_max_after is False
+
+    # 5. Persisted preferences in localStorage under versioned key
+    # Assert single persistent websocket throughout all resizing/preset/collapse operations
+    assert len(sockets) == 1, f"expected 1 persistent websocket before reload, found {len(sockets)}"
+
+    stored_str = page.evaluate("() => localStorage.getItem('vulix:monitor-layout:v1')")
+    assert stored_str is not None
+    stored = json.loads(stored_str)
+    assert stored["version"] == 1
+    assert "token" not in stored_str
+    assert "password" not in stored_str
+
+    # Select browser-focused preset and reload to verify restore
+    page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('[data-preset=\"browser-focused\"]').click()")
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => Boolean(document.querySelector('#monitorModule')?.shadowRoot?.querySelector('#sepLeft'))"
+    )
+    restored_is_collapsed = page.evaluate(
+        "() => document.querySelector('#monitorModule').shadowRoot.querySelectorAll('.panel')[0].classList.contains('is-collapsed')"
+    )
+    assert restored_is_collapsed is True
+    active_preset = page.evaluate(
+        "() => document.querySelector('#monitorModule').shadowRoot.querySelector('.layout-preset-btn.active')?.dataset?.preset"
+    )
+    assert active_preset == "browser-focused"
+
+    # 6. Narrow screens (< 768px) stack without losing state
+    page.set_viewport_size({"width": 640, "height": 800})
+    page.wait_for_function(
+        "() => window.getComputedStyle(document.querySelector('#monitorModule').shadowRoot.querySelector('#sepLeft')).display === 'none'"
+    )
+    stored_after_narrow = json.loads(page.evaluate("() => localStorage.getItem('vulix:monitor-layout:v1')"))
+    assert stored_after_narrow["preset"] == "browser-focused"
+
+    # Restore viewport width
+    page.set_viewport_size({"width": 1440, "height": 800})
+    page.wait_for_function(
+        "() => window.getComputedStyle(document.querySelector('#monitorModule').shadowRoot.querySelector('#sepRight')).display !== 'none'"
+    )
+
+    # After reload, exactly 2 sockets observed across the test lifetime (1 initial, 1 after page reload)
+    assert len(sockets) == 2, f"expected 2 websockets total after full reload, found {len(sockets)}"
+
+    # 7. Capture updated screenshot
+    monitor_frame = next(frame for frame in page.frames if frame.url.endswith("/monitor"))
+    ui_harness.populate_live_monitor(monitor_frame)
+    doc_img_path = Path(ui_harness.repo_root) / "docs" / "images" / "app-monitor.png"
+    page.screenshot(path=str(doc_img_path), full_page=False)
+    assert doc_img_path.is_file() and doc_img_path.stat().st_size > 0
+    ui_harness.assert_no_errors(page)
