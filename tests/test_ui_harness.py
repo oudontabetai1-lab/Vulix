@@ -37,6 +37,13 @@ from tests.ui_harness import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_chromium_cache_after_test():
+    """Ensure cached Chromium availability state never leaks between tests."""
+    yield
+    reset_chromium_cache()
+
+
 def _make_png_bytes(width: int, height: int) -> bytes:
     """Helper to construct minimal valid PNG bytes for IHDR testing."""
     signature = b"\x89PNG\r\n\x1a\n"
@@ -145,6 +152,7 @@ def test_find_free_port():
 
 def test_gating_skip_behavior_on_env_flags(monkeypatch):
     """Verify browser gating cleanly skips when disabled via environment."""
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("WSCAN_NO_BROWSER", raising=False)
     monkeypatch.delenv("WSCAN_E2E", raising=False)
     monkeypatch.setenv("WSCAN_SKIP_BROWSER", "1")
@@ -158,6 +166,7 @@ def test_gating_skip_behavior_on_env_flags(monkeypatch):
 
 def test_gating_skip_behavior_on_no_browser(monkeypatch):
     """Verify browser gating cleanly skips on WSCAN_NO_BROWSER=1."""
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("WSCAN_SKIP_BROWSER", raising=False)
     monkeypatch.delenv("WSCAN_E2E", raising=False)
     monkeypatch.setenv("WSCAN_NO_BROWSER", "1")
@@ -171,6 +180,7 @@ def test_gating_skip_behavior_on_no_browser(monkeypatch):
 
 def test_gating_skip_behavior_on_e2e_disabled(monkeypatch):
     """Verify browser gating cleanly skips on WSCAN_E2E=0."""
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("WSCAN_SKIP_BROWSER", raising=False)
     monkeypatch.delenv("WSCAN_NO_BROWSER", raising=False)
     monkeypatch.setenv("WSCAN_E2E", "0")
@@ -216,6 +226,7 @@ def test_ui_harness_lifecycle_and_isolation():
 
 def test_gating_skip_behavior_on_playwright_missing(monkeypatch):
     """Verify gating cleanly skips if playwright is not importable."""
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("WSCAN_SKIP_BROWSER", raising=False)
     monkeypatch.delenv("WSCAN_NO_BROWSER", raising=False)
     monkeypatch.delenv("WSCAN_E2E", raising=False)
@@ -230,17 +241,20 @@ def test_gating_skip_behavior_on_playwright_missing(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", mock_import)
-    available, reason = is_chromium_available(force_refresh=True)
-    assert available is False
-    assert "playwright" in reason.lower()
+    try:
+        available, reason = is_chromium_available(force_refresh=True)
+        assert available is False
+        assert "playwright" in reason.lower()
 
-    with pytest.raises(pytest.skip.Exception):
-        require_browser()
-    reset_chromium_cache()
+        with pytest.raises(pytest.skip.Exception):
+            require_browser()
+    finally:
+        reset_chromium_cache()
 
 
 def test_gating_skip_behavior_on_launch_failure(monkeypatch):
     """Verify gating cleanly skips if Chromium launch fails (e.g. missing binary in CI)."""
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("WSCAN_SKIP_BROWSER", raising=False)
     monkeypatch.delenv("WSCAN_NO_BROWSER", raising=False)
     monkeypatch.delenv("WSCAN_E2E", raising=False)
@@ -262,13 +276,79 @@ def test_gating_skip_behavior_on_launch_failure(monkeypatch):
     import playwright.sync_api
     monkeypatch.setattr(playwright.sync_api, "sync_playwright", lambda: MockPlaywright())
 
-    available, reason = is_chromium_available(force_refresh=True)
-    assert available is False
-    assert "Chromium launch failed" in reason
+    try:
+        available, reason = is_chromium_available(force_refresh=True)
+        assert available is False
+        assert "Chromium launch failed" in reason
 
-    with pytest.raises(pytest.skip.Exception):
-        require_browser()
+        with pytest.raises(pytest.skip.Exception):
+            require_browser()
+    finally:
+        reset_chromium_cache()
+
+
+@pytest.mark.parametrize(
+    "condition_setup,expected_reason_substr",
+    [
+        ("no_browser", "WSCAN_NO_BROWSER"),
+        ("e2e_disabled", "WSCAN_E2E=0"),
+        ("playwright_missing", "playwright"),
+        ("launch_failure", "Chromium launch failed"),
+    ],
+)
+def test_gating_failure_in_ci(condition_setup, expected_reason_substr, monkeypatch):
+    """Verify require_browser raises pytest.fail.Exception in CI when browser is unavailable."""
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.delenv("WSCAN_SKIP_BROWSER", raising=False)
     reset_chromium_cache()
+
+    try:
+        if condition_setup == "no_browser":
+            monkeypatch.delenv("WSCAN_E2E", raising=False)
+            monkeypatch.setenv("WSCAN_NO_BROWSER", "1")
+        elif condition_setup == "e2e_disabled":
+            monkeypatch.delenv("WSCAN_NO_BROWSER", raising=False)
+            monkeypatch.setenv("WSCAN_E2E", "0")
+        elif condition_setup == "playwright_missing":
+            monkeypatch.delenv("WSCAN_NO_BROWSER", raising=False)
+            monkeypatch.delenv("WSCAN_E2E", raising=False)
+            import builtins
+            real_import = builtins.__import__
+
+            def mock_import(name, *args, **kwargs):
+                if "playwright" in name:
+                    raise ImportError("No module named 'playwright'")
+                return real_import(name, *args, **kwargs)
+
+            monkeypatch.setattr(builtins, "__import__", mock_import)
+        elif condition_setup == "launch_failure":
+            monkeypatch.delenv("WSCAN_NO_BROWSER", raising=False)
+            monkeypatch.delenv("WSCAN_E2E", raising=False)
+
+            class MockChromium:
+                def launch(self, **kwargs):
+                    raise RuntimeError("Simulated launch failure")
+
+            class MockPlaywright:
+                chromium = MockChromium()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    pass
+
+            import playwright.sync_api
+            monkeypatch.setattr(playwright.sync_api, "sync_playwright", lambda: MockPlaywright())
+
+        available, reason = is_chromium_available(force_refresh=True)
+        assert available is False
+        assert expected_reason_substr.lower() in reason.lower()
+
+        with pytest.raises(pytest.fail.Exception, match="Chromium browser is required in CI"):
+            require_browser()
+    finally:
+        reset_chromium_cache()
 
 
 def test_build_sanitized_env(tmp_path: Path, monkeypatch):
@@ -281,6 +361,8 @@ def test_build_sanitized_env(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret-aws")
     monkeypatch.setenv("CUSTOM_SENSITIVE_SECRET", "super-secret")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("HOME", "/custom/home")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/custom/browsers")
 
     sanitized = build_sanitized_env(tmp_path)
 
@@ -295,6 +377,8 @@ def test_build_sanitized_env(tmp_path: Path, monkeypatch):
 
     # Essential variables must be preserved / configured
     assert sanitized.get("PATH") == "/usr/bin:/bin"
+    assert sanitized.get("HOME") == "/custom/home"
+    assert sanitized.get("PLAYWRIGHT_BROWSERS_PATH") == "/custom/browsers"
     assert sanitized.get("PYTHONPATH") == str(tmp_path)
     assert sanitized.get("PYTHONUNBUFFERED") == "1"
     assert sanitized.get("PYTHONIOENCODING") == "utf-8"
@@ -302,6 +386,7 @@ def test_build_sanitized_env(tmp_path: Path, monkeypatch):
 
 def test_ui_harness_cleanup_on_enter_failure(monkeypatch):
     """Verify resources (temp dir, server proc) are cleaned up if __enter__ fails."""
+    monkeypatch.delenv("CI", raising=False)
     require_browser()
 
     harness = UIHarness(seed_fixtures=False)

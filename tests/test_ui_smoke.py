@@ -107,6 +107,7 @@ def test_monitor_three_panes_responsive_smoke(ui_harness: UIHarness, width: int)
     try:
         page.goto(f"{ui_harness.server_url}/monitor")
         page.wait_for_selector(".main")
+        page.wait_for_function("() => typeof handleEvent === 'function'")
 
         # 1. Navigation rail presence (rail on desktop >= 1280, top nav on <= 1200)
         if width >= 1280:
@@ -181,6 +182,7 @@ def test_setup_tabs_responsive_smoke(ui_harness: UIHarness, width: int):
     try:
         page.goto(f"{ui_harness.server_url}/monitor")
         page.wait_for_selector(".main")
+        page.wait_for_function("() => typeof handleEvent === 'function'")
 
         # 1. Open Setup configuration overlay via real UI trigger button
         if page.is_visible(".ws-newscan"):

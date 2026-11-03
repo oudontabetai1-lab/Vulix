@@ -131,7 +131,6 @@
   function getVerificationLabel(finding) {
     if (!finding) return { state: 'unreproduced', text: 'not reproduced', cls: 'verify-badge verify-unreproduced' };
     const st = (finding.verification_state || '').toLowerCase();
-    const verified = finding.verified !== false;
 
     if (st === 'reproduced') {
       return { state: 'reproduced', text: 'reproduced', cls: 'verify-badge verify-reproduced' };
@@ -145,10 +144,23 @@
     if (st === 'skipped') {
       return { state: 'skipped', text: 'skipped (needs review)', cls: 'verify-badge verify-skipped' };
     }
-    if (!verified) {
+    if (st === 'not_checked' || st === 'untested' || st === 'not_tested') {
+      return { state: 'untested', text: 'not tested（未検査）', cls: 'verify-badge verify-unreproduced' };
+    }
+    if (st === 'unknown' || st === 'unavailable') {
+      return { state: 'unknown', text: 'unknown（未確定）', cls: 'verify-badge verify-unreproduced' };
+    }
+    if (finding.verified === false) {
       return { state: 'unreproduced', text: 'not reproduced', cls: 'verify-badge verify-unreproduced' };
     }
-    return { state: 'reproduced', text: 'reproduced/assumed', cls: 'verify-badge verify-reproduced' };
+    if (finding.source === 'agent' && !finding.agent_verified) {
+      return { state: 'assumed', text: 'assumed（推定）', cls: 'verify-badge verify-assumed' };
+    }
+    if (finding.verified === true) {
+      return { state: 'reproduced', text: 'reproduced', cls: 'verify-badge verify-reproduced' };
+    }
+    // 未確証/未判定 (verified 未指定または null): non-pass として扱う
+    return { state: 'unreproduced', text: 'not verified（未確証）', cls: 'verify-badge verify-unreproduced' };
   }
 
   /**

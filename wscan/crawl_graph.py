@@ -156,7 +156,7 @@ def project_crawl_graph(scan_data: Mapping[str, Any]) -> dict[str, Any]:
     edges_set: set[tuple[str, str, str]] = set()
 
     findings_list = [
-        f for f in scan_data.get("findings", [])
+        f for f in (scan_data.get("findings") or [])
         if isinstance(f, Mapping)
     ]
     finding_refs = [_build_finding_reference(f) for f in findings_list]
@@ -203,6 +203,11 @@ def project_crawl_graph(scan_data: Mapping[str, Any]) -> dict[str, Any]:
             # Attach matching findings
             for f_ref in findings_by_norm_url.get(norm_u, []):
                 node_dict["findings"].append(f_ref)
+
+            if "findings_available" in raw_node:
+                node_dict["findings_available"] = bool(raw_node["findings_available"])
+            elif scan_data.get("findings_available") is False:
+                node_dict["findings_available"] = False
 
             nodes_by_id[node_id] = node_dict
 
@@ -448,6 +453,11 @@ def project_crawl_graph(scan_data: Mapping[str, Any]) -> dict[str, Any]:
             if page_node:
                 page_node["metadata"]["page_purpose"] = redact_text(str(plan.get("page_purpose") or ""))
 
+    # Propagate unavailable findings state if explicitly specified
+    if scan_data.get("findings_available") is False:
+        for n in nodes_by_id.values():
+            n["findings_available"] = False
+
     # Sort nodes and edges deterministically
     nodes_list = sorted(
         nodes_by_id.values(),
@@ -485,7 +495,7 @@ def project_crawl_graph(scan_data: Mapping[str, Any]) -> dict[str, Any]:
         "params_count": sum(1 for n in nodes_list if n["kind"] == "param"),
         "unknown_count": sum(1 for n in nodes_list if n["kind"] == "unknown"),
         "total_edges": len(edges_list),
-        "findings_count": sum(len(n["findings"]) for n in nodes_list if n["kind"] == "page"),
+        "findings_count": sum(len(n.get("findings") or []) for n in nodes_list if n["kind"] == "page"),
     }
 
     raw_target = str(scan_data.get("target_url") or scan_data.get("target") or "")

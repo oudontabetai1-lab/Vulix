@@ -117,16 +117,21 @@ def is_chromium_available(force_refresh: bool = False) -> tuple[bool, str]:
     return res
 
 
-def require_browser() -> None:
-    """Skip the test if Chromium browser is not available in the environment."""
+def require_browser(allow_skip_in_ci: bool = False) -> None:
+    """Skip the test if Chromium browser is not available, or fail in CI environment."""
     available, reason = is_chromium_available()
     if not available:
+        if os.environ.get("CI") and not os.environ.get("WSCAN_SKIP_BROWSER") and not allow_skip_in_ci:
+            pytest.fail(f"Chromium browser is required in CI but failed to launch: {reason}")
         pytest.skip(reason)
 
 
 SAFE_PASSTHROUGH_KEYS = frozenset({
     # Execution & paths
     "PATH",
+    # Playwright browser cache & home
+    "HOME",
+    "PLAYWRIGHT_BROWSERS_PATH",
     # Windows system paths
     "SYSTEMROOT",
     "WINDIR",
@@ -389,6 +394,309 @@ def seed_baseline_scans(output_dir: Path) -> list[str]:
     )
 
     return scan_ids
+
+
+def seed_representative_scans(output_dir: Path) -> dict[str, str]:
+    """Create comprehensive deterministic non-secret fixtures for normal, agent, and hybrid scans."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scans: dict[str, str] = {}
+
+    # 1. Normal Scan (Completed with multiple findings)
+    id_normal_done = "20261026_100000"
+    scans["normal_done"] = id_normal_done
+    d_norm = output_dir / id_normal_done
+    d_norm.mkdir(parents=True, exist_ok=True)
+    (d_norm / "report.html").write_text("<!DOCTYPE html><html><body>Report 20261026_100000</body></html>", encoding="utf-8")
+    (d_norm / "scan_config.json").write_text(json.dumps({"config": {"url": "http://store.internal.local", "mode": "normal"}}), encoding="utf-8")
+    (d_norm / "evidence.json").write_text(
+        json.dumps({
+            "target": "http://store.internal.local",
+            "scan_date": "2026-10-26T10:00:00",
+            "status": "done",
+            "mode": "normal",
+            "coverage": {"pages_crawled": 12, "forms_tested": 8},
+            "visited_urls": [
+                "http://store.internal.local",
+                "http://store.internal.local/products",
+                "http://store.internal.local/search?q=test",
+                "http://store.internal.local/api/profile",
+            ],
+            "pages": [
+                {
+                    "url": "http://store.internal.local/search?q=test",
+                    "depth": 1,
+                    "forms": 1,
+                    "form_details": [
+                        {
+                            "action": "http://store.internal.local/search",
+                            "method": "post",
+                            "fields": [{"name": "q", "type": "text"}],
+                        }
+                    ],
+                }
+            ],
+            "findings": [
+                {
+                    "id": "f_xss_01",
+                    "check_type": "xss",
+                    "severity": "critical",
+                    "url": "http://store.internal.local/search?q=test",
+                    "field_name": "q",
+                    "evidence": "Reflected parameter in HTML without sanitization",
+                    "verified": True,
+                    "verification_state": "reproduced",
+                    "source": "scanner",
+                },
+                {
+                    "id": "f_sqli_01",
+                    "check_type": "sqli",
+                    "severity": "high",
+                    "url": "http://store.internal.local/products?id=1",
+                    "field_name": "id",
+                    "evidence": "Boolean equivalence difference observed",
+                    "verified": True,
+                    "verification_state": "reproduced",
+                    "source": "scanner",
+                },
+                {
+                    "id": "f_cors_01",
+                    "check_type": "cors",
+                    "severity": "medium",
+                    "url": "http://store.internal.local/api/profile",
+                    "field_name": "",
+                    "evidence": "Access-Control-Allow-Origin: * with credentials",
+                    "verified": True,
+                    "verification_state": "reproduced",
+                    "source": "scanner",
+                },
+            ],
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+    # 2. Normal Scan (Empty - completed with 0 findings and 0 crawl nodes)
+    id_normal_empty = "20261026_101000"
+    scans["normal_empty"] = id_normal_empty
+    d_empty = output_dir / id_normal_empty
+    d_empty.mkdir(parents=True, exist_ok=True)
+    (d_empty / "report.html").write_text("<!DOCTYPE html><html><body>Report Empty</body></html>", encoding="utf-8")
+    (d_empty / "scan_config.json").write_text(json.dumps({"config": {"url": "http://empty.internal.local", "mode": "normal"}}), encoding="utf-8")
+    (d_empty / "evidence.json").write_text(
+        json.dumps({
+            "target": "http://empty.internal.local",
+            "scan_date": "2026-10-26T10:10:00",
+            "status": "done",
+            "mode": "normal",
+            "coverage": {"pages_crawled": 0, "forms_tested": 0},
+            "visited_urls": [],
+            "findings": [],
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+    # 3. Agent Scan (Completed with verified finding and unverified hypothesis finding)
+    id_agent = "20261026_102000"
+    scans["agent_done"] = id_agent
+    d_agent = output_dir / id_agent
+    d_agent.mkdir(parents=True, exist_ok=True)
+    (d_agent / "report.html").write_text("<!DOCTYPE html><html><body>Agent Scan Report</body></html>", encoding="utf-8")
+    (d_agent / "agent_summary.md").write_text("# Agent Autonomous Summary\n\nDiscovered 4 routes and 1 suspected SQL injection hypothesis.", encoding="utf-8")
+    (d_agent / "scan_config.json").write_text(json.dumps({"config": {"url": "http://agent.internal.local", "mode": "agent"}}), encoding="utf-8")
+    (d_agent / "evidence.json").write_text(
+        json.dumps({
+            "target": "http://agent.internal.local",
+            "scan_date": "2026-10-26T10:20:00",
+            "status": "done",
+            "mode": "agent",
+            "harness_status": "ok",
+            "coverage_gaps": ["untested_admin_section"],
+            "coverage": {"pages_crawled": 4, "forms_tested": 2},
+            "visited_urls": [
+                "http://agent.internal.local",
+                "http://agent.internal.local/login",
+                "http://agent.internal.local/dashboard",
+            ],
+            "findings": [
+                {
+                    "id": "f_agent_hyp_01",
+                    "check_type": "sqli",
+                    "severity": "high",
+                    "url": "http://agent.internal.local/login",
+                    "field_name": "username",
+                    "evidence": "LLM hypothesis from login anomaly analysis (unconfirmed)",
+                    "verified": False,
+                    "verification_state": "assumed",
+                    "source": "agent",
+                    "agent_verified": False,
+                },
+                {
+                    "id": "f_agent_ver_01",
+                    "check_type": "xss",
+                    "severity": "critical",
+                    "url": "http://agent.internal.local/feedback",
+                    "field_name": "comment",
+                    "evidence": "Agent detected reflected parameter, confirmed by deterministic verifier",
+                    "verified": True,
+                    "verification_state": "reproduced",
+                    "source": "agent",
+                    "agent_verified": True,
+                },
+            ],
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+    # 4. Hybrid Scan (Partial / Aborted with truncation and mixed findings)
+    id_hybrid = "20261026_103000"
+    scans["hybrid_partial"] = id_hybrid
+    d_hybrid = output_dir / id_hybrid
+    d_hybrid.mkdir(parents=True, exist_ok=True)
+    (d_hybrid / "report.html").write_text("<!DOCTYPE html><html><body>Hybrid Partial Report</body></html>", encoding="utf-8")
+    (d_hybrid / "scan_config.json").write_text(json.dumps({"config": {"url": "http://hybrid.internal.local", "mode": "hybrid"}}), encoding="utf-8")
+    (d_hybrid / "checkpoint.json").write_text(
+        json.dumps({
+            "target_url": "http://hybrid.internal.local",
+            "reached_urls": ["http://hybrid.internal.local", "http://hybrid.internal.local/catalog"],
+            "truncation_counts": {"urls": 2},
+            "exhausted_truncations": ["max_depth_reached"],
+        }, indent=2),
+        encoding="utf-8",
+    )
+    (d_hybrid / "evidence.json").write_text(
+        json.dumps({
+            "target": "http://hybrid.internal.local",
+            "scan_date": "2026-10-26T10:30:00",
+            "status": "aborted",
+            "aborted": True,
+            "mode": "hybrid",
+            "coverage": {"pages_crawled": 3, "forms_tested": 1},
+            "visited_urls": [
+                "http://hybrid.internal.local",
+                "http://hybrid.internal.local/catalog",
+            ],
+            "findings": [
+                {
+                    "id": "f_hybrid_xss_01",
+                    "check_type": "xss",
+                    "severity": "high",
+                    "url": "http://hybrid.internal.local/catalog?item=1",
+                    "field_name": "item",
+                    "evidence": "Deterministic verifier confirmed reflected XSS",
+                    "verified": True,
+                    "verification_state": "reproduced",
+                    "source": "scanner",
+                },
+                {
+                    "id": "f_hybrid_agent_unrep",
+                    "check_type": "os",
+                    "severity": "critical",
+                    "url": "http://hybrid.internal.local/tools/ping",
+                    "field_name": "host",
+                    "evidence": "Agent hypothesized command injection, verification attempt failed",
+                    "verified": False,
+                    "verification_state": "unreproduced",
+                    "source": "agent",
+                    "agent_verified": False,
+                },
+            ],
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+    # 5. Scan in Error State (Unreachable target / corrupt evidence)
+    id_error = "20261026_104000"
+    scans["error_scan"] = id_error
+    d_error = output_dir / id_error
+    d_error.mkdir(parents=True, exist_ok=True)
+    (d_error / "scan_config.json").write_text(json.dumps({"config": {"url": "http://error.internal.local"}}), encoding="utf-8")
+    (d_error / "evidence.json").write_text(
+        json.dumps({
+            "target": "http://error.internal.local",
+            "scan_date": "2026-10-26T10:40:00",
+            "status": "error",
+            "error": "Connection refused: target host offline",
+            "findings": None,
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+    # 6. Scan with Untested / Not-Checked / Unavailable Items
+    id_unverified = "20261026_105000"
+    scans["unverified_items"] = id_unverified
+    d_unver = output_dir / id_unverified
+    d_unver.mkdir(parents=True, exist_ok=True)
+    (d_unver / "report.html").write_text("<!DOCTYPE html><html><body>Unverified Items Report</body></html>", encoding="utf-8")
+    (d_unver / "scan_config.json").write_text(json.dumps({"config": {"url": "http://unverified.internal.local"}}), encoding="utf-8")
+    (d_unver / "evidence.json").write_text(
+        json.dumps({
+            "target": "http://unverified.internal.local",
+            "scan_date": "2026-10-26T10:50:00",
+            "status": "done",
+            "coverage": {"pages_crawled": 5, "forms_tested": 2},
+            "visited_urls": ["http://unverified.internal.local/check"],
+            "nodes": [
+                {
+                    "id": "node_unavail_01",
+                    "kind": "page",
+                    "url": "http://unverified.internal.local/unavail",
+                    "label": "http://unverified.internal.local/unavail",
+                    "findings_available": False,
+                }
+            ],
+            "findings": [
+                {
+                    "id": "f_untested_01",
+                    "check_type": "info_disclosure",
+                    "severity": "low",
+                    "url": "http://unverified.internal.local/info",
+                    "field_name": "",
+                    "evidence": "Static check candidate, dynamic test not executed",
+                    "verified": None,
+                    "verification_state": "untested",
+                    "source": "scanner",
+                },
+                {
+                    "id": "f_not_checked_01",
+                    "check_type": "security_headers",
+                    "severity": "info",
+                    "url": "http://unverified.internal.local/headers",
+                    "field_name": "",
+                    "evidence": "Header validation skipped due to scanner timeout",
+                    "verified": None,
+                    "verification_state": "not_checked",
+                    "source": "scanner",
+                },
+                {
+                    "id": "f_unavailable_01",
+                    "check_type": "jwt",
+                    "severity": "medium",
+                    "url": "http://unverified.internal.local/token",
+                    "field_name": "auth",
+                    "evidence": "JWT inspection endpoint unreachable",
+                    "verified": None,
+                    "verification_state": "unavailable",
+                    "source": "scanner",
+                },
+                {
+                    "id": "f_skipped_01",
+                    "check_type": "csrf",
+                    "severity": "medium",
+                    "url": "http://unverified.internal.local/transfer",
+                    "field_name": "token",
+                    "evidence": "CSRF check skipped, manual confirmation required",
+                    "verified": None,
+                    "verification_state": "skipped",
+                    "source": "scanner",
+                },
+            ],
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+    seed_baseline_audit_log(output_dir)
+    seed_baseline_settings(output_dir)
+
+    return scans
 
 
 def seed_baseline_audit_log(output_dir: Path) -> Path:
@@ -731,6 +1039,8 @@ class UIHarness:
                 self._playwright = sync_playwright().start()
                 self._browser = self._playwright.chromium.launch(headless=True)
             except Exception as exc:
+                if os.environ.get("CI") and not os.environ.get("WSCAN_SKIP_BROWSER"):
+                    pytest.fail(f"Chromium browser is required in CI but failed to launch during UI harness setup: {exc}")
                 pytest.skip(f"Chromium launch failed during UI harness setup: {exc}")
 
             return self
@@ -897,6 +1207,12 @@ class UIHarness:
             }
         }""")
         page.wait_for_timeout(100)
+
+    def seed_representative_scans(self) -> dict[str, str]:
+        """Populate isolated output directory with representative scans."""
+        if not self.output_dir:
+            raise RuntimeError("Harness output directory is not initialized")
+        return seed_representative_scans(self.output_dir)
 
 
 @pytest.fixture
