@@ -1645,7 +1645,7 @@ class MonitorServer:
                 if isinstance(ev, dict):
                     data["status"] = ev.get("status") or ("aborted" if ev.get("aborted") else "done")
                     data["target_url"] = ev.get("target") or ""
-                    data["findings"] = ev.get("findings")
+                    data["findings"] = ev.get("findings") if ev.get("findings") is not None else []
                     if "findings_available" in ev:
                         data["findings_available"] = ev["findings_available"]
                     data["visited_urls"] = ev.get("visited_urls") or []

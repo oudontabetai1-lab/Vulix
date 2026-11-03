@@ -1036,6 +1036,8 @@ class UIHarness:
                 self._playwright = sync_playwright().start()
                 self._browser = self._playwright.chromium.launch(headless=True)
             except Exception as exc:
+                if os.environ.get("CI") and not os.environ.get("WSCAN_SKIP_BROWSER"):
+                    pytest.fail(f"Chromium browser is required in CI but failed to launch during UI harness setup: {exc}")
                 pytest.skip(f"Chromium launch failed during UI harness setup: {exc}")
 
             return self

@@ -336,6 +336,32 @@ class CrawlGraphApiTests(unittest.TestCase):
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.json(), {"error": "not found"})
 
+    def test_historical_scan_crawl_graph_findings_absent_backward_compatibility(self):
+        """Verify data['findings'] defaults to [] and findings_available is preserved when absent."""
+        import json
+
+        scan_dir = self.tmp / "scan_findings_absent"
+        scan_dir.mkdir(parents=True, exist_ok=True)
+
+        evidence = {
+            "target": "http://history.example.com",
+            "status": "done",
+            "findings_available": False,
+            "visited_urls": ["http://history.example.com/"],
+        }
+        (scan_dir / "evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
+
+        loaded = self.srv._load_crawl_graph_data_from_dir(scan_dir, "scan_findings_absent")
+        self.assertEqual(loaded["findings"], [])
+        self.assertIs(loaded["findings_available"], False)
+
+        res = self.client.get("/api/v1/scans/scan_findings_absent/crawl-graph", headers=self.auth_headers)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["scan_id"], "scan_findings_absent")
+        for node in data["nodes"]:
+            self.assertFalse(node.get("findings_available", True))
+
 
 if __name__ == "__main__":
     unittest.main()

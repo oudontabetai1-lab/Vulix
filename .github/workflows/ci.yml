@@ -46,6 +46,7 @@ jobs:
             echo "playwright install failed (attempt $i/3); retrying..." >&2
             sleep 5
           done
+          python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(headless=True); b.close(); p.stop()"
 
       # Unit and integration suite, including dashboard tests that launch Chromium.
       - name: Unit & integration tests

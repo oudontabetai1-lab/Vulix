@@ -184,7 +184,7 @@ def test_app_portal_and_history_screens(e2e_harness: UIHarness):
 
         search_input = page.locator('#summarySurface input[type="search"]')
         search_input.fill("agent")
-        page.wait_for_timeout(100)
+        page.wait_for_function("() => document.querySelectorAll('#summarySurface table tbody tr').length === 1")
 
         filtered_count = page.locator("#summarySurface table tbody tr").count()
         assert filtered_count == 1
@@ -192,7 +192,7 @@ def test_app_portal_and_history_screens(e2e_harness: UIHarness):
 
         # Clear search filter
         search_input.fill("")
-        page.wait_for_timeout(100)
+        page.wait_for_function("() => document.querySelectorAll('#summarySurface table tbody tr').length >= 6")
         assert page.locator("#summarySurface table tbody tr").count() >= 6
 
         # 4. Audit log screen
@@ -321,7 +321,9 @@ def test_app_setup_screen_tabs_readiness_and_dummy_secret_protection(e2e_harness
         # Navigate away to Monitor, Findings, Settings, Portal
         for dest in ["monitor", "findings", "settings", "portal"]:
             page.locator(f'[data-route="{dest}"]').click()
-            page.wait_for_timeout(80)
+            page.wait_for_function(
+                f"() => location.hash.includes('/{dest}') && document.querySelector('[data-route=\"{dest}\"]')?.getAttribute('aria-current') === 'page'"
+            )
 
             # Invariant: Secret must NOT appear in URL
             assert dummy_secret not in page.url
@@ -384,9 +386,15 @@ def test_app_monitor_screen_panes_and_live_channel(e2e_harness: UIHarness):
         # 3. Reload restores layout preferences from localStorage
         page.evaluate("() => document.querySelector('#monitorModule').shadowRoot.querySelector('[data-preset=\"log-focused\"]').click()")
         page.reload(wait_until="domcontentloaded")
-        page.wait_for_function(
-            "() => Boolean(document.querySelector('#monitorModule')?.shadowRoot?.querySelector('#sepLeft')) && document.getElementById('monitorFrame')?.dataset?.ready === 'true'"
-        )
+        page.wait_for_function("""() => {
+            const frame = document.querySelector('#monitorFrame')?.contentWindow;
+            return Boolean(document.querySelector('#monitorModule')?.shadowRoot?.querySelector('#sepLeft')) &&
+                   document.getElementById('monitorFrame')?.dataset?.ready === 'true' &&
+                   Boolean(frame?.VulixAppBridge) &&
+                   Boolean(frame?._eventStream?.connected) &&
+                   typeof frame.state?.serverInstanceId === 'string' &&
+                   frame.state.serverInstanceId.length > 0;
+        }""")
         is_right_collapsed_restored = page.evaluate(
             "() => document.querySelector('#monitorModule').shadowRoot.querySelectorAll('.panel')[2].classList.contains('is-collapsed')"
         )
@@ -428,7 +436,9 @@ def test_app_monitor_screen_panes_and_live_channel(e2e_harness: UIHarness):
         frame.locator("body").evaluate("""() => {
             addEventLog('status', 'channel reconnect verified');
         }""")
-        page.wait_for_timeout(100)
+        page.wait_for_function(
+            "() => document.querySelector('#monitorModule')?.shadowRoot?.querySelector('#eventLog')?.textContent?.includes('channel reconnect verified')"
+        )
         finding_cards_count_after = page.evaluate(
             "() => document.querySelector('#monitorModule').shadowRoot.querySelectorAll('#findingsPanel .finding-card').length"
         )
@@ -542,7 +552,8 @@ def test_app_crawl_screen_graph_and_completeness(e2e_harness: UIHarness):
         search_input = page.locator(".crawl-search-input")
         if search_input.is_visible():
             search_input.fill("catalog")
-            page.wait_for_timeout(100)
+            page.wait_for_function("() => document.querySelector('.crawl-search-input')?.value === 'catalog'")
+            page.locator(".crawl-message-banner").wait_for(state="visible")
 
         e2e_harness.assert_no_horizontal_overflow(page, max_allowed=1440 + 1)
         e2e_harness.assert_no_errors(page)
@@ -586,7 +597,10 @@ def test_app_findings_screen_filters_and_deep_links(e2e_harness: UIHarness):
         # Invariant: None of the unverified items must receive verify-reproduced
         for card_idx in range(4):
             page.locator("#findingsListContent .findings-list-card").nth(card_idx).click()
-            page.wait_for_timeout(50)
+            page.wait_for_function(
+                f"() => document.querySelectorAll('#findingsListContent .findings-list-card')[{card_idx}]?.classList?.contains('active') && "
+                f"Boolean(document.querySelector('#findingsDetailContent .verify-badge'))"
+            )
             detail_verify = page.locator("#findingsDetailContent .verify-badge")
             assert not detail_verify.evaluate("el => el.classList.contains('verify-reproduced')"), (
                 f"Finding at index {card_idx} incorrectly received verify-reproduced class"
