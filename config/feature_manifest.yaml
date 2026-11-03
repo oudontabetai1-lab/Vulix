@@ -227,6 +227,7 @@ import_sources:
   - wscan/payload_gen.py
   browser_use:
   - wscan/llm_agent_browser.py
+  - wscan/preflight.py
   cryptography:
   - wscan/transport_security.py
   cv2:
