@@ -198,6 +198,18 @@ class AgentEngine:
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / f"agent_{ts}"
         self._existing_run_dir = self.output_dir.is_dir()
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.monitor is not None:
+            try:
+                self.output_dir.resolve().relative_to(OUTPUT_BASE.resolve())
+                self.monitor.current_scan_id = self.output_dir.name
+                self.monitor.api_scan_id = self.output_dir.name
+            except (ValueError, OSError):
+                self.monitor.current_scan_id = ""
+                self.monitor.api_scan_id = ""
+            except Exception as exc:
+                self.monitor.current_scan_id = ""
+                self.monitor.api_scan_id = ""
+                console.print(f"[yellow]Warning: Could not bind monitor scan id: {exc}[/yellow]")
 
     # ------------------------------------------------------------------
     # Public entry point

@@ -118,6 +118,7 @@
     <span>Server Portal</span>
   </div>
   <div class="spacer"></div>
+  <a class="btn primary" href="/app" id="appDashboardLink">🚀 新ダッシュボード (/app)</a>
   <button class="btn" onclick="openAudit()">📋 監査ログ</button>
   <button class="btn" onclick="openSettings()">⚙ 通知設定</button>
   <a class="btn" href="/monitor">🖥 ライブモニター</a>
@@ -125,6 +126,16 @@
 </header>
 
 <main>
+  <!-- App dashboard banner -->
+  <div class="card" style="background:linear-gradient(135deg, rgba(79,209,197,0.12), rgba(58,166,224,0.08)); border-color:var(--accent); display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap">
+    <div>
+      <div style="display:flex; align-items:center; gap:8px">
+        <strong style="color:var(--accent); font-size:0.95rem">🚀 新しい統合ダッシュボードが利用可能です</strong>
+      </div>
+      <div style="font-size:0.82rem; color:var(--muted); margin-top:4px">Portal, Setup, Monitor, Crawl, Findings, History, Settings を一元管理できる統合ダッシュボードをご利用ください。</div>
+    </div>
+    <a class="btn primary" href="/app" id="bannerAppDashboardLink" style="font-weight:700">新ダッシュボードを開く (/app)</a>
+  </div>
   <!-- Current scan -->
   <div class="card">
     <p class="section-title">現在のスキャン</p>

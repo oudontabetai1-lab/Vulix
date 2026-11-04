@@ -17,6 +17,7 @@ import sys
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # Ensure the wscan package is importable
 sys.path.insert(0, str(Path(__file__).parent))
@@ -774,7 +775,7 @@ def _effective_mfa_type(args):
     return _CFG.get("mfa_type") or None
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="WScan - Web Security Scanner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1839,15 +1840,16 @@ Examples:
         help="標準出力ではなくファイルへ書き出す",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    argv_list = sys.argv[1:] if argv is None else argv
     args.ollama_model_explicit = any(
         a == "--ollama-model" or a.startswith("--ollama-model=")
-        for a in sys.argv[1:]
+        for a in argv_list
     )
     args.role_model_explicit = {
         role: any(
             a == f"--{role}-model" or a.startswith(f"--{role}-model=")
-            for a in sys.argv[1:]
+            for a in argv_list
         )
         for role in ("planner", "payload", "adaptive", "triage", "report")
     }
@@ -1914,6 +1916,35 @@ def _effective_open_report(args) -> bool:
     if getattr(args, "no_monitor", False):
         return False
     return True
+
+
+def get_dashboard_url(
+    port: int,
+    scan_id: str | None = None,
+    view: str | None = None,
+    monitor: Any = None,
+) -> str:
+    """Return the dashboard URL for the given port, optional scan_id / monitor, and view.
+
+    When scan_id is provided (or monitor has a non-empty live scan identity),
+    deep-links straight to the live Monitor view of that scan
+    (#/monitor?scan=<scan_id>).
+    When view is 'monitor' without a live scan ID (e.g. custom output directory
+    or identity unset), opens the live Monitor view without a scan ID
+    (#/monitor). Otherwise returns the root /app shell.
+    """
+    if not scan_id and monitor is not None:
+        scan_id = (
+            getattr(monitor, "current_scan_id", "")
+            or getattr(monitor, "api_scan_id", "")
+            or ""
+        )
+    clean_scan_id = (scan_id or "").strip()
+    if clean_scan_id:
+        return f"http://localhost:{port}/app#/monitor?scan={clean_scan_id}"
+    if view == "monitor":
+        return f"http://localhost:{port}/app#/monitor"
+    return f"http://localhost:{port}/app"
 
 
 def _effective_checks(args) -> list[str]:
@@ -2161,11 +2192,6 @@ async def run_agent(args):
 
     async def run_agent_task():
         await asyncio.sleep(1.5)
-        console.print(
-            f"\n[cyan]Monitoring dashboard:[/cyan] "
-            f"[underline]http://localhost:{args.port}[/underline]"
-        )
-        webbrowser.open(f"http://localhost:{args.port}")
 
         try:
             engine = AgentEngine(
@@ -2192,6 +2218,16 @@ async def run_agent(args):
                 resume=getattr(args, "resume", False),
                 proxy=getattr(args, "proxy", "") or "",
             )
+            dashboard_url = get_dashboard_url(
+                args.port,
+                monitor=getattr(engine, "monitor", None),
+                view="monitor",
+            )
+            console.print(
+                f"\n[cyan]Monitoring dashboard:[/cyan] "
+                f"[underline]{dashboard_url}[/underline]"
+            )
+            webbrowser.open(dashboard_url)
             result = await engine.run()
             # early-return 条件は _agent_exit_code の非0条件と一致させる。
             # incomplete-empty（success=False かつ 0 findings）でも sleep(3600) に入れず
@@ -2848,14 +2884,18 @@ async def run_scan(args):
         # Wait for uvicorn to be ready
         await asyncio.sleep(1.5)
 
-        console.print(
-            f"\n[cyan]Monitoring dashboard:[/cyan] "
-            f"[underline]http://localhost:{args.port}[/underline]"
-        )
-        webbrowser.open(f"http://localhost:{args.port}")
-
         try:
             engine = ScanEngine(**_engine_kwargs(monitor))
+            dashboard_url = get_dashboard_url(
+                args.port,
+                monitor=getattr(engine, "monitor", None),
+                view="monitor",
+            )
+            console.print(
+                f"\n[cyan]Monitoring dashboard:[/cyan] "
+                f"[underline]{dashboard_url}[/underline]"
+            )
+            webbrowser.open(dashboard_url)
             await engine.run()
 
             console.print(
@@ -2976,7 +3016,7 @@ async def run_serve(args):
             s.connect(("8.8.8.8", 80))
             lan_ip = s.getsockname()[0]
             s.close()
-            lan_hint = f"\n  Intranet : [underline]http://{lan_ip}:{port}[/underline]"
+            lan_hint = f"\n  Intranet : [underline]http://{lan_ip}:{port}/app[/underline]"
         except Exception:
             lan_hint = ""
 
@@ -2987,9 +3027,9 @@ async def run_serve(args):
     )
     console.print(Panel.fit(
         f"[bold cyan]WScan — Server Mode[/bold cyan]\n"
-        f"  Bind     : [underline]http://{host}:{port}[/underline]"
+        f"  Bind     : [underline]http://{host}:{port}/app[/underline]"
         f"{lan_hint}\n"
-        f"  Local    : [underline]http://localhost:{port}[/underline]\n"
+        f"  Local    : [underline]http://localhost:{port}/app[/underline]\n"
         f"{auth_line}\n"
         "  The dashboard stays up — run as many scans as you like.\n"
         "  Press Ctrl+C to stop.",
@@ -3533,7 +3573,7 @@ async def run_serve(args):
         await asyncio.sleep(1.2)
         if open_browser:
             try:
-                webbrowser.open(f"http://localhost:{port}")
+                webbrowser.open(f"http://localhost:{port}/app")
             except Exception:
                 pass
 
