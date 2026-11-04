@@ -307,6 +307,10 @@ def test_ui_assets_are_scoped_and_protected():
     assert response_evidence.status_code == 200
     assert any(m in response_evidence.headers["content-type"] for m in ["javascript", "text/javascript"])
 
+    response_check_help = client.get("/ui/check-help.js")
+    assert response_check_help.status_code == 200
+    assert any(m in response_check_help.headers["content-type"] for m in ["javascript", "text/javascript"])
+
     # missing and traversal
     assert client.get("/ui/missing.css").status_code == 404
     assert client.get("/ui/%2e%2e/dashboard.html").status_code in {403, 404}

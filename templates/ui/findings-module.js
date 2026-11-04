@@ -16,6 +16,7 @@
 (function (global) {
   'use strict';
 
+  const CHECK_HELP = global.VulixCheckHelp || (typeof require === 'function' && typeof process !== 'undefined' ? require(process.cwd() + '/templates/ui/check-help.js') : null);
   const SENSITIVE_KEY_REGEX = /(?:^key$|(?:api|access|auth)[_-]?key|password|passwd|pwd|secret|token|cookie|session[_-]?id|csrf|xsrf|credentials?|signature|samlresponse|(?:^|[._-])(?:sid|sessid|jwt|sig|jsessionid|phpsessid|bearer)(?:$|[._-])|(?:^|[._-])(?:auth|authentication|authorization|session|otp|ticket)$)/i;
 
   function escapeHtml(value) {
@@ -701,6 +702,8 @@
     let selectedFinding = null;
     let selectedFindingId = null;
     let activeUrlFilter = null;
+    let checkCatalog = {};
+    let checkCatalogLang = 'ja';
 
     function getFilters() {
       return {
@@ -899,6 +902,11 @@
           td.appendChild(code);
         } else {
           td.textContent = r.value;
+        }
+        if (r.label === 'Check Type' && CHECK_HELP) {
+          const help = CHECK_HELP.createButton(document, dom.detailContent, finding.check_type || '', checkCatalog, checkCatalogLang);
+          td.appendChild(document.createTextNode(' '));
+          td.appendChild(help);
         }
         tr.append(th, td);
         metaTbody.appendChild(tr);
@@ -1216,6 +1224,13 @@
     }
 
     async function initScansAndLoad(route) {
+      const lang = document.documentElement && document.documentElement.lang;
+      checkCatalogLang = lang && lang.toLowerCase().startsWith('en') ? 'en' : 'ja';
+      if (CHECK_HELP) {
+        const catalog = await CHECK_HELP.loadCatalog(api, checkCatalogLang);
+        checkCatalog = catalog.checks || {};
+        checkCatalogLang = catalog.lang || checkCatalogLang;
+      }
       dom.listStatus.hidden = false;
       dom.listStatus.className = 'ui-status loading';
       dom.listStatus.textContent = 'スキャン履歴を確認中…';
