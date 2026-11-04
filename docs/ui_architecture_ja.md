@@ -195,7 +195,7 @@ UI スクリプト（`templates/ui/*.js`）から実際に呼び出されるサ�
 | `GET` | `/api/v1/settings` | `settings-module.js` | Webhook 通知設定を取得（URL は伏字マスク化）。 |
 | `POST` | `/api/v1/settings` | `settings-module.js` | Webhook 通知設定を更新保存。 |
 | `POST` | `/api/v1/settings/test` | `settings-module.js` | 設定中の Webhook URL へテスト通知を送信。 |
-| `GET` | `/api/v1/scans/{id}/findings`<br>`/api/v1/scan/findings` | `findings-module.js`, `traffic-module.js` | 指定スキャンまたは現行スキャンの脆弱性一覧（`findings.json`）を返却。 |
+| `GET` | `/api/v1/scans/{id}/findings`<br>`/api/v1/scan/findings` | `findings-module.js`, `traffic-module.js` | 指定スキャン（`/api/v1/scans/{id}/findings`）は完了後に `output/<scan_id>/evidence.json` を読み取り、現行スキャン（`/api/v1/scan/findings`）はメモリ上の `self.api_findings` を返却。 |
 | `GET` | `/api/v1/scans/{id}/crawl-graph`<br>`/api/v1/scan/crawl-graph` | `crawl-module.js` | 指定スキャンまたは現行スキャンの巡回ノード・エッジ・完了状態を返却。 |
 | `GET` | `/api/v1/scans/{id}/traffic?limit=500`<br>`/api/v1/scan/traffic?limit=500` | `traffic-module.js` | 記録された HTTP リクエスト/レスポンス履歴（`http_requests.jsonl`）を返却。 |
 
