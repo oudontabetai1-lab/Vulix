@@ -337,10 +337,18 @@ def test_logo_and_favicon_asset_delivery_and_auth_protection():
     assert fav_ico_res.status_code == 200
     assert any(mime in fav_ico_res.headers["content-type"] for mime in ["image/x-icon", "image/vnd.microsoft.icon"])
 
-    # Root /favicon.ico is public and works without auth
+    apple_res = client.get("/ui/apple-touch-icon.png")
+    assert apple_res.status_code == 200
+    assert "image/png" in apple_res.headers["content-type"]
+
+    # Root /favicon.ico and /apple-touch-icon.png are public and work without auth
     root_ico = client.get("/favicon.ico")
     assert root_ico.status_code == 200
     assert any(mime in root_ico.headers["content-type"] for mime in ["image/x-icon", "image/vnd.microsoft.icon"])
+
+    root_apple = client.get("/apple-touch-icon.png")
+    assert root_apple.status_code == 200
+    assert "image/png" in root_apple.headers["content-type"]
 
     # Missing asset returns 404
     assert client.get("/ui/missing-logo.png").status_code == 404
@@ -357,7 +365,9 @@ def test_logo_and_favicon_asset_delivery_and_auth_protection():
     assert protected.get("/ui/vulix-logo-mark.png", headers=img_headers).status_code == 200
     assert protected.get("/ui/favicon.png", headers=img_headers).status_code == 200
     assert protected.get("/ui/favicon.ico").status_code == 200
+    assert protected.get("/ui/apple-touch-icon.png", headers=img_headers).status_code == 200
     assert protected.get("/favicon.ico").status_code == 200
+    assert protected.get("/apple-touch-icon.png").status_code == 200
 
     # Non-public assets rejected without session -> 401
     assert protected.get("/ui/vulix-logo.png", headers=img_headers).status_code == 401
@@ -374,33 +384,56 @@ def test_logo_and_favicon_asset_delivery_and_auth_protection():
     assert protected.get("/ui/tokens.css").status_code == 200
     assert protected.get("/ui/vulix-logo-mark.png").status_code == 200
     assert protected.get("/ui/favicon.png").status_code == 200
+    assert protected.get("/ui/apple-touch-icon.png").status_code == 200
 
 
 def test_html_brand_wiring_and_vulix_wordmark():
     server = MonitorServer()
 
-    # 1. Dashboard
+    # 1. Dashboard (/monitor)
     dash_html = (ROOT / "templates" / "dashboard.html").read_text(encoding="utf-8")
     assert "<title>Vulix — Live Monitor</title>" in dash_html
     assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in dash_html
+    assert '<link rel="apple-touch-icon" href="/ui/apple-touch-icon.png">' in dash_html
     assert '<img src="/ui/vulix-logo-mark.png" alt="Vulix"' in dash_html
+    assert 'class="hdr-brand"' in dash_html
     assert 'Vulix <span>Scan Setup</span>' in dash_html
     # Ensure tool name remains untouched
     assert "tool: 'WScan'" in dash_html
 
-    # 2. Portal
+    # 2. Portal (/)
     portal_html = (ROOT / "templates" / "portal.html").read_text(encoding="utf-8")
     assert "<title>Vulix — Server Portal</title>" in portal_html
     assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in portal_html
+    assert '<link rel="apple-touch-icon" href="/ui/apple-touch-icon.png">' in portal_html
     assert '<img src="/ui/vulix-logo-mark.png" alt="Vulix"' in portal_html
     assert '<h1>Vulix</h1>' in portal_html
 
-    # 3. Login page
+    # 3. Login page (/login)
     login_html = server._login_html()
     assert "<title>Vulix — ログイン</title>" in login_html
     assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in login_html
+    assert '<link rel="apple-touch-icon" href="/ui/apple-touch-icon.png">' in login_html
     assert '<img src="/ui/vulix-logo-mark.png" alt="Vulix"' in login_html
     assert '<h1>Vulix</h1>' in login_html
+
+    # 4. App Shell (/app)
+    app_html = (ROOT / "templates" / "app.html").read_text(encoding="utf-8")
+    assert "<title>Vulix</title>" in app_html
+    assert '<link rel="icon" type="image/png" href="/ui/favicon.png">' in app_html
+    assert '<link rel="apple-touch-icon" href="/ui/apple-touch-icon.png">' in app_html
+    assert '<header role="banner"><img src="/ui/vulix-logo-mark.png" alt="Vulix"' in app_html
+    assert '<div class="brand"><img src="/ui/vulix-logo-mark.png" alt="Vulix">Vulix</div>' in app_html
+
+    # Invariant: Every dashboard page must use accessible alt text and avoid empty alt attributes on the logo
+    for name, html_content in [
+        ("dashboard", dash_html),
+        ("portal", portal_html),
+        ("login", login_html),
+        ("app", app_html),
+    ]:
+        assert '<img src="/ui/vulix-logo-mark.png" alt="Vulix"' in html_content, f"Missing accessible logo mark in {name}"
+        assert '<img src="/ui/vulix-logo-mark.png" alt=""' not in html_content, f"Empty alt found in {name}"
 
 
 def _png_dimensions(data: bytes) -> tuple[int, int]:
@@ -413,6 +446,23 @@ def _png_dimensions(data: bytes) -> tuple[int, int]:
     return width, height
 
 
+def _ico_dimensions(data: bytes) -> set[tuple[int, int]]:
+    """ICO ファイルヘッダとディレクトリエントリから解像度一覧をパースする（PIL 不要）。"""
+    assert len(data) >= 6, "ICO data too short"
+    import struct
+    reserved, ico_type, count = struct.unpack("<HHH", data[:6])
+    assert reserved == 0 and ico_type == 1, "Invalid ICO header"
+    sizes: set[tuple[int, int]] = set()
+    for i in range(count):
+        offset = 6 + i * 16
+        assert len(data) >= offset + 16, "ICO directory entry truncated"
+        width, height = struct.unpack("<BB", data[offset:offset + 2])
+        w = 256 if width == 0 else width
+        h = 256 if height == 0 else height
+        sizes.add((w, h))
+    return sizes
+
+
 def test_vulix_logo_sha256_byte_parity_and_favicon_dimensions():
     import hashlib
 
@@ -422,6 +472,7 @@ def test_vulix_logo_sha256_byte_parity_and_favicon_dimensions():
     expected_sha = "d6aa10fbd221d54ffb050cf08a96fb1512b8437b08e80944690b50674aa70219"
     actual_sha = hashlib.sha256(logo_path.read_bytes()).hexdigest()
     assert actual_sha == expected_sha, f"Logo SHA mismatch: {actual_sha} != {expected_sha}"
+    assert _png_dimensions(logo_path.read_bytes()) == (1254, 1254)
 
     fav_path = ROOT / "templates" / "ui" / "favicon.png"
     assert fav_path.is_file()
@@ -431,9 +482,14 @@ def test_vulix_logo_sha256_byte_parity_and_favicon_dimensions():
     assert mark_path.is_file()
     assert _png_dimensions(mark_path.read_bytes()) == (96, 96)
 
+    apple_path = ROOT / "templates" / "ui" / "apple-touch-icon.png"
+    assert apple_path.is_file()
+    assert _png_dimensions(apple_path.read_bytes()) == (180, 180)
+
     ico_path = ROOT / "templates" / "ui" / "favicon.ico"
     assert ico_path.is_file()
     assert ico_path.stat().st_size > 0
+    assert _ico_dimensions(ico_path.read_bytes()) == {(16, 16), (32, 32), (48, 48)}
 
 
 def test_semantic_state_tokens_presence_and_structure():

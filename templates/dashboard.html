@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Vulix — Live Monitor</title>
 <link rel="icon" type="image/png" href="/ui/favicon.png">
+<link rel="apple-touch-icon" href="/ui/apple-touch-icon.png">
 <link rel="stylesheet" href="/ui/tokens.css">
 <link rel="stylesheet" href="/ui/components.css">
 <style>
@@ -2260,7 +2261,10 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
 
 <!-- ─── Header ─────────────────────────────────────────────── -->
 <div class="header">
-  <div id="headerTitle" style="font-size:1rem;font-weight:600;color:var(--text);white-space:nowrap">ライブモニター</div>
+  <div class="hdr-brand" style="display:flex;align-items:center;gap:8px">
+    <img src="/ui/vulix-logo-mark.png" alt="Vulix" style="width:20px;height:20px;border-radius:4px;object-fit:contain;flex-shrink:0">
+    <div id="headerTitle" style="font-size:1rem;font-weight:600;color:var(--text);white-space:nowrap">ライブモニター</div>
+  </div>
   <div class="hdr-view-toggle">
     <button type="button" class="hdr-view-btn active" id="hdrBtnLive" onclick="switchMainView('live')">ライブ</button>
     <button type="button" class="hdr-view-btn" id="hdrBtnHistory" onclick="switchMainView('history')">履歴</button>

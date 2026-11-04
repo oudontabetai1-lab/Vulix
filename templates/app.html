@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Vulix</title>
-  <link rel="icon" href="/ui/favicon.png">
+  <link rel="icon" type="image/png" href="/ui/favicon.png">
+  <link rel="apple-touch-icon" href="/ui/apple-touch-icon.png">
   <link rel="stylesheet" href="/ui/tokens.css">
   <link rel="stylesheet" href="/ui/components.css">
   <style>
@@ -289,7 +290,7 @@
 <body>
   <div class="app">
     <aside aria-label="サイドバー">
-      <div class="brand"><img src="/ui/vulix-logo-mark.png" alt="">Vulix</div>
+      <div class="brand"><img src="/ui/vulix-logo-mark.png" alt="Vulix">Vulix</div>
       <nav aria-label="Application">
         <button class="history-btn" type="button" data-route="portal">ポータル</button>
         <button class="history-btn" type="button" data-route="history">スキャン履歴</button>
@@ -303,7 +304,7 @@
       </nav>
     </aside>
     <main>
-      <header role="banner"><strong id="viewTitle">ポータル</strong><span id="scanContext" aria-live="polite"></span></header>
+      <header role="banner"><img src="/ui/vulix-logo-mark.png" alt="Vulix" style="width:24px;height:24px;object-fit:contain;border-radius:4px;flex-shrink:0"><strong id="viewTitle">ポータル</strong><span id="scanContext" aria-live="polite"></span></header>
       <section id="surface" aria-live="polite">
         <iframe id="portalFrame" title="Vulix Portal" hidden></iframe>
         <iframe id="monitorFrame" title="Vulix Monitor" hidden></iframe>
