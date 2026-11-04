@@ -9,3 +9,5 @@ rich>=13.0.0
 aiofiles>=23.0.0
 python-multipart>=0.0.6
 anthropic>=0.20.0,<2.0.0
+# Certificate parsing in the transport_security scanner
+cryptography

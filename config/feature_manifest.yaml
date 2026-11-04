@@ -3,6 +3,9 @@ schema_version: 1
 scope:
   python_sources:
   - wscan/**/*.py
+  - main.py
+  - launcher.py
+  - vulix/**/*.py
   requirements_files:
   - requirements.txt
   - requirements-agent.txt
@@ -31,6 +34,7 @@ scope:
 stdlib_imports:
 - __future__
 - abc
+- argparse
 - asyncio
 - base64
 - collections
@@ -111,10 +115,10 @@ packages:
     imports:
     - cryptography
     requirements: &id001
+    - requirements.txt
     - requirements-tls.txt
     status: declared
-    note: Optional feature dependency is explicitly declared; see resolved_gaps for the original inventory
-      finding.
+    note: Base dependency for certificate parsing in transport_security; also declared in requirements-tls.txt.
   fastapi:
     imports:
     - fastapi
@@ -236,6 +240,7 @@ import_sources:
   fastapi:
   - wscan/monitor.py
   httpx:
+  - main.py
   - wscan/adaptive_payload.py
   - wscan/attack_planner.py
   - wscan/auto_config.py
@@ -287,6 +292,8 @@ import_sources:
   - wscan/preflight.py
   - wscan/triage.py
   rich:
+  - launcher.py
+  - main.py
   - wscan/adaptive_payload.py
   - wscan/agent_engine.py
   - wscan/attack_planner.py
@@ -305,10 +312,12 @@ import_sources:
   starlette:
   - wscan/monitor.py
   uvicorn:
+  - main.py
   - wscan/benchmark_fixtures.py
   websockets:
   - wscan/browser.py
   yaml:
+  - main.py
   - wscan/api_spec_importer.py
   - wscan/batch_runner.py
   - wscan/benchmark_model.py
@@ -387,6 +396,7 @@ features:
     - aiofiles
     - python-multipart
     - anthropic
+    - cryptography
     required_runtimes:
     - python
     install_commands:
