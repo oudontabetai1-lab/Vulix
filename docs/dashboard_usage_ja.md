@@ -116,7 +116,7 @@ Target URL を入力し、目的に近いプロファイルを選びます。統
 
 ![検査設定の入力例](images/dashboard-configured.png)
 
-「検査項目」タブでは、バックエンドの機能マニフェスト（`/api/capability-manifest`）から動的に取得された全 check をカテゴリ別に選択できます。既定で有効なのは SQLi・OS インジェクション・XSS です。
+「検査項目」タブでは、バックエンドの機能マニフェスト（`/api/capability-manifest`）から動的に取得された全 check をカテゴリ別に選択できます。各項目の「i」ボタンで検査内容、リスク、確認方法、対処の概要、制約を確認できます。既定で有効なのは SQLi・OS インジェクション・XSS です。
 
 ![検査項目タブの設定画面](images/dashboard-checks-capability.png)
 

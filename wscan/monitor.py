@@ -994,6 +994,22 @@ class MonitorServer:
                                      "schema_version": SCHEMA_VERSION}, status_code=409)
             return JSONResponse(build_settings_schema())
 
+        @app.get("/api/v1/check-catalog")
+        async def api_check_catalog(lang: str = "ja"):
+            """検査項目の説明カタログを読み取り専用で返す。"""
+            from wscan.check_catalog import catalog_version, get_check_references, list_checks
+            language = "en" if lang.lower().split("-")[0].split("_")[0] == "en" else "ja"
+            try:
+                checks = {}
+                for check_id, description in list_checks(language):
+                    checks[check_id] = {
+                        **description.__dict__,
+                        "references": [ref.__dict__ for ref in get_check_references(check_id)],
+                    }
+                return JSONResponse({"catalog_version": catalog_version(), "lang": language, "checks": checks})
+            except Exception:
+                return JSONResponse({"catalog_version": None, "lang": language, "checks": {}})
+
         @app.get("/api/v1/settings/effective")
         async def api_settings_effective(
             mode: str = "normal", profile: Optional[str] = None,

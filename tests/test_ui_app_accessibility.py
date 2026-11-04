@@ -129,6 +129,10 @@ def test_app_landmarks_and_roles(a11y_harness: UIHarness):
             panel = page.locator(f"#{controls_id}")
             assert panel.get_attribute("role") == "tabpanel"
             assert panel.get_attribute("aria-labelledby") == tab.get_attribute("id")
+        info_buttons = page.locator(".setup-check-info")
+        assert info_buttons.count() > 0
+        for button in info_buttons.all():
+            assert (button.get_attribute("aria-label") or "").strip()
     finally:
         page.close()
 
@@ -255,5 +259,37 @@ def test_no_keyboard_traps_on_navigation(a11y_harness: UIHarness):
         # Check that focus moved through multiple distinct elements (not trapped in one element)
         unique_visited = set(visited_tags)
         assert len(unique_visited) >= 5, f"Focus trapped or did not advance: {visited_tags}"
+    finally:
+        page.close()
+
+
+def test_setup_check_help_button_is_independent_and_keyboard_dismissible(a11y_harness: UIHarness):
+    require_browser()
+    page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+    try:
+        page.goto(f"{a11y_harness.server_url}/app#/setup")
+        page.wait_for_selector("#setupChecks .setup-check-info", state="attached")
+        page.locator(".setup-tab").filter(has_text="検査項目").click()
+        info = page.locator('#setupChecks [data-check-id="sqli"] .setup-check-info')
+        checkbox = page.locator('#setupChecks input[data-check="sqli"]')
+        before = checkbox.is_checked()
+        info.click()
+        assert checkbox.is_checked() == before
+        dialog = page.get_by_role("dialog")
+        assert dialog.is_visible()
+        assert dialog.get_attribute("aria-labelledby")
+        assert dialog.locator(":focus").count() == 1
+        assert dialog.locator("h3").inner_text()
+        page.keyboard.press("Escape")
+        assert page.locator(".setup-check-popover").count() == 0
+        assert info.evaluate("el => el === document.activeElement")
+
+        checkbox.evaluate("el => { el.disabled = true; }")
+        info.click()
+        assert page.get_by_role("dialog").is_visible()
+        assert page.get_by_role("dialog").locator("p").count() >= 1
+        rect = page.get_by_role("dialog").evaluate("el => el.getBoundingClientRect().toJSON()")
+        assert rect["left"] >= 0 and rect["right"] <= 768
+        assert rect["top"] >= 0 and rect["bottom"] <= page.evaluate("() => window.innerHeight")
     finally:
         page.close()

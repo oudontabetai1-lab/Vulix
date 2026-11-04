@@ -801,3 +801,13 @@
 .findings-detail-th { width: 25%; }
 .findings-chip-clear { background: transparent; border: none; cursor: pointer; color: var(--text-muted); margin-left: 6px; }
 .setup-search-hidden { display: none !important; }
+.setup-check-item { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.setup-check-item > label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; cursor: pointer; }
+.setup-check-info, .setup-check-popover-close { border: 1px solid var(--border); border-radius: 50%; background: var(--surface); color: var(--accent); cursor: pointer; }
+.setup-check-info { width: 20px; height: 20px; padding: 0; flex: 0 0 20px; font-size: 0.72rem; font-weight: 700; }
+.setup-check-info:focus-visible, .setup-check-popover-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.setup-check-popover { position: fixed; z-index: 1000; width: min(360px, calc(100vw - 16px)); max-height: min(70vh, 520px); overflow: auto; box-sizing: border-box; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); }
+.setup-check-popover h3 { margin: 0 0 10px; color: var(--text); font-size: 0.95rem; }
+.setup-check-popover h4 { margin: 10px 0 3px; color: var(--text-muted); font-size: 0.76rem; }
+.setup-check-popover p { margin: 0; font-size: 0.78rem; line-height: 1.45; overflow-wrap: anywhere; }
+.setup-check-popover-close { margin-top: 12px; padding: 5px 10px; border-radius: 5px; }

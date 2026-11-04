@@ -111,3 +111,8 @@ def list_checks(lang: str = "ja") -> tuple[tuple[str, LocalizedDescription], ...
 def get_check_description(check_id: str, lang: str = "ja") -> LocalizedDescription | None:
     _load()
     return next((entry.localized(lang) for entry in _entries if entry.check_id == check_id), None)
+
+
+def get_check_references(check_id: str) -> tuple[CatalogReference, ...]:
+    _load()
+    return next((entry.references for entry in _entries if entry.check_id == check_id), ())
