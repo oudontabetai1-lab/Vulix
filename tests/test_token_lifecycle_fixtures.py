@@ -280,6 +280,41 @@ class TokenLifecycleFixturesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pair["response"]["status"], 200)
         self.assertIn("Sent: probe_payload", source)
 
+    async def test_refresh_redirect_does_not_leave_scope_and_falls_back_unchanged(self):
+        from fastapi import FastAPI, Form, Request
+        from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+
+        app = FastAPI()
+        requests = []
+
+        @app.get("/form")
+        async def form():
+            return RedirectResponse("http://out-of-scope.test/landing", status_code=302)
+
+        @app.get("/{path:path}")
+        async def observe(path: str, request: Request):
+            requests.append((request.url.hostname, request.method, await request.body()))
+            return HTMLResponse('<form><input name="csrf_token" value="unexpected"></form>')
+
+        @app.post("/form")
+        async def submit(email: str = Form(""), csrf_token: str = Form("")):
+            requests.append(("request-test", "POST", f"email={email}&csrf_token={csrf_token}".encode()))
+            return PlainTextResponse(f"Sent: {email}")
+
+        engine = _TestEngine(app, base_url="http://request-test")
+        scanner = _TestFormScanner(engine)
+        ip = InjectionPoint.for_form(
+            "http://request-test/form", "email", form_tokens=("csrf_token",),
+            form_fields=(("email", "original"), ("csrf_token", "stale_raw_token_value_xyz")),
+        )
+        source, pair = await scanner._apply_ip(ip, "probe_payload")
+
+        self.assertNotIn("out-of-scope.test", [host for host, _, _ in requests])
+        self.assertIn(("request-test", "POST", b"email=probe_payload&csrf_token=stale_raw_token_value_xyz"), requests)
+        self.assertIn("token_lifecycle:refresh_unavailable:mail_header", engine.wave_errors)
+        self.assertIn("Sent: probe_payload", source)
+        self.assertEqual(pair["request"]["post_data"], "email=probe_payload&csrf_token=stale_raw_token_value_xyz")
+
     async def test_d2_refresh_unavailable_on_budget_exhaustion(self):
         """(d2) リクエスト予算（budget gate）超過時にも refresh_unavailable を記録しフォールバックすること。"""
         ip = InjectionPoint.for_form(

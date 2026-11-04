@@ -1171,8 +1171,8 @@ class BaseScanner(ABC):
         sending_probe = False
         try:
             async with httpx.AsyncClient(**client_kwargs) as client:
-                get_resp = await client.get(target_url)
-                if get_resp.status_code >= 400:
+                get_resp = await client.get(target_url, follow_redirects=False)
+                if get_resp.is_redirect or get_resp.status_code >= 400:
                     self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
                     return None
 
@@ -1224,10 +1224,10 @@ class BaseScanner(ABC):
                     if retry_dec.should_retry:
                         try:
                             # 1度だけ再取得し、既知のトークン名の値だけ採用する。
-                            get_resp2 = await client.get(target_url)
+                            get_resp2 = await client.get(target_url, follow_redirects=False)
                         except Exception:
                             get_resp2 = None
-                        if get_resp2 is None or get_resp2.status_code >= 400:
+                        if get_resp2 is None or get_resp2.is_redirect or get_resp2.status_code >= 400:
                             self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
                         else:
                             try:
