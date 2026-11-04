@@ -585,6 +585,7 @@ class EmailSink:
 
     def _fetch_recent_pop3(self, limit: int) -> list:
         cfg = self.config
+        _validate_connection_fields(cfg)
         if cfg.use_ssl:
             conn = poplib.POP3_SSL(cfg.host, cfg.effective_port)
         else:
