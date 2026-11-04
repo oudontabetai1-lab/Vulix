@@ -126,6 +126,118 @@ def test_traffic_module_pure_redaction_and_links():
     assert "entry=req_05" in res["hash"]
     assert "method=post" in res["hash"]
     assert "status=2xx" in res["hash"]
+    # Free-text search must never leak into the URL hash
+    assert "search=" not in res["hash"]
+    assert "login" not in res["hash"]
+
+
+def test_traffic_module_pure_findings_count_honest_status():
+    """Verify that unloaded, unavailable, or failed findings render as unknown (never 0 by default).
+    Only show a real 0 when the Findings response actually loaded and returned zero.
+    """
+    script = f"""
+    const trafficMod = require('{TRAFFIC_MODULE_JS}');
+
+    // 1. Unloaded (null)
+    const cNull = trafficMod.formatFindingsCount(null, 'https://example.com/page');
+
+    // 2. Unavailable / failed (non-object or undefined)
+    const cUndefined = trafficMod.formatFindingsCount(undefined, 'https://example.com/page');
+    const cFailedString = trafficMod.formatFindingsCount('error', 'https://example.com/page');
+
+    // 3. Loaded zero (empty map, findings loaded with 0 items)
+    const cZero = trafficMod.formatFindingsCount({{}}, 'https://example.com/page');
+
+    // 4. Loaded with matching findings
+    const cPositive = trafficMod.formatFindingsCount({{ 'https://example.com/page': 3 }}, 'https://example.com/page');
+
+    // 5. Loaded with findings for other URLs but 0 for this URL
+    const cOther = trafficMod.formatFindingsCount({{ 'https://example.com/other': 2 }}, 'https://example.com/page');
+
+    console.log(JSON.stringify({{
+      cNull,
+      cUndefined,
+      cFailedString,
+      cZero,
+      cPositive,
+      cOther,
+    }}));
+    """
+    res = _run_node(script)
+
+    # Unloaded: unknown, not 0
+    assert res["cNull"]["isUnknown"] is True
+    assert res["cNull"]["loaded"] is False
+    assert res["cNull"]["count"] is None
+    assert "unknown" in res["cNull"]["text"].lower() or "未読込" in res["cNull"]["text"]
+    assert "0" not in res["cNull"]["text"]
+
+    # Unavailable / failed: unknown, not 0
+    assert res["cUndefined"]["isUnknown"] is True
+    assert res["cUndefined"]["loaded"] is False
+    assert res["cUndefined"]["count"] is None
+    assert "unknown" in res["cUndefined"]["text"].lower() or "未読込" in res["cUndefined"]["text"]
+    assert "0" not in res["cUndefined"]["text"]
+
+    assert res["cFailedString"]["isUnknown"] is True
+    assert res["cFailedString"]["loaded"] is False
+    assert res["cFailedString"]["count"] is None
+
+    # Loaded zero: real 0
+    assert res["cZero"]["isUnknown"] is False
+    assert res["cZero"]["loaded"] is True
+    assert res["cZero"]["count"] == 0
+    assert "0 件" in res["cZero"]["text"]
+
+    # Positive count
+    assert res["cPositive"]["isUnknown"] is False
+    assert res["cPositive"]["loaded"] is True
+    assert res["cPositive"]["count"] == 3
+    assert "3 件" in res["cPositive"]["text"]
+
+    # Zero for this URL when findings loaded
+    assert res["cOther"]["isUnknown"] is False
+    assert res["cOther"]["loaded"] is True
+    assert res["cOther"]["count"] == 0
+    assert "0 件" in res["cOther"]["text"]
+
+
+def test_traffic_hash_excludes_free_text_secrets():
+    """Assert buildTrafficHash never contains free-text search or url filter values.
+    Only non-free-text facets (scan, entry, method, status, source, type) are persisted.
+    """
+    dummy_secret = "SENTINEL_DUMMY_SEARCH_SECRET_XYZ123"
+    dummy_url_secret = "https://admin:SECRET_PASS@example.com/secret/path"
+    script = f"""
+    const trafficMod = require('{TRAFFIC_MODULE_JS}');
+
+    const hash = trafficMod.buildTrafficHash('scan_test', 'entry_test', {{
+      method: 'post',
+      status: '2xx',
+      source: 'scanner',
+      type: 'json',
+      search: '{dummy_secret}',
+      url: '{dummy_url_secret}',
+    }});
+
+    console.log(JSON.stringify({{ hash }}));
+    """
+    res = _run_node(script)
+    hash_str = res["hash"]
+
+    # Allowed facets are present
+    assert "scan=scan_test" in hash_str
+    assert "entry=entry_test" in hash_str
+    assert "method=post" in hash_str
+    assert "status=2xx" in hash_str
+    assert "source=scanner" in hash_str
+    assert "type=json" in hash_str
+
+    # Free-text search and url values must NOT be in the hash
+    assert dummy_secret not in hash_str
+    assert "SECRET_PASS" not in hash_str
+    assert "search=" not in hash_str
+    assert "url=" not in hash_str
 
 
 def test_traffic_module_pure_filtering():
@@ -211,6 +323,23 @@ def test_browser_traffic_view_mount_list_and_gating(ui_harness: UIHarness):
     (d_missing / "scan_config.json").write_text(json.dumps({"config": {"url": "http://example2.local"}}), encoding="utf-8")
     (d_missing / "evidence.json").write_text(json.dumps({"status": "done", "target": "http://example2.local", "findings": []}), encoding="utf-8")
 
+    # Third scan: has traffic log, but findings endpoint fails/is unavailable (evidence.json missing)
+    scan_findings_unavail = "scan_traffic_findings_fail"
+    d_unavail = ui_harness.output_dir / scan_findings_unavail
+    d_unavail.mkdir(parents=True, exist_ok=True)
+    (d_unavail / "report.html").write_text("<html><body>Scan unavail findings</body></html>", encoding="utf-8")
+    (d_unavail / "scan_config.json").write_text(json.dumps({"config": {"url": "http://example3.local"}}), encoding="utf-8")
+    (d_unavail / "http_requests.jsonl").write_text(
+        json.dumps({
+            "id": "req_301",
+            "method": "GET",
+            "url": "http://example3.local/unavail",
+            "status": 200,
+            "ts": 1700000030.0,
+        }),
+        encoding="utf-8",
+    )
+
     page = ui_harness.new_page(**STANDARD_VIEWPORTS[1440])
 
     # Navigate to /app#/traffic?scan=scan_traffic_ok
@@ -263,6 +392,8 @@ def test_browser_traffic_view_mount_list_and_gating(ui_harness: UIHarness):
     findings_cross_link = page.locator('.traffic-cross-link:has-text("Findings")')
     assert findings_cross_link.is_visible()
     assert "findings" in findings_cross_link.get_attribute("href")
+    # For scan_traffic_ok, findings actually loaded with 0 findings -> renders "0 件"
+    assert "0 件" in findings_cross_link.inner_text()
 
     # Input-point kinds chips check
     query_chip = page.locator('.traffic-ip-chip:has-text("QUERY")')
@@ -279,6 +410,27 @@ def test_browser_traffic_view_mount_list_and_gating(ui_harness: UIHarness):
     storage_data = page.evaluate("() => JSON.stringify(window.localStorage)")
     assert SENTINEL_TRAFFIC_TOKEN not in storage_data
     assert SENTINEL_TRAFFIC_SECRET not in storage_data
+
+    # Dummy secret typed into search must NOT appear in URL, hash, or localStorage
+    dummy_search_secret = "SENTINEL_DUMMY_SEARCH_SECRET_99999"
+    page.locator(".traffic-search-input").fill(dummy_search_secret)
+    assert dummy_search_secret not in page.url
+    assert dummy_search_secret not in page.evaluate("() => location.hash")
+    storage_data_search = page.evaluate("() => JSON.stringify(window.localStorage)")
+    assert dummy_search_secret not in storage_data_search
+    # Clear the search filter so subsequent scan entries are not filtered out
+    page.locator(".traffic-search-input").fill("")
+
+    # Test unavailable/failed findings count on scan_findings_unavail:
+    page.locator(".traffic-scan-select").select_option(scan_findings_unavail)
+    page.locator(".traffic-row").first.wait_for(state="visible")
+    page.locator(".traffic-row").first.click()
+    findings_unavail_link = page.locator('.traffic-cross-link:has-text("Findings")')
+    assert findings_unavail_link.is_visible()
+    # Must render 'unknown' / 未読込, NEVER '0 件' or '(0)'
+    assert "unknown" in findings_unavail_link.inner_text().lower() or "未読込" in findings_unavail_link.inner_text()
+    assert "0 件" not in findings_unavail_link.inner_text()
+    assert "(0)" not in findings_unavail_link.inner_text()
 
     # Now switch to the scan without traffic audit log (test explicit unavailable state)
     page.locator(".traffic-scan-select").select_option(scan_no_traffic)

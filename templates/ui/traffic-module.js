@@ -12,7 +12,7 @@
  *   URL userinfo, and query secrets are masked before rendering in the DOM or export.
  * - Bounded windowed/chunked rendering prevents UI freeze on 10,000+ log lines.
  * - Cross-links to Findings display 'unknown' (never 0) until findings data is loaded.
- * - URL hash retains selection and filters so reload and back/forward navigation restore state.
+ * - URL hash retains non-secret facet selection (scan, entry, method, status, source, type); free-text filters are kept in memory only.
  */
 (function (global) {
   'use strict';
@@ -105,8 +105,6 @@
       if (filters.status && filters.status !== 'all') params.set('status', filters.status);
       if (filters.source && filters.source !== 'all') params.set('source', filters.source);
       if (filters.type && filters.type !== 'all') params.set('type', filters.type);
-      if (filters.search) params.set('search', filters.search);
-      if (filters.url) params.set('url', filters.url);
     }
     const q = params.toString();
     return q ? `#/traffic?${q}` : '#/traffic';
@@ -126,6 +124,27 @@
     if (url) params.set('url', url);
     const q = params.toString();
     return q ? `#/findings?${q}` : '#/findings';
+  }
+
+  /**
+   * Format findings count for cross-link display.
+   * An unloaded, unavailable, or failed Findings count returns isUnknown: true (never 0 by default).
+   * Only returns isUnknown: false when the findings response actually loaded.
+   */
+  function formatFindingsCount(findingsByUrl, url) {
+    if (findingsByUrl === null || typeof findingsByUrl !== 'object') {
+      return { loaded: false, count: null, isUnknown: true, text: 'unknown / 未読込' };
+    }
+    const normUrl = (url || '').trim().replace(/\/+$/, '').toLowerCase();
+    const count = Object.prototype.hasOwnProperty.call(findingsByUrl, normUrl)
+      ? findingsByUrl[normUrl]
+      : 0;
+    return {
+      loaded: true,
+      count: count,
+      isUnknown: false,
+      text: `${count} 件`,
+    };
   }
 
   /**
@@ -431,12 +450,11 @@
       findingsLink.className = 'history-btn traffic-cross-link';
       findingsLink.href = buildFindingsLink(currentScanId, entry.url);
 
-      if (findingsByUrl === null) {
+      const findingsCountInfo = formatFindingsCount(findingsByUrl, entry.url);
+      if (findingsCountInfo.isUnknown) {
         findingsLink.textContent = '🔍 Findings (unknown / 未読込) →';
       } else {
-        const normUrl = (entry.url || '').trim().replace(/\/+$/, '').toLowerCase();
-        const count = findingsByUrl[normUrl] || 0;
-        findingsLink.textContent = `🔍 Findings (${count} 件) →`;
+        findingsLink.textContent = `🔍 Findings (${findingsCountInfo.count} 件) →`;
       }
       crossLinksRow.appendChild(findingsLink);
 
@@ -812,10 +830,16 @@
     });
 
     async function loadFindingsForScan(scanId) {
-      if (!scanId || !api) return;
+      if (!scanId || !api) {
+        findingsByUrl = null;
+        if (selectedEntry) {
+          renderDetail(selectedEntry);
+        }
+        return;
+      }
       try {
         const res = await (scope ? scope.request(`/api/v1/scans/${scanId}/findings`) : api.request(`/api/v1/scans/${scanId}/findings`));
-        if (res && res.isSuccess() && res.data && Array.isArray(res.data.findings)) {
+        if (res && res.isSuccess() && res.data && res.data.findings_available !== false && Array.isArray(res.data.findings)) {
           const map = {};
           res.data.findings.forEach(function (f) {
             if (f && f.url) {
@@ -825,10 +849,10 @@
           });
           findingsByUrl = map;
         } else {
-          findingsByUrl = {};
+          findingsByUrl = null;
         }
       } catch (_) {
-        findingsByUrl = {};
+        findingsByUrl = null;
       }
       if (selectedEntry) {
         renderDetail(selectedEntry);
@@ -978,6 +1002,7 @@
     buildTrafficHash: buildTrafficHash,
     buildCrawlLink: buildCrawlLink,
     buildFindingsLink: buildFindingsLink,
+    formatFindingsCount: formatFindingsCount,
     resolveTrafficActions: resolveTrafficActions,
     filterTraffic: filterTraffic,
     computeTrafficCounts: computeTrafficCounts,
