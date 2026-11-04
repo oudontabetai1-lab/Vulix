@@ -146,6 +146,7 @@ def test_app_portal_and_history_screens(e2e_harness: UIHarness):
 
         # 1. Verify Portal renders scan history table with seeded representative scans
         page.wait_for_function("() => document.querySelectorAll('#summarySurface table tbody tr').length >= 6")
+        e2e_harness.save_doc_image(page, "app-portal")
         table_text = page.locator("#summarySurface table tbody").inner_text()
 
         assert "store.internal.local" in table_text
@@ -841,5 +842,102 @@ def test_app_shell_keyboard_focus_visibility_and_responsive_widths(e2e_harness: 
         )
 
         e2e_harness.assert_no_errors(page)
+    finally:
+        page.close()
+
+
+def test_legacy_dashboard_surfaces_doc_images(ui_harness: UIHarness):
+    """Capture legacy /monitor screenshots for documentation in deterministic fixture states."""
+    require_browser()
+    page = ui_harness.new_page(**STANDARD_VIEWPORTS[1440])
+    try:
+        page.goto(f"{ui_harness.server_url}/monitor", wait_until="domcontentloaded")
+        page.wait_for_selector("#scanConfigOverlay")
+
+        # 1. dashboard-configured: Basic config filled in overlay
+        page.locator("#cfgInputUrl").fill("https://example.com")
+        page.locator("#cfgTab-basic #cfgDepth").fill("2")
+        ui_harness.save_doc_image(page, "dashboard-configured")
+
+        # 2. dashboard-carrier-coverage: Checks tab showing Carrier Coverage Matrix
+        page.locator(".cfg-tab", has_text="検査項目").click()
+        page.locator("#carrierCoverageMatrix").wait_for()
+        page.locator("#carrierCoverageHeading").scroll_into_view_if_needed()
+        page.wait_for_timeout(100)
+        ui_harness.save_doc_image(page, "dashboard-carrier-coverage")
+
+        # 3. dashboard-hybrid: Hybrid tab
+        page.locator(".cfg-tab", has_text="ハイブリッド").click()
+        page.locator("#cfgTab-hybrid").wait_for()
+        page.locator("#cfgTab-hybrid").scroll_into_view_if_needed()
+        page.wait_for_timeout(100)
+        ui_harness.save_doc_image(page, "dashboard-hybrid")
+
+        # Close overlay and populate monitor for live / done / aborted states
+        page.evaluate("() => document.getElementById('scanConfigOverlay').classList.remove('active')")
+        ui_harness.populate_live_monitor(page)
+
+        # 4. dashboard-results: Monitor in completed state with findings
+        page.evaluate('''() => {
+            handleEvent({
+                type: "scan_snapshot",
+                sequence: 10,
+                data: {
+                    status: "done",
+                    findings: [
+                        {
+                            id: "f_live_xss_01",
+                            check_type: "xss",
+                            severity: "critical",
+                            url: "http://store.internal.local/search?q=test",
+                            confirmed: true,
+                            verified: true
+                        }
+                    ],
+                    findings_count: 1,
+                    total_findings_count: 1,
+                    confirmed_findings_count: 1,
+                    page_count: 4,
+                    check_counts: {xss: 1, sqli: 0},
+                    url_order: ["http://store.internal.local", "http://store.internal.local/products"],
+                    phase: "report"
+                }
+            });
+        }''')
+        page.wait_for_function("() => state.scanDone === true && state.status === 'done'")
+        page.wait_for_timeout(100)
+        ui_harness.save_doc_image(page, "dashboard-results")
+
+        # 5. dashboard-aborted: Monitor in operator-aborted terminal state
+        page.evaluate('''() => {
+            handleEvent({
+                type: "scan_snapshot",
+                sequence: 11,
+                data: {
+                    status: "aborted",
+                    aborted: true,
+                    findings: [
+                        {
+                            id: "f_live_xss_01",
+                            check_type: "xss",
+                            severity: "critical",
+                            url: "http://store.internal.local/search?q=test",
+                            confirmed: true,
+                            verified: true
+                        }
+                    ],
+                    findings_count: 1,
+                    total_findings_count: 1,
+                    confirmed_findings_count: 1,
+                    page_count: 4,
+                    check_counts: {xss: 1, sqli: 0},
+                    url_order: ["http://store.internal.local", "http://store.internal.local/products"],
+                    phase: "attack"
+                }
+            });
+        }''')
+        page.wait_for_function("() => state.scanDone === true && (state.status === 'aborted' || state.aborted)")
+        page.wait_for_timeout(100)
+        ui_harness.save_doc_image(page, "dashboard-aborted")
     finally:
         page.close()
