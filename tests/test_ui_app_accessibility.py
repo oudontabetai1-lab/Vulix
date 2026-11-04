@@ -273,13 +273,20 @@ def test_setup_check_help_button_is_independent_and_keyboard_dismissible(a11y_ha
         info = page.locator('#setupChecks [data-check-id="sqli"] .setup-check-info')
         checkbox = page.locator('#setupChecks input[data-check="sqli"]')
         before = checkbox.is_checked()
-        info.click()
+        info.focus()
+        page.keyboard.press("Enter")
         assert checkbox.is_checked() == before
         dialog = page.get_by_role("dialog")
         assert dialog.is_visible()
         assert dialog.get_attribute("aria-labelledby")
         assert dialog.locator(":focus").count() == 1
         assert dialog.locator("h3").inner_text()
+        page.keyboard.press("Escape")
+        assert page.locator(".setup-check-popover").count() == 0
+        assert info.evaluate("el => el === document.activeElement")
+        page.keyboard.press("Space")
+        assert page.get_by_role("dialog").is_visible()
+        assert checkbox.is_checked() == before
         page.keyboard.press("Escape")
         assert page.locator(".setup-check-popover").count() == 0
         assert info.evaluate("el => el === document.activeElement")
@@ -293,3 +300,50 @@ def test_setup_check_help_button_is_independent_and_keyboard_dismissible(a11y_ha
         assert rect["top"] >= 0 and rect["bottom"] <= page.evaluate("() => window.innerHeight")
     finally:
         page.close()
+
+
+def test_setup_check_catalog_missing_entry_and_failed_fetch_fallback(a11y_harness: UIHarness):
+    require_browser()
+    page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+    page.route(
+        "**/api/v1/check-catalog*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"lang":"ja","checks":{"sqli":{"title":"SQL injection"}}}',
+        ),
+    )
+    try:
+        page.goto(f"{a11y_harness.server_url}/app#/setup")
+        page.wait_for_selector("#setupChecks input[data-check='dom_xss']", state="attached")
+        page.locator(".setup-tab").filter(has_text="検査項目").click()
+        checkbox = page.locator('#setupChecks input[data-check="dom_xss"]')
+        page.locator('#setupChecks [data-check-id="dom_xss"] .setup-check-info').click()
+        dialog = page.get_by_role("dialog")
+        assert dialog.locator("h3").inner_text() == "dom_xss"
+        assert dialog.locator("p").inner_text() == "説明準備中"
+        assert checkbox.is_checked() is False
+        page.keyboard.press("Escape")
+        checkbox.check()
+        assert checkbox.is_checked()
+    finally:
+        page.close()
+
+    failed_page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+    failed_page.route(
+        "**/api/v1/check-catalog*",
+        lambda route: route.fulfill(status=500, body="catalog unavailable"),
+    )
+    try:
+        failed_page.goto(f"{a11y_harness.server_url}/app#/setup")
+        failed_page.wait_for_selector("#setupChecks input[data-check='sqli']", state="attached")
+        failed_page.locator(".setup-tab").filter(has_text="検査項目").click()
+        checkbox = failed_page.locator('#setupChecks input[data-check="sqli"]')
+        checkbox.uncheck()
+        assert not checkbox.is_checked()
+        failed_page.locator('#setupChecks [data-check-id="sqli"] .setup-check-info').click()
+        dialog = failed_page.get_by_role("dialog")
+        assert dialog.locator("h3").inner_text() == "sqli"
+        assert dialog.locator("p").inner_text() == "説明準備中"
+    finally:
+        failed_page.close()
