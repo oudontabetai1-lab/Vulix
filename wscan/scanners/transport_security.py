@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import nullcontext
 from datetime import datetime, timezone
+import http.cookiejar
 import secrets
 import time
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -127,7 +128,8 @@ class TransportSecurityScanner(BaseScanner):
         if hasattr(self.engine, "httpx_client_kwargs"):
             kwargs = self.engine.httpx_client_kwargs(**kwargs)
         # Anonymous read-only probes: observe real credentials passively instead of replaying them.
-        kwargs.update(headers={}, auth=None, cookies=None)
+        # レスポンスの Set-Cookie を保持・引き継がないよう Cookie 保存を無効化した jar を設定
+        kwargs.update(headers={}, auth=None, cookies=http.cookiejar.CookieJar(policy=rules.AnonymousCookiePolicy()))
         logger = getattr(self.engine, "request_logger", None)
         evidence_enabled = (getattr(logger, "enabled", False)
                             and callable(getattr(logger, "probe_scope", None))
@@ -164,10 +166,13 @@ class TransportSecurityScanner(BaseScanner):
                              if evidence_enabled else nullcontext({"requests": []}))
                     with scope as context:
                         try:
+                            client.cookies.clear()
                             response = await client.request(method, destination, headers=headers or {})
                         except Exception as exc:
                             self._evidence_failure(context, exc)
                             raise
+                        finally:
+                            client.cookies.clear()
                         self._record_probe_status(response)
                         observed = self._observe_response(response) if evidence_enabled else None
                         response.extensions["vulix_transport_security_evidence"] = (context, observed)

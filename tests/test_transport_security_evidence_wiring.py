@@ -90,7 +90,7 @@ async def test_vulnerable_methods_record_one_causal_chain_per_send_and_reload(tm
     assert len(fixture.requests) == len(hook_calls) == logger.payload_count
     assert all(options_row["event_hooks"]["request"][0] is existing_hook for options_row in options)
     assert all(len(options_row["event_hooks"]["request"]) == 2 for options_row in options)
-    assert [i for i, request in enumerate(fixture.requests) if "cookie" in request.headers] == list(range(5, 16))
+    assert [i for i, request in enumerate(fixture.requests) if "cookie" in request.headers] == []
 
     logger.probe_ledger.write_manifest()
     records = ledger_rows(logger)

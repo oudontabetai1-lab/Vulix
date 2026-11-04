@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from html import unescape
+import http.cookiejar
 import ipaddress
 import re
 import ssl
@@ -43,6 +44,29 @@ def override_matches(canonical: tuple, overridden: tuple, baseline: tuple,
     """Compare status, Allow and body against both normal and invalid-override GET."""
     return (200 <= canonical[0] < 300 and canonical == overridden
             and overridden != baseline and control == baseline)
+
+
+class AnonymousCookiePolicy(http.cookiejar.DefaultCookiePolicy):
+    """Cookie の永続化・自動送信を完全に遮断するポリシー。
+
+    匿名プローブにおいて先行レスポンスの Set-Cookie が後続リクエストへ
+    引き継がれることを防ぐ。
+    """
+
+    def set_ok(self, cookie, request) -> bool:
+        return False
+
+    def return_ok(self, cookie, request) -> bool:
+        return False
+
+
+def is_anonymous_probe(check_type: str, role: str = "") -> bool:
+    """プローブが匿名性を要求するか判定する純粋関数。
+
+    transport_security のメソッド・制御プローブは匿名性を最優先とし、
+    Cookie 状態を引き継いではならない。
+    """
+    return check_type == "transport_security"
 
 
 def https_redirect_status(url: str, status: int, location: str) -> str:
