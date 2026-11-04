@@ -347,3 +347,36 @@ def test_setup_check_catalog_missing_entry_and_failed_fetch_fallback(a11y_harnes
         assert dialog.locator("p").inner_text() == "説明準備中"
     finally:
         failed_page.close()
+
+
+def test_findings_check_help_fallback_and_preserves_evidence(a11y_harness: UIHarness):
+    require_browser()
+    page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+    page.route("**/api/v1/check-catalog*", lambda route: route.fulfill(status=500, body="catalog unavailable"))
+
+    def add_unknown_check(route):
+        response = route.fetch()
+        data = response.json()
+        findings = data.get("findings") or []
+        if findings:
+            findings[0]["check_type"] = "xss_subtype"
+        route.fulfill(response=response, json=data)
+
+    page.route("**/api/v1/scans/*/findings", add_unknown_check)
+    try:
+        page.goto(f"{a11y_harness.server_url}/app#/findings?scan=20261026_100000")
+        page.wait_for_selector(".findings-evidence-wrap")
+        check_row = page.locator(".findings-meta-table-wrap tr").filter(has_text="Check Type")
+        evidence = page.locator(".findings-evidence-wrap").inner_text()
+        assert "Reflected parameter in HTML without sanitization" in evidence
+        info = check_row.locator(".setup-check-info")
+        info.click()
+        dialog = page.get_by_role("dialog")
+        assert dialog.locator("h3").inner_text() == "xss_subtype"
+        assert dialog.locator("p").inner_text() == "説明準備中"
+        assert page.locator(".findings-evidence-wrap").inner_text() == evidence
+        page.keyboard.press("Escape")
+        assert page.locator(".setup-check-popover").count() == 0
+        assert info.evaluate("el => el === document.activeElement")
+    finally:
+        page.close()

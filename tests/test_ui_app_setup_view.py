@@ -42,10 +42,10 @@ def test_check_catalog_api_locales_and_empty_fallback(monkeypatch):
 
 
 def test_check_info_source_uses_text_nodes_and_has_unknown_fallback():
-    source = SETUP_MODULE_JS.read_text(encoding='utf-8')
+    source = (ROOT / 'templates' / 'ui' / 'check-help.js').read_text(encoding='utf-8')
     assert 'setup-check-popover' in source
     assert '説明準備中' in source and 'Description not available yet' in source
-    assert "const fallback = lang === 'en' ? 'Description not available yet' : '説明準備中'" in source
+    assert "language === 'en' ? 'Description not available yet' : '説明準備中'" in source
     assert 'innerHTML' not in source
 
 
