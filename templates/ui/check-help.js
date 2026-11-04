@@ -12,7 +12,8 @@
           ? await api.get(`/api/v1/check-catalog?lang=${language}`)
           : await fetch(`/api/v1/check-catalog?lang=${language}`);
         const data = response && response.data ? response.data : (response && response.ok ? await response.json() : null);
-        return data && data.checks && typeof data.checks === 'object' ? data : { checks: {}, lang: language };
+        return data && data.catalog_version === '1.0.0' && data.checks && typeof data.checks === 'object'
+          ? data : { checks: {}, lang: language };
       } catch (_) { return { checks: {}, lang: language }; }
     })();
     return cache[language];
