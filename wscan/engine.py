@@ -2821,6 +2821,8 @@ class ScanEngine:
             method=form_meta.get("_form_method", ""),
             action=form_meta.get("_form_action", ""),
             labels=form_meta.get("_form_labels", ""),
+            form_tokens=form_meta.get("_form_tokens", ()),
+            form_fields=form_meta.get("_form_fields", ()),
         )
 
     def _checkpoint_is_done_ip(self, ip, check: str) -> bool:
@@ -6327,14 +6329,26 @@ class ScanEngine:
             forms = kept
 
         # Build ordered field list
+        from wscan.token_lifecycle import is_token_field_name
+
         field_queue: list = []
         for fi, form in enumerate(forms):
             dom_idx = form.get("index", fi)
+            form_token_names = tuple(
+                str(inp.get("name"))
+                for inp in form.get("inputs", [])
+                if inp.get("name") and is_token_field_name(str(inp.get("name")))
+            )
             for inp in form.get("inputs", []):
                 field = dict(inp)
                 field["_form_method"] = form.get("method") or "GET"
                 field["_form_action"] = form.get("action") or page.url
                 field["_form_labels"] = form.get("labels") or ""
+                field["_form_tokens"] = form_token_names
+                field["_form_fields"] = tuple(
+                    (str(item.get("name")), str(item.get("value", "")))
+                    for item in form.get("inputs", []) if item.get("name")
+                )
                 field_queue.append((fi, dom_idx, field, False))
         for param in page.url_params:
             field_queue.append((0, 0, {"name": param, "type": "text"}, True))
