@@ -56,8 +56,10 @@ _PUBLIC_PATHS = {
     "/health",
     "/login",
     "/favicon.ico",
+    "/apple-touch-icon.png",
     "/ui/favicon.png",
     "/ui/favicon.ico",
+    "/ui/apple-touch-icon.png",
     "/ui/vulix-logo-mark.png",
 }
 
@@ -529,6 +531,13 @@ class MonitorServer:
             png = TEMPLATES_DIR / "ui" / "favicon.png"
             if png.is_file():
                 return FileResponse(png, media_type="image/png")
+            return Response(status_code=404)
+
+        @app.get("/apple-touch-icon.png", include_in_schema=False)
+        async def apple_touch_icon():
+            icon = TEMPLATES_DIR / "ui" / "apple-touch-icon.png"
+            if icon.is_file():
+                return FileResponse(icon, media_type="image/png")
             return Response(status_code=404)
 
         @app.get("/login", response_class=HTMLResponse)
@@ -2083,6 +2092,7 @@ class MonitorServer:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vulix — ログイン</title>
 <link rel="icon" type="image/png" href="/ui/favicon.png">
+<link rel="apple-touch-icon" href="/ui/apple-touch-icon.png">
 <style>
   :root {{ color-scheme: dark; }}
   * {{ box-sizing: border-box; }}

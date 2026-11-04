@@ -97,7 +97,9 @@ class AuthEnabledTests(unittest.TestCase):
         self.assertEqual(self.client.get("/ui/vulix-logo-mark.png").status_code, 200)
         self.assertEqual(self.client.get("/ui/favicon.png").status_code, 200)
         self.assertEqual(self.client.get("/ui/favicon.ico").status_code, 200)
+        self.assertEqual(self.client.get("/ui/apple-touch-icon.png").status_code, 200)
         self.assertEqual(self.client.get("/favicon.ico").status_code, 200)
+        self.assertEqual(self.client.get("/apple-touch-icon.png").status_code, 200)
 
         # Other /ui/* assets are rejected without auth
         self.assertEqual(self.client.get("/ui/vulix-logo.png").status_code, 401)

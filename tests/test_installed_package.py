@@ -58,6 +58,7 @@ assert monitor.TEMPLATES_DIR.joinpath("ui", "components.css").is_file()
 assert monitor.TEMPLATES_DIR.joinpath("ui", "app-shell.js").is_file()
 assert monitor.TEMPLATES_DIR.joinpath("ui", "vulix-logo.png").is_file()
 assert monitor.TEMPLATES_DIR.joinpath("ui", "vulix-logo-mark.png").is_file()
+assert monitor.TEMPLATES_DIR.joinpath("ui", "apple-touch-icon.png").is_file()
 assert monitor.TEMPLATES_DIR.joinpath("ui", "favicon.png").is_file()
 assert engine.OUTPUT_BASE == agent.OUTPUT_BASE == monitor.OUTPUT_BASE == Path.cwd() / "output"
 scan = engine.ScanEngine("http://127.0.0.1:1", llm_provider="none", checks=["xss"], open_report=False)
@@ -79,4 +80,6 @@ with TestClient(monitor.MonitorServer().app) as client:
     assert logo.status_code == 200 and "image/png" in logo.headers["content-type"]
     mark = client.get("/ui/vulix-logo-mark.png")
     assert mark.status_code == 200 and "image/png" in mark.headers["content-type"]
+    apple = client.get("/ui/apple-touch-icon.png")
+    assert apple.status_code == 200 and "image/png" in apple.headers["content-type"]
 '''], cwd=tmp_path, env=env, check=True, capture_output=True, text=True)

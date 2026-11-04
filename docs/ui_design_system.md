@@ -150,3 +150,57 @@ Vulix `/app` ダッシュボードおよび管理画面群で使用する共通�
 
 ### フォーカス可視性・レスポンシブ検証
 ブラウザE2Eは Portal / Setup / Findings に加え、Crawl / Monitor / Settings / Agent capabilities の各ビューでも、フォーカスリングの可視性と 1440 / 1280 / 768 px での横スクロール非発生を確認します。
+
+---
+
+## 5. Vulix 公式ロゴ・アイコン使用規約
+
+Vulix ブランドの視認性・一貫性およびアクセシビリティを保つため、公式オリジナルアセットとそこから機械的にリサイズされた派生アセットのみを使用します。
+
+### アセット構成と解像度 (Sizes)
+
+| アセットパス | 解像度 | 形式 | 用途 |
+|---|---|---|---|
+| `templates/ui/vulix-logo.png` | 1254 × 1254 | PNG (RGBA) | **公式オリジナルマスター**。SHA256: `d6aa10fbd221d54ffb050cf08a96fb1512b8437b08e80944690b50674aa70219` |
+| `templates/ui/vulix-logo-mark.png` | 96 × 96 | PNG (RGBA) | ヘッダー・サイドバー・ログインカード用ブランドマーク（Retina 3x/4x 高精細表示対応） |
+| `templates/ui/apple-touch-icon.png` | 180 × 180 | PNG (RGBA) | iOS / Safari ホーム画面追加・WebClip 用高解像度アイコン |
+| `templates/ui/favicon.png` | 32 × 32 | PNG (RGBA) | モダンブラウザ用タブファビコン (`<link rel="icon" type="image/png">`) |
+| `templates/ui/favicon.ico` | 16/32/48 | ICO (RGBA) | レガシーブラウザおよびルート `/favicon.ico` フォールバック用マルチサイズ ICO |
+
+### 画面別の配置ルール (Which file for which place)
+
+1. **`/app` シェル**:
+   - サイドバー上部 (`aside .brand`): `vulix-logo-mark.png` (24×24px 表示)
+   - トップバー (`header[role="banner"]`): `vulix-logo-mark.png` (24×24px 表示)
+2. **`/login` ログイン画面**:
+   - 認証カード見出し (`.brand`): `vulix-logo-mark.png` (28×28px 表示)
+3. **`/` (Portal) ポータル画面**:
+   - ナビゲーションヘッダー (`header .brand`): `vulix-logo-mark.png` (24×24px 表示)
+4. **`/monitor` ライブモニター**:
+   - ヘッダーバー (`.header .hdr-brand`): `vulix-logo-mark.png` (20×20px 表示)
+   - サイドレール (`.ws-rail .brand`): `vulix-logo-mark.png` (20×20px 表示)
+   - スキャン設定モーダル (`#scanConfigOverlay .logo`): `vulix-logo-mark.png` (22×22px 表示)
+5. **すべての HTML 画面の `<head>`**:
+   - 必ず以下のファビコン・アイコン宣言を含めます:
+     ```html
+     <link rel="icon" type="image/png" href="/ui/favicon.png">
+     <link rel="apple-touch-icon" href="/ui/apple-touch-icon.png">
+     ```
+
+### 余白・クリアスペース規定 (Clear Space)
+
+- ロゴマークの周囲には、マーク表示寸法の最低 25%（推奨: 4px〜8px 以上）のアイソレーションエリア（クリアスペース）を確保し、他のテキスト・ボタン・ボーダーと近接・重複させないようにします。
+- レイアウト崩れや歪みを防ぐため、画像タグには常に `object-fit: contain` および `flex-shrink: 0` を指定します。
+
+### 改変・近似描画の禁止 (Do-Not-Modify)
+
+- **近似再描画・色変更・変形・トリミングの禁止**:
+  ロゴの色調変更（グラデーション変更、反転）、縦横比の歪み、回転、シャドウ・輪郭線の付加、テキストフォントの独自置き換えを禁止します。
+- **オリジナルの完全性**:
+  すべての派生アセットは、オリジナル `templates/ui/vulix-logo.png` からリサイズ（LANCZOS 高精度リサンプリング）のみによって生成します。
+- **決定論的再生成**:
+  派生アセットの生成は `scripts/derive_logo_assets.py` により完全に自動化・再現可能であり、テスト `tests/test_ui_assets.py` で SHA256 および画像解像度が検証されます。
+
+### アクセシビリティ (Accessible Alt Text)
+
+- ロゴマーク画像タグには、装飾目的の空属性（`alt=""`）や省略ではなく、必ず明示的なスクリーンリーダー向け代替テキスト `alt="Vulix"` を付与します。
