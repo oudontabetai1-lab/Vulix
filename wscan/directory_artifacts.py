@@ -30,8 +30,11 @@ def is_backup_artifact_name(name: str) -> bool:
     """ファイル名またはパスがバックアップ拡張子（.bak/.old/.orig/.swp/.zip/.gz/.tgz/~）を持つか判定する純粋関数。"""
     if not name:
         return False
-    suffix = posixpath.splitext(name)[1].lower()
-    return suffix in BACKUP_SUFFIXES or name.endswith("~")
+    path = urlsplit(name).path if "://" in name else name
+    path = path.lower()
+    name_only = posixpath.basename(path)
+    suffix = posixpath.splitext(name_only)[1].lower()
+    return suffix in BACKUP_SUFFIXES or name_only.endswith("~")
 
 
 def is_archive_artifact_name(name: str) -> bool:
@@ -355,7 +358,7 @@ def classify_backup(body: bytes, content_type: str, url: str = "") -> tuple[str,
         signals.append("source_code")
     if re.search(r"(?i)\b(?:CREATE TABLE|INSERT INTO|DB_PASSWORD\s*=|SECRET_KEY\s*=)|-----BEGIN [A-Z ]*PRIVATE KEY-----", text):
         signals.append("sensitive_content")
-    if len(text.strip()) > 20 and content_type and any(ct in content_type.lower() for ct in ("text/plain", "octet-stream", "javascript", "json", "xml")):
+    if is_backup_artifact_name(url) and len(text.strip()) > 20 and content_type and any(ct in content_type.lower() for ct in ("text/plain", "octet-stream", "javascript", "json", "xml")):
         signals.append("served_file")
     return tuple(signals)
 

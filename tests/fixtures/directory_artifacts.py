@@ -83,11 +83,14 @@ def resource(path: str, request: Request):
         return Response(b'\x1f\x8b' + b'\x00' * 1_200_000, media_type='application/gzip')
     if path == 'exposed/oversized-backup.tar':
         return Response(b'\x00' * 257 + b'ustar' + b'\x00' * 1_200_000, media_type='application/x-tar')
-    if path in ('safe/oversized-file.bin', 'safe/oversized-backup.zip'):
-        # 1MB を超える無害な非アーカイブレスポンス（先頭 262 バイトにアーカイブシグネチャを含まない大きな JSON / octet-stream）
+    if path in ('safe/oversized-file.bin', 'safe/oversized-backup.zip', 'safe/oversized-data.json', 'safe/oversized-image.png'):
+        # 1MB を超える無害な非アーカイブレスポンス（先頭 262 バイトにアーカイブシグネチャを含まない大きな JSON / octet-stream / 画像）
+        if path.endswith('.png'):
+            return Response(b'\x89PNG\r\n\x1a\n' + b'\x00' * 1_200_000, media_type='image/png')
         benign_json = json.dumps({"status": "ok", "message": "benign payload", "items": ["data"] * 1000}).encode()
         benign_body = benign_json + b' ' * (1_200_000 - len(benign_json))
-        return Response(benign_body, media_type='application/octet-stream')
+        media_type = 'application/json' if path.endswith('.json') else 'application/octet-stream'
+        return Response(benign_body, media_type=media_type)
     return PlainTextResponse('Not found', status_code=404)
 
 def create_app():

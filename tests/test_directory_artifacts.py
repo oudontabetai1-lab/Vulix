@@ -294,6 +294,13 @@ def test_pure_detection_functions_and_safe_twins():
     assert classify_backup(b'{"status": "ok", "items": []}' + b" " * 300, "application/octet-stream", "http://fixture.test/oversized-backup.zip") == ()
     assert classify_backup(b"\x00" * 300, "application/octet-stream", "http://fixture.test/oversized-backup.zip") == ()
     assert classify_backup(b"\x89PNG\r\n\x1a\n" + b"\x00" * 300, "application/octet-stream", "http://fixture.test/oversized-backup.zip") == ()
+    # 安全ツイン: バックアップ拡張子を持たない >1MB の無害非アーカイブレスポンス（JSON/バイナリ/画像等） -> 検出されない（served_file 偽陽性抑止）
+    benign_1mb = json.dumps({"status": "ok", "items": ["data"] * 1000}).encode()
+    benign_1mb += b" " * (1_200_000 - len(benign_1mb))
+    assert classify_backup(benign_1mb, "application/octet-stream", "http://fixture.test/safe/oversized-file.bin") == ()
+    assert classify_backup(benign_1mb, "application/json", "http://fixture.test/safe/oversized-data.json") == ()
+    assert classify_backup(b"\x89PNG\r\n\x1a\n" + b"\x00" * 1_200_000, "image/png", "http://fixture.test/safe/oversized-image.png") == ()
+    assert classify_backup(benign_1mb, "application/octet-stream") == ()
 
 
 @pytest.mark.asyncio
@@ -467,3 +474,20 @@ async def test_edge5_oversized_tar_and_gzip_backups(monkeypatch, oversized_path)
     finding = next((f for f in findings if f.url == url and f.evidence_type == "derived_backup"), None)
     assert finding is not None
     assert await scan.verify_finding(finding) is True
+
+
+@pytest.mark.asyncio
+async def test_edge5_oversized_benign_non_archive_safe_twin(monkeypatch):
+    safe_scan = scanner(monkeypatch)
+    # 1MB を超える無害な非アーカイブレスポンス（先頭 262 バイトにアーカイブシグネチャなし、バックアップ名ではない）
+    safe_scan.engine.reached_urls = {
+        "http://fixture.test/safe/oversized-file.bin",
+        "http://fixture.test/safe/oversized-data.json",
+        "http://fixture.test/safe/oversized-image.png",
+    }
+    safe_findings = await safe_scan.scan_page("http://fixture.test/safe/")
+    assert not any(
+        any(name in f.url for name in ("oversized-file.bin", "oversized-data.json", "oversized-image.png"))
+        for f in safe_findings
+    )
+    assert not any(f.evidence_type == "derived_backup" for f in safe_findings)
