@@ -180,40 +180,115 @@ def test_redaction_sentinel_never_leaks_raw_secret():
     assert dummy_secret.encode("utf-8") not in pickled
     assert dummy_secret not in str(pickled)
 
-    # 9. インスタンス属性に _secret_holder が存在しないこと
+    # 9. インスタンス属性に秘密属性が存在しないこと
     assert not hasattr(snapshot, "_secret_holder")
+    assert not hasattr(snapshot, "_raw_secret")
+    assert not hasattr(snapshot, "_retains_secret")
 
-    # 10. トランスポート層向けの明示的取得メソッドのみが生値を返すこと
-    assert snapshot.reveal_secret_for_transport() == dummy_secret
+    # 10. 生シークレットは保持されず、アクセサは明示的に None を返すこと（送信時は RefreshStrategy で都度取得）
+    assert snapshot.reveal_secret_for_transport() is None
 
-    # 11. pickle 復元後も安全性が維持され、明示的アクセサ経由でのみ生値が取得できること
+    # 11. pickle 復元後も安全性が維持され、生値は一切復元・保持されないこと
     restored = pickle.loads(pickled)
     assert restored.token_ref_id == snapshot.token_ref_id
     assert dummy_secret not in repr(restored)
     assert dummy_secret not in str(vars(restored))
-    assert restored.reveal_secret_for_transport() == dummy_secret
+    assert restored.reveal_secret_for_transport() is None
+
+    # 12. モジュールレベルの全グローバルに変数が漏洩・保持されていないこと
+    import wscan.token_lifecycle as tl_mod
+    assert not hasattr(tl_mod, "_RAW_SECRET_VAULT")
+    assert not hasattr(tl_mod, "clear_token_secrets")
+    assert not hasattr(tl_mod, "release_token_secret")
+    for name, val in vars(tl_mod).items():
+        if not name.startswith("__"):
+            assert dummy_secret not in str(val), f"Global {name} contains secret material!"
 
 
-def test_token_snapshot_retain_secret_false_and_release():
-    """retain_secret_for_transport=False および release_secret の動作を検証。"""
-    dummy = "SECRET_VALUE_FOR_NO_RETAIN_12345"
+def test_token_snapshot_never_retains_secret_and_release_is_noop():
+    """TokenSnapshot が生シークレットを一切保持せず、release_secret が安全な no-op であることを検証。"""
+    dummy_no_retain = "SECRET_VALUE_FOR_NO_RETAIN_12345"
     snap_no_retain = create_token_snapshot(
-        raw_value=dummy,
+        raw_value=dummy_no_retain,
         provenance="header:X-CSRF-Token",
         retain_secret_for_transport=False,
     )
-    assert snap_no_retain.reveal_secret_for_transport() == ""
-    assert dummy not in str(vars(snap_no_retain))
+    assert snap_no_retain.reveal_secret_for_transport() is None
+    assert dummy_no_retain not in str(vars(snap_no_retain))
 
-    # retain_secret_for_transport=True で作成後に明示的 release
+    dummy_retain = "SECRET_TO_BE_RELEASED_ABC"
     snap_retain = create_token_snapshot(
-        raw_value="SECRET_TO_BE_RELEASED_ABC",
+        raw_value=dummy_retain,
         provenance="form:csrf",
         retain_secret_for_transport=True,
     )
-    assert snap_retain.reveal_secret_for_transport() == "SECRET_TO_BE_RELEASED_ABC"
-    snap_retain.release_secret()
-    assert snap_retain.reveal_secret_for_transport() == ""
+    # retain_secret_for_transport=True を指定しても生シークレットは保持されない
+    assert snap_retain.reveal_secret_for_transport() is None
+    assert dummy_retain not in str(vars(snap_retain))
+    assert snap_retain.release_secret() is None
+    assert snap_retain.reveal_secret_for_transport() is None
+
+
+def test_create_token_snapshot_is_pure_and_does_not_mutate_globals():
+    """create_token_snapshot が純粋関数であり、連続呼び出しでもグローバル状態の肥大化・変異を起こさないことを検証。"""
+    import copy
+    import wscan.token_lifecycle as tl
+
+    # 呼び出し前のモジュール内グローバル変数の状態を記録
+    global_keys_before = set(vars(tl).keys())
+    global_state_before = {
+        k: copy.copy(v) if isinstance(v, (dict, list, set)) else v
+        for k, v in vars(tl).items()
+        if not k.startswith("__")
+    }
+
+    # 150 回以上の連続呼び出し（毎回異なる生シークレットを渡す）
+    snapshots = [
+        create_token_snapshot(
+            raw_value=f"DYNAMIC_PROBE_SECRET_{i}_{'x' * 32}",
+            provenance=f"header:X-CSRF-Token-{i}",
+        )
+        for i in range(150)
+    ]
+    assert len(snapshots) == 150
+
+    # 呼び出し後、モジュール内グローバル変数のキー集合に一切の変化がないこと
+    global_keys_after = set(vars(tl).keys())
+    assert global_keys_before == global_keys_after
+
+    # すべてのグローバル変数が肥大化（unbounded growth）していないこと
+    for k, original_val in global_state_before.items():
+        current_val = getattr(tl, k)
+        if isinstance(original_val, (dict, list, set)):
+            assert len(current_val) == len(original_val), f"Global {k} grew in length: {len(original_val)} -> {len(current_val)}"
+            assert current_val == original_val, f"Global {k} was mutated"
+        else:
+            assert current_val == original_val, f"Global {k} was modified"
+
+    # _RAW_SECRET_VAULT などの秘密保管グローバルが存在しないこと
+    assert not hasattr(tl, "_RAW_SECRET_VAULT")
+
+
+def test_no_module_global_holds_secret_material():
+    """モジュールレベルのいかなる変数・辞書・オブジェクトも生シークレットを保持しないことを検証。"""
+    import wscan.token_lifecycle as tl
+
+    secret = "TOP_SECRET_AUTH_TOKEN_NEVER_PERSIST_MODULE_GLOBAL_999"
+    snap = create_token_snapshot(raw_value=secret, provenance="cookie:csrftoken")
+    assert snap.token_ref_id.startswith("tok_ref_")
+
+    assert not hasattr(tl, "_RAW_SECRET_VAULT")
+    assert not hasattr(tl, "clear_token_secrets")
+    assert not hasattr(tl, "release_token_secret")
+
+    # 全モジュール属性の走査: 生シークレットが文字列として一切現れないこと
+    for name, val in vars(tl).items():
+        if name.startswith("__"):
+            continue
+        assert secret not in str(val), f"Module global '{name}' exposed secret material!"
+        if isinstance(val, dict):
+            assert secret not in val, f"Secret found as key in '{name}'"
+            assert secret not in val.values(), f"Secret found as value in '{name}'"
 
 
 def test_redact_token_value_edge_cases():

@@ -171,32 +171,16 @@ class RefreshStrategy:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-# ── 生シークレット隔離保管庫（Private Secret Vault） ──────────────────────
-# インスタンス属性（__dict__ / vars()）やデフォルトシリアライザ（pickle, json等）から
-# 生シークレットを完全に隔離し、token_ref_id をキーとするモジュール内マッピングに保持する。
-_RAW_SECRET_VAULT: dict[str, str] = {}
-
-
-def clear_token_secrets() -> None:
-    """隔離保管庫内の全生シークレットを消去する（テストクリーンアップ用等）。"""
-    _RAW_SECRET_VAULT.clear()
-
-
-def release_token_secret(token_ref_id: str) -> None:
-    """指定された参照IDの生シークレットを隔離保管庫から明示的に破棄する。"""
-    _RAW_SECRET_VAULT.pop(token_ref_id, None)
-
-
 @dataclass(frozen=True)
 class TokenSnapshot:
     """取得済みトークンの安全なスナップショット。
 
     不変条件:
-    生シークレットはデフォルトのシリアライズ (asdict / json / repr / to_dict / to_evidence)
-    に含まれない。非秘密の参照ID (token_ref_id) とマスク済み値 (redacted_value)、
-    出自情報 (provenance) のみを公開する。
-    生シークレットはインスタンス属性（__dict__ / vars()）には一切保持されず、
-    モジュール内隔離保管庫 (_RAW_SECRET_VAULT) に隔離される。
+    生シークレットは永続化・保持されない。TokenSnapshot はマスク済み値 (redacted_value)、
+    出自情報 (provenance)、非秘密の参照ID (token_ref_id) 等の安全なメタデータのみを保持する。
+    生トークン値はインスタンス属性、モジュールグローバル、キャッシュ等にいかなる形でも保持されない。
+    実送信時の生トークン値は RefreshStrategy を通じて適用時 (apply-time) に
+    呼び出し元から過渡的に渡され、TokenSnapshot には保持されない。
     """
     token_ref_id: str                   # 安定した非秘密参照ID (例: tok_ref_xxxx)
     redacted_value: str                 # マスク済み値 (例: ab12***ef (len=32))
@@ -209,60 +193,25 @@ class TokenSnapshot:
     token_hash_hint: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def __init__(
-        self,
-        token_ref_id: str,
-        redacted_value: str,
-        provenance: str,
-        issued_at: float,
-        scope: str = "",
-        binding: TokenBinding | None = None,
-        source: TokenSource | None = None,
-        value_length: int = 0,
-        token_hash_hint: str = "",
-        metadata: dict[str, Any] | None = None,
-        _raw_secret: str = "",
-    ) -> None:
-        object.__setattr__(self, "token_ref_id", token_ref_id)
-        object.__setattr__(self, "redacted_value", redacted_value)
-        object.__setattr__(self, "provenance", provenance)
-        object.__setattr__(self, "issued_at", issued_at)
-        object.__setattr__(self, "scope", scope)
-        object.__setattr__(self, "binding", binding)
-        object.__setattr__(self, "source", source)
-        object.__setattr__(self, "value_length", value_length)
-        object.__setattr__(self, "token_hash_hint", token_hash_hint)
-        object.__setattr__(self, "metadata", dict(metadata) if metadata is not None else {})
-        # 生シークレットはインスタンス属性（__dict__ / vars()）には一切保持せずモジュール外保管庫に隔離保持
-        retains = bool(_raw_secret)
-        object.__setattr__(self, "_retains_secret", retains)
-        if retains:
-            _RAW_SECRET_VAULT[token_ref_id] = _raw_secret
+    def __post_init__(self) -> None:
+        if self.metadata is None:
+            object.__setattr__(self, "metadata", {})
 
-    def reveal_secret_for_transport(self) -> str:
-        """トランスポート層での実送信時にのみ生シークレットを取り出す明示的メソッド。
+    def reveal_secret_for_transport(self) -> None:
+        """トランスポート層向け生シークレット取得アクセサ（本スライスでは常に None を返す）。
 
-        生シークレットはインスタンス属性（__dict__ / vars()）には一切保持されず、
-        非秘密参照ID (token_ref_id) をキーとしてモジュール内隔離保管庫からのみ明示的に取得される。
-        シリアライザや repr、ログ記録からは自動呼び出しされない。
+        契約の設計方針として、TokenSnapshot は生トークン値を一切保持しない。
+        実送信時の生トークン値は RefreshStrategy を通じて適用時 (apply-time) に
+        都度取得・過渡利用されるため、本スナップショットからは常に None を返す。
         """
-        if not getattr(self, "_retains_secret", True):
-            return ""
-        return _RAW_SECRET_VAULT.get(self.token_ref_id, "")
+        return None
 
     def release_secret(self) -> None:
-        """このスナップショットに対応する生シークレットを隔離保管庫から明示的に破棄する。"""
-        _RAW_SECRET_VAULT.pop(self.token_ref_id, None)
+        """生シークレット破棄用メソッド（no-op）。
 
-    def __getstate__(self) -> dict[str, Any]:
-        """シリアライズ時に生シークレットが万が一にも含まれないことを保証する。"""
-        state = dict(self.__dict__)
-        state.pop("_secret_holder", None)
-        return state
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        for k, v in state.items():
-            object.__setattr__(self, k, v)
+        TokenSnapshot は生トークン値を保持しないため、本操作は何の副作用も伴わない no-op である。
+        """
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         """安全なシリアライズ用辞書を返す。生シークレットは含まれない。"""
@@ -426,19 +375,23 @@ def create_token_snapshot(
     source: TokenSource | None = None,
     issued_at: float | None = None,
     metadata: dict[str, Any] | None = None,
-    retain_secret_for_transport: bool = True,
+    retain_secret_for_transport: bool = False,
 ) -> TokenSnapshot:
     """生トークンから安全な TokenSnapshot を構築する純粋ファクトリ関数。
 
-    生値はデフォルトでシリアライズされない private 領域にのみ隔離され、
-    外部公開される全フィールドはマスク値および非秘密参照IDとなる。
+    不変条件:
+    生トークン値は TokenSnapshot 内やモジュールグローバルには一切保持・永続化されない。
+    マスク済み値 (redacted_value)、非秘密の参照ID (token_ref_id)、出自情報 (provenance)
+    などの安全なメタデータのみを保持する。
+    実送信時の生トークン値は RefreshStrategy を通じて適用時 (apply-time) に
+    都度取得・過渡利用される（TokenSnapshot には保持されない）。
+    グローバル状態の変更や副作用を持たない純粋関数である。
     """
     ts = issued_at if issued_at is not None else time.time()
     redacted = redact_token_value(raw_value)
     ref_id = derive_token_ref_id(raw_value)
     val_len = len(raw_value)
     hash_hint = hashlib.sha256(raw_value.encode("utf-8")).hexdigest()[:8] if raw_value else ""
-    secret_holder = raw_value if retain_secret_for_transport else ""
 
     return TokenSnapshot(
         token_ref_id=ref_id,
@@ -450,8 +403,7 @@ def create_token_snapshot(
         source=source,
         value_length=val_len,
         token_hash_hint=hash_hint,
-        metadata=metadata,
-        _raw_secret=secret_holder,
+        metadata=dict(metadata) if metadata is not None else {},
     )
 
 
