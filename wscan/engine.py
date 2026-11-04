@@ -657,6 +657,17 @@ def _tls_scan_enabled_by_config(path: Path | None = None) -> bool:
         return False
 
 
+def _token_lifecycle_manager_enabled_by_config(path: Path | None = None) -> bool:
+    """config/wscan.yaml の features.token_lifecycle_manager を読む（既定 off、token lifecycle Increment 1）。"""
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        return bool((raw.get("features", {}) or {}).get("token_lifecycle_manager", False))
+    except Exception:
+        return False
+
+
 def _payload_evolution_enabled_by_config(path: Path | None = None) -> bool:
     """config/wscan.yaml の features.payload_evolution を読む。"""
     config_path = path or (CONFIG_DIR / "wscan.yaml")
@@ -973,6 +984,8 @@ class ScanEngine:
             )
             canonical_state_profile = "unrestricted"
         self.state_profile = canonical_state_profile
+        # token lifecycle Increment 1: httpx FORM トークン lifecycle マネージャ（既定 off。ダッシュボード露出は後続）
+        self.token_lifecycle_manager = _token_lifecycle_manager_enabled_by_config()
         # account_sessions: resolved at run time — list of {"username":, "cookies":, "role":}
         self.account_sessions: list = []
         # ①: SPA crawl

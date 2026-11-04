@@ -1082,6 +1082,48 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
 }
 
 
+@dataclass(frozen=True)
+class TokenRefreshResult:
+    """refresh_form_tokens の結果（生トークンは保持しない）。"""
+    outcome: TokenOutcome
+    snapshots: tuple[TokenSnapshot, ...]
+    refreshed: bool
+    residual_stale: bool
+    fields: Mapping[str, str] | None = None
+
+
+def refresh_form_tokens(
+    fresh_values: Mapping[str, str],
+    *,
+    provenance: str,
+    status_code: int,
+    headers: Mapping[str, str] | None = None,
+    body: str | bytes | None = None,
+    refreshed: bool = False,
+    fields: Mapping[str, str] | None = None,
+) -> TokenRefreshResult:
+    """フォームトークン再送後の最終応答を分類する純粋ヘルパ（I/O なし）。
+
+    生トークンは TokenSnapshot 化（redacted/ref_id のみ）後に release_secret し、保持しない。
+    residual_stale は最終応答が STALE のまま（BLOCKED/WAF 403 は含まない）。
+    """
+    snaps = []
+    substituted = dict(fields or {})
+    for name, raw in fresh_values.items():
+        snap = create_token_snapshot(str(raw), provenance=f"form:{name} @ {provenance}")
+        snaps.append(snap)
+        snap.release_secret()
+        substituted[name] = str(raw)
+    outcome = classify_token_response(status_code=status_code, headers=headers, body=body)
+    return TokenRefreshResult(
+        outcome=outcome,
+        snapshots=tuple(snaps),
+        refreshed=refreshed,
+        residual_stale=outcome.outcome == TokenOutcomeKind.STALE,
+        fields=substituted if fields is not None else None,
+    )
+
+
 def build_token_capability_matrix(
     overrides: Mapping[tuple[TokenCarrier | str, TokenTransport | str], DeclaredStatus | str] | None = None,
 ) -> TokenCapabilityMatrix:
