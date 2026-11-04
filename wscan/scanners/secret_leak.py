@@ -247,10 +247,20 @@ def is_script_scan_allowed(
     is_excluded_fn: Optional[Callable[[str], bool]] = None,
 ) -> bool:
     """捕捉済みスクリプトがスキャン対象（スコープ内かつ除外対象外）かを判定する（純粋）。"""
-    if in_scope_fn and callable(in_scope_fn) and not in_scope_fn(url):
+    if not url or not isinstance(url, str):
         return False
-    if is_excluded_fn and callable(is_excluded_fn) and is_excluded_fn(url):
-        return False
+    if in_scope_fn and callable(in_scope_fn):
+        try:
+            if not in_scope_fn(url):
+                return False
+        except (AttributeError, TypeError):
+            pass
+    if is_excluded_fn and callable(is_excluded_fn):
+        try:
+            if is_excluded_fn(url):
+                return False
+        except (AttributeError, TypeError):
+            pass
     return True
 
 
