@@ -665,9 +665,11 @@ def create_app(page_count: int = 48) -> FastAPI:
     @app.get("/csrf-onetime", response_class=HTMLResponse)
     async def csrf_onetime_form(request: Request):
         sid = request.cookies.get("session_id") or secrets.token_hex(16)
-        token = f"one_{secrets.token_hex(8)}"
         app.state.csrf_onetime = getattr(app.state, "csrf_onetime", {})
-        app.state.csrf_onetime[sid] = token
+        token = app.state.csrf_onetime.get(sid)
+        if token is None:
+            token = f"one_{secrets.token_hex(8)}"
+            app.state.csrf_onetime[sid] = token
         resp = HTMLResponse(_layout("CSRF One Time", f'<form method="post" action="/csrf-onetime"><input type="hidden" name="csrf_token" value="{token}"><input name="email" value="user@example.com"></form>'))
         if not request.cookies.get("session_id"):
             resp.set_cookie("session_id", sid)
@@ -689,9 +691,11 @@ def create_app(page_count: int = 48) -> FastAPI:
     @app.get("/csrf-onetime-safe", response_class=HTMLResponse)
     async def csrf_onetime_safe_form(request: Request):
         sid = request.cookies.get("session_id") or secrets.token_hex(16)
-        token = f"safe_{secrets.token_hex(8)}"
         app.state.csrf_onetime_safe = getattr(app.state, "csrf_onetime_safe", {})
-        app.state.csrf_onetime_safe[sid] = token
+        token = app.state.csrf_onetime_safe.get(sid)
+        if token is None:
+            token = f"safe_{secrets.token_hex(8)}"
+            app.state.csrf_onetime_safe[sid] = token
         resp = HTMLResponse(_layout("CSRF One Time Safe", f'<form method="post" action="/csrf-onetime-safe"><input type="hidden" name="csrf_token" value="{token}"><input name="email" value="user@example.com"></form>'))
         if not request.cookies.get("session_id"):
             resp.set_cookie("session_id", sid)
