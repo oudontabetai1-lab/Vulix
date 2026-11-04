@@ -7,12 +7,110 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
+from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 from wscan.url_scope import same_origin
 
 
 MAX_BODY = 1_000_000
+SCRIPT_SNAPSHOT_LIMIT = 50_000
+BACKUP_SUFFIXES = (".bak", ".old", ".orig", ".swp", ".zip", ".gz", ".tgz", ".tar")
+ARCHIVE_SUFFIXES = (".zip", ".gz", ".tgz", ".tar")
+
+
+def is_truncated_script_snapshot(body: str | bytes | None, limit: int = SCRIPT_SNAPSHOT_LIMIT) -> bool:
+    """NetworkCapture.enrich_response による 50KB 打ち切りスナップショットか判定する純粋関数。"""
+    if body is None:
+        return False
+    return len(body) >= limit
+
+
+def is_backup_artifact_name(name: str) -> bool:
+    """ファイル名またはパスがバックアップ拡張子（.bak/.old/.orig/.swp/.zip/.gz/.tgz/~）を持つか判定する純粋関数。"""
+    if not name:
+        return False
+    path = urlsplit(name).path if "://" in name else name
+    path = path.lower()
+    name_only = posixpath.basename(path)
+    suffix = posixpath.splitext(name_only)[1].lower()
+    return suffix in BACKUP_SUFFIXES or name_only.endswith("~")
+
+
+def is_archive_artifact_name(name: str) -> bool:
+    """ファイル名またはパスがアーカイブ拡張子（.zip/.gz/.tgz/.tar/.tar.gz）を持つか判定する純粋関数。"""
+    if not name:
+        return False
+    path = urlsplit(name).path if "://" in name else name
+    path = path.lower()
+    return path.endswith(ARCHIVE_SUFFIXES) or path.endswith((".tar.gz", ".tar.bz2"))
+
+
+def has_archive_signature(body: bytes | bytearray | None) -> bool:
+    """ZIP, gzip, tar (ustar) の先頭マジックバイトシグネチャを判定する純粋関数。"""
+    if not body:
+        return False
+    raw = bytes(body[:262])
+    return raw.startswith((b"PK\x03\x04", b"\x1f\x8b")) or (len(raw) >= 262 and raw[257:262] == b"ustar")
+
+
+def has_script_evidence(
+    url: str = "",
+    *,
+    is_script: bool = False,
+    content_type: str = "",
+    body: str | bytes | None = None,
+) -> bool:
+    """拡張子なしパスがスクリプト資源である根拠（<script> 参照、JS Content-Type、JS 本文）の有無を判定する純粋関数。"""
+    if is_script:
+        return True
+    ct = (content_type or "").lower()
+    if any(js_type in ct for js_type in ("javascript", "ecmascript", "jscript")):
+        return True
+    if body is not None:
+        text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
+        if text and not re.search(r"(?i)<\s*(?:!doctype|html|head|body|div|span|p|h[1-6]|table|pre)\b", text[:500]):
+            if source_mapping_references(text):
+                return True
+            if re.search(r"(?m)(?:^|[;{}\s])(?:var|let|const|function|import|export|class|async\s+function)\b", text[:MAX_BODY]):
+                return True
+    return False
+
+
+def bind_verification_target(
+    targets: dict,
+    finding: Any,
+    raw_url: str,
+    display_url: str,
+    evidence_type: str,
+) -> bool:
+    """エミットされた Finding にのみ検証対象の生 URL を紐付ける純粋ロジック。
+    重複等で Finding が None の場合は既存の紐付けを上書きしない。
+    """
+    if finding is None or not raw_url:
+        return False
+    targets[id(finding)] = raw_url
+    if (display_url, evidence_type) not in targets:
+        targets[(display_url, evidence_type)] = raw_url
+    return True
+
+
+def lookup_verification_target(
+    targets: dict,
+    finding: Any,
+    default_url: str = "",
+) -> str:
+    """Finding または (display_url, evidence_type) に紐づく検証対象生 URL を取得する純粋ロジック。"""
+    if finding is not None:
+        target = targets.get(id(finding))
+        if target:
+            return target
+        url = getattr(finding, "url", "")
+        ev_type = getattr(finding, "evidence_type", "")
+        target = targets.get((url, ev_type))
+        if target:
+            return target
+    return default_url or (getattr(finding, "url", "") if finding is not None else "")
 
 
 class _Markup(HTMLParser):
@@ -21,6 +119,7 @@ class _Markup(HTMLParser):
         self.stack = []
         self.headings = []
         self.links = []
+        self.scripts = []
         self.text = []
         self._heading = None
         self._anchor = None
@@ -36,6 +135,8 @@ class _Markup(HTMLParser):
             href = attrs.get("src") if tag in ("script", "img") else attrs.get("href")
             if href:
                 self.links.append((href, "", False))
+                if tag == "script" and attrs.get("src"):
+                    self.scripts.append(attrs.get("src"))
 
     def handle_endtag(self, tag):
         if self._heading and tag == self._heading[0]:
@@ -148,6 +249,15 @@ def extract_resource_urls(body: str, base_url: str) -> tuple[str, ...]:
     return tuple(result)
 
 
+def extract_script_urls(body: str, base_url: str) -> tuple[str, ...]:
+    result = []
+    for href in _markup(body).scripts:
+        url = normalize_candidate_url(urljoin(base_url, href))
+        if url and url not in result:
+            result.append(url)
+    return tuple(result)
+
+
 def normalize_candidate_url(url: str) -> str:
     try:
         parts = urlsplit(str(url or ""))
@@ -169,7 +279,13 @@ class ArtifactCandidate:
     observed_url: str
 
 
-def derive_artifact_candidates(observed_url: str) -> tuple[ArtifactCandidate, ...]:
+def derive_artifact_candidates(
+    observed_url: str,
+    *,
+    is_script: bool = False,
+    content_type: str = "",
+    body: str | bytes | None = None,
+) -> tuple[ArtifactCandidate, ...]:
     clean = normalize_candidate_url(observed_url)
     if not clean:
         return ()
@@ -185,11 +301,19 @@ def derive_artifact_candidates(observed_url: str) -> tuple[ArtifactCandidate, ..
         directory = posixpath.dirname(directory.rstrip("/")) + "/"
     name = posixpath.basename(path)
     suffix = posixpath.splitext(name)[1].lower()
+    is_extless_script = False
     if name and not suffix and not name.startswith("."):
         result.insert(0, ArtifactCandidate(clean, "directory", clean))
-    if not name or path.endswith("/") or (not suffix and not name.startswith(".")) or suffix in (".bak", ".old", ".orig", ".swp", ".zip", ".gz", ".tgz", ".map") or name.endswith("~"):
+        if has_script_evidence(clean, is_script=is_script, content_type=content_type, body=body):
+            result.insert(0, ArtifactCandidate(clean, "resource", clean))
+            is_extless_script = True
+    if not name or path.endswith("/") or (not suffix and not name.startswith(".")) or is_backup_artifact_name(name) or suffix == ".map":
         if suffix == ".map":
             result.insert(0, ArtifactCandidate(clean, "source_map", clean))
+        elif is_backup_artifact_name(name):
+            result.insert(0, ArtifactCandidate(clean, "backup", clean))
+        elif is_extless_script:
+            result.insert(1, ArtifactCandidate(urlunsplit(parts._replace(path=path + ".map", fragment="")), "source_map", clean))
         return tuple(result)
     if suffix in (".js", ".mjs", ".cjs", ".css"):
         result.insert(0, ArtifactCandidate(clean, "resource", clean))
@@ -219,11 +343,13 @@ def control_matches(body: str, url: str, control_body: str, control_url: str) ->
     return bool(a and b) and (a == b or SequenceMatcher(None, a, b, autojunk=False).ratio() >= .9)
 
 
-def classify_backup(body: bytes, content_type: str, url: str) -> tuple[str, ...]:
+def classify_backup(body: bytes, content_type: str, url: str = "") -> tuple[str, ...]:
     if not body:
         return ()
-    if body.startswith((b"PK\x03\x04", b"\x1f\x8b")) or body[257:262] == b"ustar":
+    if has_archive_signature(body):
         return ("archive_signature",)
+    if is_archive_artifact_name(url) or any(act in content_type.lower() for act in ("application/zip", "application/x-tar", "application/gzip", "application/x-gzip")):
+        return ()
     text = body[:MAX_BODY].decode("utf-8", errors="replace")
     if re.search(r"(?i)<(?:!doctype|html|title|body)\b", text[:2000]) or "html" in content_type.lower():
         return ()
@@ -232,7 +358,7 @@ def classify_backup(body: bytes, content_type: str, url: str) -> tuple[str, ...]
         signals.append("source_code")
     if re.search(r"(?i)\b(?:CREATE TABLE|INSERT INTO|DB_PASSWORD\s*=|SECRET_KEY\s*=)|-----BEGIN [A-Z ]*PRIVATE KEY-----", text):
         signals.append("sensitive_content")
-    if len(text.strip()) > 20 and content_type and any(ct in content_type.lower() for ct in ("text/plain", "octet-stream", "javascript", "json", "xml")):
+    if is_backup_artifact_name(url) and len(text.strip()) > 20 and content_type and any(ct in content_type.lower() for ct in ("text/plain", "octet-stream", "javascript", "json", "xml")):
         signals.append("served_file")
     return tuple(signals)
 

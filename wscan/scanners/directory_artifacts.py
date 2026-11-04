@@ -10,8 +10,11 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 
 from wscan.directory_artifacts import (
-    MAX_BODY, ArtifactCandidate, classify_backup, classify_directory_listing,
-    control_matches, derive_artifact_candidates, extract_resource_urls,
+    MAX_BODY, ArtifactCandidate, bind_verification_target, classify_backup,
+    classify_directory_listing, control_matches, derive_artifact_candidates,
+    extract_resource_urls, extract_script_urls, has_archive_signature,
+    has_script_evidence, is_archive_artifact_name, is_backup_artifact_name,
+    is_truncated_script_snapshot, lookup_verification_target,
     normalize_candidate_url, parse_source_map, source_mapping_references,
 )
 from wscan.scanner_contract import (
@@ -115,8 +118,9 @@ class DirectoryArtifactsScanner(BaseScanner):
                     data = bytearray()
                     async for chunk in response.aiter_bytes():
                         data.extend(chunk)
-                        if len(data) > MAX_BODY:
-                            raise RuntimeError("artifact response exceeds byte budget")
+                        if len(data) >= MAX_BODY:
+                            data = data[:MAX_BODY]
+                            break
                     return httpx.Response(
                         response.status_code, headers=response.headers,
                         content=bytes(data), request=httpx.Request("GET", current),
@@ -187,12 +191,18 @@ class DirectoryArtifactsScanner(BaseScanner):
             if candidate not in queue:
                 queue.append(candidate)
 
-        def observe(target):
+        def observe(target, is_script=False, content_type="", body=None):
             clean = normalize_candidate_url(target)
-            if not clean or clean in observed_now:
+            if not clean:
+                return
+            cached = body if body is not None else body_cache.get(clean)
+            if clean in observed_now:
+                if is_script or content_type or (cached and has_script_evidence(clean, body=cached)):
+                    for candidate in derive_artifact_candidates(clean, is_script=is_script, content_type=content_type, body=cached):
+                        enqueue(candidate)
                 return
             observed_now.add(clean)
-            for candidate in derive_artifact_candidates(clean):
+            for candidate in derive_artifact_candidates(clean, is_script=is_script, content_type=content_type, body=cached):
                 enqueue(candidate)
 
         try:
@@ -205,8 +215,9 @@ class DirectoryArtifactsScanner(BaseScanner):
             observe(str(response.url))
             if response.status_code == 200:
                 findings.extend(await self._references(str(response.url), response.text, origin, enqueue))
+                script_urls = set(extract_script_urls(response.text, str(response.url)))
                 for target in extract_resource_urls(response.text, str(response.url)):
-                    observe(target)
+                    observe(target, is_script=target in script_urls)
             for target in sorted(getattr(self.engine, "reached_urls", None) or ()):
                 if self._allowed(target, origin):
                     observe(target)
@@ -215,16 +226,21 @@ class DirectoryArtifactsScanner(BaseScanner):
             for pair in list(getattr(network, "pairs", None) or ()):
                 request = pair.get("request") or {}
                 target = request.get("url", "")
-                if request.get("method") == "GET" and self._allowed(target, origin):
-                    observe(target)
                 response_data = pair.get("response") or {}
+                content_type = next((v for k, v in (response_data.get("headers") or {}).items() if k.lower() == "content-type"), "")
+                resp_body = response_data.get("body")
+                if resp_body and target and target not in body_cache:
+                    body_cache[target] = resp_body[:MAX_BODY]
+                is_js = has_script_evidence(target, content_type=content_type, body=resp_body)
+                if request.get("method") == "GET" and self._allowed(target, origin):
+                    observe(target, is_script=is_js, content_type=content_type, body=resp_body)
                 location = next((v for k, v in (response_data.get("headers") or {}).items() if k.lower() == "location"), "")
                 if location and self._allowed(target, origin):
                     observe(urljoin(target, location))
             for target, body in external_scripts.items():
                 if self._allowed(target, origin):
                     body_cache[target] = body[:MAX_BODY]
-                    observe(target)
+                    observe(target, is_script=True, body=body)
         except PageDocumentUnavailable:
             raise
         except Exception as exc:
@@ -248,6 +264,21 @@ class DirectoryArtifactsScanner(BaseScanner):
             try:
                 if candidate.kind == "resource" and candidate.url in body_cache:
                     body = body_cache[candidate.url]
+                    if is_truncated_script_snapshot(body):
+                        # 50KB 打ち切りスナップショットの場合は、checked にする前に完全な本文を再取得する
+                        response = await self._fetch(candidate.url, origin)
+                        self._note("executed")
+                        if response is None:
+                            self._note("skipped")
+                            self._checked.add(key)
+                            continue
+                        final = str(response.url)
+                        if response.status_code == 200:
+                            body_cache[candidate.url] = response.text
+                            body_cache[final] = response.text
+                            findings.extend(await self._references(final, response.text, origin, enqueue))
+                        self._checked.add(key)
+                        continue
                     self._note("executed")
                     self._checked.add(key)
                     findings.extend(await self._references(candidate.url, body, origin, enqueue))
@@ -261,6 +292,8 @@ class DirectoryArtifactsScanner(BaseScanner):
                 final = str(response.url)
                 if candidate.kind == "resource":
                     if response.status_code == 200:
+                        body_cache[candidate.url] = response.text
+                        body_cache[final] = response.text
                         findings.extend(await self._references(final, response.text, origin, enqueue))
                     self._checked.add(key)
                     continue
@@ -284,8 +317,9 @@ class DirectoryArtifactsScanner(BaseScanner):
                         finding = await self._record(effective, response, "directory_listing", list(observation.signals), {"family": observation.family, "entry_count": len(observation.entries)}, control is not None)
                         if finding:
                             findings.append(finding)
+                        script_urls = set(extract_script_urls(response.text, final))
                         for target in extract_resource_urls(response.text, final):
-                            observe(target)
+                            observe(target, is_script=target in script_urls)
                 elif candidate.kind == "backup":
                     signals = classify_backup(response.content, response.headers.get("content-type", ""), final)
                     if signals:
@@ -359,8 +393,7 @@ class DirectoryArtifactsScanner(BaseScanner):
             for existing in getattr(self.engine, "all_findings", []):
                 if existing.check_type == "info_disclosure" and existing.evidence_type == "info_directory_listing" and existing.url == display:
                     return None
-        self._verification_targets[(display, evidence_type)] = candidate.url
-        return await self.record_finding(
+        finding = await self.record_finding(
             url=display, field_name="(" + evidence_type + ")", payload="GET",
             evidence=f"Observed {evidence_type}: {', '.join(signals)}; re-fetch required for confirmation.",
             pair={"request": {"url": display, "method": "GET"}, "response": {"status": response.status_code, "body": "[Artifact body omitted to protect potential secrets]"}},
@@ -368,9 +401,12 @@ class DirectoryArtifactsScanner(BaseScanner):
             evidence_details={"signals": signals, "control_available": control_available, **details},
             reproduction_steps=[f"GET {display}", "Compare with a nonexistent sibling resource and re-fetch to confirm independent signals.", "Disable autoindex and remove public backup files or private source maps."],
         )
+        if finding:
+            bind_verification_target(self._verification_targets, finding, candidate.url, display, evidence_type)
+        return finding
 
     async def verify_finding(self, finding):
-        target = self._verification_targets.get((finding.url, finding.evidence_type), finding.url)
+        target = lookup_verification_target(self._verification_targets, finding, finding.url)
         if "[REDACTED]" in target or "<redacted>" in target:
             self.engine._json_probe_failed = True
             return None
