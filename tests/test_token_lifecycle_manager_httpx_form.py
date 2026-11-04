@@ -118,9 +118,13 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         m = build_token_capability_matrix()
         self.assertTrue(m.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX))
         supported = [(c, t) for c in TokenCarrier for t in TokenTransport if m.is_supported(c, t)]
-        self.assertEqual(supported, [
+        # PLAYWRIGHT と FLOW が SUPPORTED に追加されたため、6 エントリになる
+        expected = sorted(supported, key=lambda x: (x[0].value, x[1].value))
+        self.assertEqual(sorted(supported, key=lambda x: (x[0].value, x[1].value)), sorted([
             (TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX),
             (TokenCarrier.JSON, TokenTransport.HTTPX),
             (TokenCarrier.XML, TokenTransport.HTTPX),
             (TokenCarrier.HTTP_HEADER, TokenTransport.HTTPX),
-        ])
+            (TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT),
+            (TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW),
+        ], key=lambda x: (x[0].value, x[1].value)))

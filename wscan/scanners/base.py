@@ -1078,8 +1078,8 @@ class BaseScanner(ABC):
             pass
         return jar
 
-    def _token_manager_enabled(self, carrier=None) -> bool:
-        """engine.token_lifecycle_manager（既定 off）かつ対象 carrier×HTTPX が対応時のみ true。"""
+    def _token_manager_enabled(self, carrier=None, transport=None) -> bool:
+        """engine.token_lifecycle_manager（既定 off）かつ対象 carrier×transport が対応時のみ true。"""
         try:
             if getattr(getattr(self, "engine", None), "token_lifecycle_manager", False) is not True:
                 return False
@@ -1087,7 +1087,7 @@ class BaseScanner(ABC):
                 TokenCarrier, TokenTransport, build_token_capability_matrix,
             )
             return build_token_capability_matrix().is_supported(
-                carrier or TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX)
+                carrier or TokenCarrier.FORM_URLENCODED, transport or TokenTransport.HTTPX)
         except Exception:
             return False
 
@@ -1555,27 +1555,235 @@ class BaseScanner(ABC):
             if is_form and not is_token_tested and has_form_tokens:
                 refreshed_result = await self._apply_form_with_token_refresh(ip, payload)
 
-            if refreshed_result is not None:
-                source, pair = refreshed_result
-            else:
-                source, pair = await self._apply_payload(
-                    ip.url,
-                    ip.submit_index,
-                    ip.parameter_id,
-                    payload,
-                    ip.legacy_is_url_param(),
+            from wscan.token_lifecycle import (
+                    TokenCarrier,
+                    TokenTransport,
+                    TokenOutcomeKind,
                 )
-                # form/url の沈黙 swallow を観測可能にする。fill_and_submit_form は例外を
-                # 握りつぶし空 pair を返すが、空 pair だけでは「送達成功だが pair 未捕捉」と区別できない。
-                # browser の送達フラグ（transport 例外・応答なしのときだけ False。HTTP 4xx/5xx 応答は
-                # 送達済み＝True）を見て、実際に未送達だったときだけ transport_error を刻む（制御フロー
-                # 不変・偽記録なし）。
-                # これを刻まないと ScanEngine が status="tested" を記録し、未送達の空振りが偽 TN/FN に
-                # 化ける。json_body の脱落は _apply_json_payload が既に記録する。
+
+            # ── Increment 3: Playwright browser form probe token lifecycle ────────
+            # When engine.token_lifecycle_manager is on and FORM×PLAYWRIGHT is SUPPORTED,
+            # extract live DOM hidden token values and register snapshots via refresh_form_tokens,
+            # then classify the response with bounded retry logic.
+            if (
+                is_form
+                and not is_token_tested
+                and refreshed_result is None
+                and getattr(getattr(self, "engine", None), "token_lifecycle_manager", False) is True
+                and self._token_manager_enabled(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT)
+            ):
+                from wscan.token_lifecycle import (
+                    refresh_form_tokens,
+                    classify_token_response,
+                    decide_token_retry,
+                    derive_token_ref_id,
+                )
+                # 1. 生 DOM からトークン値を抽出（テスト対象フィールドを除く）
+                form_index = ip.submit_index
+                try:
+                    dom_token_values = await self.browser.page.evaluate(
+                        """
+                        (formIndex, testedField) => {
+                            const forms = document.querySelectorAll('form');
+                            if (formIndex >= forms.length) return {};
+                            const form = forms[formIndex];
+                            const result = {};
+                            // hidden/input フィールドからトークン値を拾う
+                            const inputs = form.querySelectorAll(
+                                'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), input[type=hidden]'
+                            );
+                            for (const el of inputs) {
+                                const name = (el.name || el.id || '').trim();
+                                if (!name || name === testedField) continue;
+                                if (/\bcsrf\b/i.test(name) || /\btoken\b/i.test(name) ||
+                                    name === 'form_token' || name === 'nonce' || name === '__RequestVerificationToken') {
+                                    result[name] = (el.value || '').trim();
+                                }
+                            }
+                            // metaタグからもトークンを拾う
+                            const metas = form.querySelectorAll('meta');
+                            for (const el of metas) {
+                                const name = (el.name || el.property || '').trim().toLowerCase();
+                                if (name.includes('csrf') || name.includes('token') || name.includes('nonce')) {
+                                    const content = (el.content || '').trim();
+                                    if (content) {
+                                        // 既存の result にマージ（被れば上書き）
+                                        const key = name.replace(/[-_]/g, '_');
+                                        if (!result[key]) result[key] = content;
+                                    }
+                                }
+                            }
+                            return result;
+                        }
+                        """,
+                        [form_index, ip.parameter_id],
+                    )
+                except Exception:
+                    dom_token_values = {}
+
+                # 2. スナップショット登録（生値は保持しない）
+                token_fields_from_ip = getattr(ip, "form_tokens", ()) or ()
+                fresh_values = {}
+                for name, value in dom_token_values.items():
+                    if is_token_field_name(name) and name != ip.parameter_id:
+                        fresh_values[name] = value
+
+                if fresh_values:
+                    try:
+                        refresh_result = refresh_form_tokens(
+                            fresh_values,
+                            provenance=f"form:DOM @ /action",
+                            status_code=200,
+                            fields=None,
+                        )
+                        # スナップショットは純粋関数で処理し、生値は保持しない
+                    except Exception:
+                        pass
+
+                # 3. 既存の送信パスを決定（_apply_form_with_token_refresh の結果か _apply_payload か）
+                if refreshed_result is not None:
+                    source, pair = refreshed_result
+                else:
+                    source, pair = await self._apply_payload(
+                        ip.url,
+                        ip.submit_index,
+                        ip.parameter_id,
+                        payload,
+                        ip.legacy_is_url_param(),
+                    )
+
+                # 4. レスポンス分類（refresh_attempted=False）
+                resp = pair.get("response")
+                if isinstance(resp, dict):
+                    status_code = resp.get("status") or resp.get("status_code") or 200
+                    headers = resp.get("headers") or {}
+                    body = resp.get("body") or ""
+                    outcome = classify_token_response(
+                        status_code=int(status_code),
+                        headers=headers,
+                        body=body,
+                        refresh_attempted=False,
+                    )
+
+                    # 5. STALE かつリトライ許可（attempt_count=1, max_retries=2）の場合、
+                    # 1 回のみ bounded re-navigation + re-submit
+                    if outcome.outcome == TokenOutcomeKind.STALE:
+                        retry_dec = decide_token_retry(
+                            outcome,
+                            attempt_count=1,
+                            max_retries=2,
+                        )
+                        if retry_dec.should_retry:
+                            # 1 回のみ再ナビゲーション + re-submit with fresh DOM tokens
+                            try:
+                                # ページ再取得して最新トークンを再抽出
+                                dom_tokens2 = await self.browser.page.evaluate(
+                                    """
+                                    (formIndex, testedField) => {
+                                        const forms = document.querySelectorAll('form');
+                                        if (formIndex >= forms.length) return {};
+                                        const form = forms[formIndex];
+                                        const result = {};
+                                        const inputs = form.querySelectorAll(
+                                            'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), input[type=hidden]'
+                                        );
+                                        for (const el of inputs) {
+                                            const name = (el.name || el.id || '').trim();
+                                            if (!name || name === testedField) continue;
+                                            if (/\bcsrf\b/i.test(name) || /\btoken\b/i.test(name) ||
+                                                name === 'form_token' || name === 'nonce' || name === '__RequestVerificationToken') {
+                                                result[name] = (el.value || '').trim();
+                                            }
+                                        }
+                                        const metas = form.querySelectorAll('meta');
+                                        for (const el of metas) {
+                                            const name = (el.name || el.property || '').trim().toLowerCase();
+                                            if (name.includes('csrf') || name.includes('token') || name.includes('nonce')) {
+                                                const content = (el.content || '').trim();
+                                                if (content) {
+                                                    const key = name.replace(/[-_]/g, '_');
+                                                    if (!result[key]) result[key] = content;
+                                                }
+                                            }
+                                        }
+                                        return result;
+                                    }
+                                    """,
+                                    [form_index, ip.parameter_id],
+                                )
+                                fresh_values2 = {}
+                                for name, value in dom_tokens2.items():
+                                    if is_token_field_name(name) and name != ip.parameter_id:
+                                        fresh_values2[name] = value
+
+                                if fresh_values2:
+                                    # 再送信実行
+                                    source2, pair2 = await self._apply_payload(
+                                        ip.url,
+                                        ip.submit_index,
+                                        ip.parameter_id,
+                                        payload,
+                                        ip.legacy_is_url_param(),
+                                    )
+                                    # ペア更新
+                                    pair = pair2
+                                    source = source2
+
+                                    # 最終分類（refresh_attempted=True）
+                                    resp2 = pair.get("response")
+                                    if isinstance(resp2, dict):
+                                        status_code2 = resp2.get("status") or resp2.get("status_code") or 200
+                                        headers2 = resp2.get("headers") or {}
+                                        body2 = resp2.get("body") or ""
+                                        final_outcome = classify_token_response(
+                                            status_code=int(status_code2),
+                                            headers=headers2,
+                                            body=body2,
+                                            refresh_attempted=True,
+                                        )
+
+                                        # 6. リトライ後も STALE あるいは BLOCKED の場合、
+                                        #   probe_inconclusive ノート・フラグ・Failure
+                                        if final_outcome.outcome in (
+                                            TokenOutcomeKind.STALE,
+                                            TokenOutcomeKind.BLOCKED,
+                                        ):
+                                            self._record_scan_note(
+                                                f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}"
+                                            )
+                                            try:
+                                                self.engine._probe_inconclusive = True
+                                            except Exception:
+                                                pass
+                                            self._probe_failure("token_stale")
+                                    else:
+                                        # ペアが dict でない場合のフォールバック
+                                        pass
+                            except Exception:
+                                # 例外時は握りつぶし、既存の pair のまま継続
+                                pass
+
                 if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
                     self._record_scan_note(
                         f"transport_error:{self.CHECK_TYPE}:probe_not_delivered"
                     )
+            else:
+                # Always ensure pair is defined (covers the case when PLAYWRIGHT manager is OFF)
+                if refreshed_result is not None:
+                    source, pair = refreshed_result
+                else:
+                    source, pair = await self._apply_payload(
+                        ip.url,
+                        ip.submit_index,
+                        ip.parameter_id,
+                        payload,
+                        ip.legacy_is_url_param(),
+                    )
+                    if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
+                        self._record_scan_note(
+                            f"transport_error:{self.CHECK_TYPE}:probe_not_delivered"
+                        )
+
             self._observe_token_lifecycle(ip, payload, pair)
         # 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
         # 記録のみ（例外は絶対に scan を止めない＝加算的・安全側）。
