@@ -34,6 +34,7 @@ def test_check_catalog_api_locales_and_empty_fallback(monkeypatch):
     en = client.get('/api/v1/check-catalog?lang=en').json()
     fallback = client.get('/api/v1/check-catalog?lang=fr').json()
     assert ja['lang'] == 'ja' and ja['checks']['sqli']['title']
+    assert ja['catalog_version'] == '1.0.0'
     assert en['lang'] == 'en' and en['checks']['sqli']['title'] != ja['checks']['sqli']['title']
     assert fallback['lang'] == 'ja' and fallback['checks']['sqli']['title'] == ja['checks']['sqli']['title']
     monkeypatch.setattr(check_catalog, 'list_checks', lambda lang='ja': ())

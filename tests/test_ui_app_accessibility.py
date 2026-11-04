@@ -310,7 +310,7 @@ def test_setup_check_catalog_missing_entry_and_failed_fetch_fallback(a11y_harnes
         lambda route: route.fulfill(
             status=200,
             content_type="application/json",
-            body='{"lang":"ja","checks":{"sqli":{"title":"SQL injection"}}}',
+            body='{"catalog_version":"1.0.0","lang":"ja","checks":{"sqli":{"title":"SQL injection"}}}',
         ),
     )
     try:
@@ -348,6 +348,85 @@ def test_setup_check_catalog_missing_entry_and_failed_fetch_fallback(a11y_harnes
     finally:
         failed_page.close()
 
+    invalid_page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+    invalid_page.route(
+        "**/api/v1/check-catalog*",
+        lambda route: route.fulfill(status=200, content_type="application/json", body="invalid json"),
+    )
+    try:
+        invalid_page.goto(f"{a11y_harness.server_url}/app#/setup")
+        invalid_page.wait_for_selector("#setupChecks input[data-check='sqli']", state="attached")
+        invalid_page.locator(".setup-tab").filter(has_text="検査項目").click()
+        invalid_page.locator('#setupChecks [data-check-id="sqli"] .setup-check-info').click()
+        assert invalid_page.get_by_role("dialog").locator("p").inner_text() == "説明準備中"
+    finally:
+        invalid_page.close()
+
+
+@pytest.mark.parametrize("catalog_version", ["1.0.0", "missing", None, "2.0.0"])
+def test_shared_check_catalog_version_boundary_in_setup_and_findings(
+    a11y_harness: UIHarness, catalog_version: str | None,
+):
+    require_browser()
+    expected = {}
+
+    def catalog_response(route):
+        response = route.fetch()
+        data = response.json()
+        expected.update(data)
+        if catalog_version == "missing":
+            data.pop("catalog_version", None)
+        elif catalog_version != "1.0.0":
+            data["catalog_version"] = catalog_version
+        route.fulfill(response=response, json=data)
+
+    page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+    page.route("**/api/v1/check-catalog*", catalog_response)
+    try:
+        page.goto(f"{a11y_harness.server_url}/app#/setup")
+        page.wait_for_selector("#setupChecks input[data-check='sqli']", state="attached")
+        page.locator(".setup-tab").filter(has_text="検査項目").click()
+        checkbox = page.locator('#setupChecks input[data-check="sqli"]')
+        checked = checkbox.is_checked()
+        page.locator('#setupChecks [data-check-id="sqli"] .setup-check-info').click()
+        dialog = page.get_by_role("dialog")
+        if catalog_version == "1.0.0":
+            assert dialog.locator("p").nth(0).inner_text() == expected["checks"]["sqli"]["what_is_tested"]
+        else:
+            assert dialog.locator("p").inner_text() == "説明準備中"
+        assert checkbox.is_checked() is checked
+    finally:
+        page.close()
+
+    findings_page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+    findings_page.route("**/api/v1/check-catalog*", catalog_response)
+
+    def use_known_finding_check(route):
+        response = route.fetch()
+        data = response.json()
+        if data.get("findings"):
+            data["findings"][0]["check_type"] = "sqli"
+        route.fulfill(response=response, json=data)
+
+    findings_page.route("**/api/v1/scans/*/findings", use_known_finding_check)
+    try:
+        findings_page.goto(f"{a11y_harness.server_url}/app#/findings?scan=20261026_100000")
+        findings_page.wait_for_selector(".findings-evidence-wrap")
+        evidence = findings_page.locator(".findings-evidence-wrap").inner_text()
+        badges = findings_page.locator(".findings-badges-row").inner_text()
+        confidence = findings_page.locator(".findings-meta-table-wrap tr").filter(has_text="Confidence").inner_text()
+        findings_page.locator(".findings-meta-table-wrap tr").filter(has_text="Check Type").locator(".setup-check-info").click()
+        dialog = findings_page.get_by_role("dialog")
+        if catalog_version == "1.0.0":
+            assert dialog.locator("p").nth(0).inner_text() == expected["checks"]["sqli"]["what_is_tested"]
+        else:
+            assert dialog.locator("p").inner_text() == "説明準備中"
+        assert findings_page.locator(".findings-evidence-wrap").inner_text() == evidence
+        assert findings_page.locator(".findings-meta-table-wrap tr").filter(has_text="Confidence").inner_text() == confidence
+        assert findings_page.locator(".findings-badges-row").inner_text() == badges
+    finally:
+        findings_page.close()
+
 
 def test_findings_check_help_fallback_and_preserves_evidence(a11y_harness: UIHarness):
     require_browser()
@@ -380,3 +459,16 @@ def test_findings_check_help_fallback_and_preserves_evidence(a11y_harness: UIHar
         assert info.evaluate("el => el === document.activeElement")
     finally:
         page.close()
+
+    invalid_page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+    invalid_page.route(
+        "**/api/v1/check-catalog*",
+        lambda route: route.fulfill(status=200, content_type="application/json", body="invalid json"),
+    )
+    try:
+        invalid_page.goto(f"{a11y_harness.server_url}/app#/findings?scan=20261026_100000")
+        invalid_page.wait_for_selector(".findings-evidence-wrap")
+        invalid_page.locator(".findings-meta-table-wrap tr").filter(has_text="Check Type").locator(".setup-check-info").click()
+        assert invalid_page.get_by_role("dialog").locator("p").inner_text() == "説明準備中"
+    finally:
+        invalid_page.close()
