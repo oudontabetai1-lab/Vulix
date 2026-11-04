@@ -993,13 +993,13 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
         DeclaredStatus.PLANNED, "Planned: FormData multipart upload via SPA API client"
     ),
     (TokenCarrier.JSON, TokenTransport.SPA_API): (
-        DeclaredStatus.PLANNED, "Planned: Primary REST/JSON payload format with CSRF header"
+        DeclaredStatus.SUPPORTED, "Supported: Pre-send JSON token refresh in shared SPA API transport"
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.SPA_API): (
         DeclaredStatus.PLANNED, "Planned: Primary GraphQL API endpoint format"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API): (
-        DeclaredStatus.PLANNED, "Planned: Meta-tag / cookie extracted header (X-XSRF-TOKEN)"
+        DeclaredStatus.SUPPORTED, "Supported: Pre-send recognized CSRF header refresh in shared SPA API transport"
     ),
     (TokenCarrier.COOKIE, TokenTransport.SPA_API): (
         DeclaredStatus.PLANNED, "Planned: SameSite cookie credential inclusion"
