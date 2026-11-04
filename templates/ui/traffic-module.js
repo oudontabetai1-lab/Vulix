@@ -994,6 +994,7 @@
     };
   }
 
+  // Public module API surface (CommonJS / browser global), NOT a data export/download action
   const exportObj = {
     escapeHtml: escapeHtml,
     redactDisplayUrl: redactDisplayUrl,

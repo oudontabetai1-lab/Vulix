@@ -94,6 +94,40 @@ def test_traffic_module_pure_action_resolution():
     assert "not available in this version" in actions["send_to_proxy"]["reason"]
 
 
+def test_traffic_module_no_data_export_api():
+    """Verify traffic module API exposes only expected view/filter helpers and NO data export/download functions."""
+    script = f"""
+    const trafficMod = require('{TRAFFIC_MODULE_JS}');
+    const keys = Object.keys(trafficMod);
+    const functionKeys = keys.filter(k => typeof trafficMod[k] === 'function');
+    console.log(JSON.stringify({{ keys, functionKeys }}));
+    """
+    res = _run_node(script)
+    expected_exports = {
+        "escapeHtml",
+        "redactDisplayUrl",
+        "redactDisplayText",
+        "formatBytes",
+        "buildTrafficHash",
+        "buildCrawlLink",
+        "buildFindingsLink",
+        "formatFindingsCount",
+        "resolveTrafficActions",
+        "filterTraffic",
+        "computeTrafficCounts",
+        "renderTrafficView",
+        "createTrafficModule",
+    }
+    assert set(res["keys"]) == expected_exports
+
+    # Confirm absence of any data export/download functions or action emission
+    export_or_download_keys = [
+        k for k in res["keys"]
+        if any(term in k.lower() for term in ("download", "exportdata", "dumptraffic", "emittraffic", "savetraffic"))
+    ]
+    assert export_or_download_keys == []
+
+
 def test_traffic_module_pure_redaction_and_links():
     """Verify display redaction masks secrets and cross-links build valid hashes."""
     script = f"""
@@ -414,6 +448,12 @@ def test_browser_traffic_view_mount_list_and_gating(ui_harness: UIHarness):
     # Dummy secret typed into search must NOT appear in URL, hash, or localStorage
     dummy_search_secret = "SENTINEL_DUMMY_SEARCH_SECRET_99999"
     page.locator(".traffic-search-input").fill(dummy_search_secret)
+    # Check that search filter does not leak dummy secret into list or detail DOM text
+    list_pane_text = page.locator(".traffic-list-pane").inner_text()
+    detail_pane_text = page.locator(".traffic-detail-pane").inner_text()
+    assert dummy_search_secret not in list_pane_text
+    assert dummy_search_secret not in detail_pane_text
+    assert dummy_search_secret not in page.locator("#trafficSurface").inner_text()
     assert dummy_search_secret not in page.url
     assert dummy_search_secret not in page.evaluate("() => location.hash")
     storage_data_search = page.evaluate("() => JSON.stringify(window.localStorage)")
