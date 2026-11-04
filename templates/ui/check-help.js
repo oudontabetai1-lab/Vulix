@@ -4,6 +4,62 @@
   const cache = {};
   let nextId = 0;
 
+  function cleanText(text) {
+    if (typeof text !== 'string') return '';
+    return text.trim();
+  }
+
+  function normalizeReferences(rawRefs) {
+    if (!Array.isArray(rawRefs)) return [];
+    return rawRefs.filter(ref => {
+      if (typeof ref !== 'object' || ref === null) return false;
+      if (typeof ref.id !== 'string' || !ref.id.trim()) return false;
+      if (typeof ref.kind !== 'string' || !ref.kind.trim()) return false;
+      if (typeof ref.url !== 'string' || !ref.url.trim()) return false;
+      try {
+        const url = new URL(ref.url.trim());
+        if (url.protocol !== 'https:') return false;
+      } catch {
+        return false;
+      }
+      return true;
+    }).map(ref => ({
+      kind: cleanText(ref.kind),
+      id: cleanText(ref.id),
+      url: cleanText(ref.url),
+    }));
+  }
+
+  function emptyEntry(checkId) {
+    return {
+      title: checkId,
+      short_description: 'Description not available yet',
+      what_is_tested: '',
+      risk_if_vulnerable: '',
+      verification_overview: '',
+      remediation_overview: '',
+      limitations: '',
+      references: [],
+    };
+  }
+
+  function normalizeEntry(checkId, raw) {
+    if (!raw) return emptyEntry(checkId);
+
+    const references = normalizeReferences(raw.references);
+
+    return {
+      title: cleanText(raw.title || checkId),
+      short_description: cleanText(raw.short_description),
+      what_is_tested: cleanText(raw.what_is_tested),
+      risk_if_vulnerable: cleanText(raw.risk_if_vulnerable),
+      verification_overview: cleanText(raw.verification_overview),
+      remediation_overview: cleanText(raw.remediation_overview),
+      limitations: cleanText(raw.limitations),
+      references,
+    };
+  }
+
   async function loadCatalog(api, lang) {
     const language = lang === 'en' ? 'en' : 'ja';
     if (!cache[language]) cache[language] = (async () => {
@@ -22,19 +78,21 @@
   function createButton(doc, host, checkId, catalog, lang) {
     const language = lang === 'en' ? 'en' : 'ja';
     const entry = catalog && catalog[checkId];
+    const normalized = entry ? normalizeEntry(checkId, entry) : emptyEntry(checkId);
     const fallback = language === 'en' ? 'Description not available yet' : '説明準備中';
-    const title = entry && entry.title ? entry.title : checkId;
+    const title = normalized.title;
+
     const info = doc.createElement('button');
     info.type = 'button';
     info.className = 'setup-check-info';
     info.textContent = 'i';
     info.setAttribute('aria-label', `${title} ${language === 'en' ? 'description' : 'の説明'}`);
-    info.title = entry && entry.short_description ? entry.short_description : fallback;
+    info.title = normalized.short_description ? normalized.short_description : fallback;
     info.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
       const old = host.querySelector('.setup-check-popover');
-      if (old) { if (old.closeHelp) old.closeHelp(); old.remove(); }
+      if (old) { if (old.closeHelp) old.closeHelp(); old.remove() }
       const popover = doc.createElement('section');
       popover.className = 'setup-check-popover';
       popover.setAttribute('role', 'dialog');
@@ -43,6 +101,7 @@
       heading.id = `check-help-${++nextId}`;
       popover.setAttribute('aria-labelledby', heading.id);
       popover.appendChild(heading);
+
       const fields = [
         ['what_is_tested', '確認する内容', 'What is tested'],
         ['risk_if_vulnerable', '脆弱な場合のリスク', 'Risk if vulnerable'],
@@ -54,13 +113,48 @@
         const label = doc.createElement('h4');
         label.textContent = language === 'en' ? en : ja;
         const detail = doc.createElement('p');
-        detail.textContent = entry[key] || fallback;
+        detail.textContent = normalized[key] || fallback;
         popover.append(label, detail);
       });
+
       if (!entry) {
         const detail = doc.createElement('p');
         detail.textContent = fallback;
         popover.appendChild(detail);
+      }
+
+      // References section
+      if (entry && normalized.references && normalized.references.length > 0) {
+        const refSection = doc.createElement('section');
+        refSection.setAttribute('data-check-help-section', 'references');
+        const refHeadingLang = language === 'en' ? 'References' : '参考情報';
+        const refHeading = doc.createElement('h4');
+        refHeading.textContent = refHeadingLang;
+        refSection.appendChild(refHeading);
+
+        const refList = doc.createElement('ul');
+        refList.setAttribute('data-check-help-references', 'true');
+
+        normalized.references.forEach(ref => {
+          const listItem = doc.createElement('li');
+          const link = doc.createElement('a');
+          link.className = 'check-help-reference-link';
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+
+          // Build textContent: [id] title (or title if id is empty or already in title)
+          const id = ref.id;
+          const linkText = id && !title.includes(id) ? `${id} ${title}` : title;
+
+          link.textContent = linkText;
+          link.href = ref.url;
+
+          listItem.appendChild(link);
+          refList.appendChild(listItem);
+        });
+
+        refSection.appendChild(refList);
+        popover.appendChild(refSection);
       }
       const close = doc.createElement('button');
       close.type = 'button';
