@@ -12,6 +12,7 @@ httpx.ASGITransport を用いて以下の仕様を満たすことを検証する
 from __future__ import annotations
 
 import unittest
+import tempfile
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -20,6 +21,8 @@ import pytest
 from tests.fixtures.large_vuln_app import create_app
 from wscan.injection_point import InjectionPoint
 from wscan.scanners.base import BaseScanner
+from wscan.scanners.mail_header import MailHeaderInjectionScanner
+from wscan.request_logger import RequestLogger
 from wscan.token_lifecycle import derive_token_ref_id, extract_form_tokens
 
 
@@ -148,12 +151,103 @@ class TokenLifecycleFixturesTests(unittest.IsolatedAsyncioTestCase):
             form_tokens=("csrf_token",),
         )
         payload = "user@example.com\r\nCc: attacker@evil.example.com"
+        scanner = MailHeaderInjectionScanner(self.engine)
+        self.engine.sleep_factor = 0
+        findings = await scanner.scan_injection_point(ip, {"name": "email", "value": ""})
         source, pair = await self.scanner._apply_ip(ip, payload)
 
         # トークン検証は 200 で正常通過するが、CRLF がサニタイズされインジェクション行は存在しない
         self.assertEqual(pair["response"]["status"], 200)
         self.assertNotIn("\nCc: attacker@evil.example.com", source)
         self.assertIn("Sending confirmation...", source)
+        self.assertEqual(findings, [])
+
+    async def test_refresh_preserves_original_request_and_only_changes_token(self):
+        from fastapi import FastAPI, Form
+        from fastapi.responses import HTMLResponse, PlainTextResponse
+
+        app = FastAPI()
+        received = {}
+
+        @app.get("/page")
+        async def page():
+            return HTMLResponse('<form method="get" action="/new"><input name="email" value="fresh"><input name="other" value="changed"><input name="csrf_token" value="fresh-token"></form>')
+
+        @app.post("/original")
+        async def original(email: str = Form(""), other: str = Form(""), csrf_token: str = Form("")):
+            received.update(email=email, other=other, csrf_token=csrf_token)
+            return PlainTextResponse("accepted")
+
+        engine = _TestEngine(app, base_url="http://request-test")
+        scanner = _TestFormScanner(engine)
+        ip = InjectionPoint.for_form("http://request-test/page", "email", method="POST", action="/original",
+            form_tokens=("csrf_token",), form_fields=(("email", "original"), ("other", "kept"), ("csrf_token", "stale-token")))
+        refreshed = await scanner._apply_form_with_token_refresh(ip, "payload")
+        self.assertIsNotNone(refreshed)
+        source, pair = refreshed
+        self.assertEqual(received, {"email": "payload", "other": "kept", "csrf_token": "fresh-token"}, pair)
+        self.assertEqual(pair["request"]["url"], "http://request-test/original")
+        self.assertEqual(pair["request"]["method"], "POST")
+
+    async def test_stale_retry_refresh_failure_records_note(self):
+        from fastapi import FastAPI, Form
+        from fastapi.responses import HTMLResponse, PlainTextResponse
+
+        app = FastAPI()
+        gets = 0
+
+        @app.get("/form", response_class=HTMLResponse)
+        async def get_form():
+            nonlocal gets
+            gets += 1
+            token = '<input name="csrf_token" value="fresh">' if gets == 1 else '<input name="other" value="missing">'
+            return HTMLResponse(f'<form method="post">{token}<input name="email" value="x"></form>')
+
+        @app.post("/form")
+        async def post_form(email: str = Form(""), csrf_token: str = Form("")):
+            return PlainTextResponse("CSRF token mismatch", status_code=403)
+
+        engine = _TestEngine(app, base_url="http://retry-fail")
+        scanner = _TestFormScanner(engine)
+        ip = InjectionPoint.for_form("http://retry-fail/form", "email", form_tokens=("csrf_token",),
+            form_fields=(("email", "original"), ("csrf_token", "old")))
+        await scanner._apply_ip(ip, "payload")
+        self.assertIn("token_lifecycle:refresh_unavailable:mail_header", engine.wave_errors)
+
+    async def test_probe_send_exception_propagates(self):
+        ip = InjectionPoint.for_form("http://large-fixture.test/csrf-contact", "email", form_tokens=("csrf_token",))
+        with patch.object(self.scanner, "_record_probe_status", side_effect=RuntimeError("send failed")):
+            with self.assertRaisesRegex(RuntimeError, "send failed"):
+                await self.scanner._apply_ip(ip, "payload")
+
+    async def test_raw_tokens_absent_from_request_logger_files(self):
+        from fastapi import FastAPI, Form
+        from fastapi.responses import HTMLResponse, PlainTextResponse
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            app = FastAPI()
+            @app.get("/form", response_class=HTMLResponse)
+            async def form():
+                return HTMLResponse('<form method="post"><input name="csrf_token" value="fresh-token-raw-secret"><input name="email" value="original"></form>')
+            @app.post("/form")
+            async def submit(email: str = Form(""), csrf_token: str = Form("")):
+                return PlainTextResponse("accepted")
+            self.engine = _TestEngine(app, base_url="http://logger-test")
+            self.scanner = _TestFormScanner(self.engine)
+            logger = RequestLogger(directory)
+            self.engine.request_logger = logger
+            ip = InjectionPoint.for_form("http://logger-test/form", "email", form_tokens=("csrf_token",),
+                form_fields=(("email", "original"), ("csrf_token", "stale-token-raw-secret")))
+            source, pair = await self.scanner._apply_ip(ip, "logged payload")
+            raw_fresh = "fresh-token-raw-secret"
+            logger.log_payload("email", "logged payload", "mail_header", ip.url)
+            logger.log_probe(role="attack", pair=pair, check="mail_header", field="email", payload="logged payload", url=ip.url, sent=True)
+            files = [path for path in Path(directory).rglob("*") if path.is_file()]
+            contents = "".join(path.read_text(errors="replace") for path in files)
+            for secret in (raw_fresh, "stale-token-raw-secret"):
+                self.assertNotIn(secret, contents)
+                self.assertNotIn(secret, str(self.engine.wave_errors))
+                self.assertNotIn(secret, str(self.scanner.findings))
 
     async def test_c_static_token_form_works_unchanged(self):
         """(c) 固定トークンフォーム（static-token）でも正常に動作すること。"""

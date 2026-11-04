@@ -1095,7 +1095,7 @@ class BaseScanner(ABC):
         4. 生トークン値はノート、ログ、証拠、所見、チェックポイントに出現させず、
            derive_token_ref_id で秘匿する。
         """
-        from urllib.parse import urljoin, urlencode
+        from urllib.parse import urlencode
         from wscan.token_lifecycle import (
             TokenOutcomeKind,
             classify_token_response,
@@ -1163,6 +1163,12 @@ class BaseScanner(ABC):
 
         # ── フォームページの事前取得 (GET) ──
         known_tokens = getattr(ip, "form_tokens", ())
+        from urllib.parse import urljoin
+        action = urljoin(target_url, ip.action or target_url)
+        method = (ip.method or "POST").upper()
+        original_fields = dict(getattr(ip, "form_fields", ()) or ())
+        original_fields[ip.parameter_id] = payload
+        sending_probe = False
         try:
             async with httpx.AsyncClient(**client_kwargs) as client:
                 get_resp = await client.get(target_url)
@@ -1170,7 +1176,7 @@ class BaseScanner(ABC):
                     self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
                     return None
 
-                # 取得ページの HTML から純粋関数でフォームを解析
+                # 取得ページから値だけを読む。action/method/他フィールドは初回収集値を保つ。
                 form_info = extract_form_details(get_resp.text, form_index=form_index)
                 if not form_info:
                     if known_tokens:
@@ -1178,22 +1184,23 @@ class BaseScanner(ABC):
                     return None
 
                 # 当該フォームにトークンフィールドが存在するか確認（検査対象フィールドは除く）
-                token_fields = {
-                    k: v for k, v in form_info.get("token_fields", {}).items()
-                    if k != ip.parameter_id
-                }
+                token_fields = {k: form_info.get("token_fields", {})[k]
+                                for k in known_tokens
+                                if k in form_info.get("token_fields", {}) and k != ip.parameter_id}
+                if known_tokens and len(token_fields) != len([k for k in known_tokens if k != ip.parameter_id]):
+                    self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+                    return None
                 if not token_fields and not known_tokens:
                     # トークンフィールドを持たないフォームはリフレッシュ対象外（既存経路へ）
                     return None
 
-                # 送信パラメータの準備: トークンフィールドのみ最新値に置換し、他フィールド・アクション・メソッド・ペイロードは維持
-                action = urljoin(str(get_resp.url), form_info.get("action") or target_url)
-                method = (form_info.get("method") or ip.method or "POST").upper()
-                fields = dict(form_info.get("fields", {}))
+                fields = dict(getattr(ip, "form_fields", ()) and original_fields or form_info.get("fields", {}))
                 fields[ip.parameter_id] = payload
+                fields.update(token_fields)
 
                 # 送信実行 (初回試行)
                 req_time = time.time()
+                sending_probe = True
                 if method == "GET":
                     resp = await client.get(action, params=fields)
                 else:
@@ -1216,22 +1223,31 @@ class BaseScanner(ABC):
                     )
                     if retry_dec.should_retry:
                         try:
-                            # 1度だけ再取得して再送
+                            # 1度だけ再取得し、既知のトークン名の値だけ採用する。
                             get_resp2 = await client.get(target_url)
-                            if get_resp2.status_code < 400:
-                                form_info2 = extract_form_details(get_resp2.text, form_index=form_index)
-                                if form_info2:
-                                    fields2 = dict(form_info2.get("fields", {}))
-                                    fields2[ip.parameter_id] = payload
-                                    req_time = time.time()
-                                    if method == "GET":
-                                        resp = await client.get(action, params=fields2)
-                                    else:
-                                        resp = await client.post(action, data=fields2)
-                                    resp_time = time.time()
-                                    self._record_probe_status(resp)
                         except Exception:
-                            pass
+                            self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+                            get_resp2 = None
+                        if get_resp2 is None or get_resp2.status_code >= 400:
+                            self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+                        else:
+                            try:
+                                form_info2 = extract_form_details(get_resp2.text, form_index=form_index)
+                            except Exception:
+                                form_info2 = None
+                            fresh = (form_info2 or {}).get("token_fields", {})
+                            if not form_info2 or any(k not in fresh for k in token_fields):
+                                self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+                            else:
+                                fields2 = dict(fields)
+                                fields2.update({k: fresh[k] for k in token_fields})
+                                req_time = time.time()
+                                if method == "GET":
+                                    resp = await client.get(action, params=fields2)
+                                else:
+                                    resp = await client.post(action, data=fields2)
+                                resp_time = time.time()
+                                self._record_probe_status(resp)
 
                 # 生トークン値を秘匿した安全な post_data を作成
                 final_fields = fields2 if "fields2" in locals() else fields
@@ -1265,6 +1281,8 @@ class BaseScanner(ABC):
 
                 return resp.text, pair
         except Exception:
+            if sending_probe:
+                raise
             if known_tokens:
                 self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
             return None
