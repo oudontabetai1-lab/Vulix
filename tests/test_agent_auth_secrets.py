@@ -108,6 +108,128 @@ def test_auth_context_hash_uses_resolved_openai_compatible_endpoint(monkeypatch)
     assert a != b
 
 
+def test_auth_context_hash_includes_normalized_proxy_without_credentials():
+    # プロキシ設定の有無・エンドポイント変更を resume 同一性に反映し、パスワードなどの資格情報は含めない。
+    hash_no_proxy = AgentBrowserScanner("https://app.example.test")._auth_context_hash()
+    hash_proxy = AgentBrowserScanner(
+        "https://app.example.test", proxy="http://127.0.0.1:8080"
+    )._auth_context_hash()
+    hash_auth_proxy = AgentBrowserScanner(
+        "https://app.example.test", proxy="http://user:secret-pass@127.0.0.1:8080"
+    )._auth_context_hash()
+    hash_other_creds = AgentBrowserScanner(
+        "https://app.example.test", proxy="http://admin:different-pass@127.0.0.1:8080"
+    )._auth_context_hash()
+    hash_diff_port = AgentBrowserScanner(
+        "https://app.example.test", proxy="http://127.0.0.1:9090"
+    )._auth_context_hash()
+
+    # プロキシ有無で hash が異なる
+    assert hash_no_proxy != hash_proxy
+    # 異なるプロキシエンドポイントで hash が異なる
+    assert hash_proxy != hash_diff_port
+    # 資格情報のみが異なる同一エンドポイントは同一の hash（資格情報は hash に含めない）
+    assert hash_proxy == hash_auth_proxy == hash_other_creds
+    # パスワードが hash 文字列に漏洩しない
+    assert "secret-pass" not in hash_auth_proxy
+    assert "user" not in hash_auth_proxy
+
+
+def test_agent_resume_safe_twins_proxy_identity(tmp_path):
+    # safe twins: no-proxy resume, same-proxy resume, changed-proxy resume
+    from wscan.agent_harness import AgentHarness, AgentRunSpec
+
+    def make_scanner(proxy=""):
+        return AgentBrowserScanner("https://app.example.test", proxy=proxy)
+
+    def make_spec(scanner):
+        return AgentRunSpec(
+            "agent",
+            "https://app.example.test",
+            (),
+            (),
+            (),
+            (),
+            ("xss",),
+            "none",
+            "m",
+            5,
+            auth_context_hash=scanner._auth_context_hash(),
+            proxy=scanner.proxy,
+        )
+
+    scanner_none = make_scanner("")
+    spec_none = make_spec(scanner_none)
+
+    scanner_proxy_a = make_scanner("http://user:secret@127.0.0.1:8080")
+    spec_proxy_a = make_spec(scanner_proxy_a)
+
+    scanner_proxy_b = make_scanner("http://127.0.0.1:9090")
+    spec_proxy_b = make_spec(scanner_proxy_b)
+
+    # AgentRunSpec の proxy は資格情報が除外され正規化される
+    assert spec_proxy_a.proxy == "http://127.0.0.1:8080"
+    assert "secret" not in spec_proxy_a.proxy
+    assert "user" not in spec_proxy_a.proxy
+
+    # Safe Twin 1: no-proxy 初回実行 -> no-proxy での再開は成功
+    out_none = tmp_path / "run_no_proxy"
+    AgentHarness(out_none, spec_none, auth_secret_material=scanner_none._auth_secret_material())
+    AgentHarness(out_none, spec_none, resume=True, auth_secret_material=scanner_none._auth_secret_material())
+
+    # Safe Twin 2: proxy 設定での初回実行 -> 同一 proxy（資格情報変更含む）での再開は成功
+    out_proxy = tmp_path / "run_proxy"
+    harness_proxy = AgentHarness(
+        out_proxy, spec_proxy_a, auth_secret_material=scanner_proxy_a._auth_secret_material()
+    )
+    harness_proxy._write_manifest(coverage_complete=False)
+
+    # 永続化された state/manifest にプロキシパスワードが漏洩しない
+    persisted_state = (out_proxy / "agent_state.json").read_text(encoding="utf-8")
+    assert "secret" not in persisted_state
+    assert (out_proxy / "agent_manifest.json").exists()
+    persisted_manifest = (out_proxy / "agent_manifest.json").read_text(encoding="utf-8")
+    assert "secret" not in persisted_manifest
+
+    # 同一エンドポイント（資格情報なし表記含む）での再開
+    scanner_proxy_same_ep = make_scanner("http://127.0.0.1:8080")
+    spec_proxy_same = make_spec(scanner_proxy_same_ep)
+    AgentHarness(
+        out_proxy,
+        spec_proxy_same,
+        resume=True,
+        auth_secret_material=scanner_proxy_same_ep._auth_secret_material(),
+    )
+
+    # Safe Twin 3: proxy 変更または proxy 欠落での再開は拒否（spec mismatch）
+    # (a) proxy 有り run を proxy 無しで再開
+    with pytest.raises(ValueError, match="spec mismatch"):
+        AgentHarness(
+            out_proxy,
+            spec_none,
+            resume=True,
+            auth_secret_material=scanner_none._auth_secret_material(),
+        )
+
+    # (b) proxy 有り run を別エンドポイント proxy で再開
+    with pytest.raises(ValueError, match="spec mismatch"):
+        AgentHarness(
+            out_proxy,
+            spec_proxy_b,
+            resume=True,
+            auth_secret_material=scanner_proxy_b._auth_secret_material(),
+        )
+
+    # (c) proxy 無し run を proxy 有りで再開
+    with pytest.raises(ValueError, match="spec mismatch"):
+        AgentHarness(
+            out_none,
+            spec_proxy_a,
+            resume=True,
+            auth_secret_material=scanner_proxy_a._auth_secret_material(),
+        )
+
+
 @pytest.mark.asyncio
 async def test_engine_redacts_reflected_login_secrets_from_artifacts(tmp_path):
     from wscan.agent_engine import AgentEngine

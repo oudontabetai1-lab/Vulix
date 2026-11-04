@@ -434,3 +434,52 @@ def test_route_aware_identity_normalizes_url_payload_in_fragment_query():
     # routing 値（単一スラッシュ始まり）は保持。
     assert route_aware_identity("http://h/app#/r?next=/home") != \
         route_aware_identity("http://h/app#/r?next=/admin")
+
+
+def test_normalize_proxy_endpoint():
+    from wscan.url_normalize import normalize_proxy_endpoint
+    import pytest
+
+    assert normalize_proxy_endpoint("") == ""
+    assert normalize_proxy_endpoint("   ") == ""
+    assert normalize_proxy_endpoint("127.0.0.1:8080") == "http://127.0.0.1:8080"
+    assert normalize_proxy_endpoint("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
+    assert normalize_proxy_endpoint("http://127.0.0.1:8080/") == "http://127.0.0.1:8080"
+    assert (
+        normalize_proxy_endpoint("http://user:secret@127.0.0.1:8080")
+        == "http://127.0.0.1:8080"
+    )
+    assert (
+        normalize_proxy_endpoint("HTTP://USER:PASS@PROXY.EXAMPLE.COM:3128/")
+        == "http://proxy.example.com:3128"
+    )
+    assert (
+        normalize_proxy_endpoint("socks5://user:pass@10.0.0.1:1080")
+        == "socks5://10.0.0.1:1080"
+    )
+    with pytest.raises(ValueError):
+        normalize_proxy_endpoint("invalid host with spaces")
+
+
+def test_extract_proxy_credentials_and_has_proxy_auth():
+    from types import SimpleNamespace
+    from wscan.url_normalize import extract_proxy_credentials, has_proxy_auth
+
+    # proxy 文字列からの抽出
+    assert extract_proxy_credentials("http://u:p@127.0.0.1:8080") == ("u", "p")
+    assert has_proxy_auth("http://u:p@127.0.0.1:8080") is True
+
+    assert extract_proxy_credentials("http://127.0.0.1:8080") == (None, None)
+    assert has_proxy_auth("http://127.0.0.1:8080") is False
+
+    assert extract_proxy_credentials("") == (None, None)
+    assert has_proxy_auth("") is False
+
+    # session.browser_profile.proxy からの抽出
+    session = SimpleNamespace(
+        browser_profile=SimpleNamespace(
+            proxy=SimpleNamespace(username="session_u", password="session_p")
+        )
+    )
+    assert extract_proxy_credentials("", session) == ("session_u", "session_p")
+    assert has_proxy_auth("", session) is True

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Iterable
 
 from wscan.request_logger import _KEYS_ALT, redact_text, redact_url
+from wscan.url_normalize import normalize_proxy_endpoint
 
 
 STATE_FILENAME = "agent_state.json"
@@ -132,10 +133,15 @@ class AgentRunSpec:
     model: str
     max_steps: int
     auth_context_hash: str = ""
+    proxy: str = ""
 
     def __post_init__(self) -> None:
         if self.max_steps < 1:
             raise ValueError("max_steps must be at least 1")
+        if self.proxy:
+            object.__setattr__(
+                self, "proxy", normalize_proxy_endpoint(self.proxy)
+            )
 
     def to_dict(self) -> dict:
         return asdict(self)
