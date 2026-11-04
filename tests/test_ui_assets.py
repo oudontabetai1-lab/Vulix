@@ -217,6 +217,16 @@ EXPECTED_COMPONENT_SELECTORS = [
     ".findings-detail-th",
     ".findings-chip-clear",
     ".setup-search-hidden",
+    ".setup-check-item",
+    ".setup-check-item > label",
+    ".setup-check-info, .setup-check-popover-close",
+    ".setup-check-info",
+    ".setup-check-info:focus-visible, .setup-check-popover-close:focus-visible",
+    ".setup-check-popover",
+    ".setup-check-popover h3",
+    ".setup-check-popover h4",
+    ".setup-check-popover p",
+    ".setup-check-popover-close",
 ]
 
 

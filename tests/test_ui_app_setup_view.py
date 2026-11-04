@@ -18,10 +18,35 @@ import subprocess
 import pytest
 
 from wscan.settings_schema import FIELDS, PROFILES, SCHEMA_VERSION, build_settings_schema
+from fastapi.testclient import TestClient
+import wscan.check_catalog as check_catalog
+from wscan.monitor import MonitorServer
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_MODULE_JS = ROOT / "templates" / "ui" / "setup-module.js"
 DASHBOARD_HTML = ROOT / "templates" / "dashboard.html"
+
+
+def test_check_catalog_api_locales_and_empty_fallback(monkeypatch):
+    monkeypatch.setattr(check_catalog, "_loaded", False)
+    client = TestClient(MonitorServer().app)
+    ja = client.get('/api/v1/check-catalog?lang=ja').json()
+    en = client.get('/api/v1/check-catalog?lang=en').json()
+    fallback = client.get('/api/v1/check-catalog?lang=fr').json()
+    assert ja['lang'] == 'ja' and ja['checks']['sqli']['title']
+    assert en['lang'] == 'en' and en['checks']['sqli']['title'] != ja['checks']['sqli']['title']
+    assert fallback['lang'] == 'ja' and fallback['checks']['sqli']['title'] == ja['checks']['sqli']['title']
+    monkeypatch.setattr(check_catalog, 'list_checks', lambda lang='ja': ())
+    empty = client.get('/api/v1/check-catalog').json()
+    assert empty['checks'] == {}
+
+
+def test_check_info_source_uses_text_nodes_and_has_unknown_fallback():
+    source = SETUP_MODULE_JS.read_text(encoding='utf-8')
+    assert 'setup-check-popover' in source
+    assert '説明準備中' in source and 'Description not available yet' in source
+    assert "const fallback = lang === 'en' ? 'Description not available yet' : '説明準備中'" in source
+    assert 'innerHTML' not in source
 
 
 def _run_node(script: str) -> dict:

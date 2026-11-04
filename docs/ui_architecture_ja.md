@@ -190,6 +190,7 @@ UI スクリプト（`templates/ui/*.js`）から実際に呼び出されるサ�
 | `DELETE` | `/api/v1/schedules/{id}` | `summary-modules.js` | 定期実行スケジュールを削除。 |
 | `GET` | `/api/capability-manifest`<br>`/api/v1/capability-manifest` | `capability-reader.js`, `agent-skills-module.js` | スキャナおよび Agent の静的機能宣言マニフェストを返却（後述）。 |
 | `GET` | `/api/v1/settings/schema` | `setup-module.js`, `settings-module.js` | 設定フォーム構築のための宣言的スキーマ（フィールド定義、型、制約、プロファイル）。 |
+| `GET` | `/api/v1/check-catalog?lang=ja|en` | `setup-module.js` | 共有検査項目カタログから説明、制約、参考情報を返却。 |
 | `GET` | `/api/v1/settings/effective` | `setup-module.js`, `settings-module.js` | フォーム初期値（serve の `default_scan_cfg`）に選択プロファイルを適用した値と差分（秘密値は除外、宣言上の解決）。 |
 | `POST` | `/api/v1/preflight` | `setup-module.js` | DNS 解決、HTTP GET 到達性（直接およびプロキシ経由）、TLS 証明書検証の可否、Playwright Chromium の起動可否、出力ディレクトリの書き込み可否、ログインページへの非破壊 GET（認証情報は送信せず、スコープ内のみ）、認証準備状態、指定した checks の前提条件、Agent 用バックエンドの import 可否、ライブチャネル、OOB 設定の有無を診断（`wscan/preflight.py:351` `run_preflight`）。検査用ペイロードは送信しませんが、到達性確認とログインページ確認のために HTTP GET を送ります。 |
 | `GET` | `/api/v1/settings` | `settings-module.js` | Webhook 通知設定を取得（URL は伏字マスク化）。 |
