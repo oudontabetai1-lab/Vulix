@@ -1236,12 +1236,14 @@ class BaseScanner(ABC):
             try:
                 outcome = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
                 if outcome.outcome == TokenOutcomeKind.STALE:
-                    refresh_reason = "stale_response"
+                    refresh_reason = "stale"
                     retry_body, retry_headers, refreshed = await self._refresh_httpx_token(client, url, body, headers, carrier)
                     if refreshed:
                         request_body, request_headers = retry_body, retry_headers
                         response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
                         attempt_count += 1
+                    else:
+                        refresh_reason = "refresh_failed"
                     final = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
                     if final.outcome == TokenOutcomeKind.STALE:
                         self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
@@ -1263,10 +1265,12 @@ class BaseScanner(ABC):
                 final_outcome = classify_token_response(
                     status_code=response.status_code, headers=dict(response.headers), body=response.text)
                 self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
-                    None, None, self.CHECK_TYPE, carrier_enum, transport, attempt_count,
-                    refresh_reason, response.status_code, final_outcome.outcome.value))
-            except Exception:
-                pass
+                    probe_attempt_id=None, evidence_id=None, check=self.CHECK_TYPE,
+                    carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
+                    refresh_reason=refresh_reason, final_status=response.status_code,
+                    final_lifecycle_status=final_outcome.outcome.value))
+            except Exception as exc:
+                self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
         return response, request_body, request_headers
 
     @staticmethod
