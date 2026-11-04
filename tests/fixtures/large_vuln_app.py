@@ -87,6 +87,12 @@ def create_app(page_count: int = 48) -> FastAPI:
     app.state.csrf_nonces = {}
     app.state.csrf_nonces_safe = {}
     app.state.csrf_stuck_expected = {}
+    app.state.json_csrf_expected = {}
+    app.state.json_csrf_last_value = ""
+    app.state.json_csrf_requests = 0
+    app.state.json_csrf_received = []
+    app.state.json_csrf_force_stale = False
+    app.state.json_csrf_page_error = False
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
@@ -110,6 +116,39 @@ def create_app(page_count: int = 48) -> FastAPI:
             <ul>{links}</ul>
             """,
         )
+
+    @app.get("/token-json", response_class=HTMLResponse)
+    async def token_json_page(request: Request):
+        if app.state.json_csrf_page_error:
+            return PlainTextResponse("temporarily unavailable", status_code=503)
+        sid = request.cookies.get("session_id") or secrets.token_hex(16)
+        token = f"json_{secrets.token_hex(8)}"
+        app.state.json_csrf_last_value = token
+        app.state.json_csrf_expected[sid] = token
+        response = HTMLResponse(f'<meta name="csrf-token" content="{token}">')
+        response.set_cookie("session_id", sid)
+        return response
+
+    async def token_json_post(request: Request, safe: bool):
+        data = await request.json()
+        app.state.json_csrf_received.append(((await request.body()).decode(), request.headers.get("x-csrf-token")))
+        sid = request.cookies.get("session_id")
+        app.state.json_csrf_requests += 1
+        if app.state.json_csrf_force_stale or not sid or data.get("csrf_token") != app.state.json_csrf_expected.get(sid) or request.headers.get("x-csrf-token") != app.state.json_csrf_expected.get(sid):
+            return PlainTextResponse("CSRF token mismatch", status_code=419)
+        app.state.json_csrf_expected[sid] = "consumed"
+        value = str(data.get("email", ""))
+        if safe:
+            value = value.replace("\r", "").replace("\n", "")
+        return PlainTextResponse(f"accepted:{value}")
+
+    @app.post("/token-json", response_class=PlainTextResponse)
+    async def token_json_vulnerable(request: Request):
+        return await token_json_post(request, False)
+
+    @app.post("/token-json-safe", response_class=PlainTextResponse)
+    async def token_json_safe(request: Request):
+        return await token_json_post(request, True)
 
     @app.get("/catalog", response_class=HTMLResponse)
     async def catalog():

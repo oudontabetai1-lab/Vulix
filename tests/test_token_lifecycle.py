@@ -553,9 +553,9 @@ def test_capability_matrix_construction_and_invariants():
     """機能マトリクスの構築と各トランスポート・キャリアの宣言ステータスを検証。"""
     matrix = build_token_capability_matrix()
 
-    # 1. 宣言総数 = 6 キャリア × 7 トランスポート = 42
-    assert len(matrix.entries) == 42
-    assert len(ALL_TOKEN_CARRIERS) == 6
+    # 1. 宣言総数 = 7 キャリア × 7 トランスポート = 49
+    assert len(matrix.entries) == 49
+    assert len(ALL_TOKEN_CARRIERS) == 7
     assert len(ALL_TOKEN_TRANSPORTS) == 7
 
     # 2. 不変条件チェック: 宣言 != 実行保証
@@ -571,13 +571,15 @@ def test_capability_matrix_construction_and_invariants():
     assert matrix.is_supported("form", "playwright") is False
     assert matrix.is_planned("form", "playwright") is True
 
-    # HTTPX: form が SUPPORTED（共有 HTTPX フォーム経路での pre-send 再取得）、json, header が PLANNED
+    # HTTPX: form, json, XML, header の共有送信経路で pre-send 再取得に対応
     assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
     assert matrix.is_supported("form", "httpx") is True
     assert matrix.is_planned("form", "httpx") is False
-    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.HTTPX) == DeclaredStatus.PLANNED
-    assert matrix.is_supported("json", "httpx") is False
-    assert matrix.is_planned("json", "httpx") is True
+    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
+    assert matrix.is_supported("json", "httpx") is True
+    assert matrix.is_planned("json", "httpx") is False
+    assert matrix.get_status(TokenCarrier.HTTP_HEADER, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
+    assert matrix.get_status(TokenCarrier.XML, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
 
     # SPA API: form-urlencoded は UNSUPPORTED、JSON は PLANNED
     assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.SPA_API) == DeclaredStatus.UNSUPPORTED
@@ -607,13 +609,16 @@ def test_capability_matrix_construction_and_invariants():
     assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is False
     assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is True
 
-    # 誠実なステータス宣言: 本スライスで統合完了した (FORM_URLENCODED, HTTPX) のみ SUPPORTED（1件）であること
+    # SUPPORTED は実装済みの HTTPX carrier のみに宣言
     supported_entries = [e for e in matrix.entries if e.status == DeclaredStatus.SUPPORTED]
-    assert len(supported_entries) == 1
-    assert supported_entries[0].carrier == TokenCarrier.FORM_URLENCODED
-    assert supported_entries[0].transport == TokenTransport.HTTPX
+    assert {(e.carrier, e.transport) for e in supported_entries} == {
+        (TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX),
+        (TokenCarrier.JSON, TokenTransport.HTTPX),
+        (TokenCarrier.XML, TokenTransport.HTTPX),
+        (TokenCarrier.HTTP_HEADER, TokenTransport.HTTPX),
+    }
     other_entries = [e for e in matrix.entries if e.status != DeclaredStatus.SUPPORTED]
-    assert len(other_entries) == 41
+    assert len(other_entries) == 45
     assert all(e.status in (DeclaredStatus.PLANNED, DeclaredStatus.UNSUPPORTED, DeclaredStatus.BLOCKED) for e in other_entries)
 
 
@@ -663,7 +668,7 @@ def test_capability_matrix_overrides_and_serialization():
     assert d["schema_version"] == "1.0.0"
     assert d["declaration_only"] is True
     assert d["execution_coverage_claimed"] is False
-    assert len(d["matrix"]) == 42
+    assert len(d["matrix"]) == 49
     # JSON シリアライズ可能であること
     serialized = json.dumps(d)
     assert "har_replay::form-urlencoded" in serialized

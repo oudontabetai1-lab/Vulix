@@ -105,6 +105,7 @@ class TokenCarrier(str, Enum):
     FORM_URLENCODED = "form-urlencoded"
     MULTIPART = "multipart"
     JSON = "json"
+    XML = "xml"
     GRAPHQL = "graphql"
     HTTP_HEADER = "header"
     COOKIE = "cookie"
@@ -895,6 +896,8 @@ def normalize_carrier(val: TokenCarrier | str) -> TokenCarrier:
         return TokenCarrier.MULTIPART
     if s in ("json", "application-json"):
         return TokenCarrier.JSON
+    if s in ("xml", "application-xml", "text-xml"):
+        return TokenCarrier.XML
     if s in ("graphql", "gql"):
         return TokenCarrier.GRAPHQL
     if s in ("header", "http-header", "http_header"):
@@ -967,13 +970,16 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
         DeclaredStatus.PLANNED, "Planned: Multipart body generation with extracted token part"
     ),
     (TokenCarrier.JSON, TokenTransport.HTTPX): (
-        DeclaredStatus.PLANNED, "Planned: JSON body payload token injection"
+        DeclaredStatus.SUPPORTED, "Supported: Pre-send JSON token refresh in shared HTTPX transport"
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.HTTPX): (
         DeclaredStatus.PLANNED, "Planned: POST /graphql with token headers/variables"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.HTTPX): (
-        DeclaredStatus.PLANNED, "Planned: Direct custom header setting (e.g. X-CSRF-Token)"
+        DeclaredStatus.SUPPORTED, "Supported: Pre-send recognized CSRF header refresh in shared HTTPX transport"
+    ),
+    (TokenCarrier.XML, TokenTransport.HTTPX): (
+        DeclaredStatus.SUPPORTED, "Supported: Pre-send XML token refresh in shared HTTPX transport"
     ),
     (TokenCarrier.COOKIE, TokenTransport.HTTPX): (
         DeclaredStatus.PLANNED, "Planned: Client cookie jar propagation"
@@ -1150,6 +1156,9 @@ def build_token_capability_matrix(
                 reason = f"Custom override: {status.value}"
             elif pair in _DEFAULT_DECLARATIONS:
                 status, reason = _DEFAULT_DECLARATIONS[pair]
+            elif c == TokenCarrier.XML:
+                status = DeclaredStatus.BLOCKED if t == TokenTransport.HAR_REPLAY else DeclaredStatus.PLANNED
+                reason = "Planned: XML request body token refresh" if status == DeclaredStatus.PLANNED else "Recorded XML tokens may be stale"
             else:
                 status = DeclaredStatus.UNSUPPORTED
                 reason = "Not declared in default matrix"
