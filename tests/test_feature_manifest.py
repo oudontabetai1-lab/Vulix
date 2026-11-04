@@ -27,7 +27,7 @@ def import_inventory(sources, stdlib_names):
                 name = name.split('.')[0]
                 if name in stdlib_names:
                     standard.add(name)
-                elif name != 'wscan':
+                elif name not in ('wscan', 'vulix', 'main'):
                     external.setdefault(name, set()).add(path)
     return standard, external
 
@@ -76,8 +76,16 @@ def feature_dependencies(features, name, trail=()):
 
 def test_manifest_covers_imports_requirements_and_features():
     manifest = yaml.safe_load((ROOT / 'config/feature_manifest.yaml').read_text())
+    source_paths = list((ROOT / 'wscan').rglob('*.py'))
+    for entry in ('main.py', 'launcher.py'):
+        p = ROOT / entry
+        if p.exists():
+            source_paths.append(p)
+    vulix_dir = ROOT / 'vulix'
+    if vulix_dir.exists():
+        source_paths.extend(vulix_dir.rglob('*.py'))
     sources = {p.relative_to(ROOT).as_posix(): p.read_text(encoding='utf-8')
-               for p in (ROOT / 'wscan').rglob('*.py')}
+               for p in source_paths}
     standard, external = import_inventory(sources, sys.stdlib_module_names)
     assert manifest['schema_version'] == 1
     assert set(manifest['stdlib_imports']) == standard
@@ -203,3 +211,20 @@ def test_packaging_extras_cover_manifest_requirements():
         declared = {name for name, entry in manifest['packages'].items()
                     if filename in entry['requirements']}
         assert declared == requirement_names((ROOT / filename).read_text()), extra
+
+
+def test_default_registry_scanners_declared_in_base_requirements():
+    manifest = yaml.safe_load((ROOT / 'config/feature_manifest.yaml').read_text())
+    base_requirements = requirement_names((ROOT / 'requirements.txt').read_text())
+    optional_files = set(manifest['scope']['requirements_files']) - {'requirements.txt'}
+    optional_requirements = set().union(*(requirement_names((ROOT / f).read_text()) for f in optional_files))
+    features = manifest['features']
+    for name, feature in features.items():
+        if not name.startswith('scanner.') or feature.get('install_commands'):
+            continue
+        packages = set(feature.get('required_pip', [])) | set(feature.get('optional_pip', []))
+        for pkg in packages:
+            assert not (pkg in optional_requirements and pkg not in base_requirements), (
+                f"Scanner '{name}' uses package '{pkg}' declared only in optional requirements "
+                f"and not in requirements.txt"
+            )
