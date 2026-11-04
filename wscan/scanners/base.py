@@ -712,6 +712,76 @@ class BaseScanner(ABC):
                 return
         errors.append(note)
 
+    def _observe_token_lifecycle(
+        self,
+        ip: InjectionPoint,
+        payload,
+        pair: dict,
+    ) -> None:
+        """anti-CSRF / nonce トークン応答の非ブロッキング観測（加算的）。
+
+        フォーム注入においてトークン失効・拒否が疑われる応答（STALE / BLOCKED / INCONCLUSIVE）
+        を受信した場合、clean negative として黙殺されるのを防ぐため、
+        波状エラー（wave_errors）へ scan note を記録する。
+        脆弱性判定・チェックポイント完了判定・ペイロード生成には一切関与しない。
+        """
+        try:
+            # フォーム送信（form carrier）以外は対象外
+            if getattr(ip, "location", "") != "form" and getattr(ip, "carrier", None) != Carrier.FORM:
+                if hasattr(ip, "legacy_is_url_param") and ip.legacy_is_url_param():
+                    return
+                if getattr(ip, "location", "") not in ("form", ""):
+                    return
+
+            field_name = getattr(ip, "parameter_id", "") or ""
+            from wscan.token_lifecycle import (
+                TokenOutcomeKind,
+                classify_token_response,
+                derive_token_ref_id,
+                is_probe_conclusive,
+                is_token_field_name,
+            )
+
+            if not is_token_field_name(field_name):
+                return
+
+            if not isinstance(pair, dict):
+                return
+            resp = pair.get("response")
+            if not isinstance(resp, dict):
+                return
+
+            status_code = resp.get("status")
+            if status_code is None:
+                status_code = resp.get("status_code")
+            if status_code is None:
+                return
+
+            headers = resp.get("headers")
+            if not isinstance(headers, dict):
+                headers = dict(headers) if headers else {}
+            body = resp.get("body", "")
+
+            outcome = classify_token_response(
+                status_code=int(status_code),
+                headers=headers,
+                body=body,
+            )
+
+            # 正常受理（OK）または確定プローブは観測ノート不要
+            if is_probe_conclusive(outcome) and outcome.outcome != TokenOutcomeKind.STALE:
+                return
+
+            # 生トークン値は一切含めず、不可逆な参照IDとメタデータのみ記録
+            token_ref = derive_token_ref_id(str(payload)) if payload is not None else "tok_ref_empty"
+            note = (
+                f"token_lifecycle:{outcome.outcome.value}:{self.CHECK_TYPE}"
+                f":{field_name}:{outcome.reason_code}:{token_ref}"
+            )
+            self._record_scan_note(note)
+        except Exception:
+            pass
+
     def _begin_evolution_observation(self):
         return _CURRENT_EVOLUTION_OBSERVATION.set(None)
 
@@ -1042,6 +1112,7 @@ class BaseScanner(ABC):
                 self._record_scan_note(
                     f"transport_error:{self.CHECK_TYPE}:probe_not_delivered"
                 )
+            self._observe_token_lifecycle(ip, payload, pair)
         # 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
         # 記録のみ（例外は絶対に scan を止めない＝加算的・安全側）。
         self._record_attempt(ip, payload, source, pair)

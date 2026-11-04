@@ -407,6 +407,51 @@ def create_token_snapshot(
     )
 
 
+# Anti-CSRF / Nonce トークンフィールド名の判定セット（純粋定義）
+TOKEN_FIELD_NAMES: frozenset[str] = frozenset({
+    "csrf",
+    "_csrf",
+    "csrf_token",
+    "csrftoken",
+    "csrfmiddlewaretoken",
+    "xsrf",
+    "_xsrf",
+    "xsrf_token",
+    "xsrftoken",
+    "anti_csrf",
+    "anti_csrf_token",
+    "authenticity_token",
+    "verification_token",
+    "requestverificationtoken",
+    "__requestverificationtoken",
+    "_wpnonce",
+    "nonce",
+    "_nonce",
+    "form_token",
+    "formtoken",
+    "security_token",
+    "sec_token",
+    "requesttoken",
+    "request_token",
+    "_token",
+    "token",
+    "x_csrf_token",
+    "x_xsrf_token",
+})
+
+
+def is_token_field_name(name: str | None) -> bool:
+    """フィールド名が anti-CSRF または nonce トークンであるかを純粋判定する。
+
+    通常のユーザー入力フィールド（username, search, email, q 等）を誤認しないよう、
+    ハイフン・空白・アンダースコアを正規化した完全一致で検証する。
+    """
+    if not name or not isinstance(name, str):
+        return False
+    norm = name.strip().lower().replace("-", "_").replace(" ", "_")
+    return norm in TOKEN_FIELD_NAMES
+
+
 # ── 5. レスポンス分類（Outcome Classification Pure Function） ────────────
 
 # 明示的な CSRF トークン不一致・失効シグナル
