@@ -17,6 +17,7 @@ import sys
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # Ensure the wscan package is importable
 sys.path.insert(0, str(Path(__file__).parent))
@@ -1917,14 +1918,32 @@ def _effective_open_report(args) -> bool:
     return True
 
 
-def get_dashboard_url(port: int, scan_id: str | None = None) -> str:
-    """Return the dashboard URL for the given port and optional scan_id.
+def get_dashboard_url(
+    port: int,
+    scan_id: str | None = None,
+    view: str | None = None,
+    monitor: Any = None,
+) -> str:
+    """Return the dashboard URL for the given port, optional scan_id / monitor, and view.
 
-    When scan_id is provided, deep-links straight to the live Monitor view of
-    that scan (#/monitor?scan=<scan_id>); otherwise returns the root /app shell.
+    When scan_id is provided (or monitor has a non-empty live scan identity),
+    deep-links straight to the live Monitor view of that scan
+    (#/monitor?scan=<scan_id>).
+    When view is 'monitor' without a live scan ID (e.g. custom output directory
+    or identity unset), opens the live Monitor view without a scan ID
+    (#/monitor). Otherwise returns the root /app shell.
     """
-    if scan_id:
-        return f"http://localhost:{port}/app#/monitor?scan={scan_id}"
+    if not scan_id and monitor is not None:
+        scan_id = (
+            getattr(monitor, "current_scan_id", "")
+            or getattr(monitor, "api_scan_id", "")
+            or ""
+        )
+    clean_scan_id = (scan_id or "").strip()
+    if clean_scan_id:
+        return f"http://localhost:{port}/app#/monitor?scan={clean_scan_id}"
+    if view == "monitor":
+        return f"http://localhost:{port}/app#/monitor"
     return f"http://localhost:{port}/app"
 
 
@@ -2199,8 +2218,11 @@ async def run_agent(args):
                 resume=getattr(args, "resume", False),
                 proxy=getattr(args, "proxy", "") or "",
             )
-            scan_id = getattr(getattr(engine, "output_dir", None), "name", "")
-            dashboard_url = get_dashboard_url(args.port, scan_id)
+            dashboard_url = get_dashboard_url(
+                args.port,
+                monitor=getattr(engine, "monitor", None),
+                view="monitor",
+            )
             console.print(
                 f"\n[cyan]Monitoring dashboard:[/cyan] "
                 f"[underline]{dashboard_url}[/underline]"
@@ -2864,8 +2886,11 @@ async def run_scan(args):
 
         try:
             engine = ScanEngine(**_engine_kwargs(monitor))
-            scan_id = getattr(getattr(engine, "output_dir", None), "name", "")
-            dashboard_url = get_dashboard_url(args.port, scan_id)
+            dashboard_url = get_dashboard_url(
+                args.port,
+                monitor=getattr(engine, "monitor", None),
+                view="monitor",
+            )
             console.print(
                 f"\n[cyan]Monitoring dashboard:[/cyan] "
                 f"[underline]{dashboard_url}[/underline]"

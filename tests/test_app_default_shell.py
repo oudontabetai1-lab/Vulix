@@ -184,6 +184,20 @@ class TestServeOutputAndDefaults:
             main.get_dashboard_url(8765, "agent_20261104_100000")
             == "http://localhost:8765/app#/monitor?scan=agent_20261104_100000"
         )
+        assert main.get_dashboard_url(8765, view="monitor") == "http://localhost:8765/app#/monitor"
+        assert main.get_dashboard_url(8765, "", view="monitor") == "http://localhost:8765/app#/monitor"
+
+        dummy_monitor_with_id = Namespace(current_scan_id="20261104_100000", api_scan_id="20261104_100000")
+        assert (
+            main.get_dashboard_url(8765, monitor=dummy_monitor_with_id, view="monitor")
+            == "http://localhost:8765/app#/monitor?scan=20261104_100000"
+        )
+
+        dummy_monitor_without_id = Namespace(current_scan_id="", api_scan_id="")
+        assert (
+            main.get_dashboard_url(8765, monitor=dummy_monitor_without_id, view="monitor")
+            == "http://localhost:8765/app#/monitor"
+        )
 
     def test_serve_source_code_points_to_app(self):
         source = Path("main.py").read_text(encoding="utf-8")
@@ -230,7 +244,7 @@ class TestServeOutputAndDefaults:
         assert "http://127.0.0.1:8765/app" in panel_text
         assert "http://localhost:8765/app" in panel_text
 
-    def test_scan_printed_url_and_browser_open(self, monkeypatch, tmp_path):
+    def test_scan_printed_url_and_browser_open_default_and_custom(self, monkeypatch, tmp_path):
         captured_prints = []
         opened_urls = []
 
@@ -262,15 +276,31 @@ class TestServeOutputAndDefaults:
 
         monkeypatch.setattr(ScanEngine, "run", dummy_engine_run)
 
-        args = main.parse_args(["scan", "https://example.test", "--port", "8765", "--output", str(tmp_path / "scan_out")])
-        asyncio.run(main.run_scan(args))
+        # 1. Default output: URL carries scan ID from live monitor and deep links
+        args_default = main.parse_args(["scan", "https://example.test", "--port", "8765"])
+        asyncio.run(main.run_scan(args_default))
+        all_prints_default = "\n".join(captured_prints)
+        assert "http://localhost:8765/app#/monitor?scan=" in all_prints_default
+        assert len(opened_urls) == 1
+        assert opened_urls[0].startswith("http://localhost:8765/app#/monitor?scan=")
+        default_scan_id = opened_urls[0].split("scan=")[1]
+        assert len(default_scan_id) > 0
 
-        all_prints = "\n".join(captured_prints)
-        expected_url = "http://localhost:8765/app#/monitor?scan=scan_out"
-        assert expected_url in all_prints, f"Expected {expected_url} in console output: {all_prints}"
-        assert opened_urls == [expected_url], f"Expected webbrowser.open({expected_url}), got: {opened_urls}"
+        # 2. Custom output directory: opens live Monitor view without scan ID;
+        # never puts the custom directory name in the URL
+        captured_prints.clear()
+        opened_urls.clear()
+        custom_dir = tmp_path / "custom_sensitive_scan_out"
+        args_custom = main.parse_args(["scan", "https://example.test", "--port", "8765", "--output", str(custom_dir)])
+        asyncio.run(main.run_scan(args_custom))
+        all_prints_custom = "\n".join(captured_prints)
+        expected_url = "http://localhost:8765/app#/monitor"
+        assert expected_url in all_prints_custom
+        assert opened_urls == [expected_url]
+        assert "custom_sensitive_scan_out" not in opened_urls[0]
+        assert "custom_sensitive_scan_out" not in all_prints_custom.split("Monitoring dashboard:")[1].splitlines()[0]
 
-    def test_agent_printed_url_and_browser_open(self, monkeypatch, tmp_path):
+    def test_agent_printed_url_and_browser_open_default_and_custom(self, monkeypatch, tmp_path):
         captured_prints = []
         opened_urls = []
 
@@ -303,15 +333,29 @@ class TestServeOutputAndDefaults:
 
         monkeypatch.setattr(AgentEngine, "run", dummy_agent_run)
 
-        args = main.parse_args(["agent", "https://example.test", "--port", "8765", "--llm", "ollama", "--output", str(tmp_path / "agent_out")])
-        asyncio.run(main.run_agent(args))
+        # 1. Default output: URL carries agent scan ID from live monitor
+        args_default = main.parse_args(["agent", "https://example.test", "--port", "8765", "--llm", "ollama"])
+        asyncio.run(main.run_agent(args_default))
+        all_prints_default = "\n".join(captured_prints)
+        assert "http://localhost:8765/app#/monitor?scan=agent_" in all_prints_default
+        assert len(opened_urls) == 1
+        assert opened_urls[0].startswith("http://localhost:8765/app#/monitor?scan=agent_")
 
-        all_prints = "\n".join(captured_prints)
-        expected_url = "http://localhost:8765/app#/monitor?scan=agent_out"
-        assert expected_url in all_prints, f"Expected {expected_url} in console output: {all_prints}"
-        assert opened_urls == [expected_url], f"Expected webbrowser.open({expected_url}), got: {opened_urls}"
+        # 2. Custom output directory: opens live Monitor view without scan ID;
+        # never puts the custom directory name in the URL
+        captured_prints.clear()
+        opened_urls.clear()
+        custom_dir = tmp_path / "custom_sensitive_agent_out"
+        args_custom = main.parse_args(["agent", "https://example.test", "--port", "8765", "--llm", "ollama", "--output", str(custom_dir)])
+        asyncio.run(main.run_agent(args_custom))
+        all_prints_custom = "\n".join(captured_prints)
+        expected_url = "http://localhost:8765/app#/monitor"
+        assert expected_url in all_prints_custom
+        assert opened_urls == [expected_url]
+        assert "custom_sensitive_agent_out" not in opened_urls[0]
+        assert "custom_sensitive_agent_out" not in all_prints_custom.split("Monitoring dashboard:")[1].splitlines()[0]
 
-    def test_no_monitor_mode_does_not_open_browser_or_print_dashboard(self, monkeypatch):
+    def test_no_monitor_and_batch_modes_do_not_open_browser(self, monkeypatch, tmp_path):
         captured_prints = []
         opened_urls = []
 
@@ -329,6 +373,7 @@ class TestServeOutputAndDefaults:
         from wscan.engine import ScanEngine
         from wscan.agent_engine import AgentEngine
         from wscan.llm_agent_browser import AgentScanResult
+        from wscan.batch_runner import BatchResult
 
         async def dummy_engine_run(self):
             return
@@ -351,6 +396,74 @@ class TestServeOutputAndDefaults:
         asyncio.run(main.run_agent(args_agent))
         assert len(opened_urls) == 0, f"webbrowser.open should not be called in agent --no-monitor mode: {opened_urls}"
         assert "Monitoring dashboard:" not in "\n".join(captured_prints)
+
+        # 3. batch mode
+        captured_prints.clear()
+        dummy_targets = tmp_path / "targets.yaml"
+        dummy_targets.write_text("targets:\n  - url: https://example.test\n", encoding="utf-8")
+        args_batch = main.parse_args(["batch", str(dummy_targets)])
+
+        async def dummy_batch_run(self):
+            self.results = []
+            self.output_base.mkdir(parents=True, exist_ok=True)
+            return self.results
+
+        monkeypatch.setattr("wscan.batch_runner.BatchRunner.run", dummy_batch_run)
+        asyncio.run(main.run_batch(args_batch))
+        assert len(opened_urls) == 0, f"webbrowser.open should not be called in batch mode: {opened_urls}"
+        assert "Monitoring dashboard:" not in "\n".join(captured_prints)
+
+    def test_app_browser_monitor_mounts_default_and_custom_output_urls(self, ui_harness: UIHarness):
+        """Browser test verifying that default output URL (with scan ID) and custom
+        output URL (without scan ID) both properly mount the live Monitor view,
+        and that custom output never leaks the directory name into the URL."""
+        ui_harness.seed_representative_scans()
+        page = ui_harness.new_page()
+
+        # 1. Custom output directory URL without scan ID:
+        # mounts and follows the live Monitor view directly, no directory name in URL
+        custom_output_url = f"{ui_harness.server_url}/app#/monitor"
+        page.goto(custom_output_url, wait_until="domcontentloaded")
+        page.wait_for_function("""() => {
+            const host = document.querySelector('#monitorModule');
+            return host && !host.hidden && host.shadowRoot?.querySelector('#viewLiveMonitor');
+        }""")
+        assert page.url.endswith("#/monitor")
+        assert "scan=" not in page.url
+        assert not page.locator("#message").is_visible()
+
+        # 2. Default output with scan ID:
+        # when the live scan context matches the scan ID, the live Monitor view mounts
+        default_scan_id = "20261026_100000"
+        default_url = f"{ui_harness.server_url}/app#/monitor?scan={default_scan_id}"
+        page.goto(default_url, wait_until="domcontentloaded")
+        # Ensure frame WS/state is ready before delivering matching active scan event
+        page.wait_for_function("""() => {
+            const w = document.querySelector('#monitorFrame')?.contentWindow;
+            return w?._eventStream?.connected
+              && w.eval("typeof state.serverInstanceId === 'string' && state.serverInstanceId.length > 0");
+        }""")
+        event_js = (
+            "const ev={type:'scan_started',server_id:state.serverInstanceId,"
+            f"run_id:'run-default',scan_id:'{default_scan_id}',sequence:1,"
+            "backend_version:_eventStream.backendVersion(),"
+            "data:{url:'https://safe.example.test',checks:['xss']}};"
+            "state.ws.onmessage({data:JSON.stringify(ev)})"
+        )
+        page.evaluate(f"() => document.querySelector('#monitorFrame').contentWindow.eval({event_js!r})")
+        page.wait_for_function("""() => {
+            const host = document.querySelector('#monitorModule');
+            return host && !host.hidden && host.shadowRoot?.querySelector('#viewLiveMonitor');
+        }""")
+        assert page.url.endswith(f"#/monitor?scan={default_scan_id}")
+        assert not page.locator("#message").is_visible()
+
+        # 3. Confirm that an arbitrary custom directory name in the URL would be rejected
+        page.goto(f"{ui_harness.server_url}/app#/monitor?scan=custom_sensitive_dir", wait_until="domcontentloaded")
+        page.wait_for_selector("#message", state="visible")
+        assert page.locator("#message").is_visible()
+        assert "見つかりません" in page.locator("#message").inner_text()
+        ui_harness.assert_no_errors(page)
 
 
 class TestLegacyPagesLinkToApp:

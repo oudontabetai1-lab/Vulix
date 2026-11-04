@@ -1193,10 +1193,14 @@ class ScanEngine:
                 self.output_dir.resolve().relative_to(OUTPUT_BASE.resolve())
                 self.monitor.current_scan_id = self.output_dir.name
                 self.monitor.api_scan_id = self.output_dir.name
-            except ValueError:
+            except (ValueError, OSError):
                 self.monitor.current_scan_id = ""
-            except Exception:
-                pass
+                self.monitor.api_scan_id = ""
+            except Exception as exc:
+                self.monitor.current_scan_id = ""
+                self.monitor.api_scan_id = ""
+                self.wave_errors.append(f"monitor_scan_id: {type(exc).__name__}: {exc}")
+                console.print(f"[yellow]Warning: Could not bind monitor scan id: {exc}[/yellow]")
 
         # Payloads
         default_payloads_path = CONFIG_DIR / "default_payloads.yaml"

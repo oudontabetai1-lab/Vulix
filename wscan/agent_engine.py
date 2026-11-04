@@ -203,10 +203,13 @@ class AgentEngine:
                 self.output_dir.resolve().relative_to(OUTPUT_BASE.resolve())
                 self.monitor.current_scan_id = self.output_dir.name
                 self.monitor.api_scan_id = self.output_dir.name
-            except ValueError:
+            except (ValueError, OSError):
                 self.monitor.current_scan_id = ""
-            except Exception:
-                pass
+                self.monitor.api_scan_id = ""
+            except Exception as exc:
+                self.monitor.current_scan_id = ""
+                self.monitor.api_scan_id = ""
+                console.print(f"[yellow]Warning: Could not bind monitor scan id: {exc}[/yellow]")
 
     # ------------------------------------------------------------------
     # Public entry point
