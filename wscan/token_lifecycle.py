@@ -20,19 +20,13 @@
    HTTP 403 / 419 / 422 などのステータスコード単体では STALE と断定せず、レスポンス本文や
    ヘッダの明示的シグナルがない限り INCONCLUSIVE とする。
 
-【後続スライスでの統合予定インベントリ】
-現在、`wscan.scanners.mail_header` は独自にワンタイム CSRF/nonce の毎回再抽出
-（refresh）を実施している。
-後続のスライスにおいて、以下の既存パスへ本ライフサイクル契約を段階的に統合する:
-- Playwright: DOM ナビゲーションおよびフォーム・meta タグからのトークン自動抽出・再注入
-- HTTPX: 直接 HTTP 検査におけるトークン再取得・ヘッダ/Cookie 反映
-- SPA API: X-XSRF-TOKEN / JSON パスへのトークン反映およびセッション維持
-- HAR replay: 記録済み静的トークンの stale 検知と実行時置換
-- Flow: 複数ステップ遷移シナリオでのトークン抽出・連鎖伝播
-- Agent: 自律ブラウジングエージェントでのトークン認識と更新
-- Hybrid: Agent 探索結果から決定論的スキャナへのトークン引き継ぎ
-
-※ 本スライスは純粋な契約定義と単体テストのみであり、上記既存ファイルは変更しない。
+【統合状況】
+opt-in フラグの下で、HTTPX の form / JSON・XML・header、Playwright の form と FlowRunner、
+SPA API の JSON・header は token manager に接続済み。HAR replay、Agent、Hybrid、multipart、
+cookie は未接続（宣言上の能力と実行時の接続は別）。
+flow_runner.py のページ全体 DOM 抽出と base.py の browser manager 経路、および
+mail_header.py のフォーム範囲・リクエストごとの抽出は意図して分離する。selector、key の大文字小文字、
+テスト済みフィールドの除外、抽出範囲の意味が異なり、統合すると検出結果が変わる。
 """
 from __future__ import annotations
 
@@ -55,6 +49,8 @@ TOKEN_LIFECYCLE_DISCLAIMER: str = (
 
 SCHEMA_VERSION: str = "1.0.0"
 CONTRACT_KIND: str = "token_lifecycle_contract"
+
+
 
 
 # ── 2. 列挙型（Enums） ────────────────────────────────────────────────────

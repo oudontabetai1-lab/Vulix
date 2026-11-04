@@ -6022,7 +6022,7 @@ class ScanEngine:
                 _flow_scope_ok = lambda u: (
                     self._is_access_allowed_url(u) and not self._is_url_excluded(u)
                 )
-                if not await FlowRunner(self.browser, scope_check=_flow_scope_ok, recorder=_record_flow_step).run(matched_flow):
+                if not await FlowRunner(self.browser, scope_check=_flow_scope_ok, recorder=_record_flow_step, engine=self).run(matched_flow):
                     emit(self.browser, "flow_end", parent_id=_flow_tail, flow_id=_flow_id or "", outcome="unexecutable")
                     console.print(
                         f"  [yellow][Flow] Pre-attack flow failed: {escape(matched_flow.name)} — "

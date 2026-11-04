@@ -28,6 +28,66 @@ from wscan.token_lifecycle import (
 PAYLOAD = "user@example.com\r\nCc: attacker@evil.example.com"
 
 
+class _FlowPage:
+    url = "https://example.test/"
+    def __init__(self, token="fresh-secret"):
+        self.token = token
+        self.scripts = []
+    async def evaluate(self, script, *args):
+        self.scripts.append(script)
+        if "querySelectorAll" in script and "field.toLowerCase()" in script and "const elements" in script:
+            return self.token
+        if "const result = {}" in script:
+            assert script.lstrip().startswith("() =>")
+            return {"csrf_token": self.token}
+        if "const find =" in script:
+            return {"ok": True, "ambiguous": False, "sensitive": False}
+        return True
+
+
+class _FlowBrowser:
+    def __init__(self, page): self.page = page
+
+
+@pytest.mark.asyncio
+async def test_flow_token_extraction_is_opt_in_and_ref_only():
+    from wscan.flow_runner import ScanFlow
+    for flag in (False, True):
+        page = _FlowPage()
+        engine = type("Engine", (), {"token_lifecycle_manager": flag})()
+        notes = []
+        runner = FlowRunner(_FlowBrowser(page), engine=engine, recorder=lambda *args: notes.append(args))
+        fill = FlowStep("fill", field="csrf_token", value="recorded-old")
+        flow = ScanFlow("tokens", [fill, FlowStep("submit")])
+        assert await runner.run(flow)
+        extraction_scripts = [s for s in page.scripts if "const result = {}" in s or "field.toLowerCase()" in s]
+        if flag:
+            assert fill.value == "fresh-secret"
+            assert runner._flow_token_bindings == {"csrf_token": derive_token_ref_id("fresh-secret")}
+            assert all("fresh-secret" not in repr(x) for x in runner._flow_token_bindings.values())
+            assert any(s.lstrip().startswith("() =>") for s in extraction_scripts)
+            assert all("fresh-secret" not in repr(note) for note in notes)
+        else:
+            assert fill.value == "recorded-old"
+            assert runner._flow_token_bindings == {}
+            assert extraction_scripts == []
+
+
+@pytest.mark.asyncio
+async def test_flow_live_token_fill_console_uses_reference_id():
+    from wscan import flow_runner as flow_runner_module
+    from wscan.flow_runner import ScanFlow
+    page = _FlowPage(token="raw-live-token-value")
+    engine = type("Engine", (), {"token_lifecycle_manager": True})()
+    runner = FlowRunner(_FlowBrowser(page), engine=engine)
+    output = []
+    with patch.object(flow_runner_module.console, "print", side_effect=lambda value, **kwargs: output.append(str(value))):
+        assert await runner.run(ScanFlow("tokens", [FlowStep("fill", field="csrf_token", value="recorded-old")]))
+    rendered = "\n".join(output)
+    assert "raw-live-token-value" not in rendered
+    assert derive_token_ref_id("raw-live-token-value") in rendered
+
+
 def _ip(base, path, form_tokens=None):
     """Create an InjectionPoint for form probing."""
     return InjectionPoint.for_form(
