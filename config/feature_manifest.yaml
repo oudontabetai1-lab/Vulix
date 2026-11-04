@@ -80,6 +80,7 @@ stdlib_imports:
 - tempfile
 - termios
 - threading
+- unicodedata
 - time
 - tty
 - types

@@ -278,7 +278,7 @@ MFA コード取得や blind XSS/SSRF・メールヘッダ注入の OOB 確証�
 python3 -m pip install -r requirements-mcp.txt
 ```
 
-TOTP はネイティブ生成を利用でき、従来の `mcp-totp-authenticator` も互換経路として残っています。メール MFA は `mcp-email-server` を使います。OOB メールの環境変数と受信ボックスは [OOB メール設定](docs/oob_email_ja.md) を参照してください。API キー、TOTP シークレット、メールパスワードはリポジトリや YAML に保存しないでください。
+TOTP はネイティブ生成を利用でき、従来の `mcp-totp-authenticator` も互換経路として残っています。メール MFA は `mcp-email-server` を使います。OOB メールの設定（環境変数またはダッシュボード Settings 画面からの設定・接続テスト）と受信ボックスは [OOB メール設定](docs/oob_email_ja.md) を参照してください。API キー、TOTP シークレット、メールパスワードはリポジトリや YAML に保存しないでください。
 
 ## 5. ダッシュボード
 

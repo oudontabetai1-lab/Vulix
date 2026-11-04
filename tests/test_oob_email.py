@@ -1,6 +1,19 @@
 import unittest
+from unittest.mock import patch
 
 from wscan import oob_email as oe
+
+
+class RecentPOP3ValidationTests(unittest.TestCase):
+    def test_credentials_rejected_before_pop3_connect(self):
+        for field in ("username", "password"):
+            for char in ("\r", "\n", "\0"):
+                values = {"host": "mail.test", "username": "user", "password": "pass"}
+                values[field] += char
+                sink = oe.EmailSink(oe.OOBEmailConfig(**values, protocol="pop3"))
+                with self.subTest(field=field, char=repr(char)), patch.object(oe.poplib, "POP3", side_effect=AssertionError("connected")), patch.object(oe.poplib, "POP3_SSL", side_effect=AssertionError("connected")):
+                    with self.assertRaises(oe.OOBEmailValidationError):
+                        sink._fetch_recent_pop3(10)
 
 
 def _raw(to="", subject="", body="", frm="app@target.test", ctype="text/plain"):
