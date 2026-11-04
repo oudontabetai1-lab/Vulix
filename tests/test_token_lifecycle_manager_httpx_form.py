@@ -1,4 +1,4 @@
-"""OUD-170 Increment 1: httpx FORM トークンマネージャ（flag 既定 OFF）の parity / inconclusive テスト。"""
+"""httpx FORM トークンマネージャ（flag 既定 OFF）の parity / inconclusive テスト。"""
 from __future__ import annotations
 
 import unittest
