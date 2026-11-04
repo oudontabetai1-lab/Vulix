@@ -100,6 +100,30 @@ async def test_managed_probe_stale_refresh_retry_records_one_event():
 
 
 @pytest.mark.asyncio
+async def test_managed_transport_error_emits_event_and_reraises():
+    import httpx
+    from tests.test_token_lifecycle_fixtures import _TestEngine, _TestFormScanner
+    value = _TestEngine(object(), base_url="http://app.test")
+    value.token_lifecycle_manager = True
+    value._is_access_allowed_url = lambda _url: True
+    value._is_url_excluded = lambda _url: False
+    scanner = _TestFormScanner(value)
+    value._token_lifecycle_events = []
+    value.record_token_lifecycle_event = value._token_lifecycle_events.append
+    error = httpx.ConnectError("offline")
+    async def handler(_request):
+        raise error
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.ConnectError) as raised:
+            await scanner._send_httpx_token_managed(client, "POST", "http://app.test/api", {}, {}, "json")
+    assert raised.value is error
+    assert len(value._token_lifecycle_events) == 1
+    recorded = value._token_lifecycle_events[0]
+    assert (recorded.refresh_reason, recorded.final_status, recorded.final_lifecycle_status, recorded.attempt_count) == (
+        "transport_error", None, "unknown", 1)
+
+
+@pytest.mark.asyncio
 async def test_stale_inconclusive_and_flag_off_are_recorder_independent():
     import httpx
     from tests.fixtures.large_vuln_app import create_app

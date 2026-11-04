@@ -1228,9 +1228,22 @@ class BaseScanner(ABC):
                     )
             except Exception:
                 pass
-        response = await client.request(method, url, content=(json.dumps(request_body) if carrier == "json" else request_body), headers=request_headers)
         attempt_count = 1
         refresh_reason = None
+        try:
+            response = await client.request(method, url, content=(json.dumps(request_body) if carrier == "json" else request_body), headers=request_headers)
+        except Exception:
+            if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
+                try:
+                    from wscan.token_lifecycle import TokenLifecycleEvent
+                    self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
+                        probe_attempt_id=None, evidence_id=None, check=self.CHECK_TYPE,
+                        carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
+                        refresh_reason="transport_error", final_status=None,
+                        final_lifecycle_status="unknown"))
+                except Exception as exc:
+                    self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
+            raise
         if enabled:
             outcome = None
             try:
@@ -1240,8 +1253,21 @@ class BaseScanner(ABC):
                     retry_body, retry_headers, refreshed = await self._refresh_httpx_token(client, url, body, headers, carrier)
                     if refreshed:
                         request_body, request_headers = retry_body, retry_headers
-                        response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
                         attempt_count += 1
+                        try:
+                            response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
+                        except Exception:
+                            if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
+                                try:
+                                    from wscan.token_lifecycle import TokenLifecycleEvent
+                                    self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
+                                        probe_attempt_id=None, evidence_id=None, check=self.CHECK_TYPE,
+                                        carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
+                                        refresh_reason="transport_error", final_status=None,
+                                        final_lifecycle_status="unknown"))
+                                except Exception as exc:
+                                    self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
+                            raise
                     else:
                         refresh_reason = "refresh_failed"
                     final = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
