@@ -20,13 +20,18 @@ Blind XSS / SSRF、メールヘッダインジェクション、second-order な
 from __future__ import annotations
 
 import email
+import imaplib
 import os
+import poplib
 import secrets
+import socket
+import ssl
 import time
 from dataclasses import dataclass, field
 from email.message import Message
 from email.utils import getaddresses
-from typing import Optional
+from pathlib import Path
+from typing import Mapping, Optional
 
 
 # ── トークン / アドレス生成 ────────────────────────────────────────────────
@@ -100,6 +105,251 @@ class OOBEmailConfig:
             mailbox=(e.get("WSCAN_OOB_MAILBOX", "INBOX") or "INBOX").strip(),
             domain=(e.get("WSCAN_OOB_DOMAIN", "") or "").strip(),
         )
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict] = None) -> "OOBEmailConfig":
+        d = data or {}
+        protocol = str(d.get("protocol") or "imap").strip().lower()
+        try:
+            port = int(d.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        use_ssl = bool(d.get("use_ssl", d.get("ssl", True)))
+        return cls(
+            protocol="pop3" if protocol == "pop3" else "imap",
+            host=str(d.get("host") or "").strip(),
+            port=port,
+            username=str(d.get("username") or "").strip(),
+            password=str(d.get("password") or ""),
+            use_ssl=use_ssl,
+            mailbox=str(d.get("mailbox") or "INBOX").strip(),
+            domain=str(d.get("domain") or "").strip(),
+        )
+
+
+OOB_ENV_KEYS = (
+    "WSCAN_OOB_HOST",
+    "WSCAN_OOB_USERNAME",
+    "WSCAN_OOB_PASSWORD",
+    "WSCAN_OOB_PROTOCOL",
+    "WSCAN_OOB_PORT",
+    "WSCAN_OOB_SSL",
+    "WSCAN_OOB_MAILBOX",
+    "WSCAN_OOB_DOMAIN",
+)
+
+
+def is_oob_env_set(env: Optional[Mapping[str, str]] = None) -> bool:
+    """環境変数 WSCAN_OOB_* が 1 つでも有効値を持つか判定する。"""
+    e = os.environ if env is None else env
+    return any(bool((e.get(k) or "").strip()) for k in OOB_ENV_KEYS)
+
+
+def resolve_oob_config(
+    settings_path: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> tuple[OOBEmailConfig, str]:
+    """優先順位に従って実効 OOB 設定を解決する。
+
+    優先順位:
+    1. 環境変数 (WSCAN_OOB_*) が設定されていれば最優先 (source="environment")
+    2. ダッシュボード保存設定 (wscan_settings.json) があればそれを採用 (source="dashboard")
+    3. いずれも無ければ未設定 (source="unset")
+    """
+    if is_oob_env_set(env):
+        return OOBEmailConfig.from_env(dict(env) if env is not None else None), "environment"
+
+    path = settings_path
+    if path is None:
+        try:
+            from .monitor import OUTPUT_BASE
+            path = OUTPUT_BASE / "wscan_settings.json"
+        except Exception:
+            path = Path.cwd() / "output" / "wscan_settings.json"
+
+    if path.is_file():
+        try:
+            import json
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+            saved = data.get("oob")
+            if isinstance(saved, dict) and (saved.get("host") or saved.get("username")):
+                return OOBEmailConfig.from_dict(saved), "dashboard"
+        except Exception:
+            pass
+
+    return OOBEmailConfig(), "unset"
+
+
+# ── 接続テスト ────────────────────────────────────────────────────────────
+def _test_imap_connection(cfg: OOBEmailConfig, timeout: float = 10.0) -> dict:
+    stage = "connect"
+    conn = None
+    try:
+        if cfg.use_ssl:
+            conn = imaplib.IMAP4_SSL(cfg.host, cfg.effective_port, timeout=timeout)
+        else:
+            conn = imaplib.IMAP4(cfg.host, cfg.effective_port, timeout=timeout)
+
+        stage = "login"
+        conn.login(cfg.username, cfg.password)
+
+        stage = "select"
+        conn.select(cfg.mailbox or "INBOX", readonly=True)
+        conn.list()
+
+        return {
+            "ok": True,
+            "stage": "done",
+            "error_kind": None,
+            "message": "接続と認証に成功しました。",
+        }
+    except (TimeoutError, socket.timeout):
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": "timeout",
+            "message": "接続がタイムアウトしました。ホスト名とポート番号を確認してください。",
+        }
+    except ssl.SSLError:
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": "ssl",
+            "message": "SSL/TLS ハンドシェイクに失敗しました。SSL 設定を確認してください。",
+        }
+    except (ConnectionError, OSError, socket.gaierror):
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": "network",
+            "message": "サーバーへの接続に失敗しました。ホスト名とポート番号を確認してください。",
+        }
+    except imaplib.IMAP4.error:
+        error_kind = "auth" if stage == "login" else "mailbox"
+        msg = (
+            "認証に失敗しました。ユーザー名またはパスワードを確認してください。"
+            if stage == "login"
+            else "メールボックスの選択に失敗しました。メールボックス名を確認してください。"
+        )
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": error_kind,
+            "message": msg,
+        }
+    except Exception:
+        error_kind = "auth" if stage == "login" else ("mailbox" if stage == "select" else "error")
+        msg = (
+            "認証に失敗しました。ユーザー名またはパスワードを確認してください。"
+            if stage == "login"
+            else "接続テストに失敗しました。"
+        )
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": error_kind,
+            "message": msg,
+        }
+    finally:
+        if conn is not None:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+
+
+def _test_pop3_connection(cfg: OOBEmailConfig, timeout: float = 10.0) -> dict:
+    stage = "connect"
+    conn = None
+    try:
+        if cfg.use_ssl:
+            conn = poplib.POP3_SSL(cfg.host, cfg.effective_port, timeout=timeout)
+        else:
+            conn = poplib.POP3(cfg.host, cfg.effective_port, timeout=timeout)
+
+        stage = "login"
+        conn.user(cfg.username)
+        conn.pass_(cfg.password)
+
+        stage = "list"
+        conn.list()
+
+        return {
+            "ok": True,
+            "stage": "done",
+            "error_kind": None,
+            "message": "接続と認証に成功しました。",
+        }
+    except (TimeoutError, socket.timeout):
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": "timeout",
+            "message": "接続がタイムアウトしました。ホスト名とポート番号を確認してください。",
+        }
+    except ssl.SSLError:
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": "ssl",
+            "message": "SSL/TLS ハンドシェイクに失敗しました。SSL 設定を確認してください。",
+        }
+    except (ConnectionError, OSError, socket.gaierror):
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": "network",
+            "message": "サーバーへの接続に失敗しました。ホスト名とポート番号を確認してください。",
+        }
+    except poplib.error_proto:
+        error_kind = "auth" if stage == "login" else "mailbox"
+        msg = (
+            "認証に失敗しました。ユーザー名またはパスワードを確認してください。"
+            if stage == "login"
+            else "メールボックスの一覧取得に失敗しました。"
+        )
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": error_kind,
+            "message": msg,
+        }
+    except Exception:
+        error_kind = "auth" if stage == "login" else "error"
+        msg = (
+            "認証に失敗しました。ユーザー名またはパスワードを確認してください。"
+            if stage == "login"
+            else "接続テストに失敗しました。"
+        )
+        return {
+            "ok": False,
+            "stage": stage,
+            "error_kind": error_kind,
+            "message": msg,
+        }
+    finally:
+        if conn is not None:
+            try:
+                conn.quit()
+            except Exception:
+                pass
+
+
+def test_oob_connection(config: OOBEmailConfig, timeout: float = 10.0) -> dict:
+    """OOB メール受信サーバーへの接続・認証・一覧テストを実行する（読み取り専用）。
+
+    機微情報（パスワード）やサーバーの生のエラー文字列は返却値・ログに含めない。
+    """
+    if not config.configured:
+        return {
+            "ok": False,
+            "stage": "config",
+            "error_kind": "not_configured",
+            "message": "OOB 設定が不完全です（host, username, password を指定してください）。",
+        }
+    if config.protocol == "pop3":
+        return _test_pop3_connection(config, timeout=timeout)
+    return _test_imap_connection(config, timeout=timeout)
 
 
 # ── 受信メール表現 ────────────────────────────────────────────────────────
@@ -210,8 +460,6 @@ class EmailSink:
 
     # -- IMAP --
     def _connect_imap(self):
-        import imaplib
-
         cfg = self.config
         if cfg.use_ssl:
             conn = imaplib.IMAP4_SSL(cfg.host, cfg.effective_port)
@@ -260,8 +508,6 @@ class EmailSink:
 
     # -- POP3 (サーバ側検索が無いので全件取得してフィルタ) --
     def _search_pop3(self, token: str) -> list:
-        import poplib
-
         cfg = self.config
         if cfg.use_ssl:
             conn = poplib.POP3_SSL(cfg.host, cfg.effective_port)
@@ -320,8 +566,6 @@ class EmailSink:
                 pass
 
     def _fetch_recent_pop3(self, limit: int) -> list:
-        import poplib
-
         cfg = self.config
         if cfg.use_ssl:
             conn = poplib.POP3_SSL(cfg.host, cfg.effective_port)

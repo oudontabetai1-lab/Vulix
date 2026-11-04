@@ -430,3 +430,225 @@ def test_test_notification_path_exercised_against_mock_only():
     assert res["dispatchCount"] == 1
     assert res["lastPath"] == "/api/v1/settings/test"
     assert "テスト通知を送信しました" in res["statusText"]
+
+
+def test_oob_settings_ui_masking_and_save():
+    """Verify OOB settings UI masking preservation, non-prefilled password, and explicit save."""
+    script = f"""
+    {COMMON_DOM_STUB}
+    const settingsMod = require('{SETTINGS_MODULE_JS}');
+
+    const calls = [];
+    const mockApi = {{
+      createScope: () => ({{
+        getActiveCount: () => 1,
+        get: async (path) => {{
+          calls.push({{ method: 'GET', path: path }});
+          if (path === '/api/v1/settings/oob') {{
+            return {{
+              ok: true,
+              data: {{
+                protocol: 'imap',
+                host: 'mail.test',
+                port: 993,
+                username: 'scanner@test',
+                password_set: true,
+                password_hint: '••••••••',
+                source: 'dashboard',
+              }}
+            }};
+          }}
+          if (path === '/api/v1/settings') return {{ ok: true, data: {{ notifications: {{}} }} }};
+          return {{ ok: true, data: {{ fields: [] }} }};
+        }},
+        post: async (path, body) => {{
+          calls.push({{ method: 'POST', path: path, body: body }});
+          return {{ ok: true, data: {{ status: 'ok' }} }};
+        }},
+        delete: async (path) => {{
+          calls.push({{ method: 'DELETE', path: path }});
+          return {{ ok: true, data: {{ status: 'ok' }} }};
+        }},
+        cancelAll: () => {{}},
+      }})
+    }};
+
+    const container = document.createElement('div');
+    const view = settingsMod.renderSettingsView(container, {{ api: mockApi }});
+
+    setTimeout(() => {{
+      const dom = view.dom;
+      const initialPasswordValue = dom.oobPassword.value;
+      const placeholder = dom.oobPassword.placeholder;
+      const hint = dom.oobPasswordHint.textContent;
+
+      // 1. Save without entering password -> password key must NOT be sent
+      dom.saveOobBtn.trigger('click');
+
+      setTimeout(() => {{
+        const saveCall1 = calls.find(c => c.method === 'POST' && c.path === '/api/v1/settings/oob');
+        const sent1 = saveCall1 ? saveCall1.body : null;
+
+        // 2. Save with new password entered -> password must be sent
+        dom.oobPassword.value = 'new_secret_pass';
+        dom.saveOobBtn.trigger('click');
+
+        setTimeout(() => {{
+          const postCalls = calls.filter(c => c.method === 'POST' && c.path === '/api/v1/settings/oob');
+          const sent2 = postCalls.length > 1 ? postCalls[1].body : null;
+          const passwordAfterSave = dom.oobPassword.value;
+
+          console.log(JSON.stringify({{
+            initialPasswordValue: initialPasswordValue,
+            placeholder: placeholder,
+            hint: hint,
+            sent1HasPassword: 'password' in (sent1 || {{}}),
+            sent2Password: sent2 ? sent2.password : null,
+            passwordAfterSave: passwordAfterSave,
+          }}));
+        }}, 20);
+      }}, 20);
+    }}, 20);
+    """
+    res = _run_node(script)
+    assert res["initialPasswordValue"] == ""
+    assert "設定済み" in res["placeholder"]
+    assert "設定済み" in res["hint"] or "••••••••" in res["hint"]
+    assert res["sent1HasPassword"] is False
+    assert res["sent2Password"] == "new_secret_pass"
+    assert res["passwordAfterSave"] == ""
+
+
+def test_oob_settings_ui_env_source_read_only():
+    """Verify that when source is environment, UI shows read-only notice and disables inputs/save/clear."""
+    script = f"""
+    {COMMON_DOM_STUB}
+    const settingsMod = require('{SETTINGS_MODULE_JS}');
+
+    const mockApi = {{
+      createScope: () => ({{
+        getActiveCount: () => 1,
+        get: async (path) => {{
+          if (path === '/api/v1/settings/oob') {{
+            return {{
+              ok: true,
+              data: {{
+                protocol: 'imap',
+                host: 'env.mail.test',
+                port: 993,
+                username: 'envuser',
+                password_set: true,
+                password_hint: 'env_pass_hint',
+                source: 'environment',
+              }}
+            }};
+          }}
+          if (path === '/api/v1/settings') return {{ ok: true, data: {{ notifications: {{}} }} }};
+          return {{ ok: true, data: {{ fields: [] }} }};
+        }},
+        cancelAll: () => {{}},
+      }})
+    }};
+
+    const container = document.createElement('div');
+    const view = settingsMod.renderSettingsView(container, {{ api: mockApi }});
+
+    setTimeout(() => {{
+      const dom = view.dom;
+      console.log(JSON.stringify({{
+        noticeHidden: dom.oobEnvNotice.hidden,
+        saveDisabled: dom.saveOobBtn.disabled,
+        clearDisabled: dom.clearOobBtn.disabled,
+        hostDisabled: dom.oobHost.disabled,
+        passwordDisabled: dom.oobPassword.disabled,
+        hostValue: dom.oobHost.value,
+      }}));
+    }}, 20);
+    """
+    res = _run_node(script)
+    assert res["noticeHidden"] is False
+    assert res["saveDisabled"] is True
+    assert res["clearDisabled"] is True
+    assert res["hostDisabled"] is True
+    assert res["passwordDisabled"] is True
+    assert res["hostValue"] == "env.mail.test"
+
+
+def test_oob_settings_ui_clear_and_test_connection():
+    """Verify Clear calls DELETE and Test Connection calls POST /test and updates status banner."""
+    script = f"""
+    {COMMON_DOM_STUB}
+    const settingsMod = require('{SETTINGS_MODULE_JS}');
+
+    const dispatches = [];
+    const mockApi = {{
+      createScope: () => ({{
+        getActiveCount: () => 1,
+        get: async (path) => {{
+          if (path === '/api/v1/settings/oob') {{
+            return {{
+              ok: true,
+              data: {{
+                protocol: 'imap',
+                host: 'mail.test',
+                password_set: true,
+                source: 'dashboard',
+              }}
+            }};
+          }}
+          if (path === '/api/v1/settings') return {{ ok: true, data: {{ notifications: {{}} }} }};
+          return {{ ok: true, data: {{ fields: [] }} }};
+        }},
+        delete: async (path) => {{
+          dispatches.push({{ method: 'DELETE', path: path }});
+          return {{ ok: true, data: {{ status: 'ok' }} }};
+        }},
+        post: async (path, body) => {{
+          dispatches.push({{ method: 'POST', path: path, body: body }});
+          if (path === '/api/v1/settings/oob/test') {{
+            return {{
+              ok: true,
+              data: {{
+                ok: true,
+                stage: 'done',
+                error_kind: null,
+                message: '接続と認証に成功しました。',
+              }}
+            }};
+          }}
+          return {{ ok: true }};
+        }},
+        cancelAll: () => {{}},
+      }})
+    }};
+
+    const container = document.createElement('div');
+    const view = settingsMod.renderSettingsView(container, {{ api: mockApi }});
+
+    setTimeout(() => {{
+      const dom = view.dom;
+
+      // Click test connection
+      dom.testOobBtn.trigger('click');
+
+      setTimeout(() => {{
+        const statusAfterTest = dom.oobStatus.textContent;
+
+        // Click clear
+        dom.clearOobBtn.trigger('click');
+
+        setTimeout(() => {{
+          console.log(JSON.stringify({{
+            dispatches: dispatches,
+            statusAfterTest: statusAfterTest,
+            statusAfterClear: dom.oobStatus.textContent,
+          }}));
+        }}, 20);
+      }}, 20);
+    }}, 20);
+    """
+    res = _run_node(script)
+    assert any(d["method"] == "POST" and d["path"] == "/api/v1/settings/oob/test" for d in res["dispatches"])
+    assert any(d["method"] == "DELETE" and d["path"] == "/api/v1/settings/oob" for d in res["dispatches"])
+    assert "成功" in res["statusAfterTest"]
+    assert "削除" in res["statusAfterClear"]

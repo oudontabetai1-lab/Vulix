@@ -180,7 +180,238 @@
     notifyCard.appendChild(notifyForm);
     root.appendChild(notifyCard);
 
-    // ── 2. Settings Declaration & Effective Config Card ──
+    // ── 2. OOB Email Settings Card ──
+    const oobCard = document.createElement('div');
+    oobCard.className = 'ui-card';
+    oobCard.id = 'oobCard';
+
+    const oobTitle = document.createElement('h3');
+    oobTitle.className = 'ui-card-title';
+    oobTitle.textContent = 'OOB（帯域外）メール受信設定 (IMAP / POP3)';
+    oobCard.appendChild(oobTitle);
+
+    const oobLoading = document.createElement('div');
+    oobLoading.className = 'ui-status loading';
+    oobLoading.id = 'oobLoading';
+    oobLoading.setAttribute('role', 'status');
+    oobLoading.textContent = 'OOB 設定を読み込み中…';
+    oobCard.appendChild(oobLoading);
+
+    const oobError = document.createElement('div');
+    oobError.className = 'ui-status error';
+    oobError.id = 'oobError';
+    oobError.setAttribute('role', 'status');
+    oobError.hidden = true;
+    oobCard.appendChild(oobError);
+
+    const oobEnvNotice = document.createElement('div');
+    oobEnvNotice.className = 'ui-status info';
+    oobEnvNotice.id = 'oobEnvNotice';
+    oobEnvNotice.setAttribute('role', 'status');
+    oobEnvNotice.hidden = true;
+    oobEnvNotice.textContent = '環境変数 (WSCAN_OOB_*) が設定されているため、設定は読み取り専用です。ダッシュボードからの変更・削除は無効化されています。';
+    oobCard.appendChild(oobEnvNotice);
+
+    const oobForm = document.createElement('form');
+    oobForm.className = 'ui-form';
+    oobForm.id = 'oobForm';
+    oobForm.hidden = true;
+    oobForm.setAttribute('onsubmit', 'return false;');
+
+    // Protocol select
+    const protoGroup = document.createElement('div');
+    protoGroup.className = 'ui-form-group';
+    const protoLabel = document.createElement('label');
+    protoLabel.className = 'ui-label';
+    protoLabel.htmlFor = 'oobProtocol';
+    protoLabel.textContent = '受信プロトコル (Protocol)';
+    protoGroup.appendChild(protoLabel);
+    const protoSelect = document.createElement('select');
+    protoSelect.id = 'oobProtocol';
+    protoSelect.className = 'ui-select';
+    [
+      { id: 'imap', label: 'IMAP (推奨 / サーバ側検索・フォルダ対応)' },
+      { id: 'pop3', label: 'POP3' },
+    ].forEach(function (p) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.label;
+      protoSelect.appendChild(opt);
+    });
+    protoGroup.appendChild(protoSelect);
+    oobForm.appendChild(protoGroup);
+
+    // Host input
+    const hostGroup = document.createElement('div');
+    hostGroup.className = 'ui-form-group';
+    const hostLabel = document.createElement('label');
+    hostLabel.className = 'ui-label';
+    hostLabel.htmlFor = 'oobHost';
+    hostLabel.textContent = '受信サーバーホスト (Host)';
+    hostGroup.appendChild(hostLabel);
+    const hostInput = document.createElement('input');
+    hostInput.type = 'text';
+    hostInput.id = 'oobHost';
+    hostInput.className = 'ui-input';
+    hostInput.placeholder = 'imap.example.com';
+    hostInput.autocomplete = 'off';
+    hostInput.spellcheck = false;
+    hostGroup.appendChild(hostInput);
+    oobForm.appendChild(hostGroup);
+
+    // Port input
+    const portGroup = document.createElement('div');
+    portGroup.className = 'ui-form-group';
+    const portLabel = document.createElement('label');
+    portLabel.className = 'ui-label';
+    portLabel.htmlFor = 'oobPort';
+    portLabel.textContent = 'ポート (Port)';
+    const portHint = document.createElement('span');
+    portHint.className = 'ui-hint';
+    portHint.textContent = '0 でプロトコル既定 (IMAPS 993 / POP3S 995)';
+    portLabel.appendChild(portHint);
+    portGroup.appendChild(portLabel);
+    const portInput = document.createElement('input');
+    portInput.type = 'number';
+    portInput.id = 'oobPort';
+    portInput.className = 'ui-input';
+    portInput.placeholder = '0';
+    portInput.min = '0';
+    portInput.max = '65535';
+    portGroup.appendChild(portInput);
+    oobForm.appendChild(portGroup);
+
+    // SSL checkbox
+    const sslRow = document.createElement('div');
+    sslRow.className = 'ui-form-row';
+    const sslLabel = document.createElement('label');
+    sslLabel.className = 'ui-checkbox-label';
+    const sslInput = document.createElement('input');
+    sslInput.type = 'checkbox';
+    sslInput.id = 'oobSsl';
+    sslInput.checked = true;
+    sslLabel.appendChild(sslInput);
+    sslLabel.appendChild(document.createTextNode(' SSL / TLS 暗号化を使用する'));
+    sslRow.appendChild(sslLabel);
+    oobForm.appendChild(sslRow);
+
+    // Username input
+    const userGroup = document.createElement('div');
+    userGroup.className = 'ui-form-group';
+    const userLabel = document.createElement('label');
+    userLabel.className = 'ui-label';
+    userLabel.htmlFor = 'oobUsername';
+    userLabel.textContent = 'ユーザー名 (Username)';
+    userGroup.appendChild(userLabel);
+    const userInput = document.createElement('input');
+    userInput.type = 'text';
+    userInput.id = 'oobUsername';
+    userInput.className = 'ui-input';
+    userInput.placeholder = 'oob@example.com';
+    userInput.autocomplete = 'off';
+    userInput.spellcheck = false;
+    userGroup.appendChild(userInput);
+    oobForm.appendChild(userGroup);
+
+    // Password input
+    const passGroup = document.createElement('div');
+    passGroup.className = 'ui-form-group';
+    const passLabel = document.createElement('label');
+    passLabel.className = 'ui-label';
+    passLabel.htmlFor = 'oobPassword';
+    passLabel.textContent = 'パスワード / アプリパスワード';
+    const passHint = document.createElement('span');
+    passHint.className = 'ui-hint';
+    passHint.id = 'oobPasswordHint';
+    passLabel.appendChild(passHint);
+    passGroup.appendChild(passLabel);
+    const passInput = document.createElement('input');
+    passInput.type = 'password';
+    passInput.id = 'oobPassword';
+    passInput.className = 'ui-input';
+    passInput.placeholder = 'パスワード';
+    passInput.autocomplete = 'new-password';
+    passInput.spellcheck = false;
+    passGroup.appendChild(passInput);
+    oobForm.appendChild(passGroup);
+
+    // Mailbox input (IMAP)
+    const mboxGroup = document.createElement('div');
+    mboxGroup.className = 'ui-form-group';
+    const mboxLabel = document.createElement('label');
+    mboxLabel.className = 'ui-label';
+    mboxLabel.htmlFor = 'oobMailbox';
+    mboxLabel.textContent = 'メールボックス / フォルダ (Mailbox)';
+    mboxGroup.appendChild(mboxLabel);
+    const mboxInput = document.createElement('input');
+    mboxInput.type = 'text';
+    mboxInput.id = 'oobMailbox';
+    mboxInput.className = 'ui-input';
+    mboxInput.placeholder = 'INBOX';
+    mboxInput.autocomplete = 'off';
+    mboxInput.spellcheck = false;
+    mboxGroup.appendChild(mboxInput);
+    oobForm.appendChild(mboxGroup);
+
+    // Catch-all domain input
+    const domainGroup = document.createElement('div');
+    domainGroup.className = 'ui-form-group';
+    const domainLabel = document.createElement('label');
+    domainLabel.className = 'ui-label';
+    domainLabel.htmlFor = 'oobDomain';
+    domainLabel.textContent = 'OOB ドメイン (Catch-all Domain)';
+    domainGroup.appendChild(domainLabel);
+    const domainInput = document.createElement('input');
+    domainInput.type = 'text';
+    domainInput.id = 'oobDomain';
+    domainInput.className = 'ui-input';
+    domainInput.placeholder = 'oob.example.com';
+    domainInput.autocomplete = 'off';
+    domainInput.spellcheck = false;
+    domainGroup.appendChild(domainInput);
+    oobForm.appendChild(domainGroup);
+
+    // Action buttons & status
+    const oobActionRow = document.createElement('div');
+    oobActionRow.className = 'ui-actions';
+
+    const saveOobBtn = document.createElement('button');
+    saveOobBtn.type = 'button';
+    saveOobBtn.id = 'saveOobBtn';
+    saveOobBtn.className = 'history-btn primary';
+    saveOobBtn.textContent = '保存';
+    oobActionRow.appendChild(saveOobBtn);
+
+    const clearOobBtn = document.createElement('button');
+    clearOobBtn.type = 'button';
+    clearOobBtn.id = 'clearOobBtn';
+    clearOobBtn.className = 'history-btn';
+    clearOobBtn.textContent = '設定削除';
+    oobActionRow.appendChild(clearOobBtn);
+
+    const testOobBtn = document.createElement('button');
+    testOobBtn.type = 'button';
+    testOobBtn.id = 'testOobBtn';
+    testOobBtn.className = 'history-btn';
+    testOobBtn.textContent = '接続テスト';
+    oobActionRow.appendChild(testOobBtn);
+
+    const oobStatusSpan = document.createElement('span');
+    oobStatusSpan.id = 'oobStatus';
+    oobStatusSpan.className = 'ui-status-text';
+    oobStatusSpan.setAttribute('aria-live', 'polite');
+    oobActionRow.appendChild(oobStatusSpan);
+    oobForm.appendChild(oobActionRow);
+
+    const oobNote = document.createElement('p');
+    oobNote.className = 'ui-note';
+    oobNote.textContent = 'OOB 受信設定は blind XSS / SSRF、メールヘッダ注入等の確証に使用されます。保存済みパスワードは UI に返さず、入力した新しいパスワードは保存または接続テスト時にのみ送信します。';
+    oobForm.appendChild(oobNote);
+
+    oobCard.appendChild(oobForm);
+    root.appendChild(oobCard);
+
+    // ── 3. Settings Declaration & Effective Config Card ──
     const configCard = document.createElement('div');
     configCard.className = 'ui-card';
     configCard.id = 'configCard';
@@ -329,6 +560,23 @@
       saveSettingsBtn: saveBtn,
       testNotificationBtn: testBtn,
       notifyStatus: statusSpan,
+      oobLoading: oobLoading,
+      oobError: oobError,
+      oobEnvNotice: oobEnvNotice,
+      oobForm: oobForm,
+      oobProtocol: protoSelect,
+      oobHost: hostInput,
+      oobPort: portInput,
+      oobSsl: sslInput,
+      oobUsername: userInput,
+      oobPassword: passInput,
+      oobPasswordHint: passHint,
+      oobMailbox: mboxInput,
+      oobDomain: domainInput,
+      saveOobBtn: saveOobBtn,
+      clearOobBtn: clearOobBtn,
+      testOobBtn: testOobBtn,
+      oobStatus: oobStatusSpan,
       modeSelect: modeSelect,
       profileSelect: profileSelect,
       refreshConfigBtn: refreshBtn,
@@ -544,6 +792,151 @@
       }
     }
 
+    async function loadOobSettings() {
+      dom.oobLoading.hidden = false;
+      dom.oobError.hidden = true;
+      dom.oobForm.hidden = true;
+
+      try {
+        const res = await scope.get('/api/v1/settings/oob');
+        if (scope.getActiveCount() === 0 && !res.ok && res.isAborted && res.isAborted()) return;
+
+        dom.oobLoading.hidden = true;
+        if (!res.ok || !res.data) {
+          dom.oobError.textContent = 'OOB 設定を取得できません（利用不可）。';
+          dom.oobError.hidden = false;
+          return;
+        }
+
+        const data = res.data;
+        dom.oobForm.hidden = false;
+        const isEnv = data.source === 'environment';
+
+        dom.oobEnvNotice.hidden = !isEnv;
+        dom.oobProtocol.value = data.protocol || 'imap';
+        dom.oobHost.value = data.host || '';
+        dom.oobPort.value = data.port ? String(data.port) : '0';
+        dom.oobSsl.checked = data.use_ssl !== false && data.ssl !== false;
+        dom.oobUsername.value = data.username || '';
+        dom.oobPassword.value = '';
+        dom.oobPassword.placeholder = data.password_set
+          ? '設定済み（変更時のみ入力）'
+          : 'パスワード';
+        dom.oobPasswordHint.textContent = data.password_set
+          ? `現在: ${data.password_hint || '設定済み'}`
+          : '未設定';
+        dom.oobMailbox.value = data.mailbox || 'INBOX';
+        dom.oobDomain.value = data.domain || '';
+
+        // 環境変数がアクティブな場合は編集・削除を無効化（読み取り専用）
+        [
+          dom.oobProtocol,
+          dom.oobHost,
+          dom.oobPort,
+          dom.oobSsl,
+          dom.oobUsername,
+          dom.oobPassword,
+          dom.oobMailbox,
+          dom.oobDomain,
+          dom.saveOobBtn,
+          dom.clearOobBtn,
+        ].forEach(function (el) {
+          el.disabled = isEnv;
+        });
+      } catch (err) {
+        dom.oobLoading.hidden = true;
+        dom.oobError.textContent = 'OOB 設定を取得できません（利用不可）。';
+        dom.oobError.hidden = false;
+      }
+    }
+
+    async function saveOobSettings() {
+      if (dom.saveOobBtn.disabled) return;
+      dom.oobStatus.textContent = '保存中…';
+      const payload = {
+        protocol: dom.oobProtocol.value || 'imap',
+        host: dom.oobHost.value.trim(),
+        port: parseInt(dom.oobPort.value || '0', 10) || 0,
+        ssl: Boolean(dom.oobSsl.checked),
+        use_ssl: Boolean(dom.oobSsl.checked),
+        username: dom.oobUsername.value.trim(),
+        mailbox: dom.oobMailbox.value.trim() || 'INBOX',
+        domain: dom.oobDomain.value.trim(),
+      };
+      const pw = dom.oobPassword.value;
+      if (pw) {
+        payload.password = pw;
+      }
+
+      try {
+        const res = await scope.post('/api/v1/settings/oob', payload);
+        if (!res.ok) {
+          const err = (res.data && res.data.error) || res.errorMessage || '保存に失敗しました';
+          dom.oobStatus.textContent = err;
+          return;
+        }
+        dom.oobStatus.textContent = 'OOB 設定を保存しました';
+        dom.oobPassword.value = '';
+        await loadOobSettings();
+      } catch (err) {
+        dom.oobStatus.textContent = '保存に失敗しました';
+      }
+    }
+
+    async function clearOobSettings() {
+      if (dom.clearOobBtn.disabled) return;
+      dom.oobStatus.textContent = '削除中…';
+      try {
+        const res = await scope.delete('/api/v1/settings/oob');
+        if (!res.ok) {
+          const err = (res.data && res.data.error) || res.errorMessage || '削除に失敗しました';
+          dom.oobStatus.textContent = err;
+          return;
+        }
+        dom.oobStatus.textContent = 'OOB 設定を削除しました';
+        dom.oobPassword.value = '';
+        await loadOobSettings();
+      } catch (err) {
+        dom.oobStatus.textContent = '削除に失敗しました';
+      }
+    }
+
+    async function testOobSettings() {
+      dom.oobStatus.textContent = '接続テスト中…';
+      const payload = {
+        protocol: dom.oobProtocol.value || 'imap',
+        host: dom.oobHost.value.trim(),
+        port: parseInt(dom.oobPort.value || '0', 10) || 0,
+        ssl: Boolean(dom.oobSsl.checked),
+        use_ssl: Boolean(dom.oobSsl.checked),
+        username: dom.oobUsername.value.trim(),
+        mailbox: dom.oobMailbox.value.trim() || 'INBOX',
+        domain: dom.oobDomain.value.trim(),
+      };
+      const pw = dom.oobPassword.value;
+      if (pw) {
+        payload.password = pw;
+      }
+
+      try {
+        const res = await scope.post('/api/v1/settings/oob/test', payload);
+        if (!res.ok || !res.data) {
+          const err = (res.data && res.data.message) || (res.data && res.data.error) || res.errorMessage || '接続テストに失敗しました';
+          dom.oobStatus.textContent = '✗ 失敗: ' + err;
+          return;
+        }
+        const data = res.data;
+        if (data.ok) {
+          dom.oobStatus.textContent = '✓ 成功: ' + (data.message || '接続と認証に成功しました。');
+        } else {
+          const kind = data.error_kind || data.stage || 'error';
+          dom.oobStatus.textContent = `✗ 失敗 [${kind}]: ${data.message || '接続できませんでした。'}`;
+        }
+      } catch (err) {
+        dom.oobStatus.textContent = '接続テストに失敗しました';
+      }
+    }
+
     async function loadConfigData() {
       const mode = dom.modeSelect.value || 'normal';
       const profile = mode === 'agent' ? '' : (dom.profileSelect.value || '');
@@ -596,6 +989,9 @@
     // Attach listeners
     dom.saveSettingsBtn.addEventListener('click', saveNotifications);
     dom.testNotificationBtn.addEventListener('click', testNotifications);
+    dom.saveOobBtn.addEventListener('click', saveOobSettings);
+    dom.clearOobBtn.addEventListener('click', clearOobSettings);
+    dom.testOobBtn.addEventListener('click', testOobSettings);
 
     dom.modeSelect.addEventListener('change', function () {
       const mode = dom.modeSelect.value;
@@ -630,6 +1026,7 @@
 
     // Initial load
     loadNotifications();
+    loadOobSettings();
     loadConfigData();
 
     return {
@@ -641,6 +1038,7 @@
       },
       reload: function () {
         loadNotifications();
+        loadOobSettings();
         loadConfigData();
       },
     };

@@ -542,7 +542,7 @@ from .scanners.cms import CmsScanner
 from .waf_detector import WAFDetector
 from .payload_learning import PayloadLearner, origin_key
 from .flow_runner import ScanFlow, FlowRunner
-from .oob_email import OOBEmailConfig, EmailSink, make_oob_token, oob_address
+from .oob_email import OOBEmailConfig, EmailSink, make_oob_token, oob_address, resolve_oob_config
 
 console = Console()
 
@@ -1422,12 +1422,15 @@ class ScanEngine:
         self._llm_semaphore = None
         self._adaptive_llm_availability_lock = asyncio.Lock()
 
-        # OOB（帯域外）メール受信シンク。環境変数（WSCAN_OOB_*）から構築し、
+        # OOB（帯域外）メール受信シンク。
+        # 優先順位: 環境変数（WSCAN_OOB_*）> ダッシュボード保存設定（wscan_settings.json）> 未設定。
+        # 環境変数が設定されていない場合のみ、ダッシュボードから保存された設定を採用する。
         # 設定が揃っているときだけ EmailSink を有効化する（未設定なら None）。
         # メールヘッダインジェクション等「アプリがメールを送って初めて確証できる」
         # 検査が、注入した一意 Bcc 宛にメールが届いたかをポーリングするために使う。
-        # 認証情報はコードに埋めず env 経由（CLAUDE.md の不変条件）。
-        self.oob_config = OOBEmailConfig.from_env()
+        self.oob_config, self.oob_source = resolve_oob_config(
+            settings_path=OUTPUT_BASE / "wscan_settings.json"
+        )
         self.oob_sink: Optional[EmailSink] = (
             EmailSink(self.oob_config) if self.oob_config.configured else None
         )

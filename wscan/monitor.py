@@ -789,6 +789,153 @@ class MonitorServer:
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)
 
+        @app.get("/api/v1/settings/oob")
+        async def api_get_oob_settings():
+            """OOB メール受信設定を返す（パスワード生値は含めず、マスクヒントのみ）。"""
+            cfg, source = self._effective_oob_config()
+            return JSONResponse({
+                "protocol": cfg.protocol,
+                "host": cfg.host,
+                "port": cfg.port,
+                "username": cfg.username,
+                "mailbox": cfg.mailbox,
+                "domain": cfg.domain,
+                "use_ssl": cfg.use_ssl,
+                "ssl": cfg.use_ssl,
+                "password_set": bool(cfg.password),
+                "password_hint": self._mask_secret(cfg.password),
+                "source": source,
+            })
+
+        @app.post("/api/v1/settings/oob")
+        async def api_set_oob_settings(request: Request):
+            """OOB メール受信設定を更新する（環境変数有効時は 409 で拒否）。"""
+            if self._is_oob_env_active():
+                return JSONResponse(
+                    {"error": "環境変数 (WSCAN_OOB_*) で OOB 設定が定義されているため、ダッシュボードからは変更できません。"},
+                    status_code=409,
+                )
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+            data = body.get("oob") if isinstance(body.get("oob"), dict) else body
+
+            protocol = str(data.get("protocol") or "imap").strip().lower()
+            if protocol not in ("imap", "pop3"):
+                return JSONResponse({"error": "protocol は imap または pop3 を指定してください。"}, status_code=400)
+
+            host = str(data.get("host") or "").strip()
+            if not host:
+                return JSONResponse({"error": "host は必須です。"}, status_code=400)
+
+            try:
+                port = int(data.get("port") if data.get("port") is not None else 0)
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "port は整数で指定してください。"}, status_code=400)
+            if not (0 <= port <= 65535):
+                return JSONResponse({"error": "port は 0 から 65535 の範囲で指定してください。"}, status_code=400)
+
+            username = str(data.get("username") or "").strip()
+            use_ssl = bool(data.get("use_ssl", data.get("ssl", True)))
+            mailbox = str(data.get("mailbox") or "INBOX").strip()
+            domain = str(data.get("domain") or "").strip()
+
+            # 空・未指定のパスワードは既存値を維持
+            existing = self._saved_oob_dict()
+            new_pw = data.get("password")
+            if new_pw is not None and str(new_pw) != "":
+                password = str(new_pw)
+            else:
+                password = existing.get("password", "")
+
+            settings = self._load_settings()
+            settings["oob"] = {
+                "protocol": protocol,
+                "host": host,
+                "port": port,
+                "username": username,
+                "password": password,
+                "use_ssl": use_ssl,
+                "mailbox": mailbox,
+                "domain": domain,
+            }
+            try:
+                self._save_settings(settings)
+            except Exception as exc:
+                return JSONResponse({"error": f"保存に失敗しました: {exc}"}, status_code=500)
+
+            self._audit(
+                "oob_settings_update",
+                self._client_ip(request),
+                f"host={host} password_set={bool(password)}",
+            )
+            return JSONResponse({"status": "ok"})
+
+        @app.delete("/api/v1/settings/oob")
+        async def api_delete_oob_settings(request: Request):
+            """保存された OOB メール設定を削除する（パスワード含む）。"""
+            if self._is_oob_env_active():
+                return JSONResponse(
+                    {"error": "環境変数 (WSCAN_OOB_*) で OOB 設定が定義されているため、ダッシュボードからは削除できません。"},
+                    status_code=409,
+                )
+            settings = self._load_settings()
+            if "oob" in settings:
+                del settings["oob"]
+                try:
+                    self._save_settings(settings)
+                except Exception as exc:
+                    return JSONResponse({"error": f"削除に失敗しました: {exc}"}, status_code=500)
+
+            self._audit("oob_settings_delete", self._client_ip(request), "cleared=true")
+            return JSONResponse({"status": "ok", "message": "OOB 設定を削除しました。"})
+
+        @app.post("/api/v1/settings/oob/test")
+        async def api_test_oob_settings(request: Request):
+            """OOB メールサーバーへの接続テストを実行する（実効設定を使用、読み取り専用）。"""
+            from wscan.oob_email import test_oob_connection
+
+            cfg, source = self._effective_oob_config()
+
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+
+            # 環境変数が有効ならテストも必ず実効設定で行い、リクエスト値で迂回させない。
+            if source != "environment" and isinstance(body, dict) and body:
+                data = body.get("oob") if isinstance(body.get("oob"), dict) else body
+                if data.get("protocol"):
+                    cfg.protocol = "pop3" if str(data["protocol"]).lower() == "pop3" else "imap"
+                if data.get("host"):
+                    cfg.host = str(data["host"]).strip()
+                if data.get("port") is not None:
+                    try:
+                        cfg.port = int(data["port"])
+                    except (TypeError, ValueError):
+                        pass
+                if data.get("username"):
+                    cfg.username = str(data["username"]).strip()
+                if data.get("password"):
+                    cfg.password = str(data["password"])
+                if "use_ssl" in data or "ssl" in data:
+                    cfg.use_ssl = bool(data.get("use_ssl", data.get("ssl", True)))
+                if data.get("mailbox"):
+                    cfg.mailbox = str(data["mailbox"]).strip()
+                if data.get("domain"):
+                    cfg.domain = str(data["domain"]).strip()
+
+            result = test_oob_connection(cfg, timeout=10.0)
+
+            self._audit(
+                "oob_settings_test",
+                self._client_ip(request),
+                f"host={cfg.host} ok={result['ok']}",
+            )
+            return JSONResponse(result)
+
         @app.get("/api/v1/schedules")
         async def api_get_schedules():
             """登録済みの定期スキャンを一覧で返す。"""
@@ -1955,16 +2102,47 @@ class MonitorServer:
         スケジュールが丸ごと失われる。同一ディレクトリの一時ファイルへ書いて
         fsync 後に置換することで、常に「旧 or 新」のどちらか完全な状態を保つ。
         書き込みは serve の単一イベントループ内で同期実行されるため逐次化される。
+        POSIX 環境では所有者のみ読み書き可能 (0600) なパーミッションを保証する。
         """
         OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
         target = self._settings_path()
         tmp = target.with_suffix(".json.tmp")
         payload = json.dumps(data, ensure_ascii=False, indent=2)
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
+
+        if os.name == "posix":
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            fd = os.open(tmp, flags, 0o600)
+            with open(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+        else:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+
         os.replace(tmp, target)
+        if os.name == "posix":
+            try:
+                os.chmod(target, 0o600)
+            except OSError:
+                pass
+
+    def _is_oob_env_active(self) -> bool:
+        from wscan.oob_email import is_oob_env_set
+        return is_oob_env_set()
+
+    def _effective_oob_config(self):
+        from wscan.oob_email import resolve_oob_config
+        return resolve_oob_config(settings_path=self._settings_path())
+
+    def _saved_oob_dict(self) -> dict:
+        return self._load_settings().get("oob") or {}
 
     def _notify_settings(self) -> dict:
         n = (self._load_settings().get("notifications") or {})
