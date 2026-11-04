@@ -13,7 +13,7 @@ import main
 from wscan.monitor import MonitorServer
 from wscan.settings_schema import (
     ALL_MODES, FIELDS, PROFILES, SCHEMA_VERSION, build_effective_config,
-    build_settings_schema, validate_settings_schema,
+    build_settings_schema, validate_settings_schema, validate_ui_exposure,
 )
 
 
@@ -44,6 +44,28 @@ def test_complete_form_declarations_and_defaults():
         assert isinstance(f["constraints"], dict)
     assert set(build_settings_schema()["profiles"]) == set(PROFILES)
     assert validate_settings_schema(build_settings_schema()) == []
+
+
+def test_representative_normalized_metadata():
+    fields = {f["key"]: f["metadata"] for f in FIELDS}
+    assert (fields["depth"]["type"], fields["depth"]["default"], fields["depth"]["scope"]) == ("integer", 2, "scan")
+    assert (fields["auth_pass"]["type"], fields["auth_pass"]["default"], fields["auth_pass"]["sensitive"], fields["auth_pass"]["scope"]) == ("secret", "", True, "profile")
+    assert (fields["toggles.allow_state_changing_probes"]["key"], fields["toggles.allow_state_changing_probes"]["type"], fields["toggles.allow_state_changing_probes"]["dangerous"]) == ("allow_state_changing_probes", "boolean", True)
+    assert (fields["llm"]["type"], fields["llm"]["default"], fields["llm"]["scope"]) == ("choice", "ollama", "instance")
+    bad = deepcopy(list(FIELDS[:1]))
+    bad[0]["metadata"]["ui_exposed"] = False
+    assert validate_ui_exposure(bad) == ["report_lang"]
+    bad[0]["metadata"]["ui_exposure_reason"] = "CLI only"
+    assert validate_ui_exposure(bad) == []
+
+
+def test_settings_parity_pure_alias_and_resolution():
+    from scripts.check_settings_parity import ALIASES, parity_warnings, resolve
+    keys = {f["metadata"]["key"] for f in FIELDS}
+    assert ALIASES["include_registration"] == "toggles.skip_registration"
+    assert ALIASES["browser.header_scope_enforce"] == "header_scope_enforce"
+    assert resolve("allow_state_changing_probes", keys) == "allow_state_changing_probes"
+    assert any("unresolved setting absent" in warning for warning in parity_warnings({"cli": ["absent"]}, keys))
 
 
 @pytest.mark.parametrize("mutation", ["missing_version", "version", "field", "constraint", "claim", "extra", "wrong_type"])

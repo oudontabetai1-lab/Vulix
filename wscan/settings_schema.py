@@ -158,7 +158,12 @@ def _field(key, label, default, *, modes=SCAN_MODES, redacted=False, constraints
             "applicable_modes": list(modes),
             "profiles": list(PROFILES) if set(modes) & set(SCAN_MODES) else [],
             "default": None if redacted else default, "redacted": redacted,
-            "constraints": constraints or {}}
+            "constraints": constraints or {},
+            "category": "general", "description": label,
+            "ui_exposed": True, "editable": True, "sensitive": redacted,
+            "dangerous": False, "choices": tuple((constraints or {}).get("enum", ())),
+            "validation": constraints or {}, "restart_required": False,
+            "scope": "scan"}
 
 
 # serve のフォーム初期値と同じキー。toggles はドット区切りで宣言する。
@@ -265,6 +270,31 @@ FIELDS = (
     _field("accounts", "アカウント", [], redacted=True),
 )
 
+# Metadata extends the existing form declarations while preserving their legacy shape.
+_NORMALIZED = {
+    "depth": {"category": "scan", "description": "Maximum crawl depth", "type": "integer",
+              "default": 2, "validation": {"minimum": 0}, "scope": "scan"},
+    "auth_pass": {"category": "profile", "description": "Login password", "type": "secret",
+                  "default": "", "sensitive": True, "scope": "profile"},
+    "toggles.allow_state_changing_probes": {
+        "key": "allow_state_changing_probes", "category": "safety",
+        "description": "Permit state-changing probes", "type": "boolean",
+        "default": False, "dangerous": True, "scope": "scan"},
+    "llm": {"category": "analysis", "description": "LLM provider", "type": "choice",
+            "default": "ollama", "choices": ("ollama", "claude", "openai", "openai_compatible", "gemini", "none"),
+            "validation": {"enum": ["ollama", "claude", "openai", "openai_compatible", "gemini", "none"]},
+            "scope": "instance"},
+}
+for _decl in FIELDS:
+    _meta = {**{k: _decl[k] for k in (
+        "key", "type", "default", "category", "description", "ui_exposed", "editable",
+        "sensitive", "dangerous", "choices", "validation", "restart_required", "scope")},
+        **_NORMALIZED.get(_decl["key"], {})}
+    # Keep the legacy default/type consumed by existing form validation unchanged.
+    _decl["metadata"] = {k: _meta[k] for k in (
+        "key", "type", "default", "category", "description", "ui_exposed", "editable",
+        "sensitive", "dangerous", "choices", "validation", "restart_required", "scope")}
+
 
 def _envelope(kind: str) -> dict:
     return {"schema_version": SCHEMA_VERSION, "manifest_kind": kind,
@@ -293,6 +323,13 @@ def validate_settings_schema(schema: Any, *, expected_schema_version=SCHEMA_VERS
     except (TypeError, ValueError):
         valid = False
     return [] if valid else ["Missing or invalid settings declarations"]
+
+
+def validate_ui_exposure(fields) -> list[str]:
+    """Unexposed declarations must explain why the UI omits them."""
+    return [field.get("key", "<unknown>") for field in fields
+            if field.get("metadata", {}).get("ui_exposed") is False
+            and not field.get("metadata", {}).get("ui_exposure_reason", "").strip()]
 
 
 def _valid(value: Any, field: dict) -> bool:
