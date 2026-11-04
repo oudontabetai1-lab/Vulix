@@ -651,6 +651,107 @@ def create_app(page_count: int = 48) -> FastAPI:
             return PlainTextResponse("CSRF token mismatch", status_code=403)
         return PlainTextResponse(f"Sending confirmation...\nTo: {email}\nSubject: Thanks", status_code=200)
 
+    @app.get("/csrf-static-safe", response_class=HTMLResponse)
+    async def csrf_static_safe_form():
+        return HTMLResponse(_layout("CSRF Static Safe", '<form method="post" action="/csrf-static-safe"><input type="hidden" name="csrf_token" value="static-token-fixed-9999"><input name="email" value="user@example.com"></form>'))
+
+    @app.post("/csrf-static-safe", response_class=PlainTextResponse)
+    async def csrf_static_safe(email: str = Form(""), csrf_token: str = Form("")):
+        if csrf_token != "static-token-fixed-9999":
+            return PlainTextResponse("CSRF token mismatch", status_code=403)
+        clean = email.replace("\r", "").replace("\n", "")
+        return PlainTextResponse(f"Sending confirmation...\nTo: {clean}\nSubject: Thanks", status_code=200)
+
+    @app.get("/csrf-onetime", response_class=HTMLResponse)
+    async def csrf_onetime_form(request: Request):
+        sid = request.cookies.get("session_id") or secrets.token_hex(16)
+        app.state.csrf_onetime = getattr(app.state, "csrf_onetime", {})
+        token = app.state.csrf_onetime.get(sid)
+        if token is None:
+            token = f"one_{secrets.token_hex(8)}"
+            app.state.csrf_onetime[sid] = token
+        resp = HTMLResponse(_layout("CSRF One Time", f'<form method="post" action="/csrf-onetime"><input type="hidden" name="csrf_token" value="{token}"><input name="email" value="user@example.com"></form>'))
+        if not request.cookies.get("session_id"):
+            resp.set_cookie("session_id", sid)
+        return resp
+
+    async def consume_onetime(request: Request, email: str, csrf_token: str, safe: bool):
+        sid = request.cookies.get("session_id")
+        valid = sid and csrf_token and csrf_token == getattr(app.state, "csrf_onetime", {}).get(sid)
+        if not valid:
+            return PlainTextResponse("CSRF token mismatch", status_code=419)
+        app.state.csrf_onetime[sid] = None
+        value = email.replace("\r", "").replace("\n", "") if safe else email
+        return PlainTextResponse(f"Sent: {value}")
+
+    @app.post("/csrf-onetime", response_class=PlainTextResponse)
+    async def csrf_onetime(request: Request, email: str = Form(""), csrf_token: str = Form("")):
+        return await consume_onetime(request, email, csrf_token, False)
+
+    @app.get("/csrf-onetime-safe", response_class=HTMLResponse)
+    async def csrf_onetime_safe_form(request: Request):
+        sid = request.cookies.get("session_id") or secrets.token_hex(16)
+        app.state.csrf_onetime_safe = getattr(app.state, "csrf_onetime_safe", {})
+        token = app.state.csrf_onetime_safe.get(sid)
+        if token is None:
+            token = f"safe_{secrets.token_hex(8)}"
+            app.state.csrf_onetime_safe[sid] = token
+        resp = HTMLResponse(_layout("CSRF One Time Safe", f'<form method="post" action="/csrf-onetime-safe"><input type="hidden" name="csrf_token" value="{token}"><input name="email" value="user@example.com"></form>'))
+        if not request.cookies.get("session_id"):
+            resp.set_cookie("session_id", sid)
+        return resp
+
+    @app.post("/csrf-onetime-safe", response_class=PlainTextResponse)
+    async def csrf_onetime_safe(request: Request, email: str = Form(""), csrf_token: str = Form("")):
+        sid = request.cookies.get("session_id")
+        valid = sid and csrf_token and csrf_token == getattr(app.state, "csrf_onetime_safe", {}).get(sid)
+        if not valid:
+            return PlainTextResponse("CSRF token mismatch", status_code=419)
+        app.state.csrf_onetime_safe[sid] = None
+        clean = email.replace("\r", "").replace("\n", "")
+        return PlainTextResponse(f"Sent: {clean}")
+
+    @app.get("/csrf-session", response_class=HTMLResponse)
+    async def csrf_session_form(request: Request):
+        sid = request.cookies.get("session_id") or secrets.token_hex(16)
+        app.state.csrf_session = getattr(app.state, "csrf_session", {})
+        app.state.csrf_session[sid] = f"session_{secrets.token_hex(8)}"
+        token = app.state.csrf_session[sid]
+        resp = HTMLResponse(_layout("CSRF Session", f'<form method="post" action="/csrf-session"><input type="hidden" name="csrf_token" value="{token}"><input name="email" value="user@example.com"></form>'))
+        if not request.cookies.get("session_id"):
+            resp.set_cookie("session_id", sid)
+        return resp
+
+    async def session_submit(request: Request, email: str, csrf_token: str, safe: bool):
+        sid = request.cookies.get("session_id")
+        if not sid or csrf_token != getattr(app.state, "csrf_session", {}).get(sid):
+            return PlainTextResponse("CSRF token mismatch", status_code=419)
+        value = email.replace("\r", "").replace("\n", "") if safe else email
+        return PlainTextResponse(f"Sent: {value}")
+
+    @app.post("/csrf-session", response_class=PlainTextResponse)
+    async def csrf_session(request: Request, email: str = Form(""), csrf_token: str = Form("")):
+        return await session_submit(request, email, csrf_token, False)
+
+    @app.get("/csrf-session-safe", response_class=HTMLResponse)
+    async def csrf_session_safe_form(request: Request):
+        sid = request.cookies.get("session_id") or secrets.token_hex(16)
+        app.state.csrf_session_safe = getattr(app.state, "csrf_session_safe", {})
+        app.state.csrf_session_safe[sid] = f"safe_session_{secrets.token_hex(8)}"
+        token = app.state.csrf_session_safe[sid]
+        resp = HTMLResponse(_layout("CSRF Session Safe", f'<form method="post" action="/csrf-session-safe"><input type="hidden" name="csrf_token" value="{token}"><input name="email" value="user@example.com"></form>'))
+        if not request.cookies.get("session_id"):
+            resp.set_cookie("session_id", sid)
+        return resp
+
+    @app.post("/csrf-session-safe", response_class=PlainTextResponse)
+    async def csrf_session_safe(request: Request, email: str = Form(""), csrf_token: str = Form("")):
+        sid = request.cookies.get("session_id")
+        if not sid or csrf_token != getattr(app.state, "csrf_session_safe", {}).get(sid):
+            return PlainTextResponse("CSRF token mismatch", status_code=419)
+        clean = email.replace("\r", "").replace("\n", "")
+        return PlainTextResponse(f"Sent: {clean}")
+
     # ── token lifecycle: refresh しても再送が stale のままのフォーム（脆弱 / 安全ツイン） ──
     def _stuck_form(action):
         return HTMLResponse(_layout("CSRF Stuck", f"""
