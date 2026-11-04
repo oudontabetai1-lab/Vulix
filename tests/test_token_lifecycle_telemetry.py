@@ -124,6 +124,51 @@ async def test_managed_transport_error_emits_event_and_reraises():
 
 
 @pytest.mark.asyncio
+async def test_managed_retry_transport_error_emits_one_event_and_preserves_response():
+    import httpx
+    from tests.test_token_lifecycle_fixtures import _TestEngine, _TestFormScanner
+
+    async def run(recorder):
+        value = _TestEngine(object(), base_url="http://app.test")
+        value.token_lifecycle_manager = True
+        value._is_access_allowed_url = lambda _url: True
+        value._is_url_excluded = lambda _url: False
+        scanner = _TestFormScanner(value)
+        events = []
+        value.record_token_lifecycle_event = events.append if recorder else lambda _event: None
+        posts = gets = 0
+        error = httpx.ConnectError("retry offline")
+
+        def handler(request):
+            nonlocal posts, gets
+            if request.method == "GET":
+                gets += 1
+                token = "stale" if gets == 1 else "fresh-123"
+                return httpx.Response(200, headers={"content-type": "text/html"},
+                                      text=f'<form><input type="hidden" name="csrf_token" value="{token}"></form>')
+            posts += 1
+            if posts == 1:
+                return httpx.Response(419, text="CSRF token mismatch")
+            raise error
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://app.test") as client:
+            try:
+                result = await scanner._send_httpx_token_managed(
+                    client, "POST", "http://app.test/api", {"q": "x", "csrf_token": "stale"}, {}, "json")
+            except Exception as exc:
+                return ("raised", type(exc), str(exc)), events
+        return ("returned", result[0].status_code), events
+
+    observed, events = await run(True)
+    noop_observed, _ = await run(False)
+    assert observed == noop_observed == ("returned", 419)
+    assert len(events) == 1
+    recorded = events[0]
+    assert (recorded.refresh_reason, recorded.attempt_count, recorded.final_status,
+            recorded.final_lifecycle_status) == ("transport_error", 2, None, "unknown")
+
+
+@pytest.mark.asyncio
 async def test_stale_inconclusive_and_flag_off_are_recorder_independent():
     import httpx
     from tests.fixtures.large_vuln_app import create_app

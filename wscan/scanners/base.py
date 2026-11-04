@@ -1230,6 +1230,7 @@ class BaseScanner(ABC):
                 pass
         attempt_count = 1
         refresh_reason = None
+        retry_transport_error_recorded = False
         try:
             response = await client.request(method, url, content=(json.dumps(request_body) if carrier == "json" else request_body), headers=request_headers)
         except Exception:
@@ -1265,6 +1266,7 @@ class BaseScanner(ABC):
                                         carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
                                         refresh_reason="transport_error", final_status=None,
                                         final_lifecycle_status="unknown"))
+                                    retry_transport_error_recorded = True
                                 except Exception as exc:
                                     self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
                             raise
@@ -1285,7 +1287,8 @@ class BaseScanner(ABC):
                     except Exception:
                         pass
         # Telemetry is deliberately last: classification and inconclusive handling own verdicts.
-        if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
+        if (enabled and not retry_transport_error_recorded and self.engine
+                and hasattr(self.engine, "record_token_lifecycle_event")):
             try:
                 from wscan.token_lifecycle import TokenLifecycleEvent, classify_token_response
                 final_outcome = classify_token_response(
