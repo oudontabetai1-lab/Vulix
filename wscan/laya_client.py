@@ -95,11 +95,11 @@ def decide(state: Any, questions: dict, *, variant: str = "default") -> Optional
     try:
         agent = _load(variant)
         result = agent.predict(state, questions)
+        # 要求した全 question が dict で揃っている完全な応答だけ採る（呼び出し側の KeyError 防止）。
+        answers = result.get("answers") if isinstance(result, dict) else None
+        if isinstance(answers, dict) and all(_answer_ok(spec, answers.get(q)) for q, spec in questions.items()):
+            return result
     except Exception:
         # Laya の障害は確実性の敵（偽陰性）にしない。例外は握って None（従来経路へ）。
         return None
-    # 要求した全 question が dict で揃っている完全な応答だけ採る（呼び出し側の KeyError 防止）。
-    answers = result.get("answers") if isinstance(result, dict) else None
-    if isinstance(answers, dict) and all(_answer_ok(spec, answers.get(q)) for q, spec in questions.items()):
-        return result
     return None

@@ -114,3 +114,17 @@ def test_concurrent_first_load_once(monkeypatch):
 def test_null_answer_value_is_none(monkeypatch):
     _fake(monkeypatch, lambda s, q: {"answers": {"q": {"noul": None}}})
     assert laya_client.decide("s", Q) is None
+
+
+def test_non_dict_questions_is_none(monkeypatch):
+    _fake(monkeypatch, lambda s, q: {"answers": {"q": {"noul": 0.9}}})
+    assert laya_client.decide("s", ["q"]) is None
+
+
+def test_response_get_raises_is_none(monkeypatch):
+    class BadResponse(dict):
+        def get(self, key, default=None):
+            raise RuntimeError("malformed response")
+
+    _fake(monkeypatch, lambda s, q: BadResponse())
+    assert laya_client.decide("s", Q) is None
