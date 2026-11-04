@@ -17,6 +17,10 @@ def test_catalog_matches_registry_and_has_plain_text_in_both_languages():
     data = json.loads(catalog._CATALOG_PATH.read_text(encoding="utf-8"))
     assert data["schema_version"] == "1.0.0"
     assert set(data["checks"]) == set(SCANNERS)
+    assert sum(bool(item["references"]) for item in data["checks"].values()) == 35
+    assert {check_id for check_id, item in data["checks"].items() if not item["references"]} == {
+        "security_headers", "graphql", "jwt", "websocket", "mass_assignment", "http_methods",
+    }
     for check_id, item in data["checks"].items():
         assert set(item) == {"ja", "en", "references"}
         for lang in ("ja", "en"):
