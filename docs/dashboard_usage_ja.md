@@ -62,11 +62,15 @@ python3 main.py serve --host 127.0.0.1 --port 8765
 http://localhost:8765/app
 ```
 
-Vulix の標準ダッシュボードは `/app` です。ポータル、スキャン履歴、監査ログ、Scan Setup、Monitor、Findings（検出結果）、Crawl（クロールグラフ）、Agent Skills、Settings が統合され、通常操作に必要なすべての画面が揃っています。
+Vulix の標準ダッシュボードは `/app` です。公式ロゴ（`templates/ui/vulix-logo-mark.png`）を配した左ナビゲーションレイルと上部ヘッダー（現在画面タイトル・ライブ接続バッジ）を備え、ポータル、スキャン履歴、監査ログ、Scan Setup、Monitor、Findings（検出結果）、Crawl（クロールグラフ）、Agent Skills、Settings が統合され、通常操作に必要なすべての画面が揃っています。
+
+> ℹ️ **通常/serve ダッシュボードについて**: ここで説明する UI シェルやレイアウト、画面遷移は、スキャンの設定・観測・結果管理を行う Web ダッシュボード（通常/serve モード）の動作です。自律探索を行う Agent / Hybrid エンジン内部の探索アルゴリズムや判定処理（Phase 1 偵察 / Phase 2 ハンドオフ）そのものとは区別されます。
 
 - **`serve` モード**: ブラウザで `/app`（ポータル画面）を自動的に開きます。
 - **`scan` / `agent` コマンド**: ダッシュボード有効時は `/app` シェルのライブ Monitor 画面（`http://localhost:<port>/app#/monitor?scan=<scan_id>`）へ直接ディープリンクして表示・ブラウザオープンします。ポータルではなく該当スキャンのライブ監視画面へ直接着地するため、スキャンの進行状況を即座に確認できます。
 - **`--no-monitor` / `batch` モード**: ダッシュボードサーバーおよびブラウザの自動起動は行われません。
+
+![統合画面のポータル](images/app-portal.png)
 
 従来の単体画面である `/`（Server Portal）や `/monitor`（ライブモニター）も後方互換としてそのまま動作し、画面上から新ダッシュボードへのリンクも提供しています。
 
@@ -83,6 +87,12 @@ python3 main.py serve --host 0.0.0.0 --port 8765
 
 ## 4. 初期設定画面を確認する
 
+統合ダッシュボードの左側ナビゲーションレイルから「Scan Setup」を選ぶと、設定画面（`/app#/setup`）が表示されます。
+
+![統合画面の Scan Setup](images/app-setup.png)
+
+従来のライブモニター内設定オーバーレイ（`/monitor`）も後方互換としてそのまま利用できます。
+
 ![ダッシュボード初期設定画面](images/dashboard-start.png)
 
 画面上部には Target URL、スキャンプロファイル、設定タブがあります。通常スキャンを始める前に、少なくとも次を確認します。
@@ -94,7 +104,7 @@ python3 main.py serve --host 0.0.0.0 --port 8765
 
 ## 5. 通常スキャンの設定を入力する
 
-Target URL を入力し、目的に近いプロファイルを選びます。
+Target URL を入力し、目的に近いプロファイルを選びます。統合画面の Scan Setup はサーバーの設定宣言（`/api/v1/settings/schema`）に連動する5つのタブ（クロール・スコープ、検査項目・ペイロード、認証・ネットワーク、AI・自律探索、高度な設定・フロー）で構成され、通常・Agent・Hybrid モードの設定入力に対応します。
 
 | プロファイル | 用途 |
 | --- | --- |
@@ -219,6 +229,12 @@ mTLS では PEM のクライアント証明書/秘密鍵、または Playwright 
 
 ## 6. Agent / Hybrid タブを設定する
 
+統合画面の「Agent Skills」画面（`/app#/agent-skills`）では、Agent が備えるブラウザ自律操作やスコープ制御などの機能一覧（マニフェスト）を確認できます。
+
+![統合画面の Agent Skills](images/app-agent-skills.png)
+
+従来のライブモニター内「Agent Browser」「ハイブリッド」設定タブ（`/monitor`）も引き続き利用可能です。
+
 ![Agent Browser とハイブリッドの設定タブ](images/dashboard-hybrid.png)
 
 ### Agent Browser
@@ -283,6 +299,21 @@ DNS、HTTP 到達性、プロキシ適用状態、TLS 設定、Playwright Chromi
 
 ## 8. 実行中の状態を確認する
 
+統合画面の Monitor（`/app#/monitor`）では、進行中のスキャンの通信、進捗、ブラウザ画面、Finding を3ペインレイアウトでリアルタイムに確認できます。
+
+![統合画面の Monitor](images/app-monitor.png)
+
+- **3ペイン構成**:
+  - **左ペイン（巡回マップ）**: 発見ページ、巡回中/完了/検出状態のツリー
+  - **中央ペイン（ブラウザ画面）**: 実行中のスクリーンショット表示、介入バー
+  - **右ペイン（ログ・Findings）**: 検出結果一覧、直近の通信（Request/Response）、Event Log
+- **ペイン境界リサイズ**: 境界セパレータ（スプリッター）はマウスドラッグおよびキーボード（矢印キー、フォーカス可視インジケータ付き）で直感的に幅を変更できます。
+- **折りたたみ・最大化**: 各ペインのボタンから特定ペインを折りたたんだり、最大化して全幅表示できます。
+- **レイアウトプリセット**: 画面上部のプリセット切替から「標準」「ブラウザ優先」「ログ優先」をワンクリックで選択できます。
+- **レイアウトの永続化**: 選択したレイアウトプリセットやペイン幅は `localStorage` に自動保存され、ページの再読み込みや別画面への遷移後も復元されます。狭小画面（幅900px未満）では自動的に縦積みスタック表示へ切り替わります。
+
+従来の `/monitor` 画面でも同様の情報を確認できます。
+
 ![スキャン実行中](images/dashboard-running.png)
 
 通常スキャンの主なフェーズは次のとおりです。
@@ -327,6 +358,12 @@ Hybrid では Event Log に Phase 1 の URL 数と Agent Finding 数、Phase 2 �
 
 ## 9. 結果と Finding を読む
 
+統合画面の Findings（`/app#/findings`）では、過去および最新スキャンの脆弱性一覧を重大度・検査種別・確証状態・出自（決定論スキャナ / Agent独自解釈）で絞り込み、詳細なエビデンスビューアや証跡を確認できます。
+
+![統合画面の Findings](images/app-findings.png)
+
+従来のライブモニター内 Findings パネル（`/monitor`）でも同様の結果を確認できます。
+
 ![検出結果の表示](images/dashboard-results.png)
 
 Finding では、重要度だけでなく確証と出自を確認します。
@@ -360,6 +397,8 @@ HTML レポートのバッジ:
 ### 統合画面（/app）での Crawl / Findings 相互連携
 
 統合画面（`/app`）では、クロールグラフ（Crawl 画面）と検出事項一覧（Findings 画面）の間でスムーズな相互連携が可能です：
+
+![統合画面の Crawl](images/app-crawl.png)
 
 - **Crawl ノード詳細からの遷移**: 選択ノードの URL に紐づく Finding 件数が表示され、リンクから該当 URL でフィルタされた Findings 画面へ遷移できます。検出データが未ロードのときは「0件」と偽らず「unknown」と明示されます。
 - **Findings 詳細からの遷移**: Finding 詳細の「クロールグラフで表示」から該当 URL の Crawl ノードへ移動できます。グラフのスナップショットに対象ノードが含まれていない場合は、架空ノードを捏造せず「クロールグラフ未検出（not in crawl graph）」と明示します。
@@ -436,7 +475,17 @@ python3 main.py scan https://example.com \
 - **状態ハンドリング**: 読み込み中スピナー、空状態（「記録された管理操作はありません」）、401 認証エラー時の再試行ボタンを完備しています。
 - **画面切り替えの非破壊性**: ライブモニター、スキャン履歴、監査ログ間を切り替えても、バックグラウンドの WebSocket 接続やライブ状態は維持されます。
 
-## 14. よくあるつまずき
+## 14. 設定（Settings）の確認と管理
+
+左側サイドバー（レイル）の「Settings」を選択すると、ダッシュボード全体の設定管理画面（`/app#/settings`）が表示されます。
+
+![統合画面の Settings](images/app-settings.png)
+
+- **通知設定**: Webhook URL を指定してスキャン完了時や脆弱性検出時の通知を設定できます。入力した機密トークンや URL は安全にマスクされます。
+- **設定値一覧**: サーバー上で有効な設定値の一覧（`/api/v1/settings/schema`）を閲覧・フィルタ検索できます。パスワードやシークレット値は画面上でマスクされます。
+- **設定の明示保存**: 設定変更後は「設定を保存」ボタンを押すことで安全に反映されます。
+
+## 15. よくあるつまずき
 
 ### 対象にアクセスできない
 
@@ -472,15 +521,15 @@ Depth、Max Forms、ペイロード上限、並列数を下げ、リクエスト
 
 詳細な切り分けは [トラブルシューティング](troubleshooting_ja.md)、実検査前の準備は [運用ガイド](operation_guide_ja.md) を参照してください。
 
-## 15. 最短手順まとめ
+## 16. 最短手順まとめ
 
 ```bash
 python3 main.py serve --host 127.0.0.1 --port 8765
 ```
 
-1. `http://localhost:8765/` を開き、「新規スキャン」を押す。
-2. Target URL とプロファイルを指定する。
-3. 認証、スコープ、検査項目、負荷を確認する。
+1. ブラウザで `http://localhost:8765/app`（または従来の `/` / `/monitor`）を開く。
+2. 左レイルの「Scan Setup」（または「新規スキャン」）から Target URL とプロファイルを指定する。
+3. 認証、スコープ、検査項目、負荷を確認し、必要に応じて「スキャン準備チェック」で事前診断する。
 4. 通常は画面下部、Agent/Hybrid は各タブ内の開始ボタンを押す。
-5. 実行中は Event Log、Current Test、Request/Response、Findings を確認する。
-6. 完了後は Agent バッジ、Evidence、再現物、HTML/JSON/SARIF を確認する。
+5. 実行中は 3ペイン Monitor（巡回マップ、ブラウザ画面、Findings・Event Log・通信ログ）で進捗を確認する。
+6. 完了後は Findings 画面・Crawl グラフ・エビデンス・HTML/JSON/SARIF レポートを確認する。
