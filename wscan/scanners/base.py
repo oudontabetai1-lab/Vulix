@@ -1078,8 +1078,8 @@ class BaseScanner(ABC):
             pass
         return jar
 
-    def _token_manager_enabled(self) -> bool:
-        """engine.token_lifecycle_manager（既定 off）かつ FORM×HTTPX が SUPPORTED の時のみ true。"""
+    def _token_manager_enabled(self, carrier=None) -> bool:
+        """engine.token_lifecycle_manager（既定 off）かつ対象 carrier×HTTPX が対応時のみ true。"""
         try:
             if getattr(getattr(self, "engine", None), "token_lifecycle_manager", False) is not True:
                 return False
@@ -1087,9 +1087,169 @@ class BaseScanner(ABC):
                 TokenCarrier, TokenTransport, build_token_capability_matrix,
             )
             return build_token_capability_matrix().is_supported(
-                TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX)
+                carrier or TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX)
         except Exception:
             return False
+
+    async def _refresh_httpx_token(self, client, url, body, headers, carrier):
+        """Return a request copy with only positively matched CSRF/nonce values refreshed."""
+        import re
+        from wscan.token_lifecycle import TOKEN_FIELD_NAMES, extract_form_details
+        names = {n.replace("-", "_").lower() for n in TOKEN_FIELD_NAMES}
+        body_names = set()
+        if carrier in ("json", "xml"):
+            def collect(value):
+                if isinstance(value, dict):
+                    for key, child in value.items():
+                        if key.replace("-", "_").lower() in names:
+                            body_names.add(key)
+                        collect(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        collect(child)
+            if carrier == "json":
+                collect(body)
+            else:
+                try:
+                    import xml.etree.ElementTree as ET
+                    body_names.update(element.tag.rsplit("}", 1)[-1].replace("-", "_").lower()
+                                      for element in ET.fromstring(body).iter())
+                    body_names.intersection_update(names)
+                except Exception:
+                    pass
+        header_names = [k for k in headers if k.lower() in {
+            "x-csrf-token", "x-xsrf-token", "x-csrftoken", "x-xsrftoken",
+            "csrf-token", "x-request-verification-token",
+        }]
+        if not body_names and not header_names:
+            return body, headers, False
+        if self._field_budget_gate():
+            return body, headers, False
+        if hasattr(self.engine, "_is_access_allowed_url") and not self.engine._is_access_allowed_url(url):
+            return body, headers, False
+        if hasattr(self.engine, "_is_url_excluded") and self.engine._is_url_excluded(url):
+            return body, headers, False
+        from wscan.state_profile import may_submit
+        if not may_submit(getattr(self.engine, "state_profile", "unrestricted"), method="GET", action=url):
+            return body, headers, False
+        page = await client.get(url, follow_redirects=False)
+        if page.is_redirect or page.status_code >= 400:
+            return body, headers, False
+        fresh = {}
+        for name, value in re.findall(r'<meta[^>]+(?:name|property)=["\']([^"\']+)["\'][^>]+content=["\']([^"\']+)["\']', page.text, re.I):
+            if name.replace("-", "_").lower() in names:
+                normalized = name.replace("-", "_").lower()
+                fresh[normalized] = value
+                if normalized in {"csrf_token", "csrftoken", "csrf"}:
+                    fresh.setdefault("x_csrf_token", value)
+                elif normalized in {"xsrf_token", "xsrftoken", "xsrf"}:
+                    fresh.setdefault("x_xsrf_token", value)
+        for cookie in client.cookies.jar:
+            cookie, value = cookie.name, cookie.value
+            if cookie.replace("-", "_").lower() in names:
+                fresh[cookie.replace("-", "_").lower()] = value
+        for key, value in page.headers.items():
+            normalized = key.replace("-", "_").lower()
+            if normalized in names:
+                fresh[normalized] = value
+        for key, value in (extract_form_details(page.text) or {}).get("token_fields", {}).items():
+            normalized = key.replace("-", "_").lower()
+            fresh[normalized] = value
+            if normalized in {"csrf_token", "csrftoken", "csrf"}:
+                fresh.setdefault("x_csrf_token", value)
+            elif normalized in {"xsrf_token", "xsrftoken", "xsrf"}:
+                fresh.setdefault("x_xsrf_token", value)
+        found = False
+        new_body = body
+        if carrier == "json" and body_names:
+            def replace(value):
+                nonlocal found
+                if isinstance(value, dict):
+                    return {k: (fresh[k.replace("-", "_").lower()] if k.replace("-", "_").lower() in body_names and k.replace("-", "_").lower() in fresh else replace(v)) for k, v in value.items()}
+                if isinstance(value, list):
+                    return [replace(v) for v in value]
+                return value
+            new_body = replace(body)
+            found = new_body != body
+        elif carrier == "xml":
+            import xml.etree.ElementTree as ET
+            try:
+                root = ET.fromstring(body)
+                for element in root.iter():
+                    key = element.tag.rsplit("}", 1)[-1].replace("-", "_").lower()
+                    if key in names and key in fresh:
+                        element.text = fresh[key]
+                        found = True
+                if found:
+                    new_body = ET.tostring(root, encoding="unicode")
+            except Exception:
+                pass
+        new_headers = dict(headers)
+        for key in header_names:
+            token_name = key.replace("-", "_").lower()
+            if token_name in fresh:
+                new_headers[key] = fresh[token_name]
+                found = True
+        return new_body, new_headers, found
+
+    async def _send_httpx_token_managed(self, client, method, url, body, headers, carrier):
+        from wscan.token_lifecycle import TokenCarrier, TokenOutcomeKind, classify_token_response
+        enabled = self._token_manager_enabled({"json": TokenCarrier.JSON, "xml": TokenCarrier.XML}.get(carrier, TokenCarrier.HTTP_HEADER))
+        request_body, request_headers = body, headers
+        if enabled:
+            try:
+                request_body, request_headers, _ = await self._refresh_httpx_token(
+                    client, url, body, headers, carrier)
+            except Exception:
+                request_body, request_headers = body, headers
+        response = await client.request(method, url, content=(json.dumps(request_body) if carrier == "json" else request_body), headers=request_headers)
+        if enabled:
+            outcome = None
+            try:
+                outcome = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
+                if outcome.outcome == TokenOutcomeKind.STALE:
+                    retry_body, retry_headers, refreshed = await self._refresh_httpx_token(client, url, body, headers, carrier)
+                    if refreshed:
+                        request_body, request_headers = retry_body, retry_headers
+                        response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
+                    final = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
+                    if final.outcome == TokenOutcomeKind.STALE:
+                        self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                        try:
+                            self.engine._probe_inconclusive = True
+                        except Exception:
+                            pass
+            except Exception:
+                if outcome is not None and outcome.outcome == TokenOutcomeKind.STALE:
+                    self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                    try:
+                        self.engine._probe_inconclusive = True
+                    except Exception:
+                        pass
+        return response, request_body, request_headers
+
+    @staticmethod
+    def _redact_managed_token_evidence(body, headers):
+        from wscan.token_lifecycle import TOKEN_FIELD_NAMES, derive_token_ref_id
+        names = {n.replace("-", "_").lower() for n in TOKEN_FIELD_NAMES}
+        safe_headers = dict(headers)
+        for key, value in safe_headers.items():
+            if key.lower() in {"x-csrf-token", "x-xsrf-token", "x-csrftoken", "x-xsrftoken", "csrf-token", "x-request-verification-token"}:
+                safe_headers[key] = derive_token_ref_id(str(value))
+        if isinstance(body, (dict, list)):
+            def clean(value):
+                if isinstance(value, dict):
+                    return {k: (derive_token_ref_id(str(v)) if k.replace("-", "_").lower() in names else clean(v)) for k, v in value.items()}
+                if isinstance(value, list):
+                    return [clean(v) for v in value]
+                return value
+            safe_body = json.dumps(clean(body))
+        else:
+            import re
+            safe_body = str(body)
+            for name in names:
+                safe_body = re.sub(r"(<(?:(?:[\w.-]+):)?" + re.escape(name) + r"(?:\s[^>]*)?>)(.*?)(</(?:(?:[\w.-]+):)?" + re.escape(name) + r"\s*>)", lambda m: m.group(1) + derive_token_ref_id(m.group(2)) + m.group(3), safe_body, flags=re.I | re.S)
+        return safe_body, safe_headers
 
     async def _apply_form_with_token_refresh(
         self,
@@ -1909,7 +2069,8 @@ class BaseScanner(ABC):
         request_timestamp = time.time()
         try:
             async with httpx.AsyncClient(**kwargs) as client:
-                response = await client.request(method, url, content=post_data)
+                response, managed_body, managed_headers = await self._send_httpx_token_managed(
+                    client, method, url, body, headers, "json")
                 self._record_probe_status(response)
             response_timestamp = time.time()
             # 実応答を受信できた＝送信成功。呼び出し側ループはこの証拠が無いと「済み」に
@@ -1919,12 +2080,13 @@ class BaseScanner(ABC):
                 self.engine._json_probe_sent = True
             except Exception:
                 pass
+            safe_post_data, safe_headers = self._redact_managed_token_evidence(managed_body, managed_headers)
             pair = {
                 "request": {
                     "url": url,
                     "method": method,
-                    "headers": headers,
-                    "post_data": post_data,
+                    "headers": safe_headers,
+                    "post_data": safe_post_data,
                     "timestamp": request_timestamp,
                 },
                 "response": {
@@ -2029,19 +2191,21 @@ class BaseScanner(ABC):
         request_timestamp = time.time()
         try:
             async with httpx.AsyncClient(**kwargs) as client:
-                response = await client.request(method, url, content=post_data)
+                response, managed_body, managed_headers = await self._send_httpx_token_managed(
+                    client, method, url, post_data, headers, "xml")
                 self._record_probe_status(response)
             response_timestamp = time.time()
             try:
                 self.engine._xml_probe_sent = True
             except Exception:
                 pass
+            safe_post_data, safe_headers = self._redact_managed_token_evidence(managed_body, managed_headers)
             pair = {
                 "request": {
                     "url": url,
                     "method": method,
-                    "headers": headers,
-                    "post_data": post_data,
+                    "headers": safe_headers,
+                    "post_data": safe_post_data,
                     "timestamp": request_timestamp,
                 },
                 "response": {

@@ -114,8 +114,13 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pair["response"]["status"], 200)
         self.assertEqual(self._inconclusive(eng), [])
 
-    def test_matrix_only_form_httpx_supported(self):
+    def test_matrix_declares_only_implemented_httpx_carriers_supported(self):
         m = build_token_capability_matrix()
         self.assertTrue(m.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX))
         supported = [(c, t) for c in TokenCarrier for t in TokenTransport if m.is_supported(c, t)]
-        self.assertEqual(supported, [(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX)])
+        self.assertEqual(supported, [
+            (TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX),
+            (TokenCarrier.JSON, TokenTransport.HTTPX),
+            (TokenCarrier.XML, TokenTransport.HTTPX),
+            (TokenCarrier.HTTP_HEADER, TokenTransport.HTTPX),
+        ])
