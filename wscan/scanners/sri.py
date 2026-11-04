@@ -61,9 +61,10 @@ _ATTR_RE = re.compile(
 
 
 def _parse_attrs(attr_blob: str) -> dict[str, str]:
+    import html
     attrs: dict[str, str] = {}
     for match in _ATTR_RE.finditer(attr_blob):
-        attrs[match.group("name").lower()] = match.group("value")
+        attrs[match.group("name").lower()] = html.unescape((match.group("value") or "").strip())
     return attrs
 
 
@@ -83,16 +84,17 @@ def find_unprotected_externals(html: str, page_url: str) -> list[dict]:
     """
     if not html:
         return []
-    from wscan.component_intel import _active_script_srcs
+    from wscan.component_intel import _active_script_srcs, normalize_script_src
 
     active_scripts, base_href = _active_script_srcs(html)
+    normalized_active = {normalize_script_src(s) for s in active_scripts}
     effective_base = urljoin(page_url, base_href) if base_href else page_url
     page_host = _host_of(page_url)
     results: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
     def _process(tag: str, attrs: dict[str, str], src_attr: str) -> None:
-        src = (attrs.get(src_attr) or "").strip()
+        src = normalize_script_src(attrs.get(src_attr) or "")
         if not src:
             return
         # Skip inline / data: / javascript: / protocol-relative blanks.
@@ -120,7 +122,8 @@ def find_unprotected_externals(html: str, page_url: str) -> list[dict]:
 
     for match in _SCRIPT_TAG_RE.finditer(html):
         attrs = _parse_attrs(match.group(1))
-        if attrs.get("src", "").strip() not in active_scripts:
+        src_val = normalize_script_src(attrs.get("src", ""))
+        if src_val not in normalized_active:
             continue
         _process("script", attrs, "src")
 

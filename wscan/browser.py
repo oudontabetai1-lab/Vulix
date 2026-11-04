@@ -2379,11 +2379,11 @@ class BrowserManager:
         )
         return source, pair
 
-    async def collect_links(self, base_url: str, same_domain: bool = True) -> list[str]:
+    async def collect_links(self, base_url: str, same_domain: bool = True, include_scripts: bool = True) -> list[str]:
         """Collect navigable URLs from links, forms, script resources, data attributes, and inline JS."""
         try:
             links = await self.page.evaluate("""
-                (baseUrl) => {
+                ({baseUrl, includeScripts}) => {
                     const parsed = new URL(baseUrl);
                     const links = new Set();
                     const ignoredExt = /\\.(?:png|jpe?g|gif|svg|webp|ico|css|woff2?|ttf|map|pdf|zip)(?:[?#].*)?$/i;
@@ -2408,12 +2408,14 @@ class BrowserManager:
 
                     // JS resources are scan targets even though they are not navigation controls.
                     // Resolve through document.baseURI so <base href> matches browser loading.
-                    document.querySelectorAll('script[src]').forEach(script => {
-                        const type = (script.getAttribute('type') || '').trim().toLowerCase().split(';', 1)[0];
-                        if (!type || type === 'module' || /^(?:application|text)\/(?:x-)?(?:java|ecma)script$/.test(type)) {
-                            addCandidate(script.getAttribute('src'), document.baseURI);
-                        }
-                    });
+                    if (includeScripts) {
+                        document.querySelectorAll('script[src]').forEach(script => {
+                            const type = (script.getAttribute('type') || '').trim().toLowerCase().split(';', 1)[0];
+                            if (!type || type === 'module' || /^(?:application|text)\\/(?:x-)?(?:java|ecma)script$/.test(type)) {
+                                addCandidate(script.getAttribute('src'), document.baseURI);
+                            }
+                        });
+                    }
 
                     document.querySelectorAll('[data-href], [data-url], [data-route], [data-path], [data-api], [data-endpoint]').forEach(el => {
                         ['data-href', 'data-url', 'data-route', 'data-path', 'data-api', 'data-endpoint'].forEach(attr => {
@@ -2431,8 +2433,11 @@ class BrowserManager:
 
                     return [...links];
                 }
-            """, base_url)
+            """, {"baseUrl": base_url, "includeScripts": include_scripts})
             links.extend(self._collect_urls_from_loaded_assets(base_url))
+            if not include_scripts:
+                from .url_extraction import is_script_subresource_url
+                links = [l for l in links if not is_script_subresource_url(l)]
             if same_domain:
                 base = urlparse(base_url)
                 links = [l for l in links if urlparse(l).netloc == base.netloc]
@@ -2440,7 +2445,7 @@ class BrowserManager:
         except Exception:
             return []
 
-    async def collect_links_rich(self, base_url: str, same_domain: bool = True) -> list[dict]:
+    async def collect_links_rich(self, base_url: str, same_domain: bool = True, include_scripts: bool = False) -> list[dict]:
         """Collect navigable links together with the element that produces them.
 
         Returns a list of ``{url, text, selector, rect, viewport}`` entries so the
@@ -2513,7 +2518,11 @@ class BrowserManager:
             # DOM element is added with a null ``via`` so crawl coverage is not reduced.
             seen = {e["url"] for e in entries}
             try:
-                for url in await self.collect_links(base_url, same_domain=same_domain):
+                for url in await self.collect_links(base_url, same_domain=same_domain, include_scripts=include_scripts):
+                    if not include_scripts:
+                        from .url_extraction import is_script_subresource_url
+                        if is_script_subresource_url(url):
+                            continue
                     if url not in seen:
                         seen.add(url)
                         entries.append({"url": url, "text": "", "selector": "",

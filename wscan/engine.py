@@ -3973,6 +3973,7 @@ class ScanEngine:
                                     clean not in self.visited_urls
                                     and self._is_access_allowed_url(clean)
                                     and not self._is_url_excluded(clean)
+                                    and not self._is_script_subresource(clean)
                                 ):
                                     self.visited_urls.add(clean)
                                     self._transition_via.setdefault(clean, {
@@ -4377,7 +4378,8 @@ class ScanEngine:
                         break
                     if (clean not in self.visited_urls
                             and self._is_access_allowed_url(clean)
-                            and not self._is_url_excluded(clean)):
+                            and not self._is_url_excluded(clean)
+                            and not self._is_script_subresource(clean)):
                         self.visited_urls.add(clean)
                         self._transition_via.setdefault(clean, {
                             "text": entry.get("text", ""),
@@ -4873,10 +4875,13 @@ class ScanEngine:
 
         攻撃フェーズでは ``navigate()`` が network をクリアするため、ここで本文を
         確保しておくと js_static が別ページ遷移後でも外部 JS を解析できる。
-        失敗・未捕捉は単に空のまま（best-effort）。
+        リダイレクト（302 等）されている場合は network 内の遷移先 pair を追跡して
+        最終的な本文を確保する。リダイレクト先の最終 URL がスコープ外または除外対象の
+        場合はスキャン対象として保存しない。失敗・未捕捉は単に空のまま（best-effort）。
         """
         from urllib.parse import urljoin
-        from wscan.component_intel import _active_script_srcs
+        from wscan.component_intel import _active_script_srcs, follow_redirect_chain_in_network
+        from wscan.scanners.secret_leak import is_script_scan_allowed
 
         network = getattr(self.browser, "network", None)
         if not network or not hasattr(network, "latest_for_url"):
@@ -4884,21 +4889,35 @@ class ScanEngine:
         out: dict = {}
         srcs, base_href = _active_script_srcs(html or "")
         script_base = urljoin(base_url, base_href) if base_href else base_url
+        in_scope = getattr(self, "_is_access_allowed_url", None)
+        is_excluded = getattr(self, "_is_url_excluded", None)
+        seen_srcs: set[str] = set()
+
         for src in srcs:
             abs_url = urljoin(script_base, src)
-            if abs_url in out:
+            if abs_url in seen_srcs:
                 continue
-            try:
-                # 完全一致（クエリ込み）を優先。キャッシュバスター付きで同一パス
-                # 別クエリ（/app.js?v=public と ?v=admin）の取り違えを防ぐ。
-                pair = network.latest_for_url(abs_url, match_query=True)
-                if not pair:
-                    pair = network.latest_for_url(abs_url, match_query=False)
-            except Exception:
-                pair = None
+            seen_srcs.add(abs_url)
+
+            final_url, pair = follow_redirect_chain_in_network(network, abs_url)
+            # リダイレクトされたスクリプトの場合、最終 URL をスコープおよび除外ルールで検証する。
+            # スコープ外または除外対象の場合、スキャン対象として保存しない。
+            if final_url != abs_url:
+                if not is_script_scan_allowed(final_url, in_scope_fn=in_scope, is_excluded_fn=is_excluded):
+                    continue
+                if not is_script_scan_allowed(abs_url, in_scope_fn=None, is_excluded_fn=is_excluded):
+                    continue
+                store_key = final_url
+            else:
+                if not is_script_scan_allowed(abs_url, in_scope_fn=None, is_excluded_fn=is_excluded):
+                    continue
+                store_key = abs_url
+
+            if store_key in out:
+                continue
             body = (pair or {}).get("response", {}).get("body", "") if pair else ""
             if body and body.strip():
-                out[abs_url] = body
+                out[store_key] = body
         return out
 
     async def _phase_attack(self, pages: list, plans: dict):
@@ -5493,7 +5512,11 @@ class ScanEngine:
                     clean_key = clean.rstrip("/")
                     if len(auth_visited) >= url_cap:
                         break
-                    if clean_key not in auth_visited and not self._is_url_excluded(clean):
+                    if (
+                        clean_key not in auth_visited
+                        and not self._is_url_excluded(clean)
+                        and not self._is_script_subresource(clean)
+                    ):
                         auth_visited.add(clean_key)  # dedup はキー、queue は元 URL（slash 保持）
                         # queued post-auth URL を scan-level state にも残し、abort 時に
                         # coverage が pending を unreached(not attempted)へ分類できるようにする
@@ -7525,6 +7548,11 @@ class ScanEngine:
                 f"→ {len(plan.fields)} field(s)"
             )
         return plans
+
+    def _is_script_subresource(self, url: str) -> bool:
+        """URL が JavaScript スクリプトサブリソース（.js/.mjs/.cjs）かを判定する。"""
+        from .url_extraction import is_script_subresource_url
+        return is_script_subresource_url(url)
 
     def _is_url_excluded(self, url: str) -> bool:
         """Return True if *url* matches any entry in the exclude_urls set.

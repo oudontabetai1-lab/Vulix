@@ -3,10 +3,12 @@ import unittest
 import types
 from unittest.mock import AsyncMock
 
+from wscan.scanners.base import PageDocumentUnavailable
 from wscan.scanners.secret_leak import (
     _redact,
     _shannon_entropy,
     scan_text_for_secrets,
+    is_script_scan_allowed,
 )
 
 
@@ -138,6 +140,383 @@ class SecretLeakScriptContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await scanner.scan_page("http://target.test/assets/app.js"), [])
         self.assertEqual(scanner.record_finding.await_count, 1)
         self.assertEqual(scanner._document_body.await_count, 1)
+
+    async def test_honors_url_exclusions_for_captured_scripts(self):
+        # Edge 2: 捕捉済みスクリプトに対してもオペレータの URL 除外ルール（_is_url_excluded）を適用する。
+        from wscan.scanners.secret_leak import SecretLeakScanner
+
+        excluded_urls = {"http://target.test/static/private.js"}
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None, wave_errors=[],
+            _is_access_allowed_url=lambda url: url.startswith("http://target.test/"),
+            _is_url_excluded=lambda url: url in excluded_urls,
+        )
+        scanner = SecretLeakScanner(engine)
+        scanner._document_body = AsyncMock(return_value="safe referring document")
+        scanner.record_finding = AsyncMock(side_effect=lambda **kw: kw)
+
+        page = types.SimpleNamespace(
+            url="http://target.test/portal",
+            external_scripts={
+                # 除外対象のスクリプト（秘密を含むが除外設定により走査・報告されない）
+                "http://target.test/static/private.js": 'window.secret="AKIA5JZQNVRT7H3KX9P1";',
+                # 安全ツイン: 除外対象外のスクリプト（秘密を含むため確実に報告される）
+                "http://target.test/static/public.js": 'window.secret="AKIA5JZQNVRT7H3KX9P2";',
+                # 安全ツイン: 除外対象外の無害スクリプト（秘密を含まないため報告されない）
+                "http://target.test/static/safe.js": "function greet(){return 'hello';}",
+            },
+        )
+
+        found = await scanner.scan_page_context(page)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["url"], "http://target.test/static/public.js")
+        self.assertEqual(found[0]["evidence_details"]["resource_url"], "http://target.test/static/public.js")
+
+    def test_pure_is_script_scan_allowed(self):
+        # Edge 2 の純粋判定関数テスト
+        in_scope = lambda u: "in-scope" in u
+        is_excl = lambda u: "private" in u
+
+        # スコープ内かつ除外対象外 -> True
+        self.assertTrue(is_script_scan_allowed("https://in-scope.test/public.js", in_scope, is_excl))
+        # 除外対象 -> False
+        self.assertFalse(is_script_scan_allowed("https://in-scope.test/private.js", in_scope, is_excl))
+        # スコープ外 -> False
+        self.assertFalse(is_script_scan_allowed("https://out-of-scope.test/public.js", in_scope, is_excl))
+
+    async def test_captured_scripts_not_gated_on_document_replay_failure(self):
+        # Edge 5: 参照ドキュメントの再取得（direct GET）がタイムアウト/PageDocumentUnavailable で
+        # 失敗しても、crawl 時に捕捉済みのスクリプト本文の検査をゲートせず実行する。
+        from wscan.scanners.secret_leak import SecretLeakScanner
+
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None, wave_errors=[],
+            _is_access_allowed_url=lambda url: True,
+            _is_url_excluded=lambda url: False,
+        )
+        scanner = SecretLeakScanner(engine)
+        # ドキュメントの direct GET が例外を送出
+        scanner._document_body = AsyncMock(side_effect=PageDocumentUnavailable("document timeout"))
+        scanner.record_finding = AsyncMock(side_effect=lambda **kw: kw)
+
+        page = types.SimpleNamespace(
+            url="http://target.test/flaky-doc",
+            external_scripts={
+                "http://target.test/assets/app.js": 'window.key="AIzaSyA-WLh38Kv9XQ7yz1bP4uMd3RTaZ2nHkLm";',
+            },
+        )
+
+        # page.html が無い場合、捕捉済みスクリプトの finding を保持して PageDocumentUnavailable が再送出される
+        with self.assertRaises(PageDocumentUnavailable) as cm:
+            await scanner.scan_page_context(page)
+        self.assertEqual(len(cm.exception.findings), 1)
+        self.assertEqual(cm.exception.findings[0]["url"], "http://target.test/assets/app.js")
+
+    async def test_captured_document_html_used_when_replay_unavailable(self):
+        # Edge 5: クロール時に捕捉済みの page.html があれば、direct GET が失敗しても
+        # すでに捕捉された本文を使って検査を完了する。
+        from wscan.scanners.secret_leak import SecretLeakScanner
+
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None, wave_errors=[],
+            _is_access_allowed_url=lambda url: True,
+            _is_url_excluded=lambda url: False,
+        )
+        scanner = SecretLeakScanner(engine)
+        scanner._document_body = AsyncMock(side_effect=PageDocumentUnavailable("direct GET timed out"))
+        scanner.record_finding = AsyncMock(side_effect=lambda **kw: kw)
+
+        page = types.SimpleNamespace(
+            url="http://target.test/offline-doc",
+            html='<html><body><script>var k="AKIA5JZQNVRT7H3KX9P1";</script></body></html>',
+            external_scripts={
+                "http://target.test/assets/app.js": 'window.key="AIzaSyA-WLh38Kv9XQ7yz1bP4uMd3RTaZ2nHkLm";',
+            },
+        )
+
+        # page.html があるため PageDocumentUnavailable にならず両方の finding が返る
+        findings = await scanner.scan_page_context(page)
+        self.assertEqual(len(findings), 2)
+        urls = [f["url"] for f in findings]
+        self.assertIn("http://target.test/offline-doc", urls)
+        self.assertIn("http://target.test/assets/app.js", urls)
+
+    async def test_safe_twin_document_replay_failure_without_secrets(self):
+        # 安全ツイン: direct GET が失敗し、捕捉済みスクリプトも無害な場合、偽陽性の finding は生成されない。
+        from wscan.scanners.secret_leak import SecretLeakScanner
+
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None, wave_errors=[],
+            _is_access_allowed_url=lambda url: True,
+            _is_url_excluded=lambda url: False,
+        )
+        scanner = SecretLeakScanner(engine)
+        scanner._document_body = AsyncMock(side_effect=PageDocumentUnavailable("document timeout"))
+        scanner.record_finding = AsyncMock(side_effect=lambda **kw: kw)
+
+        page = types.SimpleNamespace(
+            url="http://target.test/flaky-doc",
+            external_scripts={
+                "http://target.test/assets/safe.js": "function add(a, b) { return a + b; }",
+            },
+        )
+
+        with self.assertRaises(PageDocumentUnavailable) as cm:
+            await scanner.scan_page_context(page)
+        self.assertEqual(len(cm.exception.findings), 0)
+
+    async def test_redirected_script_response_followed_and_scanned(self):
+        # Edge 4 (リコール保持): in-scope <script src> がスコープ内の非除外資産へリダイレクトされた場合、
+        # 最終 URL を追跡して本文を確保し、秘密を走査・検出する。
+        from wscan.engine import ScanEngine
+        from wscan.scanners.secret_leak import SecretLeakScanner
+
+        class CapturedNetwork:
+            def latest_for_url(self, url, **_kwargs):
+                if url == "http://target.test/app.js":
+                    # リダイレクト応答（302, Location ヘッダあり, 本文なし）
+                    return {
+                        "request": {"url": url},
+                        "response": {
+                            "status": 302,
+                            "url": url,
+                            "headers": {"location": "/static/app.bundle.js"},
+                            "body": "",
+                        },
+                    }
+                elif url == "http://target.test/static/app.bundle.js":
+                    # 最終的なスクリプト実体（200, 秘密を含む本文）
+                    return {
+                        "request": {"url": url},
+                        "response": {
+                            "status": 200,
+                            "url": url,
+                            "headers": {"content-type": "application/javascript"},
+                            "body": 'window.key="AIzaSyA-WLh38Kv9XQ7yz1bP4uMd3RTaZ2nHkLm";',
+                        },
+                    }
+                return None
+
+        engine = ScanEngine.__new__(ScanEngine)
+        engine._browser = types.SimpleNamespace(network=CapturedNetwork())
+        engine.monitor = None
+        engine.payload_gen = None
+        engine.wave_errors = []
+        engine._is_access_allowed_url = lambda url: True
+        engine._is_url_excluded = lambda url: False
+
+        # _snapshot_external_scripts がリダイレクトを追跡して final URL と body を確保する
+        snapshot = engine._snapshot_external_scripts(
+            '<script src="/app.js"></script>',
+            "http://target.test/page",
+        )
+        self.assertIn("http://target.test/static/app.bundle.js", snapshot)
+        self.assertIn("AIzaSyA", snapshot["http://target.test/static/app.bundle.js"])
+
+        # scanner がそのスナップショットから秘密を検出する
+        scanner = SecretLeakScanner(engine)
+        scanner._document_body = AsyncMock(return_value="safe document")
+        scanner.record_finding = AsyncMock(side_effect=lambda **kw: kw)
+
+        page = types.SimpleNamespace(url="http://target.test/page", external_scripts=snapshot)
+        found = await scanner.scan_page_context(page)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["url"], "http://target.test/static/app.bundle.js")
+
+    async def test_redirected_script_to_out_of_scope_asset_not_scanned(self):
+        # Edge 4 (スコープ境界保護): in-scope <script src> がスコープ外の資産へリダイレクトされた場合、
+        # 最終 URL をスコープ判定し、スキャン・報告対象から除外する。
+        from wscan.engine import ScanEngine
+        from wscan.scanners.secret_leak import SecretLeakScanner
+
+        class CapturedNetwork:
+            def latest_for_url(self, url, **_kwargs):
+                if url == "http://target.test/app.js":
+                    return {
+                        "request": {"url": url},
+                        "response": {
+                            "status": 302,
+                            "url": url,
+                            "headers": {"location": "https://external-thirdparty.test/vendor.js"},
+                            "body": "",
+                        },
+                    }
+                elif url == "https://external-thirdparty.test/vendor.js":
+                    return {
+                        "request": {"url": url},
+                        "response": {
+                            "status": 200,
+                            "url": url,
+                            "headers": {"content-type": "application/javascript"},
+                            "body": 'window.key="AIzaSyA-WLh38Kv9XQ7yz1bP4uMd3RTaZ2nHkLm";',
+                        },
+                    }
+                return None
+
+        engine = ScanEngine.__new__(ScanEngine)
+        engine._browser = types.SimpleNamespace(network=CapturedNetwork())
+        engine.monitor = None
+        engine.payload_gen = None
+        engine.wave_errors = []
+        # target.test のみ許可（external-thirdparty.test はスコープ外）
+        engine._is_access_allowed_url = lambda url: url.startswith("http://target.test/")
+        engine._is_url_excluded = lambda url: False
+
+        snapshot = engine._snapshot_external_scripts(
+            '<script src="/app.js"></script>',
+            "http://target.test/page",
+        )
+        self.assertNotIn("https://external-thirdparty.test/vendor.js", snapshot)
+        self.assertNotIn("http://target.test/app.js", snapshot)
+
+        scanner = SecretLeakScanner(engine)
+        scanner._document_body = AsyncMock(return_value="safe document")
+        scanner.record_finding = AsyncMock(side_effect=lambda **kw: kw)
+
+        page = types.SimpleNamespace(url="http://target.test/page", external_scripts=snapshot)
+        found = await scanner.scan_page_context(page)
+        self.assertEqual(len(found), 0)
+
+    async def test_redirected_script_to_excluded_asset_not_scanned(self):
+        # Edge 4 (除外ルール適用): in-scope <script src> がオペレータ除外対象の資産へリダイレクトされた場合、
+        # 最終 URL を除外判定し、スキャン・報告対象から除外する。
+        from wscan.engine import ScanEngine
+        from wscan.scanners.secret_leak import SecretLeakScanner
+
+        excluded_url = "http://target.test/static/excluded.bundle.js"
+
+        class CapturedNetwork:
+            def latest_for_url(self, url, **_kwargs):
+                if url == "http://target.test/app.js":
+                    return {
+                        "request": {"url": url},
+                        "response": {
+                            "status": 302,
+                            "url": url,
+                            "headers": {"location": "/static/excluded.bundle.js"},
+                            "body": "",
+                        },
+                    }
+                elif url == excluded_url:
+                    return {
+                        "request": {"url": url},
+                        "response": {
+                            "status": 200,
+                            "url": url,
+                            "headers": {"content-type": "application/javascript"},
+                            "body": 'window.key="AIzaSyA-WLh38Kv9XQ7yz1bP4uMd3RTaZ2nHkLm";',
+                        },
+                    }
+                return None
+
+        engine = ScanEngine.__new__(ScanEngine)
+        engine._browser = types.SimpleNamespace(network=CapturedNetwork())
+        engine.monitor = None
+        engine.payload_gen = None
+        engine.wave_errors = []
+        engine._is_access_allowed_url = lambda url: True
+        engine._is_url_excluded = lambda url: url == excluded_url
+
+        snapshot = engine._snapshot_external_scripts(
+            '<script src="/app.js"></script>',
+            "http://target.test/page",
+        )
+        self.assertNotIn(excluded_url, snapshot)
+        self.assertNotIn("http://target.test/app.js", snapshot)
+
+        scanner = SecretLeakScanner(engine)
+        scanner._document_body = AsyncMock(return_value="safe document")
+        scanner.record_finding = AsyncMock(side_effect=lambda **kw: kw)
+
+        page = types.SimpleNamespace(url="http://target.test/page", external_scripts=snapshot)
+        found = await scanner.scan_page_context(page)
+        self.assertEqual(len(found), 0)
+
+    async def test_safe_twin_redirected_script_without_secrets(self):
+        # 安全ツイン: リダイレクト先の本文が無害な場合、秘密漏洩として誤検知されない。
+        from wscan.engine import ScanEngine
+        from wscan.scanners.secret_leak import SecretLeakScanner
+
+        class CapturedNetwork:
+            def latest_for_url(self, url, **_kwargs):
+                if url == "http://target.test/app.js":
+                    return {
+                        "response": {
+                            "status": 302,
+                            "url": url,
+                            "headers": {"location": "/static/safe.bundle.js"},
+                            "body": "",
+                        },
+                    }
+                elif url == "http://target.test/static/safe.bundle.js":
+                    return {
+                        "response": {
+                            "status": 200,
+                            "url": url,
+                            "headers": {"content-type": "application/javascript"},
+                            "body": "function run() { return 42; }",
+                        },
+                    }
+                return None
+
+        engine = ScanEngine.__new__(ScanEngine)
+        engine._browser = types.SimpleNamespace(network=CapturedNetwork())
+        engine.monitor = None
+        engine.payload_gen = None
+        engine.wave_errors = []
+        engine._is_access_allowed_url = lambda url: True
+        engine._is_url_excluded = lambda url: False
+
+        snapshot = engine._snapshot_external_scripts(
+            '<script src="/app.js"></script>',
+            "http://target.test/page",
+        )
+        self.assertIn("http://target.test/static/safe.bundle.js", snapshot)
+
+        scanner = SecretLeakScanner(engine)
+        scanner._document_body = AsyncMock(return_value="safe document")
+        scanner.record_finding = AsyncMock(side_effect=lambda **kw: kw)
+
+        page = types.SimpleNamespace(url="http://target.test/page", external_scripts=snapshot)
+        found = await scanner.scan_page_context(page)
+        self.assertEqual(len(found), 0)
+
+    def test_pure_follow_redirect_chain_in_network(self):
+        # Edge 4 の純粋リダイレクト追跡ヘルパーの単体テスト
+        from wscan.component_intel import follow_redirect_chain_in_network
+
+        class MockNetwork:
+            def __init__(self, table):
+                self.table = table
+
+            def latest_for_url(self, url, **_kwargs):
+                return self.table.get(url)
+
+        # 1. 直接一致（リダイレクトなし）
+        net1 = MockNetwork({
+            "http://t.test/a.js": {"response": {"status": 200, "body": "ok"}},
+        })
+        url, pair = follow_redirect_chain_in_network(net1, "http://t.test/a.js")
+        self.assertEqual(url, "http://t.test/a.js")
+        self.assertEqual(pair["response"]["body"], "ok")
+
+        # 2. 2ホップリダイレクト: /a.js -> /b.js -> /c.js
+        net2 = MockNetwork({
+            "http://t.test/a.js": {"response": {"status": 301, "headers": {"Location": "/b.js"}}},
+            "http://t.test/b.js": {"response": {"status": 302, "headers": {"location": "http://t.test/c.js"}}},
+            "http://t.test/c.js": {"response": {"status": 200, "body": "final_script"}},
+        })
+        url, pair = follow_redirect_chain_in_network(net2, "http://t.test/a.js")
+        self.assertEqual(url, "http://t.test/c.js")
+        self.assertEqual(pair["response"]["body"], "final_script")
+
+        # 3. ループリダイレクト: /loop1 -> /loop2 -> /loop1（無限ループせず安全に終了）
+        net3 = MockNetwork({
+            "http://t.test/loop1": {"response": {"status": 302, "headers": {"location": "/loop2"}}},
+            "http://t.test/loop2": {"response": {"status": 302, "headers": {"location": "/loop1"}}},
+        })
+        url, pair = follow_redirect_chain_in_network(net3, "http://t.test/loop1")
+        self.assertIn(url, ("http://t.test/loop1", "http://t.test/loop2"))
 
 
 if __name__ == "__main__":
