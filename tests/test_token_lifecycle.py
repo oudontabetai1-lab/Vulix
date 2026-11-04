@@ -564,12 +564,11 @@ def test_capability_matrix_construction_and_invariants():
     assert TOKEN_LIFECYCLE_DISCLAIMER in matrix.disclaimer
 
     # 3. 各トランスポートの代表的宣言ステータスチェック（現スライスでは未統合のため SUPPORTED は一切宣言せず PLANNED とする）
-    # Playwright: form, multipart, json, header が PLANNED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
+    # Playwright: form-urlencoded が SUPPORTED (Increment 3)、multipart, json, header が PLANNED
+    assert matrix.is_supported("form", "playwright") is True
+    assert matrix.is_planned("form", "playwright") is False
     assert matrix.get_status(TokenCarrier.MULTIPART, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
     assert matrix.get_status(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
-    assert matrix.is_supported("form", "playwright") is False
-    assert matrix.is_planned("form", "playwright") is True
 
     # HTTPX: form, json, XML, header の共有送信経路で pre-send 再取得に対応
     assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
@@ -604,21 +603,22 @@ def test_capability_matrix_construction_and_invariants():
     assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) is False
     assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) is True
 
-    # Flow: form, multipart, json, header が PLANNED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) == DeclaredStatus.PLANNED
-    assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is False
-    assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is True
+    # Flow: form-urlencoded は SUPPORTED (Increment 3)、multipart, json, header が PLANNED
+    assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is True
+    assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is False
 
-    # SUPPORTED は実装済みの HTTPX carrier のみに宣言
+    # SUPPORTED は実装済みの carrier のみに宣言（Increment 3 で PLAYWRIGHT と FLOW が追加）
     supported_entries = [e for e in matrix.entries if e.status == DeclaredStatus.SUPPORTED]
     assert {(e.carrier, e.transport) for e in supported_entries} == {
         (TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX),
         (TokenCarrier.JSON, TokenTransport.HTTPX),
         (TokenCarrier.XML, TokenTransport.HTTPX),
         (TokenCarrier.HTTP_HEADER, TokenTransport.HTTPX),
+        (TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT),
+        (TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW),
     }
     other_entries = [e for e in matrix.entries if e.status != DeclaredStatus.SUPPORTED]
-    assert len(other_entries) == 45
+    assert len(other_entries) == 43
     assert all(e.status in (DeclaredStatus.PLANNED, DeclaredStatus.UNSUPPORTED, DeclaredStatus.BLOCKED) for e in other_entries)
 
 
@@ -626,27 +626,27 @@ def test_capability_matrix_distinguishes_supported_vs_planned():
     """将来のスライスで統合が完了した際に SUPPORTED と PLANNED を明確に区別できることを検証。"""
     default_matrix = build_token_capability_matrix()
 
-    # 現スライスでは未統合のため PLANNED であり、is_supported は False
-    assert default_matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
-    assert default_matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) is False
-    assert default_matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) is True
+    # 現スライスでは JSON+PLAYWRIGHT は PLANNED のまま（FORM_URLENCODED+PLAYWRIGHTはIncrement 3でSUPPORTED化）
+    assert default_matrix.get_status(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
+    assert default_matrix.is_supported(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) is False
+    assert default_matrix.is_planned(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) is True
 
     # 後続スライスでの統合完了を模したオーバーライド
     integrated_matrix = build_token_capability_matrix(
         overrides={
-            (TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT): DeclaredStatus.SUPPORTED,
+            (TokenCarrier.JSON, TokenTransport.PLAYWRIGHT): DeclaredStatus.SUPPORTED,
         }
     )
 
     # 統合後は SUPPORTED に遷移し、is_supported が True、is_planned が False となること
+    assert integrated_matrix.get_status(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) == DeclaredStatus.SUPPORTED
+    assert integrated_matrix.is_supported(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) is True
+    assert integrated_matrix.is_planned(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) is False
+
+    # 他の未統合トランスポートは依然として PLANNED のまま区別されること
     assert integrated_matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) == DeclaredStatus.SUPPORTED
     assert integrated_matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) is True
     assert integrated_matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) is False
-
-    # 他の未統合トランスポートは依然として PLANNED のまま区別されること
-    assert integrated_matrix.get_status(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
-    assert integrated_matrix.is_supported(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) is False
-    assert integrated_matrix.is_planned(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) is True
 
     # DeclaredStatus の Enum レベルで相違すること
     assert DeclaredStatus.SUPPORTED != DeclaredStatus.PLANNED

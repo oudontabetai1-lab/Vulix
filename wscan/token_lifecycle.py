@@ -944,7 +944,7 @@ def normalize_status(val: DeclaredStatus | str) -> DeclaredStatus:
 _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredStatus, str]] = {
     # Playwright (ブラウザ DOM / ナビゲーション)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT): (
-        DeclaredStatus.PLANNED, "Planned: DOM form navigation and hidden token field extraction"
+        DeclaredStatus.SUPPORTED, "Supported: DOM form navigation and hidden token field extraction"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.PLAYWRIGHT): (
         DeclaredStatus.PLANNED, "Planned: File input attachment with DOM token retention"
@@ -1028,7 +1028,7 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
 
     # Flow (マルチステップ・シナリオ)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW): (
-        DeclaredStatus.PLANNED, "Planned: Prior step token extraction chained to subsequent step form"
+        DeclaredStatus.SUPPORTED, "Supported: Prior step token extraction chained to subsequent step form"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.FLOW): (
         DeclaredStatus.PLANNED, "Planned: Flow state token injection into multipart step"

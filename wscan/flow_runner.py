@@ -163,6 +163,8 @@ class FlowRunner:
         # browser.navigate は redirect を追従し最終応答で成功を返すため、静的な step-URL 検査だけ
         # では scope 外へ redirect した先で fill/click が走るのを防げない。
         self._scope_check = scope_check
+        # Increment 3: token lifecycle manager が有効なときの Flow step トークン継承用
+        self._flow_token_bindings: dict[str, str] = {}
 
     def _record(self, index, total, outcome):
         if self._recorder is not None:
@@ -250,10 +252,42 @@ class FlowRunner:
             self._assert_landing_in_scope()
 
         elif step.action == "fill":
-            # record が保存する fill step は CSS selector（`#id` / `[name="x"]`）を持つ。
-            # selector があればそれを優先し、無ければ field(name/id)から組み立てる。これで
-            # record→scan --flows の再生が実際に効く（click と対称）。
+            # Increment 3: token lifecycle manager が有効なとき、flow definition の
+            # 古いトークン値がライブ DOM の新しい値で上書きされないように、
+            # トークン欄がはじき出す前に live DOM から再抽出する。
+            from wscan.token_lifecycle import is_token_field_name
+
             ident = step.selector or step.field
+            # フィールド名がトークン欄の場合、live DOM からトークン値を再抽出
+            try:
+                field_lower = str(ident).lower().replace("-", "_").replace(" ", "_")
+                if is_token_field_name(field_lower) and hasattr(self.browser, "page"):
+                    # すでにページ上に同名のトークン入力が存在すれば、そちらの値を採用
+                    dom_value = await self.browser.page.evaluate(
+                        """(field) => {
+                            // hidden/input フィールドからトークン値を探す
+                            const elements = document.querySelectorAll(
+                                'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), input[type=hidden], textarea, select'
+                            );
+                            for (const el of elements) {
+                                const name = (el.name || el.id || '').trim();
+                                if (name && name.toLowerCase() === field.toLowerCase()) {
+                                    return el.value || '';
+                                }
+                            }
+                            return '';
+                        }"""
+                        , [field_lower]
+                    )
+                    if dom_value:
+                        # ライブ DOM 値を _flow_token_bindings で記録（生値はログ/notesから除去）
+                        ref_id = derive_token_ref_id(dom_value)
+                        self._flow_token_bindings[field_lower] = ref_id
+                        step.value = dom_value
+            except Exception:
+                # page.evaluate 例外は flow 実行を止めない
+                pass
+
             filled = await self.browser.page.evaluate(
                 """([sel, f, v]) => {
                     const find = (s) => { try { return document.querySelector(s); } catch (e) { return null; } };
@@ -332,7 +366,54 @@ class FlowRunner:
                 )
 
         elif step.action == "submit":
+            # Increment 3: token lifecycle manager が有効なとき、flow definition の
+            # 古いトークン値がライブ DOM の新しい値で上書きされないように、
+            # submit 直前に live DOM からトークンを再抽出する。
+            from wscan.token_lifecycle import is_token_field_name
+
             console.print(f"  [dim]{label} submit[/dim]")
+            # submit 直前に live DOM からトークン値を再抽出（トークン欄が存在する場合）
+            try:
+                if hasattr(self.browser, "page"):
+                    # form 内のすべてのトークン入力を拾う
+                    dom_tokens = await self.browser.page.evaluate(
+                        """ => {
+                            const result = {};
+                            const inputs = document.querySelectorAll(
+                                'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), input[type=hidden], textarea, select'
+                            );
+                            for (const el of inputs) {
+                                const name = (el.name || el.id || '').trim();
+                                if (!name) continue;
+                                const lower = name.toLowerCase();
+                                // トークンフィールド名とみなされるものだけを収集
+                                if (/csrf|token|nonce|__requestverificationtoken/.test(lower)) {
+                                    result[lower] = (el.value || '').trim();
+                                }
+                            }
+                            // metaタグからもトークンを拾う
+                            const metas = document.querySelectorAll('meta');
+                            for (const el of metas) {
+                                const name = (el.name || el.property || '').trim().toLowerCase();
+                                if (name.includes('csrf') || name.includes('token') || name.includes('nonce')) {
+                                    const content = (el.content || '').trim();
+                                    if (content) {
+                                        const key = name.replace(/[-_]/g, '_');
+                                        if (!result[key]) result[key] = content;
+                                    }
+                                }
+                            }
+                            return result;
+                        }"""
+                    )
+                    # 記録（生値はログ/notesから除去するため derive_token_ref_id で参照IDのみ記録）
+                    for name, value in dom_tokens.items():
+                        ref_id = derive_token_ref_id(value)
+                        self._flow_token_bindings[name] = ref_id
+            except Exception:
+                # page.evaluate 例外は flow 実行を止めない
+                pass
+
             clicked = await self.browser.page.evaluate(
                 """(sel) => {
                     // record が Enter 送信等で保存した form selector があればその form を送信する。
