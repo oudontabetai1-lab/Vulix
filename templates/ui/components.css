@@ -320,6 +320,9 @@
   padding: 2px 5px;
   border-radius: 3px;
   color: var(--text);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 /* Status styles */

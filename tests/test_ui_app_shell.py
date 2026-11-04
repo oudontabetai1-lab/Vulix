@@ -193,6 +193,7 @@ def test_monitor_module_owns_live_panes_and_blocks_stale_actions(ui_harness: UIH
     }""")
     module = page.locator("#monitorModule")
     assert module.locator("#urlList").count() == 1
+    module.locator("#eventLog").get_by_text("module live event").wait_for()
     assert module.locator("#eventLog").get_by_text("module live event").count() == 1
     assert module.locator("#findingsPanel .finding-card").count() == 1
 

@@ -1149,6 +1149,7 @@
         closeBtn.className = 'crawl-drawer-close';
         closeBtn.textContent = '✕';
         closeBtn.title = '閉じる';
+        closeBtn.setAttribute('aria-label', '詳細ドロワーを閉じる');
         closeBtn.addEventListener('click', () => {
           detailDrawer.hidden = true;
         });
@@ -1186,6 +1187,7 @@
       closeBtn.className = 'crawl-drawer-close';
       closeBtn.textContent = '✕';
       closeBtn.title = '閉じる';
+      closeBtn.setAttribute('aria-label', '詳細ドロワーを閉じる');
       closeBtn.addEventListener('click', () => {
         detailDrawer.hidden = true;
       });
@@ -1328,6 +1330,9 @@
         const row = doc.createElement('div');
         row.className = `crawl-tree-row ${selectedNodeId === n.id ? 'selected' : ''}`;
         row.style.paddingLeft = `${depth * 16 + 8}px`;
+        row.setAttribute('tabindex', '0');
+        row.setAttribute('role', 'treeitem');
+        row.setAttribute('aria-label', String(n.label || n.url || n.id));
 
         const dot = doc.createElement('span');
         dot.className = `crawl-tree-dot ${KIND_CLASSES[n.kind] || KIND_CLASSES.unknown}`;
@@ -1346,11 +1351,18 @@
           row.appendChild(vulnBadge);
         }
 
-        row.addEventListener('click', () => {
+        const onSelectRow = () => {
           selectedNodeId = n.id;
           explorerTree.querySelectorAll('.crawl-tree-row').forEach((r) => r.classList.remove('selected'));
           row.classList.add('selected');
           renderNodeDetailContent(explorerDetail, n);
+        };
+        row.addEventListener('click', onSelectRow);
+        row.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onSelectRow();
+          }
         });
 
         const wrap = doc.createElement('div');
@@ -1415,6 +1427,9 @@
         const tr = doc.createElement('tr');
         tr.classList.add('crawl-clickable');
         if (selectedNodeId === n.id) tr.classList.add('selected-row');
+        tr.setAttribute('tabindex', '0');
+        tr.setAttribute('role', 'button');
+        tr.setAttribute('aria-label', `${n.label || n.url || n.id} の詳細`);
 
         // Kind
         const tdKind = doc.createElement('td');
@@ -1459,11 +1474,18 @@
         }
         tr.appendChild(tdF);
 
-        tr.addEventListener('click', () => {
+        const onSelectTr = () => {
           selectedNodeId = n.id;
           tbody.querySelectorAll('tr').forEach((row) => row.classList.remove('selected-row'));
           tr.classList.add('selected-row');
           openDetail(n);
+        };
+        tr.addEventListener('click', onSelectTr);
+        tr.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onSelectTr();
+          }
         });
 
         tbody.appendChild(tr);
@@ -1659,6 +1681,13 @@
       applyTransform();
     });
 
+    const onKeyEscape = (ev) => {
+      if (ev.key === 'Escape' && !detailDrawer.hidden) {
+        detailDrawer.hidden = true;
+      }
+    };
+    doc.addEventListener('keydown', onKeyEscape);
+
     // Initial fetch
     loadScansList();
     loadCrawlGraph(initialScanId);
@@ -1667,6 +1696,7 @@
       root: root,
       loadCrawlGraph: loadCrawlGraph,
       destroy: () => {
+        doc.removeEventListener('keydown', onKeyEscape);
         if (typeof container.replaceChildren === 'function') {
           container.replaceChildren();
         } else {

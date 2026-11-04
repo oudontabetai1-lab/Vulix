@@ -136,6 +136,7 @@ body {
 }
 @keyframes fadeIn { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:none; } }
 .event-item .time { color: var(--text-muted); font-size: 0.7rem; margin-right: 6px; font-family: monospace; }
+.event-log-new-entry { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
 .event-status { border-left-color: var(--accent); background: var(--accent-glow); }
 .event-finding { border-left-color: var(--critical); background: rgba(226,112,143,0.1); }
 .event-payload { border-left-color: var(--border); background: var(--surface2); }
@@ -2388,8 +2389,11 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
     <div class="panel-header">
       Event Log
       <span class="panel-badge" id="eventCount">0</span>
+      <button class="event-log-new-entry" id="eventLogNewEntries" type="button" hidden aria-label="Jump to latest event">
+        <span id="eventLogNewEntryCount" aria-live="polite"></span> · jump to latest
+      </button>
     </div>
-    <div class="panel-content" id="eventLog">
+    <div class="panel-content" id="eventLog" tabindex="0" aria-label="Event log">
       <div class="no-findings-msg">Waiting for scan to start...</div>
     </div>
   </div>
@@ -2406,17 +2410,17 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
       <div class="sitemap-container" id="sitemapContainer">
         <div class="sitemap-toolbar">
           <span class="sitemap-pill">画面遷移図 <span id="sitemapNodeCount">0</span></span>
-          <input id="smSearch" class="sm-search" placeholder="検索…" oninput="smOnSearch(this.value)">
+          <input id="smSearch" class="sm-search" placeholder="検索…" oninput="smOnSearch(this.value)" aria-label="サイトマップ検索">
           <div class="sm-modes">
             <button class="sm-mode-btn active" id="smMode-compact"  onclick="smSetMode('compact')">コンパクト</button>
             <button class="sm-mode-btn"        id="smMode-shots"    onclick="smSetMode('shots')">スクショ</button>
             <button class="sm-mode-btn"        id="smMode-explorer" onclick="smSetMode('explorer')">一覧</button>
           </div>
-          <button class="sm-mini-btn" onclick="smExpandAll(true)"  title="全展開">⊞</button>
-          <button class="sm-mini-btn" onclick="smExpandAll(false)" title="全折りたたみ">⊟</button>
-          <button class="sm-mini-btn" onclick="smZoom(0.8)"  title="縮小">－</button>
-          <button class="sm-mini-btn" onclick="smZoom(1.25)" title="拡大">＋</button>
-          <button class="sm-mini-btn" onclick="smResetView()" title="リセット">⟲</button>
+          <button class="sm-mini-btn" onclick="smExpandAll(true)"  title="全展開" aria-label="全展開">⊞</button>
+          <button class="sm-mini-btn" onclick="smExpandAll(false)" title="全折りたたみ" aria-label="全折りたたみ">⊟</button>
+          <button class="sm-mini-btn" onclick="smZoom(0.8)"  title="縮小" aria-label="縮小">－</button>
+          <button class="sm-mini-btn" onclick="smZoom(1.25)" title="拡大" aria-label="拡大">＋</button>
+          <button class="sm-mini-btn" onclick="smResetView()" title="リセット" aria-label="リセット">⟲</button>
           <div class="sitemap-legend">
             <span class="sitemap-pill"><span class="sm-dot" style="background:#d99a63"></span>巡回中</span>
             <span class="sitemap-pill"><span class="sm-dot" style="background:#9184d9"></span>完了</span>
@@ -2487,19 +2491,19 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
         <span class="panel-badge" id="findingCount" style="color:var(--critical)">0</span>
         <span class="panel-badge" id="hypothesisCount" style="display:none;color:#facc15;font-size:0.68rem">0 hyp</span>
         <div style="display:flex;gap:6px;margin-left:auto;align-items:center">
-          <select id="filterSeverity" onchange="filterFindings()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem">
+          <select id="filterSeverity" onchange="filterFindings()" aria-label="重大度フィルタ" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem">
             <option value="">All</option>
             <option value="critical">Critical</option>
             <option value="high">High</option>
             <option value="medium">Medium</option>
             <option value="low">Low</option>
           </select>
-          <select id="filterVerification" onchange="filterFindings()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem">
+          <select id="filterVerification" onchange="filterFindings()" aria-label="確証状態フィルタ" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem">
             <option value="">All Verification</option>
             <option value="confirmed">Confirmed</option>
             <option value="hypothesis">Hypothesis</option>
           </select>
-          <input id="filterSearch" type="text" placeholder="Search…" oninput="filterFindings()"
+          <input id="filterSearch" type="text" placeholder="Search…" oninput="filterFindings()" aria-label="検出結果検索"
             style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem;width:100px">
         </div>
       </div>
@@ -2572,10 +2576,10 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
     <div class="history-toolbar">
       <div class="history-search-wrap">
         <span class="history-search-icon">🔍</span>
-        <input type="text" id="historySearchInput" class="history-search-input" placeholder="スキャンIDまたは対象URLで絞り込み..." oninput="onHistorySearchInput(this.value)">
+        <input type="text" id="historySearchInput" class="history-search-input" placeholder="スキャンIDまたは対象URLで絞り込み..." oninput="onHistorySearchInput(this.value)" aria-label="スキャン履歴検索">
       </div>
       <div>
-        <select id="historyStatusFilter" class="history-filter-select" onchange="onHistoryFilterChange(this.value)">
+        <select id="historyStatusFilter" class="history-filter-select" onchange="onHistoryFilterChange(this.value)" aria-label="ステータスフィルタ">
           <option value="all">すべてのステータス</option>
           <option value="done">完了 (done)</option>
           <option value="scanning">実行中 (scanning)</option>
@@ -2651,10 +2655,10 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
     <div class="audit-toolbar">
       <div class="audit-search-wrap">
         <span class="audit-search-icon">🔍</span>
-        <input type="text" id="auditSearchInput" class="audit-search-input" placeholder="操作名、送信元IP、詳細で絞り込み..." oninput="onAuditSearchInput(this.value)">
+        <input type="text" id="auditSearchInput" class="audit-search-input" placeholder="操作名、送信元IP、詳細で絞り込み..." oninput="onAuditSearchInput(this.value)" aria-label="監査ログ検索">
       </div>
       <div>
-        <select id="auditActionFilter" class="audit-filter-select" onchange="onAuditFilterChange(this.value)">
+        <select id="auditActionFilter" class="audit-filter-select" onchange="onAuditFilterChange(this.value)" aria-label="操作種別フィルタ">
           <option value="all">すべての操作</option>
           <option value="scan">スキャン操作 (scan_*)</option>
           <option value="schedule">定期スキャン (schedule_*)</option>
@@ -5864,6 +5868,14 @@ function resetLiveScanState() {
   const findingsPanel = document.getElementById('findingsPanel');
   if (findingsPanel) findingsPanel.innerHTML = '<div class="no-findings-msg">No vulnerabilities detected yet.</div>';
   const eventLog = document.getElementById('eventLog');
+  _eventLogEntries.length = 0;
+  _eventLogWindowStart = 0;
+  _eventLogFollowingLatest = true;
+  _eventLogNewEntryCount = 0;
+  const newEntries = document.getElementById('eventLogNewEntries');
+  if (newEntries) newEntries.hidden = true;
+  const newEntryCount = document.getElementById('eventLogNewEntryCount');
+  if (newEntryCount) newEntryCount.textContent = '';
   if (eventLog) eventLog.innerHTML = '<div class="no-findings-msg">Waiting for scan to start...</div>';
   const screenshotArea = document.getElementById('screenshotArea');
   if (screenshotArea) {
@@ -6065,21 +6077,73 @@ function timeStr(ts) {
   return d.toTimeString().split(' ')[0];
 }
 
-function addEventLog(type, message) {
-  const log = document.getElementById('eventLog');
-  // Remove placeholder
-  const placeholder = log.querySelector('.no-findings-msg');
-  if (placeholder) placeholder.remove();
-
+const _eventLogEntries = [];
+let _eventLogWindowStart = 0;
+const _eventLogWindowSize = 500;
+const _eventLogPageSize = 250;
+let _eventLogNewEntryCount = 0;
+let _eventLogFollowingLatest = true;
+let _eventLogRenderPending = false;
+function _renderEventLogWindow(log) {
+  const end = Math.min(_eventLogEntries.length, _eventLogWindowStart + _eventLogWindowSize);
+  const fragment = document.createDocumentFragment();
+  for (let i = _eventLogWindowStart; i < end; i++) {
+    fragment.appendChild(_makeEventLogItem(_eventLogEntries[i]));
+  }
+  log.replaceChildren(fragment);
+}
+function _makeEventLogItem(entry) {
   const item = document.createElement('div');
-  item.className = 'event-item event-' + type;
+  item.className = 'event-item event-' + entry.type;
+  item.innerHTML = `<span class="time">${entry.ts}</span><span class="ev-type">[${entry.type.toUpperCase()}]</span> ${escapeHtml(entry.message)}`;
+  return item;
+}
+function _loadOlderEventLogEntries(log) {
+  if (_eventLogWindowStart === 0 || log.scrollTop > 0) return;
+  const priorHeight = log.scrollHeight;
+  _eventLogWindowStart = Math.max(0, _eventLogWindowStart - _eventLogPageSize);
+  _eventLogFollowingLatest = false;
+  _renderEventLogWindow(log);
+  log.scrollTop = Math.max(1, log.scrollHeight - priorHeight);
+}
+document.getElementById('eventLog')?.addEventListener('scroll', function () {
+  _loadOlderEventLogEntries(this);
+});
+document.getElementById('eventLogNewEntries')?.addEventListener('click', function () {
+  const log = document.getElementById('eventLog');
+  if (!log) return;
+  _eventLogWindowStart = Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
+  _eventLogFollowingLatest = true;
+  _renderEventLogWindow(log);
+  log.scrollTop = log.scrollHeight;
+  _eventLogNewEntryCount = 0;
+  this.hidden = true;
+  document.getElementById('eventLogNewEntryCount').textContent = '';
+});
+function addEventLog(type, message) {
   const ts = new Date().toTimeString().split(' ')[0];
-  item.innerHTML = `<span class="time">${ts}</span><span class="ev-type">[${type.toUpperCase()}]</span> ${escapeHtml(message)}`;
-  log.appendChild(item);
-  if (state.autoScroll) log.scrollTop = log.scrollHeight;
-
-  // Keep log trimmed
-  while (log.children.length > 500) log.removeChild(log.firstChild);
+  const entry = { type, message: String(message), ts };
+  _eventLogEntries.push(entry);
+  if (!_eventLogFollowingLatest) _eventLogNewEntryCount += 1;
+  if (_eventLogRenderPending) return;
+  _eventLogRenderPending = true;
+  requestAnimationFrame(() => {
+    _eventLogRenderPending = false;
+    const log = document.getElementById('eventLog');
+    if (!log) return;
+    if (_eventLogFollowingLatest) {
+      _eventLogWindowStart = Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
+      _renderEventLogWindow(log);
+      if (state.autoScroll) log.scrollTop = Number.MAX_SAFE_INTEGER;
+    } else if (_eventLogNewEntryCount) {
+      const newEntries = document.getElementById('eventLogNewEntries');
+      const newEntryCount = document.getElementById('eventLogNewEntryCount');
+      if (newEntries && newEntryCount) {
+        newEntries.hidden = false;
+        newEntryCount.textContent = `${_eventLogNewEntryCount} new ${_eventLogNewEntryCount === 1 ? 'entry' : 'entries'}`;
+      }
+    }
+  });
 }
 
 function updateScreenshot(b64, label) {
@@ -8058,6 +8122,8 @@ async function bootDashboard() {
 Object.assign(window, {
   publishAppScanContext, _markOwnScan, isSecretKeyName, sanitizeUrlForExport, sanitizeUrlListForExport, recursiveSanitizeNonsecret, hasCredentialsInConfig, _createNonsecretDescriptor, _sanitizeConfigForExport, containsRedactedValues, _discardRejectedPendingScan, _promotePendingScan, findingKey, computeVerification, isFindingConfirmed, updateFindingCounters, renderCheckGroups, initCheckGroups, loadScannerCapabilities, setScanMode, getSelectedChecks, selectAllChecks, setSelectedChecks, setCfgToggle, toggleCfg, showCfgTab, applyScanProfile, updateLlmModelField, collectRoleModels, restoreRoleModels, mfaImapFields, mfaImapPassword, applyMfaImap, mfaTotpFields, parseHeaderText, authHeaderFields, timeWindowFields, applyTimeWindows, applyMfaTotp, applyAuthHeaders, validateTotpReadiness, wireTotpQrPreview, uploadFile, wireUpload, renderManualCrawlStatus, startManualCrawl, stopManualCrawl, importManualCrawl, _wsSend, startRemoteBrowser, remoteNavigate, hasRemoteTotpConfig, armMfaFieldSelection, selectRemoteMfaField, fillRemoteTotp, bindRemoteScreen, useManualCrawlOutput, showPostScanActions, rerunLastScan, openManualCrawlAfterScan, submitScanConfig, _collectFullConfigForExport, _downloadJson, _filenameForConfig, exportConfigToFile, importConfigFromFile, applyImportedConfig, initConfigOverlay, updateAgentModelPlaceholder, submitAgentScan, hasSensitiveMatrixParam, safeUrlForStorage, safeUrlListForStorage, safeExcludeUrl, safeExcludeUrlsForStorage, saveConfigToStorage, loadConfigFromStorage, loadDefaultConfigFromServer, _esc, openScenarioBuilder, scnCloseBuilder, scnDefaultStep, scnAddStep, scnInsertStep, scnDeleteStep, scnDuplicateStep, scnMoveStep, scnChangeAction, scnSetField, scnLoadLoginTemplate, scnRender, scnStepSummary, scnRenderPreview, scnRenderPalette, scnPalNavigate, scnPalFill, scnPalAddForm, scnState_push, scnSaveBuilder, _scnSummaryCard, scnDeleteFlow, renderCfgFlows, renderReviewFlows, addAccount, collectAccounts, collectFlows, restoreFlows, formatDuration, updateETA, _onEventStreamStatusChange, _onEventStreamAuthRequired, _onEventStreamWireStale, initEventStream, connect, handleEvent, dispatchLegacyEvent, resetLiveScanState, applyScanSnapshot, updatePhaseBar, renderUrlList, renderCheckCounters, updatePayloadDisplay, togglePayloadExpand, setStatus, timeStr, addEventLog, updateScreenshot, addFinding, replaceFindings, updateRequest, updateResponse, showNetTab, openLightbox, escapeHtml, sendIntervention, confirmAbort, setPauseState, showPlanModal, confirmPlan, filterFindings, closeInteractiveModals, beginCrawlReview, resetCrawlReviewDetailState, openCrawlReviewDetails, showCrawlReviewModal, renderCrawlReviewList, sendCrawlReview, openManualCrawlFromReview, toggleManualPayload, sendManualPayload, showAiAnalysis, runAutoConfig, applyAutoConfig, submitHybridScan, handleWafDetected, switchCenterTab, loadD3, initSiteMapD3, _smEl, _smShort, _smNorm, _smModel, _sitemapRerender, _smArrowDefs, _smApplyView, _smRenderCompact, _smRenderShots, _smHash, _smRenderExplorer, _smShowPopover, _smHidePopover, smSetMode, smOnSearch, smExpandAll, smZoom, smResetView, _smWirePan, _smNodeColor, addSiteMapNode, markSiteMapVuln, showSiteMapFallback, _updateSiteMapFallback, _showSmTooltip, _hideSmTooltip, updatePhaseTimingStrip, _showSubphase, renderCheckProgressBars, switchMainView, onHistorySearchInput, onHistoryFilterChange, isSensitiveKey, maskPathSecrets, hasUnmaskedSensitivePath, maskNestedKv, maskKv, redactDisplayUrl, formatHistoryBytes, formatHistoryDate, setHistoryViewState, cancelScanHistory, loadScanHistory, renderHistoryTable, getAuditActionMeta, onAuditSearchInput, onAuditFilterChange, formatAuditTimestamp, validateAndSanitizeClientIp, formatSafeAuditDetail, setAuditViewState, loadAuditLog, renderAuditTable, bootDashboard
 });
+Object.assign(window, { _eventLogEntries });
+Object.defineProperty(window, '_eventLogWindowStart', { configurable: true, get: () => _eventLogWindowStart });
 Object.defineProperty(window, 'state', { configurable: true, get: () => state });
 Object.defineProperty(window, 'findingCardKeys', { configurable: true, get: () => findingCardKeys });
 Object.defineProperty(window, 'findingViewerHelpers', { configurable: true, get: () => findingViewerHelpers });

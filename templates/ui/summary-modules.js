@@ -3,6 +3,7 @@
   'use strict';
 
   const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
+  const setAttr = (node, k, v) => { if (typeof node.setAttribute === 'function') node.setAttribute(k, v); };
   const button = (text, action) => { const node = el('button', text, 'history-btn'); node.type = 'button'; node.addEventListener('click', action); return node; };
   const cell = (row, value, cls) => row.appendChild(el('td', value, cls));
   const knownCount = (value) => typeof value === 'number' && Number.isFinite(value) ? String(value) : '未取得';
@@ -74,10 +75,10 @@
         prune.hidden = !(data && data.storage && (data.storage.retention_days || data.storage.retention_max_scans)); historyCard.append(prune);
         addScanRows(body, data && data.scans);
         const sched = el('section', undefined, 'findings-detail-pane'); sched.append(el('h2', '定期スキャン'));
-        const url = el('input'); url.placeholder = 'https://example.com';
-        const checks = el('input'); checks.placeholder = '検査 (空欄で既定)';
-        const depth = el('input'); depth.type = 'number'; depth.min = '1'; depth.max = '10'; depth.value = '2';
-        const interval = el('input'); interval.type = 'number'; interval.min = '0.1'; interval.step = '0.5'; interval.value = '24';
+        const url = el('input'); url.placeholder = 'https://example.com'; setAttr(url, 'aria-label', '定期スキャン対象URL');
+        const checks = el('input'); checks.placeholder = '検査 (空欄で既定)'; setAttr(checks, 'aria-label', '定期スキャン検査項目');
+        const depth = el('input'); depth.type = 'number'; depth.min = '1'; depth.max = '10'; depth.value = '2'; setAttr(depth, 'aria-label', '定期スキャン巡回深度');
+        const interval = el('input'); interval.type = 'number'; interval.min = '0.1'; interval.step = '0.5'; interval.value = '24'; setAttr(interval, 'aria-label', '定期スキャン実行間隔(時間)');
         const add = button('追加', async () => { const target = url.value.trim(); if (!target) { global.alert('URL を入力してください'); return; } const body = { url: target, depth: parseInt(depth.value, 10) || 2, interval_hours: parseFloat(interval.value) || 24 }; if (checks.value.trim()) body.checks = checks.value.trim(); await api.post('/api/v1/schedules', body); portal.mount(); });
         sched.append(url, checks, depth, interval, add); const list = el('div'); sched.append(list); summary.append(sched);
         const schedules = await reader.schedules(); if (current !== generation) return;
@@ -87,7 +88,7 @@
     };
     const history = {
       id: 'history', title: 'スキャン履歴', route: '#/history',
-      async mount() { const current = ++generation; show('スキャン履歴'); const card = el('section', undefined, 'findings-detail-pane'); const search = el('input'); search.type = 'search'; search.placeholder = '対象 / ID'; const refresh = button('更新', () => history.mount()); card.append(search, refresh); const table = el('table'); const body = el('tbody'); table.append(body); card.append(table); surfaceEl.append(card); const data = await reader.scans(); if (current !== generation) return; const scans = data && data.scans || []; search.addEventListener('input', () => { body.replaceChildren(); addScanRows(body, scans.filter((s) => `${s.id || ''} ${reader.redactDisplayUrl(s.target || '')}`.toLowerCase().includes(search.value.toLowerCase()))); }); addScanRows(body, data && data.scans); },
+      async mount() { const current = ++generation; show('スキャン履歴'); const card = el('section', undefined, 'findings-detail-pane'); const search = el('input'); search.type = 'search'; search.placeholder = '対象 / ID'; setAttr(search, 'aria-label', 'スキャン履歴検索'); const refresh = button('更新', () => history.mount()); card.append(search, refresh); const table = el('table'); const body = el('tbody'); table.append(body); card.append(table); surfaceEl.append(card); const data = await reader.scans(); if (current !== generation) return; const scans = data && data.scans || []; search.addEventListener('input', () => { body.replaceChildren(); addScanRows(body, scans.filter((s) => `${s.id || ''} ${reader.redactDisplayUrl(s.target || '')}`.toLowerCase().includes(search.value.toLowerCase()))); }); addScanRows(body, data && data.scans); },
       unmount() { generation++; surfaceEl.hidden = true; surfaceEl.replaceChildren(); },
     };
     const audit = {

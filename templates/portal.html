@@ -152,7 +152,7 @@
   <div class="card">
     <div class="toolbar">
       <p class="section-title" style="margin:0">スキャン履歴</p>
-      <input type="search" id="histSearch" placeholder="対象/IDで絞り込み…" oninput="renderScans()"
+      <input type="search" id="histSearch" placeholder="対象/IDで絞り込み…" oninput="renderScans()" aria-label="スキャン履歴絞り込み"
         style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:0.82rem;width:220px">
       <span class="spacer"></span>
       <span class="muted" id="storageInfo"></span>
@@ -190,13 +190,13 @@
       <button class="btn sm" onclick="loadSchedules()">↻ 更新</button>
     </div>
     <div class="now-row" style="gap:8px;flex-wrap:wrap;margin-bottom:14px">
-      <input id="schUrl" type="text" placeholder="https://example.com"
+      <input id="schUrl" type="text" placeholder="https://example.com" aria-label="定期スキャンURL"
         style="flex:1;min-width:200px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 11px;font-size:.86rem">
-      <input id="schChecks" type="text" placeholder="検査(空=既定) 例: xss sqli os" title="検査項目（スペース区切り、空で既定）"
+      <input id="schChecks" type="text" placeholder="検査(空=既定) 例: xss sqli os" title="検査項目（スペース区切り、空で既定）" aria-label="定期スキャン検査項目"
         style="width:210px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 11px;font-size:.86rem">
-      <input id="schDepth" type="number" min="1" max="10" value="2" title="クロール深度"
+      <input id="schDepth" type="number" min="1" max="10" value="2" title="クロール深度" aria-label="定期スキャン巡回深度"
         style="width:70px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:.86rem">
-      <input id="schInterval" type="number" min="0.1" step="0.5" value="24" title="実行間隔（時間）"
+      <input id="schInterval" type="number" min="0.1" step="0.5" value="24" title="実行間隔（時間）" aria-label="定期スキャン実行間隔"
         style="width:96px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:.86rem">
       <button class="btn primary" onclick="addSchedule()">＋ 追加</button>
     </div>
