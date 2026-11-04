@@ -1277,6 +1277,45 @@ class BaseScanner(ABC):
                 safe_body = re.sub(r"(<(?:(?:[\w.-]+):)?" + re.escape(name) + r"(?:\s[^>]*)?>)(.*?)(</(?:(?:[\w.-]+):)?" + re.escape(name) + r"\s*>)", lambda m: m.group(1) + derive_token_ref_id(m.group(2)) + m.group(3), safe_body, flags=re.I | re.S)
         return safe_body, safe_headers
 
+    @staticmethod
+    def _redact_refreshed_response_tokens(response_text, original_body, original_headers, managed_body, managed_headers):
+        """Mask only newly refreshed token values in persisted response evidence."""
+        import re
+        from wscan.token_lifecycle import TOKEN_FIELD_NAMES, derive_token_ref_id
+        names = {n.replace("-", "_").lower() for n in TOKEN_FIELD_NAMES}
+        values = set()
+
+        def collect(old, new):
+            if isinstance(old, dict) and isinstance(new, dict):
+                for key, value in new.items():
+                    if key in old:
+                        if key.replace("-", "_").lower() in names and old[key] != value:
+                            values.add(str(value))
+                        else:
+                            collect(old[key], value)
+            elif isinstance(old, list) and isinstance(new, list):
+                for before, after in zip(old, new):
+                    collect(before, after)
+            elif isinstance(old, str) and isinstance(new, str) and old != new:
+                try:
+                    import xml.etree.ElementTree as ET
+                    before, after = ET.fromstring(old), ET.fromstring(new)
+                    for left, right in zip(before.iter(), after.iter()):
+                        key = right.tag.rsplit("}", 1)[-1].replace("-", "_").lower()
+                        if key in names and left.text != right.text and right.text:
+                            values.add(right.text)
+                except Exception:
+                    pass
+
+        collect(original_body, managed_body)
+        token_headers = {"x-csrf-token", "x-xsrf-token", "x-csrftoken", "x-xsrftoken", "csrf-token", "x-request-verification-token"}
+        for key, value in managed_headers.items():
+            if key.lower() in token_headers and value != original_headers.get(key):
+                values.add(str(value))
+        for value in sorted((v for v in values if v), key=len, reverse=True):
+            response_text = re.sub(re.escape(value), lambda _: derive_token_ref_id(value), response_text)
+        return response_text
+
     async def _apply_form_with_token_refresh(
         self,
         ip: InjectionPoint,
@@ -2326,8 +2365,9 @@ class BaseScanner(ABC):
                 "response": {
                     "url": str(response.url),
                     "status": response.status_code,
-                    "headers": dict(response.headers),
-                    "body": response.text,
+                    "headers": {k: self._redact_refreshed_response_tokens(v, body, headers, managed_body, managed_headers) for k, v in response.headers.items()},
+                    "body": self._redact_refreshed_response_tokens(
+                        response.text, body, headers, managed_body, managed_headers),
                     "timestamp": response_timestamp,
                 },
             }
@@ -2445,8 +2485,9 @@ class BaseScanner(ABC):
                 "response": {
                     "url": str(response.url),
                     "status": response.status_code,
-                    "headers": dict(response.headers),
-                    "body": response.text,
+                    "headers": {k: self._redact_refreshed_response_tokens(v, post_data, headers, managed_body, managed_headers) for k, v in response.headers.items()},
+                    "body": self._redact_refreshed_response_tokens(
+                        response.text, post_data, headers, managed_body, managed_headers),
                     "timestamp": response_timestamp,
                 },
             }

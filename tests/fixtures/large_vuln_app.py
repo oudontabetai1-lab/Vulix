@@ -90,6 +90,8 @@ def create_app(page_count: int = 48) -> FastAPI:
     app.state.json_csrf_expected = {}
     app.state.json_csrf_last_value = ""
     app.state.json_csrf_requests = 0
+    app.state.json_csrf_refresh_gets = 0
+    app.state.json_csrf_echo = False
     app.state.json_csrf_received = []
     app.state.json_csrf_force_stale = False
     app.state.json_csrf_page_error = False
@@ -119,6 +121,7 @@ def create_app(page_count: int = 48) -> FastAPI:
 
     @app.get("/token-json", response_class=HTMLResponse)
     async def token_json_page(request: Request):
+        app.state.json_csrf_refresh_gets += 1
         if app.state.json_csrf_page_error:
             return PlainTextResponse("temporarily unavailable", status_code=503)
         sid = request.cookies.get("session_id") or secrets.token_hex(16)
@@ -138,6 +141,9 @@ def create_app(page_count: int = 48) -> FastAPI:
             return PlainTextResponse("CSRF token mismatch", status_code=419)
         app.state.json_csrf_expected[sid] = "consumed"
         value = str(data.get("email", ""))
+        if app.state.json_csrf_echo:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"accepted": value, "csrf_token": data.get("csrf_token")})
         if safe:
             value = value.replace("\r", "").replace("\n", "")
         return PlainTextResponse(f"accepted:{value}")

@@ -58,6 +58,16 @@ class SpaApiTokenLifecycleTests(IsolatedAsyncioTestCase):
         self.assertGreaterEqual(app.state.json_csrf_requests, 1)
         self.assertEqual(scanner._token_manager_enabled(TokenCarrier.JSON, TokenTransport.SPA_API), True)
 
+    async def test_echoed_fresh_token_is_redacted_from_response_evidence_only(self):
+        app = create_app()
+        app.state.json_csrf_echo = True
+        _, engine, (body, pair) = await replay(app)
+        fresh = json.loads(app.state.json_csrf_received[-1][0])["csrf_token"]
+        stored = repr(pair) + repr(engine.wave_errors)
+        self.assertIn("Cc: injected@example.test", body)
+        self.assertNotIn(fresh, stored)
+        self.assertIn("tok_ref_", pair["response"]["body"])
+
     async def test_x_xsrf_header_is_refreshed_on_managed_spa_send(self):
         app = FastAPI()
         app.state.expected = ""
@@ -111,6 +121,7 @@ class SpaApiTokenLifecycleTests(IsolatedAsyncioTestCase):
             "stale-token",
         ))
         self.assertFalse(engine.wave_errors)
+        self.assertEqual(app.state.json_csrf_refresh_gets, 0)
 
     async def test_refresh_exception_falls_back_to_unmodified_request(self):
         app = create_app()
@@ -134,6 +145,7 @@ class SpaApiTokenLifecycleTests(IsolatedAsyncioTestCase):
         self.assertEqual(app.state.json_csrf_requests, 1)
         self.assertEqual(len(engine.wave_errors), 1)
         self.assertEqual(engine.wave_errors[0], "token_lifecycle:probe_inconclusive:mail_header")
+        self.assertEqual(app.state.json_csrf_refresh_gets, 0)
 
     def test_spa_matrix_supports_only_json_and_recognized_headers(self):
         matrix = build_token_capability_matrix()
