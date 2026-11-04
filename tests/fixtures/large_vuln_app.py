@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import secrets
 from urllib.parse import unquote
 
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -53,6 +54,10 @@ def _layout(title: str, body: str) -> str:
             '<a href="/upload">Upload</a>',
             '<a href="/contact">Contact</a>',
             '<a href="/contact-safe">Contact Safe</a>',
+            '<a href="/csrf-contact">CSRF Contact</a>',
+            '<a href="/csrf-contact-safe">CSRF Contact Safe</a>',
+            '<a href="/csrf-static">CSRF Static</a>',
+            '<a href="/csrf-failing-form">CSRF Failing Form</a>',
             '<a href="/coupon">Coupon</a>',
             '<a href="/ws-lab">WebSocket Lab</a>',
             '<a href="/login">Login</a>',
@@ -77,6 +82,8 @@ def _layout(title: str, body: str) -> str:
 def create_app(page_count: int = 48) -> FastAPI:
     app = FastAPI(title="WScan large vulnerable fixture")
     app.state.tickets = []
+    app.state.csrf_nonces = {}
+    app.state.csrf_nonces_safe = {}
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
@@ -513,6 +520,96 @@ def create_app(page_count: int = 48) -> FastAPI:
         # 安全ツイン: CR/LF を除去してからヘッダへ組み込む（注入不成立）。
         clean = email.replace("\r", "").replace("\n", "")
         return f"Sending confirmation...\nTo: {clean}\nSubject: Thanks"
+
+    # ── Anti-CSRF / Nonce ローテーションフォーム（脆弱 / 安全ツイン） ──────────
+    @app.get("/csrf-contact", response_class=HTMLResponse)
+    async def csrf_contact_form(request: Request):
+        sid = request.cookies.get("session_id")
+        created_sid = False
+        if not sid:
+            sid = secrets.token_hex(16)
+            created_sid = True
+        nonce = f"token_{secrets.token_hex(8)}"
+        app.state.csrf_nonces[sid] = nonce
+        body = f"""
+        <form method="post" action="/csrf-contact">
+          <input type="hidden" name="csrf_token" value="{nonce}">
+          <input name="email" value="user@example.com">
+          <button>Send</button>
+        </form>
+        """
+        resp = HTMLResponse(_layout("CSRF Contact", body))
+        if created_sid or "session_id" not in request.cookies:
+            resp.set_cookie("session_id", sid)
+        return resp
+
+    @app.post("/csrf-contact", response_class=PlainTextResponse)
+    async def csrf_contact(request: Request, email: str = Form(""), csrf_token: str = Form("")):
+        sid = request.cookies.get("session_id")
+        expected = app.state.csrf_nonces.get(sid) if sid else None
+        if not sid or not csrf_token or csrf_token != expected:
+            return PlainTextResponse("CSRF token mismatch", status_code=403)
+        # ワンタイム消費: 1度送信されたら無効化（ローテーション）
+        app.state.csrf_nonces[sid] = None
+        # 脆弱: 受け取った値をそのまま反射
+        return PlainTextResponse(f"Sending confirmation...\nTo: {email}\nSubject: Thanks", status_code=200)
+
+    @app.get("/csrf-contact-safe", response_class=HTMLResponse)
+    async def csrf_contact_safe_form(request: Request):
+        sid = request.cookies.get("session_id")
+        created_sid = False
+        if not sid:
+            sid = secrets.token_hex(16)
+            created_sid = True
+        nonce = f"token_{secrets.token_hex(8)}"
+        app.state.csrf_nonces_safe[sid] = nonce
+        body = f"""
+        <form method="post" action="/csrf-contact-safe">
+          <input type="hidden" name="csrf_token" value="{nonce}">
+          <input name="email" value="user@example.com">
+          <button>Send</button>
+        </form>
+        """
+        resp = HTMLResponse(_layout("CSRF Contact Safe", body))
+        if created_sid or "session_id" not in request.cookies:
+            resp.set_cookie("session_id", sid)
+        return resp
+
+    @app.post("/csrf-contact-safe", response_class=PlainTextResponse)
+    async def csrf_contact_safe(request: Request, email: str = Form(""), csrf_token: str = Form("")):
+        sid = request.cookies.get("session_id")
+        expected = app.state.csrf_nonces_safe.get(sid) if sid else None
+        if not sid or not csrf_token or csrf_token != expected:
+            return PlainTextResponse("CSRF token mismatch", status_code=403)
+        app.state.csrf_nonces_safe[sid] = None
+        # 安全ツイン: CR/LF を除去してから反射（インジェクション不成立）
+        clean = email.replace("\r", "").replace("\n", "")
+        return PlainTextResponse(f"Sending confirmation...\nTo: {clean}\nSubject: Thanks", status_code=200)
+
+    @app.get("/csrf-static", response_class=HTMLResponse)
+    async def csrf_static_form():
+        body = """
+        <form method="post" action="/csrf-static">
+          <input type="hidden" name="csrf_token" value="static-token-fixed-9999">
+          <input name="email" value="user@example.com">
+          <button>Send</button>
+        </form>
+        """
+        return HTMLResponse(_layout("CSRF Static", body))
+
+    @app.post("/csrf-static", response_class=PlainTextResponse)
+    async def csrf_static(email: str = Form(""), csrf_token: str = Form("")):
+        if csrf_token != "static-token-fixed-9999":
+            return PlainTextResponse("CSRF token mismatch", status_code=403)
+        return PlainTextResponse(f"Sending confirmation...\nTo: {email}\nSubject: Thanks", status_code=200)
+
+    @app.get("/csrf-failing-form", response_class=PlainTextResponse)
+    async def csrf_failing_form_get():
+        return PlainTextResponse("Internal Server Error", status_code=500)
+
+    @app.post("/csrf-failing-form", response_class=PlainTextResponse)
+    async def csrf_failing_form_post(email: str = Form(""), csrf_token: str = Form("")):
+        return PlainTextResponse(f"Sent: {email}", status_code=200)
 
     @app.get("/coupon", response_class=HTMLResponse)
     async def coupon_form():

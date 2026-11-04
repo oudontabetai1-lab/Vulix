@@ -318,6 +318,56 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/ctf/bundle-hidden?token=from-bundle", js_resp.text)
         self.assertIn(FLAG_BUNDLE_DISCOVERY, flag_resp.text)
 
+    async def test_csrf_contact_rotates_token_and_rejects_stale(self):
+        # 1回目の GET で token1 を取得
+        get1 = await self.client.get("/csrf-contact")
+        self.assertEqual(get1.status_code, 200)
+        from wscan.token_lifecycle import extract_form_tokens
+        tokens1 = extract_form_tokens(get1.text)
+        token1 = tokens1.get("csrf_token")
+        self.assertTrue(bool(token1))
+
+        # 2回目の GET で token2 にローテーション
+        get2 = await self.client.get("/csrf-contact")
+        tokens2 = extract_form_tokens(get2.text)
+        token2 = tokens2.get("csrf_token")
+        self.assertNotEqual(token1, token2)
+
+        # 古い token1 で POST -> 403 拒否
+        post_stale = await self.client.post("/csrf-contact", data={"csrf_token": token1, "email": "test@example.com"})
+        self.assertEqual(post_stale.status_code, 403)
+        self.assertIn("CSRF token mismatch", post_stale.text)
+
+        # 最新の token2 で POST -> 200 成功
+        post_ok = await self.client.post("/csrf-contact", data={"csrf_token": token2, "email": "test@example.com"})
+        self.assertEqual(post_ok.status_code, 200)
+        self.assertIn("Sending confirmation...", post_ok.text)
+
+        # 再送（消費済み） -> 403 拒否
+        post_replayed = await self.client.post("/csrf-contact", data={"csrf_token": token2, "email": "test@example.com"})
+        self.assertEqual(post_replayed.status_code, 403)
+
+    async def test_csrf_contact_safe_twin_strips_crlf(self):
+        get_resp = await self.client.get("/csrf-contact-safe")
+        from wscan.token_lifecycle import extract_form_tokens
+        tokens = extract_form_tokens(get_resp.text)
+        token = tokens.get("csrf_token")
+
+        payload = "user@example.com\r\nCc: attacker@evil.example.com"
+        post_resp = await self.client.post("/csrf-contact-safe", data={"csrf_token": token, "email": payload})
+        self.assertEqual(post_resp.status_code, 200)
+        self.assertNotIn("\nCc: attacker@evil.example.com", post_resp.text)
+
+    async def test_csrf_static_form_accepts_fixed_token(self):
+        get_resp = await self.client.get("/csrf-static")
+        self.assertIn("static-token-fixed-9999", get_resp.text)
+
+        bad_resp = await self.client.post("/csrf-static", data={"csrf_token": "wrong", "email": "user@test"})
+        self.assertEqual(bad_resp.status_code, 403)
+
+        good_resp = await self.client.post("/csrf-static", data={"csrf_token": "static-token-fixed-9999", "email": "user@test"})
+        self.assertEqual(good_resp.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()
