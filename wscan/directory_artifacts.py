@@ -16,6 +16,7 @@ from wscan.url_scope import same_origin
 MAX_BODY = 1_000_000
 SCRIPT_SNAPSHOT_LIMIT = 50_000
 BACKUP_SUFFIXES = (".bak", ".old", ".orig", ".swp", ".zip", ".gz", ".tgz", ".tar")
+ARCHIVE_SUFFIXES = (".zip", ".gz", ".tgz", ".tar")
 
 
 def is_truncated_script_snapshot(body: str | bytes | None, limit: int = SCRIPT_SNAPSHOT_LIMIT) -> bool:
@@ -33,12 +34,44 @@ def is_backup_artifact_name(name: str) -> bool:
     return suffix in BACKUP_SUFFIXES or name.endswith("~")
 
 
+def is_archive_artifact_name(name: str) -> bool:
+    """ファイル名またはパスがアーカイブ拡張子（.zip/.gz/.tgz/.tar/.tar.gz）を持つか判定する純粋関数。"""
+    if not name:
+        return False
+    path = urlsplit(name).path if "://" in name else name
+    path = path.lower()
+    return path.endswith(ARCHIVE_SUFFIXES) or path.endswith((".tar.gz", ".tar.bz2"))
+
+
 def has_archive_signature(body: bytes | bytearray | None) -> bool:
     """ZIP, gzip, tar (ustar) の先頭マジックバイトシグネチャを判定する純粋関数。"""
     if not body:
         return False
     raw = bytes(body[:262])
     return raw.startswith((b"PK\x03\x04", b"\x1f\x8b")) or (len(raw) >= 262 and raw[257:262] == b"ustar")
+
+
+def has_script_evidence(
+    url: str = "",
+    *,
+    is_script: bool = False,
+    content_type: str = "",
+    body: str | bytes | None = None,
+) -> bool:
+    """拡張子なしパスがスクリプト資源である根拠（<script> 参照、JS Content-Type、JS 本文）の有無を判定する純粋関数。"""
+    if is_script:
+        return True
+    ct = (content_type or "").lower()
+    if any(js_type in ct for js_type in ("javascript", "ecmascript", "jscript")):
+        return True
+    if body is not None:
+        text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
+        if text and not re.search(r"(?i)<\s*(?:!doctype|html|head|body|div|span|p|h[1-6]|table|pre)\b", text[:500]):
+            if source_mapping_references(text):
+                return True
+            if re.search(r"(?m)(?:^|[;{}\s])(?:var|let|const|function|import|export|class|async\s+function)\b", text[:MAX_BODY]):
+                return True
+    return False
 
 
 def bind_verification_target(
@@ -83,6 +116,7 @@ class _Markup(HTMLParser):
         self.stack = []
         self.headings = []
         self.links = []
+        self.scripts = []
         self.text = []
         self._heading = None
         self._anchor = None
@@ -98,6 +132,8 @@ class _Markup(HTMLParser):
             href = attrs.get("src") if tag in ("script", "img") else attrs.get("href")
             if href:
                 self.links.append((href, "", False))
+                if tag == "script" and attrs.get("src"):
+                    self.scripts.append(attrs.get("src"))
 
     def handle_endtag(self, tag):
         if self._heading and tag == self._heading[0]:
@@ -210,6 +246,15 @@ def extract_resource_urls(body: str, base_url: str) -> tuple[str, ...]:
     return tuple(result)
 
 
+def extract_script_urls(body: str, base_url: str) -> tuple[str, ...]:
+    result = []
+    for href in _markup(body).scripts:
+        url = normalize_candidate_url(urljoin(base_url, href))
+        if url and url not in result:
+            result.append(url)
+    return tuple(result)
+
+
 def normalize_candidate_url(url: str) -> str:
     try:
         parts = urlsplit(str(url or ""))
@@ -231,7 +276,13 @@ class ArtifactCandidate:
     observed_url: str
 
 
-def derive_artifact_candidates(observed_url: str) -> tuple[ArtifactCandidate, ...]:
+def derive_artifact_candidates(
+    observed_url: str,
+    *,
+    is_script: bool = False,
+    content_type: str = "",
+    body: str | bytes | None = None,
+) -> tuple[ArtifactCandidate, ...]:
     clean = normalize_candidate_url(observed_url)
     if not clean:
         return ()
@@ -247,14 +298,19 @@ def derive_artifact_candidates(observed_url: str) -> tuple[ArtifactCandidate, ..
         directory = posixpath.dirname(directory.rstrip("/")) + "/"
     name = posixpath.basename(path)
     suffix = posixpath.splitext(name)[1].lower()
+    is_extless_script = False
     if name and not suffix and not name.startswith("."):
         result.insert(0, ArtifactCandidate(clean, "directory", clean))
-        result.insert(0, ArtifactCandidate(clean, "resource", clean))
+        if has_script_evidence(clean, is_script=is_script, content_type=content_type, body=body):
+            result.insert(0, ArtifactCandidate(clean, "resource", clean))
+            is_extless_script = True
     if not name or path.endswith("/") or (not suffix and not name.startswith(".")) or is_backup_artifact_name(name) or suffix == ".map":
         if suffix == ".map":
             result.insert(0, ArtifactCandidate(clean, "source_map", clean))
         elif is_backup_artifact_name(name):
             result.insert(0, ArtifactCandidate(clean, "backup", clean))
+        elif is_extless_script:
+            result.insert(1, ArtifactCandidate(urlunsplit(parts._replace(path=path + ".map", fragment="")), "source_map", clean))
         return tuple(result)
     if suffix in (".js", ".mjs", ".cjs", ".css"):
         result.insert(0, ArtifactCandidate(clean, "resource", clean))
@@ -289,6 +345,8 @@ def classify_backup(body: bytes, content_type: str, url: str = "") -> tuple[str,
         return ()
     if has_archive_signature(body):
         return ("archive_signature",)
+    if is_archive_artifact_name(url) or any(act in content_type.lower() for act in ("application/zip", "application/x-tar", "application/gzip", "application/x-gzip")):
+        return ()
     text = body[:MAX_BODY].decode("utf-8", errors="replace")
     if re.search(r"(?i)<(?:!doctype|html|title|body)\b", text[:2000]) or "html" in content_type.lower():
         return ()

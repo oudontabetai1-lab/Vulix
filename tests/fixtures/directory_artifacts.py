@@ -56,6 +56,8 @@ def resource(path: str, request: Request):
         return Response(json.dumps({"version": 3, "sources": ["webpack:///src/secret-bundle.js"], "sourcesContent": ['const secret = "bundle-leak";']}), media_type='application/json')
     if path == 'safe/bundle':
         return PlainTextResponse('const a = 1;\n')
+    if path == 'safe/catalog':
+        return HTMLResponse('<html><body><h1>Catalog Directory</h1><p>Items</p></body></html>')
     # Edge 3: 機微クエリ付き検証ターゲットと安全ツイン
     if path == 'exposed/query-map.js.map':
         if request.query_params.get('token') == 'valid_token':
@@ -81,8 +83,11 @@ def resource(path: str, request: Request):
         return Response(b'\x1f\x8b' + b'\x00' * 1_200_000, media_type='application/gzip')
     if path == 'exposed/oversized-backup.tar':
         return Response(b'\x00' * 257 + b'ustar' + b'\x00' * 1_200_000, media_type='application/x-tar')
-    if path == 'safe/oversized-file.bin':
-        return Response(b'\x00' * 1_200_000, media_type='application/octet-stream')
+    if path in ('safe/oversized-file.bin', 'safe/oversized-backup.zip'):
+        # 1MB を超える無害な非アーカイブレスポンス（先頭 262 バイトにアーカイブシグネチャを含まない大きな JSON / octet-stream）
+        benign_json = json.dumps({"status": "ok", "message": "benign payload", "items": ["data"] * 1000}).encode()
+        benign_body = benign_json + b' ' * (1_200_000 - len(benign_json))
+        return Response(benign_body, media_type='application/octet-stream')
     return PlainTextResponse('Not found', status_code=404)
 
 def create_app():

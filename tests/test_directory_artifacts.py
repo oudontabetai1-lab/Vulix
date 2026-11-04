@@ -10,9 +10,10 @@ from tests.fixtures.directory_artifacts import app, LISTING, ROOT_LISTING, ROOT_
 from wscan.directory_artifacts import (
     ArtifactCandidate, bind_verification_target, classify_directory_listing,
     classify_backup, control_matches, derive_artifact_candidates,
-    has_archive_signature, is_backup_artifact_name,
-    is_truncated_script_snapshot, lookup_verification_target,
-    normalize_candidate_url, parse_source_map, source_mapping_references,
+    has_archive_signature, has_script_evidence, is_archive_artifact_name,
+    is_backup_artifact_name, is_truncated_script_snapshot,
+    lookup_verification_target, normalize_candidate_url, parse_source_map,
+    source_mapping_references,
 )
 from wscan.scanners.directory_artifacts import DirectoryArtifactsScanner
 from wscan.scanners.base import PageDocumentUnavailable
@@ -235,12 +236,20 @@ def test_pure_detection_functions_and_safe_twins():
     assert not is_truncated_script_snapshot(None)
 
     # Edge 2: 拡張子なしスクリプト候補抽出純粋関数
-    bundle_candidates = derive_artifact_candidates("http://fixture.test/bundle")
+    bundle_candidates = derive_artifact_candidates("http://fixture.test/bundle", is_script=True)
     kinds = {c.kind for c in bundle_candidates}
     assert "resource" in kinds
     assert "directory" in kinds
     res_cand = next(c for c in bundle_candidates if c.kind == "resource")
     assert res_cand.url == "http://fixture.test/bundle"
+    # 安全ツイン: スクリプト証拠のない通常のディレクトリ風パス（ナビゲーション等）は resource 候補にならない
+    dir_candidates = derive_artifact_candidates("http://fixture.test/admin")
+    assert not any(c.kind == "resource" for c in dir_candidates)
+    assert any(c.kind == "directory" for c in dir_candidates)
+    # JS Content-Type または JS 本文の証拠がある場合もスクリプト資源とみなされる
+    assert has_script_evidence("http://fixture.test/bundle", content_type="application/javascript")
+    assert has_script_evidence("http://fixture.test/bundle", body="const x = 1;\n//# sourceMappingURL=bundle.map")
+    assert not has_script_evidence("http://fixture.test/admin", body="<html><body>Admin</body></html>")
 
     # Edge 3: 検証ターゲット紐付け純粋関数
     targets = {}
@@ -276,6 +285,15 @@ def test_pure_detection_functions_and_safe_twins():
     assert not has_archive_signature(b"<html><head><title>404</title></head></html>")
     assert not has_archive_signature(b"\x00" * 300)
     assert not has_archive_signature(None)
+
+    # Edge 5: バックアップ分類純粋関数（実シグネチャ判定と .zip 偽陽性抑止）
+    # 陽性: 実シグネチャが存在する .zip -> archive_signature
+    assert classify_backup(b"PK\x03\x04" + b"\x00" * 300, "application/octet-stream", "http://fixture.test/oversized-backup.zip") == ("archive_signature",)
+    assert classify_backup(b"\x1f\x8b" + b"\x00" * 300, "application/octet-stream", "http://fixture.test/oversized-backup.tar.gz") == ("archive_signature",)
+    # 安全ツイン: 拡張子はアーカイブだがシグネチャを持たない大きな無害レスポンス（JSON/バイナリ等） -> 検出されない（served_file 偽陽性抑止）
+    assert classify_backup(b'{"status": "ok", "items": []}' + b" " * 300, "application/octet-stream", "http://fixture.test/oversized-backup.zip") == ()
+    assert classify_backup(b"\x00" * 300, "application/octet-stream", "http://fixture.test/oversized-backup.zip") == ()
+    assert classify_backup(b"\x89PNG\r\n\x1a\n" + b"\x00" * 300, "application/octet-stream", "http://fixture.test/oversized-backup.zip") == ()
 
 
 @pytest.mark.asyncio
@@ -326,6 +344,16 @@ async def test_edge2_extensionless_script_and_safe_twin(monkeypatch):
     )
     safe_findings = await safe_scan.scan_page_context(safe_page)
     assert not any("bundle.map" in f.url for f in safe_findings)
+
+    # 安全ツイン: スクリプトではなく通常のディレクトリ/ナビゲーションとして観測されたパスは resource 候補にならない
+    nav_scan = scanner(monkeypatch, lambda req: httpx.Response(200, text='<html><body><a href="/safe/catalog">Catalog</a><script src="/exposed/bundle"></script></body></html>'))
+    nav_scan.engine.reached_urls = {"http://fixture.test/safe/catalog"}
+    nav_findings = await nav_scan.scan_page("http://fixture.test/safe/nav")
+    # /safe/catalog は directory 候補として扱われ、resource 候補としては計画・実行されない
+    assert not any(c == ("http://fixture.test/safe/catalog", "resource") for c in nav_scan._checked)
+    assert not any(c == ("http://fixture.test/safe/catalog", "resource") for c in nav_scan._planned)
+    # 一方で <script src="/exposed/bundle"> はスクリプト証拠があるため resource 候補として計画される
+    assert ("http://fixture.test/exposed/bundle", "resource") in nav_scan._planned
 
 
 @pytest.mark.asyncio
@@ -379,18 +407,18 @@ async def test_edge4_explicitly_observed_backup_artifacts_and_safe_twin(monkeypa
 @pytest.mark.asyncio
 async def test_edge5_oversized_artifact_capped_prefix_and_safe_twin(monkeypatch):
     scan = scanner(monkeypatch)
-    # 1MB を超える ZIP バックアップ
+    # 1MB を超える ZIP バックアップ（陽性: 実シグネチャ -> 検出される）
     scan.engine.reached_urls = {"http://fixture.test/exposed/oversized-backup.zip"}
     findings = await scan.scan_page("http://fixture.test/exposed/")
     finding = next((f for f in findings if f.url.endswith("oversized-backup.zip") and f.evidence_type == "derived_backup"), None)
     assert finding is not None
     assert await scan.verify_finding(finding) is True
 
-    # 安全ツイン: 1MB を超えるがアーカイブシグネチャを持たないバイナリは検出されない
+    # 安全ツイン: 1MB を超える無害な非アーカイブレスポンス（.zip かつ application/octet-stream だがアーカイブシグネチャなし）は検出されない
     safe_scan = scanner(monkeypatch)
-    safe_scan.engine.reached_urls = {"http://fixture.test/safe/oversized-file.bin"}
+    safe_scan.engine.reached_urls = {"http://fixture.test/safe/oversized-backup.zip"}
     safe_findings = await safe_scan.scan_page("http://fixture.test/safe/")
-    assert not any("oversized-file.bin" in f.url for f in safe_findings)
+    assert not any("oversized-backup.zip" in f.url for f in safe_findings)
 
 
 @pytest.mark.asyncio
