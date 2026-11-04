@@ -1226,7 +1226,6 @@ class BaseScanner(ABC):
                             # 1度だけ再取得し、既知のトークン名の値だけ採用する。
                             get_resp2 = await client.get(target_url)
                         except Exception:
-                            self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
                             get_resp2 = None
                         if get_resp2 is None or get_resp2.status_code >= 400:
                             self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
