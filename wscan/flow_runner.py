@@ -19,6 +19,7 @@ wait      : pause for ``timeout`` seconds (useful after AJAX transitions)
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from wscan.browser import BrowserManager
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 # wait/click timeout の上限（秒）。無限大（1e309/"Infinity"）や巨大値で asyncio.sleep が返らず
 # スキャン全体が停止するのを防ぐ。
@@ -156,8 +158,9 @@ class FlowRunner:
         # browser is now on the last page of the flow
     """
 
-    def __init__(self, browser: "BrowserManager", *, scope_check=None, recorder=None):
+    def __init__(self, browser: "BrowserManager", *, scope_check=None, recorder=None, engine=None):
         self.browser = browser
+        self._engine = engine
         self._recorder = recorder
         # navigate 後の実着地 URL を検証するコールバック（url->bool、in-scope なら True）。
         # browser.navigate は redirect を追従し最終応答で成功を返すため、静的な step-URL 検査だけ
@@ -165,6 +168,14 @@ class FlowRunner:
         self._scope_check = scope_check
         # Increment 3: token lifecycle manager が有効なときの Flow step トークン継承用
         self._flow_token_bindings: dict[str, str] = {}
+
+    def _flow_token_manager_enabled(self) -> bool:
+        if getattr(self._engine, "token_lifecycle_manager", False) is not True:
+            return False
+        from wscan.token_lifecycle import TokenCarrier, TokenTransport, build_token_capability_matrix
+        return build_token_capability_matrix().is_supported(
+            TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW
+        )
 
     def _record(self, index, total, outcome):
         if self._recorder is not None:
@@ -255,13 +266,15 @@ class FlowRunner:
             # Increment 3: token lifecycle manager が有効なとき、flow definition の
             # 古いトークン値がライブ DOM の新しい値で上書きされないように、
             # トークン欄がはじき出す前に live DOM から再抽出する。
-            from wscan.token_lifecycle import is_token_field_name
-
             ident = step.selector or step.field
             # フィールド名がトークン欄の場合、live DOM からトークン値を再抽出
             try:
-                field_lower = str(ident).lower().replace("-", "_").replace(" ", "_")
-                if is_token_field_name(field_lower) and hasattr(self.browser, "page"):
+                if self._flow_token_manager_enabled():
+                    from wscan.token_lifecycle import derive_token_ref_id, is_token_field_name
+                    field_lower = str(ident).lower().replace("-", "_").replace(" ", "_")
+                else:
+                    field_lower = ""
+                if field_lower and is_token_field_name(field_lower) and hasattr(self.browser, "page"):
                     # すでにページ上に同名のトークン入力が存在すれば、そちらの値を採用
                     dom_value = await self.browser.page.evaluate(
                         """(field) => {
@@ -284,9 +297,9 @@ class FlowRunner:
                         ref_id = derive_token_ref_id(dom_value)
                         self._flow_token_bindings[field_lower] = ref_id
                         step.value = dom_value
-            except Exception:
+            except Exception as exc:
                 # page.evaluate 例外は flow 実行を止めない
-                pass
+                logger.debug("Flow token fill extraction failed (%s)", type(exc).__name__)
 
             filled = await self.browser.page.evaluate(
                 """([sel, f, v]) => {
@@ -369,15 +382,14 @@ class FlowRunner:
             # Increment 3: token lifecycle manager が有効なとき、flow definition の
             # 古いトークン値がライブ DOM の新しい値で上書きされないように、
             # submit 直前に live DOM からトークンを再抽出する。
-            from wscan.token_lifecycle import is_token_field_name
-
             console.print(f"  [dim]{label} submit[/dim]")
             # submit 直前に live DOM からトークン値を再抽出（トークン欄が存在する場合）
             try:
-                if hasattr(self.browser, "page"):
+                if self._flow_token_manager_enabled() and hasattr(self.browser, "page"):
+                    from wscan.token_lifecycle import derive_token_ref_id
                     # form 内のすべてのトークン入力を拾う
                     dom_tokens = await self.browser.page.evaluate(
-                        """ => {
+                        """() => {
                             const result = {};
                             const inputs = document.querySelectorAll(
                                 'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), input[type=hidden], textarea, select'
@@ -410,9 +422,9 @@ class FlowRunner:
                     for name, value in dom_tokens.items():
                         ref_id = derive_token_ref_id(value)
                         self._flow_token_bindings[name] = ref_id
-            except Exception:
+            except Exception as exc:
                 # page.evaluate 例外は flow 実行を止めない
-                pass
+                logger.debug("Flow token submit extraction failed (%s)", type(exc).__name__)
 
             clicked = await self.browser.page.evaluate(
                 """(sel) => {

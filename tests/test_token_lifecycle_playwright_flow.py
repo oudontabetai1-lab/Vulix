@@ -28,6 +28,51 @@ from wscan.token_lifecycle import (
 PAYLOAD = "user@example.com\r\nCc: attacker@evil.example.com"
 
 
+class _FlowPage:
+    url = "https://example.test/"
+    def __init__(self, token="fresh-secret"):
+        self.token = token
+        self.scripts = []
+    async def evaluate(self, script, *args):
+        self.scripts.append(script)
+        if "querySelectorAll" in script and "field.toLowerCase()" in script and "const elements" in script:
+            return self.token
+        if "const result = {}" in script:
+            assert script.lstrip().startswith("() =>")
+            return {"csrf_token": self.token}
+        if "const find =" in script:
+            return {"ok": True, "ambiguous": False, "sensitive": False}
+        return True
+
+
+class _FlowBrowser:
+    def __init__(self, page): self.page = page
+
+
+@pytest.mark.asyncio
+async def test_flow_token_extraction_is_opt_in_and_ref_only():
+    from wscan.flow_runner import ScanFlow
+    for flag in (False, True):
+        page = _FlowPage()
+        engine = type("Engine", (), {"token_lifecycle_manager": flag})()
+        notes = []
+        runner = FlowRunner(_FlowBrowser(page), engine=engine, recorder=lambda *args: notes.append(args))
+        fill = FlowStep("fill", field="csrf_token", value="recorded-old")
+        flow = ScanFlow("tokens", [fill, FlowStep("submit")])
+        assert await runner.run(flow)
+        extraction_scripts = [s for s in page.scripts if "const result = {}" in s or "field.toLowerCase()" in s]
+        if flag:
+            assert fill.value == "fresh-secret"
+            assert runner._flow_token_bindings == {"csrf_token": derive_token_ref_id("fresh-secret")}
+            assert all("fresh-secret" not in repr(x) for x in runner._flow_token_bindings.values())
+            assert any(s.lstrip().startswith("() =>") for s in extraction_scripts)
+            assert all("fresh-secret" not in repr(note) for note in notes)
+        else:
+            assert fill.value == "recorded-old"
+            assert runner._flow_token_bindings == {}
+            assert extraction_scripts == []
+
+
 def _ip(base, path, form_tokens=None):
     """Create an InjectionPoint for form probing."""
     return InjectionPoint.for_form(
