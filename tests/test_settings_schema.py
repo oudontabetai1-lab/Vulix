@@ -13,7 +13,7 @@ import main
 from wscan.monitor import MonitorServer
 from wscan.settings_schema import (
     ALL_MODES, FIELDS, PROFILES, SCHEMA_VERSION, build_effective_config,
-    build_settings_schema, validate_settings_schema,
+    build_settings_schema, validate_settings_schema, validate_ui_exposure,
 )
 
 
@@ -44,6 +44,105 @@ def test_complete_form_declarations_and_defaults():
         assert isinstance(f["constraints"], dict)
     assert set(build_settings_schema()["profiles"]) == set(PROFILES)
     assert validate_settings_schema(build_settings_schema()) == []
+
+
+def test_representative_normalized_metadata():
+    fields = {f["key"]: f["metadata"] for f in FIELDS}
+    assert (fields["depth"]["type"], fields["depth"]["default"], fields["depth"]["scope"]) == ("integer", 2, "scan")
+    assert (fields["auth_pass"]["type"], fields["auth_pass"]["default"], fields["auth_pass"]["sensitive"], fields["auth_pass"]["scope"]) == ("secret", "", True, "profile")
+    assert (fields["toggles.allow_state_changing_probes"]["key"], fields["toggles.allow_state_changing_probes"]["type"], fields["toggles.allow_state_changing_probes"]["dangerous"]) == ("allow_state_changing_probes", "boolean", True)
+    assert (fields["llm"]["type"], fields["llm"]["default"], fields["llm"]["scope"]) == ("choice", "ollama", "instance")
+    bad = deepcopy(list(FIELDS[:1]))
+    bad[0]["metadata"]["ui_exposed"] = False
+    assert validate_ui_exposure(bad) == ["report_lang"]
+    bad[0]["metadata"]["ui_exposure_reason"] = "CLI only"
+    assert validate_ui_exposure(bad) == []
+
+
+def test_settings_parity_pure_alias_and_resolution():
+    from scripts.check_settings_parity import ALIASES, argparse_destinations, parity_warnings, resolve
+    keys = {f["metadata"]["key"] for f in FIELDS}
+    assert ALIASES["include_registration"] == "toggles.skip_registration"
+    assert ALIASES["browser.header_scope_enforce"] == "header_scope_enforce"
+    assert resolve("allow_state_changing_probes", keys) == "allow_state_changing_probes"
+    assert any("unresolved setting absent" in warning for warning in parity_warnings({"cli": ["absent"]}, keys))
+    warnings = parity_warnings({"cli": ["depth", "depth"]}, keys)
+    assert any("duplicate inventory name depth" in warning for warning in warnings)
+    assert any("stale schema key" in warning for warning in parity_warnings({}, keys))
+
+
+def test_settings_parity_parser_matches_real_argparse_destinations():
+    from scripts.check_settings_parity import argparse_destinations
+    destinations = set(argparse_destinations(Path(main.__file__).read_text()))
+    role_destinations = {"planner_model", "payload_model", "adaptive_model", "triage_model", "report_model"}
+    assert role_destinations <= destinations
+    assert {"auto_config", "auto_spa_crawl"} <= destinations
+    assert "no_auto_config" not in destinations
+    assert "no_auto_spa" not in destinations
+
+    # These parse-only invocations exercise the actual BooleanOptionalAction and
+    # explicit inverse action without starting a scan or touching the network.
+    args = main.parse_args([
+        "scan", "https://inventory.invalid", "--planner-model", "planner-fixture",
+        "--payload-model", "payload-fixture", "--adaptive-model", "adaptive-fixture",
+        "--triage-model", "triage-fixture", "--report-model", "report-fixture",
+        "--no-auto-config", "--no-auto-spa",
+    ])
+    assert {name: getattr(args, name) for name in role_destinations} == {
+        "planner_model": "planner-fixture", "payload_model": "payload-fixture",
+        "adaptive_model": "adaptive-fixture", "triage_model": "triage-fixture",
+        "report_model": "report-fixture",
+    }
+    assert args.auto_config is False
+    assert args.auto_spa_crawl is False
+    assert role_destinations <= vars(args).keys()
+    assert destinations <= vars(args).keys()
+    assert main.parse_args(["scan", "https://inventory.invalid", "--auto-config"]).auto_config is True
+
+
+def test_settings_parity_python_and_payload_adversarial_fixtures():
+    from scripts.check_settings_parity import argparse_destinations, parity_warnings, scan_payloads
+
+    parser_fixture = '''
+for role in ("planner", "report"):
+    scan.add_argument(f"--{role}-model")
+scan.add_argument("--no-cache", action="store_false", dest="cache")
+scan.add_argument("--automatic", action=argparse.BooleanOptionalAction)
+'''
+    assert argparse_destinations(parser_fixture) == ["planner_model", "report_model", "cache", "automatic"]
+    alias_warnings = parity_warnings(
+        {"one": ["allow_state_changing_probes", "toggles.allow_state_changing_probes"]},
+        {"allow_state_changing_probes"},
+    )
+    assert not any("duplicate inventory name" in warning for warning in alias_warnings)
+    assert not any("unresolved setting" in warning for warning in alias_warnings)
+
+    js_fixture = '''
+function submitScanConfig() {
+  const config = {
+    url: "https://x/{y}",
+    normal_only: true,
+  };
+}
+function submitAgentScan() {
+  const config = {
+    agent_mode: true,
+    agent_model: "x\\\"}y",
+  };
+}
+function submitHybridScan() {
+  const config = {
+    hybrid_mode: true,
+    hybrid_llm: "ollama",
+    nested: { ignored: true },
+  };
+}
+'''
+    assert scan_payloads(js_fixture) == {
+        "submitScanConfig": ["url", "normal_only"],
+        "submitAgentScan": ["agent_mode", "agent_model"],
+        "submitHybridScan": ["hybrid_mode", "hybrid_llm", "nested"],
+    }
 
 
 @pytest.mark.parametrize("mutation", ["missing_version", "version", "field", "constraint", "claim", "extra", "wrong_type"])
@@ -233,6 +332,15 @@ function alert(message) {throw new Error(message);}
     script += f"\n{function}(); process.stdout.write(JSON.stringify(Object.keys(sent)));"
     completed = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     submitted = set(json.loads(completed.stdout))
+    from scripts.check_settings_parity import scan_payloads
+    payload_name = {"submitScanConfig": "submitScanConfig", "submitAgentScan": "submitAgentScan",
+                    "submitHybridScan": "submitHybridScan"}[function]
+    dashboard = (Path(main.__file__).parent / "templates/dashboard.html").read_text()
+    assert set(scan_payloads(dashboard)[payload_name]) <= submitted
+    if mode == "agent":
+        assert {"agent_mode", "agent_model", "agent_max_steps"} <= submitted
+    elif mode == "hybrid":
+        assert {"hybrid_mode", "hybrid_llm", "hybrid_model", "hybrid_max_steps"} <= submitted
     aliases = {"community_payloads": "enable_community_payloads", "component_intel": "enable_component_intel",
                "tls_scan": "enable_tls_scan"}
     declared = {aliases.get(f["key"][8:], f["key"][8:]) if f["key"].startswith("toggles.") else f["key"]
