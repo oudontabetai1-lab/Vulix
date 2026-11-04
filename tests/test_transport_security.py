@@ -457,6 +457,7 @@ def test_anonymous_probes_isolate_response_cookies():
     sentinel_cookie_name = "test_anon_session_sentinel"
     sentinel_cookie_value = "token_" + secrets.token_hex(8)
     seen_requests = []
+    seen_responses = []
 
     def mock_handler(request: httpx.Request) -> httpx.Response:
         cookie_header = request.headers.get("cookie")
@@ -471,8 +472,11 @@ def test_anonymous_probes_isolate_response_cookies():
             headers["set-cookie"] = f"{sentinel_cookie_name}={sentinel_cookie_value}; Path=/"
 
         if request.url.path == "/":
-            return httpx.Response(200, headers=headers, text="<html>welcome</html>")
-        return httpx.Response(404, headers=headers, text="not found")
+            resp = httpx.Response(200, headers=headers, text="<html>welcome</html>")
+        else:
+            resp = httpx.Response(404, headers=headers, text="not found")
+        seen_responses.append(resp)
+        return resp
 
     transport = httpx.MockTransport(mock_handler)
     engine, scanner = engine_for(transport)
@@ -485,8 +489,20 @@ def test_anonymous_probes_isolate_response_cookies():
 
     # 複数回プローブが送信されたことを確認
     assert len(seen_requests) >= 2
-    # どの後続プローブにも Set-Cookie の値が送られていないことを確認
+    # 最初のプローブレスポンスが実際に Set-Cookie を返したことを確認（cookie jar が保持し得る状態にあったことの証明）
+    assert seen_responses[0].headers.get("set-cookie") == f"{sentinel_cookie_name}={sentinel_cookie_value}; Path=/"
+
+    # どの後続プローブにも Set-Cookie の値が送られていないことを確認（AnonymousCookiePolicy の隔離効果）
     for req in seen_requests:
         assert req["cookie"] is None or sentinel_cookie_value not in req["cookie"]
         assert req["cookie"] is None or sentinel_cookie_name not in req["cookie"]
 
+    # 通常のデフォルト cookie jar であれば先行レスポンスの Set-Cookie が後続リクエストへ引き継がれることを対比実証
+    default_client = httpx.Client(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, headers={"set-cookie": f"{sentinel_cookie_name}={sentinel_cookie_value}; Path=/"}
+                                   if req.url.path == "/probe1" else {})
+    ))
+    resp1 = default_client.get("http://fixture.test/probe1")
+    assert resp1.headers.get("set-cookie") == f"{sentinel_cookie_name}={sentinel_cookie_value}; Path=/"
+    resp2 = default_client.get("http://fixture.test/probe2")
+    assert resp2.request.headers.get("cookie") == f"{sentinel_cookie_name}={sentinel_cookie_value}"
