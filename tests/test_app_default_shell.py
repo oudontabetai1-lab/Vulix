@@ -22,6 +22,8 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.ui_harness import UIHarness, ui_harness, require_browser
+
 import main
 import wscan.monitor as monitor_mod
 from wscan.monitor import MonitorServer
@@ -170,7 +172,18 @@ class TestRoutesCompatibility:
 
 
 class TestServeOutputAndDefaults:
-    """Verify serve command outputs and opens the /app URL."""
+    """Verify serve, scan, and agent commands output and open the correct /app URL."""
+
+    def test_dashboard_url_helper(self):
+        assert main.get_dashboard_url(8765) == "http://localhost:8765/app"
+        assert (
+            main.get_dashboard_url(8765, "20261104_100000")
+            == "http://localhost:8765/app#/monitor?scan=20261104_100000"
+        )
+        assert (
+            main.get_dashboard_url(8765, "agent_20261104_100000")
+            == "http://localhost:8765/app#/monitor?scan=agent_20261104_100000"
+        )
 
     def test_serve_source_code_points_to_app(self):
         source = Path("main.py").read_text(encoding="utf-8")
@@ -216,6 +229,128 @@ class TestServeOutputAndDefaults:
         panel_text = "\n".join(captured_panels)
         assert "http://127.0.0.1:8765/app" in panel_text
         assert "http://localhost:8765/app" in panel_text
+
+    def test_scan_printed_url_and_browser_open(self, monkeypatch, tmp_path):
+        captured_prints = []
+        opened_urls = []
+
+        class DummyConsole:
+            def print(self, *args, **kwargs):
+                for arg in args:
+                    if hasattr(arg, "renderable"):
+                        captured_prints.append(str(arg.renderable))
+                    else:
+                        captured_prints.append(str(arg))
+
+        monkeypatch.setattr("rich.console.Console", DummyConsole)
+        monkeypatch.setattr("webbrowser.open", lambda url: opened_urls.append(url))
+
+        async def fast_sleep(*args, **kwargs):
+            return
+
+        monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+        async def dummy_serve(self):
+            return
+
+        monkeypatch.setattr("uvicorn.Server.serve", dummy_serve)
+
+        from wscan.engine import ScanEngine
+
+        async def dummy_engine_run(self):
+            return
+
+        monkeypatch.setattr(ScanEngine, "run", dummy_engine_run)
+
+        args = main.parse_args(["scan", "https://example.test", "--port", "8765", "--output", str(tmp_path / "scan_out")])
+        asyncio.run(main.run_scan(args))
+
+        all_prints = "\n".join(captured_prints)
+        expected_url = "http://localhost:8765/app#/monitor?scan=scan_out"
+        assert expected_url in all_prints, f"Expected {expected_url} in console output: {all_prints}"
+        assert opened_urls == [expected_url], f"Expected webbrowser.open({expected_url}), got: {opened_urls}"
+
+    def test_agent_printed_url_and_browser_open(self, monkeypatch, tmp_path):
+        captured_prints = []
+        opened_urls = []
+
+        class DummyConsole:
+            def print(self, *args, **kwargs):
+                for arg in args:
+                    if hasattr(arg, "renderable"):
+                        captured_prints.append(str(arg.renderable))
+                    else:
+                        captured_prints.append(str(arg))
+
+        monkeypatch.setattr("rich.console.Console", DummyConsole)
+        monkeypatch.setattr("webbrowser.open", lambda url: opened_urls.append(url))
+
+        async def fast_sleep(*args, **kwargs):
+            return
+
+        monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+        async def dummy_serve(self):
+            return
+
+        monkeypatch.setattr("uvicorn.Server.serve", dummy_serve)
+
+        from wscan.agent_engine import AgentEngine
+        from wscan.llm_agent_browser import AgentScanResult
+
+        async def dummy_agent_run(self):
+            return AgentScanResult(target_url="https://example.test", success=True, findings=[])
+
+        monkeypatch.setattr(AgentEngine, "run", dummy_agent_run)
+
+        args = main.parse_args(["agent", "https://example.test", "--port", "8765", "--llm", "ollama", "--output", str(tmp_path / "agent_out")])
+        asyncio.run(main.run_agent(args))
+
+        all_prints = "\n".join(captured_prints)
+        expected_url = "http://localhost:8765/app#/monitor?scan=agent_out"
+        assert expected_url in all_prints, f"Expected {expected_url} in console output: {all_prints}"
+        assert opened_urls == [expected_url], f"Expected webbrowser.open({expected_url}), got: {opened_urls}"
+
+    def test_no_monitor_mode_does_not_open_browser_or_print_dashboard(self, monkeypatch):
+        captured_prints = []
+        opened_urls = []
+
+        class DummyConsole:
+            def print(self, *args, **kwargs):
+                for arg in args:
+                    if hasattr(arg, "renderable"):
+                        captured_prints.append(str(arg.renderable))
+                    else:
+                        captured_prints.append(str(arg))
+
+        monkeypatch.setattr("rich.console.Console", DummyConsole)
+        monkeypatch.setattr("webbrowser.open", lambda url: opened_urls.append(url))
+
+        from wscan.engine import ScanEngine
+        from wscan.agent_engine import AgentEngine
+        from wscan.llm_agent_browser import AgentScanResult
+
+        async def dummy_engine_run(self):
+            return
+
+        async def dummy_agent_run(self):
+            return AgentScanResult(target_url="https://example.test", success=True, findings=[])
+
+        monkeypatch.setattr(ScanEngine, "run", dummy_engine_run)
+        monkeypatch.setattr(AgentEngine, "run", dummy_agent_run)
+
+        # 1. scan with --no-monitor
+        args_scan = main.parse_args(["scan", "https://example.test", "--no-monitor"])
+        asyncio.run(main.run_scan(args_scan))
+        assert len(opened_urls) == 0, f"webbrowser.open should not be called in --no-monitor mode: {opened_urls}"
+        assert "Monitoring dashboard:" not in "\n".join(captured_prints)
+
+        # 2. agent with --no-monitor
+        captured_prints.clear()
+        args_agent = main.parse_args(["agent", "https://example.test", "--no-monitor", "--llm", "ollama"])
+        asyncio.run(main.run_agent(args_agent))
+        assert len(opened_urls) == 0, f"webbrowser.open should not be called in agent --no-monitor mode: {opened_urls}"
+        assert "Monitoring dashboard:" not in "\n".join(captured_prints)
 
 
 class TestLegacyPagesLinkToApp:
@@ -338,3 +473,115 @@ class TestAppNavigationResolutionAndTrafficAbsence:
 
         app_entry_js = APP_ENTRY_JS.read_text(encoding="utf-8")
         assert "portalFrame" not in app_entry_js, "Obsolete portalFrame DOM binding must be removed from app-entry.js"
+
+    def test_app_browser_navigation_all_entries_mount_or_explicit_unavailable(self, ui_harness: UIHarness):
+        """Real browser test verifying that every /app navigation entry resolves to either
+        a mounted registered view with visible view-specific element or an explicit unavailable
+        state with a reason (never a blank or broken view). Also asserts no navigation entry or link
+        targets a Traffic view."""
+        ui_harness.seed_representative_scans()
+        page = ui_harness.new_page()
+        page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
+        page.wait_for_selector("nav[aria-label='Application']", state="visible")
+
+        # 1. Assert no navigation entry or link anywhere targets a Traffic view
+        nav_texts = page.eval_on_selector_all(
+            "nav button, nav a",
+            "els => els.map(el => (el.textContent || '').trim().toLowerCase())",
+        )
+        all_routes = page.eval_on_selector_all(
+            "[data-route]",
+            "els => els.map(el => (el.getAttribute('data-route') || '').toLowerCase())",
+        )
+        all_hrefs = page.eval_on_selector_all(
+            "a[href]",
+            "els => els.map(el => (el.getAttribute('href') || '').toLowerCase())",
+        )
+        for text in nav_texts:
+            assert "traffic" not in text, f"Navigation text contains traffic: {text}"
+        for route in all_routes:
+            assert "traffic" not in route, f"Navigation route contains traffic: {route}"
+        for href in all_hrefs:
+            assert "traffic" not in href, f"Link href targets traffic: {href}"
+
+        # 2. Get all navigation entries from the DOM
+        nav_buttons = page.locator("nav [data-route]")
+        count = nav_buttons.count()
+        assert count >= 8, f"Expected at least 8 navigation items in nav, found {count}"
+
+        routes = []
+        for i in range(count):
+            btn = nav_buttons.nth(i)
+            route_id = btn.get_attribute("data-route")
+            assert route_id, "Navigation button missing data-route attribute"
+            routes.append(route_id)
+
+        # Specific elements indicating that each registered view has mounted
+        view_specific_selectors = {
+            "portal": "#summarySurface",
+            "history": "#summarySurface",
+            "audit": "#summarySurface",
+            "setup": "#setupSurface",
+            "monitor": "#monitorFrame",
+            "findings": "#findingsSurface",
+            "crawl": "#crawlSurface",
+            "agent-skills": "#agentSkillsSurface",
+            "settings": "#settingsSurface",
+        }
+
+        for route_id in routes:
+            # Navigate to the entry by clicking its nav button
+            btn = page.locator(f'nav [data-route="{route_id}"]')
+            btn.click()
+            page.wait_for_timeout(60)
+
+            # Confirm aria-current="page" was applied
+            assert btn.get_attribute("aria-current") == "page", f"Route {route_id} button not marked aria-current"
+
+            # Check view-specific selector or unavailable message
+            expected_selector = view_specific_selectors.get(route_id)
+            surface = page.locator(expected_selector) if expected_selector else None
+            message = page.locator("#message")
+
+            # Either registered view mounted or explicit unavailable state shown
+            is_mounted = surface is not None and surface.is_visible()
+            is_unavailable = message.is_visible()
+
+            assert is_mounted or is_unavailable, (
+                f"Route {route_id} is neither mounted (expected selector {expected_selector}) "
+                f"nor showing an explicit unavailable state (#message)."
+            )
+
+            if is_unavailable:
+                reason = message.inner_text().strip()
+                assert len(reason) > 0, f"Route {route_id} unavailable message has no reason text"
+                assert any(k in reason for k in ("利用不可", "不正", "一致しません", "見つかりません", "unavailable")), (
+                    f"Route {route_id} unavailable message does not contain expected reason keyword: {reason}"
+                )
+            else:
+                # View mounted: assert it is not blank and contains view-specific elements
+                if route_id in ("portal", "history", "audit"):
+                    assert page.locator("#summarySurface").is_visible()
+                    assert len(page.locator("#summarySurface").inner_text().strip()) > 0
+                elif route_id == "setup":
+                    assert page.locator("#setupSurface").is_visible()
+                    page.wait_for_selector("#cfgInputUrl", state="visible")
+                elif route_id == "monitor":
+                    assert page.locator("#monitorFrame").is_visible() or page.locator("#monitorModule").is_visible()
+                elif route_id == "findings":
+                    assert page.locator("#findingsSurface").is_visible()
+                    page.wait_for_selector(".findings-split-view, .findings-container", state="visible")
+                elif route_id == "crawl":
+                    assert page.locator("#crawlSurface").is_visible()
+                    page.wait_for_selector("#crawlModeSelect, .crawl-toolbar, #crawlSvg", state="visible")
+                elif route_id == "agent-skills":
+                    assert page.locator("#agentSkillsSurface").is_visible()
+                    assert len(page.locator("#agentSkillsSurface").inner_text().strip()) > 0
+                elif route_id == "settings":
+                    assert page.locator("#settingsSurface").is_visible()
+                    page.wait_for_selector(".ui-settings-container, #notificationCard, #saveSettingsBtn", state="visible")
+
+            # Never a blank or broken view
+            surface_section = page.locator("#surface")
+            assert surface_section.is_visible()
+            ui_harness.assert_no_errors(page)

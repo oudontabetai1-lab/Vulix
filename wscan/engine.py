@@ -1192,6 +1192,7 @@ class ScanEngine:
             try:
                 self.output_dir.resolve().relative_to(OUTPUT_BASE.resolve())
                 self.monitor.current_scan_id = self.output_dir.name
+                self.monitor.api_scan_id = self.output_dir.name
             except ValueError:
                 self.monitor.current_scan_id = ""
             except Exception:
