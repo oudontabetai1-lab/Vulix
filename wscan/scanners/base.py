@@ -1060,6 +1060,215 @@ class BaseScanner(ABC):
     def _probe_id(pair):
         return ((pair or {}).get("request") or {}).get("_probe_attempt_id", "")
 
+    async def _collect_browser_cookies(self, target_url: str = "") -> httpx.Cookies:
+        """ブラウザコンテキストおよび engine.cookies から cookie jar を集約する。"""
+        jar = httpx.Cookies()
+        try:
+            if hasattr(self, "browser") and hasattr(self.browser, "context") and getattr(self.browser.context, "cookies", None):
+                for c in await self.browser.context.cookies():
+                    jar.set(c["name"], c["value"], domain=c.get("domain", ""), path=c.get("path", "/"))
+        except Exception:
+            pass
+        try:
+            if hasattr(self.engine, "cookies") and isinstance(getattr(self.engine, "cookies", None), dict):
+                for k, v in self.engine.cookies.items():
+                    if k not in jar:
+                        jar.set(k, v)
+        except Exception:
+            pass
+        return jar
+
+    async def _apply_form_with_token_refresh(
+        self,
+        ip: InjectionPoint,
+        payload: str,
+    ) -> Optional[tuple[str, dict]]:
+        """共有 HTTPX フォーム送信パスにおける pre-send トークン再取得・置換と有界リトライ。
+
+        1. 対象フォームがトークンフィールドを含む場合、送信直前に同一セッション/cookie jar で
+           フォームページを再取得し、純粋関数で最新のトークン値を抽出して当該フィールドのみ置換する。
+        2. レスポンスが STALE（トークン失効）と分類された場合、decide_token_retry に従い
+           最大1回だけトークンを再取得して再送する（有界リトライ）。
+        3. 再取得が不可能な場合（ページ不在、抽出失敗、スコープ外、リクエスト予算超過、
+           state profile 拒否）、動作を変更せず None を返し、既存の送信経路へフォールバックする。
+           その際、非ブロッキングな scan note `token_lifecycle:refresh_unavailable:<check>` を記録する。
+        4. 生トークン値はノート、ログ、証拠、所見、チェックポイントに出現させず、
+           derive_token_ref_id で秘匿する。
+        """
+        from urllib.parse import urljoin, urlencode
+        from wscan.token_lifecycle import (
+            TokenOutcomeKind,
+            classify_token_response,
+            decide_token_retry,
+            derive_token_ref_id,
+            extract_form_details,
+            RefreshStrategy,
+            RefreshKind,
+        )
+
+        target_url = ip.url or ""
+        form_index = ip.submit_index
+
+        # ── 事前検証 1: スコープチェック ──
+        in_scope = True
+        if hasattr(self.engine, "_is_access_allowed_url"):
+            try:
+                if not self.engine._is_access_allowed_url(target_url):
+                    in_scope = False
+            except Exception:
+                in_scope = False
+        if hasattr(self.engine, "_is_url_excluded"):
+            try:
+                if self.engine._is_url_excluded(target_url):
+                    in_scope = False
+            except Exception:
+                pass
+        if not in_scope:
+            self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+            return None
+
+        # ── 事前検証 2: state profile チェック（GET は読み取り専用だが許可プロファイルを確認） ──
+        try:
+            from wscan.state_profile import may_submit
+            profile = getattr(getattr(self, "engine", None), "state_profile", "unrestricted")
+            if not may_submit(profile, method="GET", action=target_url):
+                self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+                return None
+        except Exception:
+            pass
+
+        # ── 事前検証 3: リクエスト予算チェック ──
+        if self._field_budget_gate():
+            self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+            return None
+
+        # ── HTTP クライアント引数の構築 ──
+        client_kwargs: dict = {
+            "timeout": getattr(self.engine, "timeout", 15),
+            "follow_redirects": True,
+        }
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            client_kwargs = self.engine.httpx_client_kwargs(**client_kwargs)
+        elif getattr(self.engine, "proxy", ""):
+            client_kwargs["proxy"] = self.engine.proxy
+
+        if "transport" not in client_kwargs and getattr(self.engine, "transport", None) is not None:
+            client_kwargs["transport"] = self.engine.transport
+        if "base_url" not in client_kwargs and getattr(self.engine, "base_url", None):
+            client_kwargs["base_url"] = self.engine.base_url
+
+        cookies = await self._collect_browser_cookies(target_url)
+        if "cookies" not in client_kwargs:
+            client_kwargs["cookies"] = cookies
+
+        # ── フォームページの事前取得 (GET) ──
+        known_tokens = getattr(ip, "form_tokens", ())
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                get_resp = await client.get(target_url)
+                if get_resp.status_code >= 400:
+                    self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+                    return None
+
+                # 取得ページの HTML から純粋関数でフォームを解析
+                form_info = extract_form_details(get_resp.text, form_index=form_index)
+                if not form_info:
+                    if known_tokens:
+                        self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+                    return None
+
+                # 当該フォームにトークンフィールドが存在するか確認（検査対象フィールドは除く）
+                token_fields = {
+                    k: v for k, v in form_info.get("token_fields", {}).items()
+                    if k != ip.parameter_id
+                }
+                if not token_fields and not known_tokens:
+                    # トークンフィールドを持たないフォームはリフレッシュ対象外（既存経路へ）
+                    return None
+
+                # 送信パラメータの準備: トークンフィールドのみ最新値に置換し、他フィールド・アクション・メソッド・ペイロードは維持
+                action = urljoin(str(get_resp.url), form_info.get("action") or target_url)
+                method = (form_info.get("method") or ip.method or "POST").upper()
+                fields = dict(form_info.get("fields", {}))
+                fields[ip.parameter_id] = payload
+
+                # 送信実行 (初回試行)
+                req_time = time.time()
+                if method == "GET":
+                    resp = await client.get(action, params=fields)
+                else:
+                    resp = await client.post(action, data=fields)
+                resp_time = time.time()
+                self._record_probe_status(resp)
+
+                # レスポンス分類と有界リトライ判定 (最大1回)
+                outcome = classify_token_response(
+                    status_code=resp.status_code,
+                    headers=dict(resp.headers),
+                    body=resp.text,
+                )
+                if outcome.outcome == TokenOutcomeKind.STALE:
+                    retry_dec = decide_token_retry(
+                        outcome,
+                        attempt_count=1,
+                        max_retries=2,
+                        refresh_strategy=RefreshStrategy(strategy=RefreshKind.PAGE_RELOAD),
+                    )
+                    if retry_dec.should_retry:
+                        try:
+                            # 1度だけ再取得して再送
+                            get_resp2 = await client.get(target_url)
+                            if get_resp2.status_code < 400:
+                                form_info2 = extract_form_details(get_resp2.text, form_index=form_index)
+                                if form_info2:
+                                    fields2 = dict(form_info2.get("fields", {}))
+                                    fields2[ip.parameter_id] = payload
+                                    req_time = time.time()
+                                    if method == "GET":
+                                        resp = await client.get(action, params=fields2)
+                                    else:
+                                        resp = await client.post(action, data=fields2)
+                                    resp_time = time.time()
+                                    self._record_probe_status(resp)
+                        except Exception:
+                            pass
+
+                # 生トークン値を秘匿した安全な post_data を作成
+                final_fields = fields2 if "fields2" in locals() else fields
+                safe_fields = dict(final_fields)
+                for tname in (token_fields or known_tokens):
+                    raw_val = str(final_fields.get(tname, ""))
+                    safe_fields[tname] = derive_token_ref_id(raw_val)
+
+                req_headers = dict(resp.request.headers) if hasattr(resp, "request") else {}
+                pair = {
+                    "request": {
+                        "url": action,
+                        "method": method,
+                        "headers": req_headers,
+                        "post_data": urlencode(safe_fields),
+                        "timestamp": req_time,
+                    },
+                    "response": {
+                        "url": str(resp.url),
+                        "status": resp.status_code,
+                        "headers": dict(resp.headers),
+                        "body": resp.text,
+                        "timestamp": resp_time,
+                    },
+                }
+
+                # セッション cookie を engine.cookies へ同期
+                if hasattr(self.engine, "cookies") and isinstance(getattr(self.engine, "cookies", None), dict):
+                    for k, v in client.cookies.items():
+                        self.engine.cookies[k] = v
+
+                return resp.text, pair
+        except Exception:
+            if known_tokens:
+                self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
+            return None
+
     async def _apply_ip_unrecorded(
         self,
         ip: InjectionPoint,
@@ -1094,24 +1303,46 @@ class BaseScanner(ABC):
                 return "", {}
             source, pair = await self._apply_xml_payload(ip, payload)
         else:
-            source, pair = await self._apply_payload(
-                ip.url,
-                ip.submit_index,
-                ip.parameter_id,
-                payload,
-                ip.legacy_is_url_param(),
+            from wscan.token_lifecycle import is_token_field_name
+            from wscan.scanner_contract import Carrier
+
+            is_form = (
+                getattr(ip, "location", "") == "form"
+                or getattr(ip, "carrier", None) == Carrier.FORM
+            ) and not (hasattr(ip, "legacy_is_url_param") and ip.legacy_is_url_param())
+            field_name = getattr(ip, "parameter_id", "") or ""
+            is_token_tested = is_token_field_name(field_name)
+
+            has_form_tokens = any(
+                is_token_field_name(t) and t != field_name
+                for t in getattr(ip, "form_tokens", ())
             )
-            # form/url の沈黙 swallow を観測可能にする。fill_and_submit_form は例外を
-            # 握りつぶし空 pair を返すが、空 pair だけでは「送達成功だが pair 未捕捉」と区別できない。
-            # browser の送達フラグ（transport 例外・応答なしのときだけ False。HTTP 4xx/5xx 応答は
-            # 送達済み＝True）を見て、実際に未送達だったときだけ transport_error を刻む（制御フロー
-            # 不変・偽記録なし）。
-            # これを刻まないと ScanEngine が status="tested" を記録し、未送達の空振りが偽 TN/FN に
-            # 化ける。json_body の脱落は _apply_json_payload が既に記録する。
-            if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
-                self._record_scan_note(
-                    f"transport_error:{self.CHECK_TYPE}:probe_not_delivered"
+
+            refreshed_result = None
+            if is_form and not is_token_tested and has_form_tokens:
+                refreshed_result = await self._apply_form_with_token_refresh(ip, payload)
+
+            if refreshed_result is not None:
+                source, pair = refreshed_result
+            else:
+                source, pair = await self._apply_payload(
+                    ip.url,
+                    ip.submit_index,
+                    ip.parameter_id,
+                    payload,
+                    ip.legacy_is_url_param(),
                 )
+                # form/url の沈黙 swallow を観測可能にする。fill_and_submit_form は例外を
+                # 握りつぶし空 pair を返すが、空 pair だけでは「送達成功だが pair 未捕捉」と区別できない。
+                # browser の送達フラグ（transport 例外・応答なしのときだけ False。HTTP 4xx/5xx 応答は
+                # 送達済み＝True）を見て、実際に未送達だったときだけ transport_error を刻む（制御フロー
+                # 不変・偽記録なし）。
+                # これを刻まないと ScanEngine が status="tested" を記録し、未送達の空振りが偽 TN/FN に
+                # 化ける。json_body の脱落は _apply_json_payload が既に記録する。
+                if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
+                    self._record_scan_note(
+                        f"transport_error:{self.CHECK_TYPE}:probe_not_delivered"
+                    )
             self._observe_token_lifecycle(ip, payload, pair)
         # 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
         # 記録のみ（例外は絶対に scan を止めない＝加算的・安全側）。

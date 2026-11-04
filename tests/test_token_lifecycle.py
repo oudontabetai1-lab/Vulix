@@ -34,6 +34,8 @@ from wscan.token_lifecycle import (
     create_token_snapshot,
     decide_token_retry,
     derive_token_ref_id,
+    extract_form_details,
+    extract_form_tokens,
     is_probe_conclusive,
     normalize_carrier,
     normalize_status,
@@ -569,8 +571,10 @@ def test_capability_matrix_construction_and_invariants():
     assert matrix.is_supported("form", "playwright") is False
     assert matrix.is_planned("form", "playwright") is True
 
-    # HTTPX: form, json, header が PLANNED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX) == DeclaredStatus.PLANNED
+    # HTTPX: form が SUPPORTED（共有 HTTPX フォーム経路での pre-send 再取得）、json, header が PLANNED
+    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
+    assert matrix.is_supported("form", "httpx") is True
+    assert matrix.is_planned("form", "httpx") is False
     assert matrix.get_status(TokenCarrier.JSON, TokenTransport.HTTPX) == DeclaredStatus.PLANNED
     assert matrix.is_supported("json", "httpx") is False
     assert matrix.is_planned("json", "httpx") is True
@@ -603,10 +607,14 @@ def test_capability_matrix_construction_and_invariants():
     assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is False
     assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is True
 
-    # 不誠実なステータス宣言の防止: 現スライスでは未統合のため SUPPORTED は 0 件であること
+    # 誠実なステータス宣言: 本スライスで統合完了した (FORM_URLENCODED, HTTPX) のみ SUPPORTED（1件）であること
     supported_entries = [e for e in matrix.entries if e.status == DeclaredStatus.SUPPORTED]
-    assert len(supported_entries) == 0
-    assert all(e.status in (DeclaredStatus.PLANNED, DeclaredStatus.UNSUPPORTED, DeclaredStatus.BLOCKED) for e in matrix.entries)
+    assert len(supported_entries) == 1
+    assert supported_entries[0].carrier == TokenCarrier.FORM_URLENCODED
+    assert supported_entries[0].transport == TokenTransport.HTTPX
+    other_entries = [e for e in matrix.entries if e.status != DeclaredStatus.SUPPORTED]
+    assert len(other_entries) == 41
+    assert all(e.status in (DeclaredStatus.PLANNED, DeclaredStatus.UNSUPPORTED, DeclaredStatus.BLOCKED) for e in other_entries)
 
 
 def test_capability_matrix_distinguishes_supported_vs_planned():
@@ -681,3 +689,46 @@ def test_normalization_helpers():
     assert normalize_status("planned") == DeclaredStatus.PLANNED
     assert normalize_status("unsupported") == DeclaredStatus.UNSUPPORTED
     assert normalize_status("blocked") == DeclaredStatus.BLOCKED
+
+
+def test_extract_form_tokens_and_details_pure():
+    """HTML 解析によるトークンおよびフォーム抽出純粋関数の検証。"""
+    html = """
+    <html><body>
+      <form action="/login" method="post">
+        <input type="hidden" name="csrf_token" value="token_abc_123">
+        <input type="text" name="username" value="admin">
+        <input type="submit" value="Log In">
+      </form>
+      <form action="/search" method="get">
+        <input name="q" value="test">
+      </form>
+    </body></html>
+    """
+    # フォーム 0: csrf_token が抽出されること
+    tokens = extract_form_tokens(html, 0)
+    assert tokens == {"csrf_token": "token_abc_123"}
+
+    details0 = extract_form_details(html, 0)
+    assert details0 is not None
+    assert details0["action"] == "/login"
+    assert details0["method"] == "POST"
+    assert details0["fields"] == {"csrf_token": "token_abc_123", "username": "admin"}
+    assert details0["token_fields"] == {"csrf_token": "token_abc_123"}
+
+    # フォーム 1: トークンフィールドが存在しないこと
+    tokens1 = extract_form_tokens(html, 1)
+    assert tokens1 == {}
+
+    details1 = extract_form_details(html, 1)
+    assert details1 is not None
+    assert details1["action"] == "/search"
+    assert details1["method"] == "GET"
+    assert details1["fields"] == {"q": "test"}
+    assert details1["token_fields"] == {}
+
+    # 範囲外および不正入力の安全側フォールバック
+    assert extract_form_tokens(html, 99) == {}
+    assert extract_form_details(html, 99) is None
+    assert extract_form_tokens("") == {}
+    assert extract_form_details("") is None
