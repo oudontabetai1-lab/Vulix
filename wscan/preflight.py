@@ -11,6 +11,8 @@ from urllib.parse import urljoin, urlparse, urlsplit
 
 import httpx
 
+from .browser import _playwright_proxy_options
+
 
 def classify_exception(exc: BaseException) -> tuple[str, str]:
     """Return stable machine reason and safe detail for transport exceptions."""
@@ -398,7 +400,7 @@ async def run_preflight(
     try:
         from playwright.async_api import async_playwright
         async with await async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, proxy={"server": proxy} if proxy else None)
+            browser = await p.chromium.launch(headless=True, proxy=_playwright_proxy_options(proxy))
             await browser.close()
         rows.append(_check("playwright", "pass", "available", "Playwright Chromium launched successfully."))
     except ImportError:

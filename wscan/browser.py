@@ -22,7 +22,17 @@ from rich.console import Console
 
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
-from .url_normalize import normalize_proxy_server
+from .url_normalize import normalize_proxy_server, split_proxy_credentials
+
+
+def _playwright_proxy_options(proxy: str) -> dict[str, str] | None:
+    if not proxy:
+        return None
+    server, username, password = split_proxy_credentials(proxy)
+    options = {"server": server}
+    if username is not None or password is not None:
+        options.update(username=username or "", password=password or "")
+    return options
 from .url_extraction import (
     is_plausible_route_candidate,
     truncated_regex_literal,
@@ -577,7 +587,7 @@ def build_browser_context_options(
     if tls_config is not None and hasattr(tls_config, "playwright_context_options"):
         ctx_kwargs.update(tls_config.playwright_context_options(target_url))
     if proxy:
-        ctx_kwargs["proxy"] = {"server": proxy}
+        ctx_kwargs["proxy"] = _playwright_proxy_options(proxy)
     if extra_headers and not use_scoped_headers:
         # Keep header names case-preserving but de-dupe case-insensitive collisions
         # so Playwright doesn't reject duplicates.
@@ -807,7 +817,7 @@ class BrowserManager:
                 self._header_debug_port = None
         launch_kwargs: dict = {"headless": self.headless, "args": launch_args}
         if self.proxy:
-            launch_kwargs["proxy"] = {"server": self.proxy}
+            launch_kwargs["proxy"] = _playwright_proxy_options(self.proxy)
         self._browser = await self._playwright.chromium.launch(**launch_kwargs)
         ctx_kwargs = self._context_options()
         try:
@@ -3361,7 +3371,7 @@ class BrowserManager:
 
         ctx = await self._browser.new_context(
             ignore_https_errors=True,
-            proxy={"server": self.proxy} if self.proxy else None,
+            proxy=_playwright_proxy_options(self.proxy),
         )
         try:
             page = await ctx.new_page()
