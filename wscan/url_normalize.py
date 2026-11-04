@@ -1,6 +1,7 @@
 """checkpoint キー専用の保守的な URL 正規化。"""
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import parse_qsl, unquote, unquote_plus, urlencode, urlsplit, urlunsplit
 
 from wscan.url_scope import is_route_fragment
@@ -210,6 +211,59 @@ def split_proxy_credentials(server: str) -> tuple[str, str | None, str | None]:
         (parsed.scheme, hostport, parsed.path, parsed.query, parsed.fragment)
     )
     return stripped, username, password
+
+
+def normalize_proxy_endpoint(raw: str) -> str:
+    """プロキシ URL から認証情報を除いた正規化エンドポイントを返す（純粋）。
+
+    normalize_proxy_server と split_proxy_credentials を再利用し、
+    scheme/host:port/path を正規化して返す。
+    ユーザー名・パスワード等の資格情報は一切含めない。
+    空文字・空白のみの場合は ``""`` を返す。
+    """
+    if not raw:
+        return ""
+    server = normalize_proxy_server(raw)
+    if not server:
+        return ""
+    stripped, _, _ = split_proxy_credentials(server)
+    parsed = urlsplit(stripped)
+    scheme = (parsed.scheme or "http").lower()
+    netloc = parsed.netloc.lower()
+    path = parsed.path.rstrip("/")
+    if path:
+        return f"{scheme}://{netloc}{path}"
+    return f"{scheme}://{netloc}"
+
+
+def extract_proxy_credentials(
+    proxy: str = "",
+    session: Any = None,
+) -> tuple[str | None, str | None]:
+    """プロキシ認証情報 (username, password) を抽出する（純粋）。
+
+    proxy 文字列（userinfo 形式）または session.browser_profile.proxy から取得する。
+    パスワード等の秘密情報は保持・ログ記録しない。
+    """
+    if proxy:
+        _, username, password = split_proxy_credentials(proxy)
+        if username is not None or password is not None:
+            return username, password
+    if session is not None:
+        profile = getattr(session, "browser_profile", None)
+        proxy_cfg = getattr(profile, "proxy", None)
+        if proxy_cfg is not None:
+            username = getattr(proxy_cfg, "username", None)
+            password = getattr(proxy_cfg, "password", None)
+            if username or password:
+                return username, password
+    return None, None
+
+
+def has_proxy_auth(proxy: str = "", session: Any = None) -> bool:
+    """プロキシ認証が設定されているかを判定する（純粋）。"""
+    username, password = extract_proxy_credentials(proxy, session)
+    return bool(username or password)
 
 
 def strip_path_trailing_slash(url: str) -> str:

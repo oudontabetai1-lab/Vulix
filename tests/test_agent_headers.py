@@ -74,10 +74,16 @@ class _SessionWithoutCurrentPage:
 
 
 class _FetchCommands:
-    def __init__(self, fail_enable=False, fail_header_continue=False):
+    def __init__(
+        self,
+        fail_enable=False,
+        fail_header_continue=False,
+        fail_auth_continue=False,
+    ):
         self.calls = []
         self.fail_enable = fail_enable
         self.fail_header_continue = fail_header_continue
+        self.fail_auth_continue = fail_auth_continue
 
     async def enable(self, params=None, session_id=None):
         self.calls.append(("enable", params, session_id))
@@ -92,16 +98,27 @@ class _FetchCommands:
         if self.fail_header_continue and "headers" in params:
             raise RuntimeError("Fetch continue failed")
 
+    async def continueWithAuth(self, params, session_id=None):
+        self.calls.append(("continueWithAuth", params, session_id))
+        if self.fail_auth_continue:
+            raise RuntimeError("Fetch auth continue failed")
+
 
 class _FetchRegistration:
     def __init__(self, fail_registration=False):
         self.callback = None
+        self.auth_callback = None
         self.fail_registration = fail_registration
 
     def requestPaused(self, callback):
         if self.fail_registration:
             raise RuntimeError("Fetch handler registration failed")
         self.callback = callback
+
+    def authRequired(self, callback):
+        if self.fail_registration:
+            raise RuntimeError("Fetch auth handler registration failed")
+        self.auth_callback = callback
 
 
 class _TargetCommands:
@@ -147,6 +164,7 @@ class _RequestScopedHeaderSession:
         fail_enable=False,
         fail_registration=False,
         fail_header_continue=False,
+        fail_auth_continue=False,
         target_events=False,
     ):
         self.calls = []
@@ -154,6 +172,7 @@ class _RequestScopedHeaderSession:
         self.fetch_commands = _FetchCommands(
             fail_enable=fail_enable,
             fail_header_continue=fail_header_continue,
+            fail_auth_continue=fail_auth_continue,
         )
         self.fetch_registration = _FetchRegistration(
             fail_registration=fail_registration
@@ -1301,6 +1320,226 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             "Agent ブラウザの認証ヘッダを解除できませんでした。"
             "対象外ページへ認証情報が送信される可能性があります。",
             "running",
+        )
+
+
+class AgentAuthenticatedProxyFetchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_authenticated_proxy_preserves_handle_auth_requests_on_fetch_enable(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+            proxy="http://proxy-user:secret-pass@127.0.0.1:8080",
+        )
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertTrue(enabled)
+        enable_calls = [
+            call for call in session.fetch_commands.calls if call[0] == "enable"
+        ]
+        self.assertEqual(len(enable_calls), 1)
+        self.assertEqual(
+            enable_calls[0],
+            (
+                "enable",
+                {"patterns": [{"urlPattern": "*"}], "handleAuthRequests": True},
+                "target-session",
+            ),
+        )
+        self.assertIsNotNone(session.fetch_registration.auth_callback)
+
+    async def test_unauthenticated_proxy_omits_handle_auth_requests(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+            proxy="http://127.0.0.1:8080",
+        )
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertTrue(enabled)
+        enable_calls = [
+            call for call in session.fetch_commands.calls if call[0] == "enable"
+        ]
+        self.assertEqual(
+            enable_calls[0],
+            (
+                "enable",
+                {"patterns": [{"urlPattern": "*"}]},
+                "target-session",
+            ),
+        )
+        self.assertIsNone(session.fetch_registration.auth_callback)
+
+    async def test_no_proxy_omits_handle_auth_requests(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertTrue(enabled)
+        enable_calls = [
+            call for call in session.fetch_commands.calls if call[0] == "enable"
+        ]
+        self.assertEqual(
+            enable_calls[0],
+            (
+                "enable",
+                {"patterns": [{"urlPattern": "*"}]},
+                "target-session",
+            ),
+        )
+        self.assertIsNone(session.fetch_registration.auth_callback)
+
+    async def test_proxy_auth_callback_responds_to_407_with_credentials(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+            proxy="http://proxy-user:secret-pass@127.0.0.1:8080",
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+
+        await session.fetch_registration.auth_callback(
+            {
+                "requestId": "auth-req-1",
+                "authChallenge": {
+                    "source": "Proxy",
+                    "origin": "http://127.0.0.1:8080",
+                },
+            },
+            "event-session",
+        )
+
+        auth_calls = [
+            call for call in session.fetch_commands.calls if call[0] == "continueWithAuth"
+        ]
+        self.assertEqual(len(auth_calls), 1)
+        self.assertEqual(
+            auth_calls[0],
+            (
+                "continueWithAuth",
+                {
+                    "requestId": "auth-req-1",
+                    "authChallengeResponse": {
+                        "response": "ProvideCredentials",
+                        "username": "proxy-user",
+                        "password": "secret-pass",
+                    },
+                },
+                "event-session",
+            ),
+        )
+        self.assertFalse(scanner._proxy_auth_failed)
+
+    async def test_proxy_auth_callback_responds_to_non_proxy_challenge_with_default(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+            proxy="http://proxy-user:secret-pass@127.0.0.1:8080",
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+
+        await session.fetch_registration.auth_callback(
+            {
+                "requestId": "auth-req-2",
+                "authChallenge": {
+                    "source": "Server",
+                    "origin": "https://server.example",
+                },
+            },
+            "event-session",
+        )
+
+        auth_calls = [
+            call for call in session.fetch_commands.calls if call[0] == "continueWithAuth"
+        ]
+        self.assertEqual(len(auth_calls), 1)
+        self.assertEqual(
+            auth_calls[0],
+            (
+                "continueWithAuth",
+                {
+                    "requestId": "auth-req-2",
+                    "authChallengeResponse": {
+                        "response": "Default",
+                    },
+                },
+                "event-session",
+            ),
+        )
+
+    async def test_proxy_auth_failure_is_observable_without_leaking_password(self):
+        monitor = SimpleNamespace(emit_status=AsyncMock())
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+            proxy="http://proxy-user:secret-pass@127.0.0.1:8080",
+            monitor=monitor,
+        )
+        session = _RequestScopedHeaderSession(fail_auth_continue=True)
+        await scanner._enable_request_scoped_headers(session)
+
+        await session.fetch_registration.auth_callback(
+            {
+                "requestId": "auth-req-fail",
+                "authChallenge": {
+                    "source": "Proxy",
+                    "origin": "http://127.0.0.1:8080",
+                },
+            },
+            "event-session",
+        )
+
+        self.assertTrue(scanner._proxy_auth_failed)
+        self.assertTrue(scanner._proxy_auth_failed_warned)
+        monitor.emit_status.assert_awaited_once()
+        status_msg = monitor.emit_status.await_args[0][0]
+        self.assertIn("プロキシ認証チャレンジ(407)への応答に失敗しました", status_msg)
+        self.assertNotIn("secret-pass", status_msg)
+        for reason in scanner._proxy_auth_failure_reasons:
+            self.assertNotIn("secret-pass", reason)
+
+    async def test_attached_target_preserves_handle_auth_requests(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+            proxy="http://proxy-user:secret-pass@127.0.0.1:8080",
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+        await scanner._enable_request_scoped_headers(session)
+
+        # 新規タブがアタッチされた際のイベントを発火
+        attached_handler = session.target_registration.callback
+        attached_handler(
+            {
+                "targetInfo": {
+                    "targetId": "new-tab-target",
+                    "type": "page",
+                },
+                "sessionId": "new-tab-session",
+            }
+        )
+        # バックグラウンドタスクの完了を待機
+        await asyncio.gather(*scanner._target_event_tasks)
+
+        enable_calls = [
+            call for call in session.fetch_commands.calls if call[0] == "enable"
+        ]
+        self.assertEqual(len(enable_calls), 2)
+        self.assertEqual(
+            enable_calls[-1],
+            (
+                "enable",
+                {"patterns": [{"urlPattern": "*"}], "handleAuthRequests": True},
+                "new-tab-session",
+            ),
         )
 
 

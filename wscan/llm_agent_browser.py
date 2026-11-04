@@ -36,6 +36,9 @@ from rich.console import Console
 from rich.rule import Rule
 from .url_normalize import (
     endpoint_identity,
+    extract_proxy_credentials,
+    has_proxy_auth,
+    normalize_proxy_endpoint,
     normalize_proxy_server,
     route_aware_identity,
     split_proxy_credentials,
@@ -742,6 +745,10 @@ class AgentBrowserScanner:
         self._missing_header_url_api_warned = False
         self._header_application_failed_warned = False
         self._header_clear_failed_warned = False
+        self._proxy_auth_failed_warned = False
+        self._proxy_auth_failed = False
+        self._proxy_auth_failure_reasons: list[str] = []
+        self._active_session = None
         self._step_count = 0
         self._episode_offset = 0
         self._active_episode_id = "legacy"
@@ -800,6 +807,28 @@ class AgentBrowserScanner:
                 pass
         console.print(f"[yellow]{message}[/yellow]")
 
+    async def _warn_proxy_auth_failed(self, details: str = "") -> None:
+        """プロキシ認証の失敗を、秘匿情報を含めず一度だけ通知する。"""
+        self._proxy_auth_failed = True
+        if details:
+            self._proxy_auth_failure_reasons.append(str(details)[:120])
+        if self._proxy_auth_failed_warned:
+            return
+        self._proxy_auth_failed_warned = True
+        message = (
+            "プロキシ認証チャレンジ(407)への応答に失敗しました。"
+            "プロキシ経由の通信がブロックされている可能性があります。"
+        )
+        if details:
+            message = f"{message} ({details})"
+        if self.monitor:
+            try:
+                await self.monitor.emit_status(message, "running")
+                return
+            except Exception:
+                pass
+        console.print(f"[bold red]{message}[/bold red]")
+
     async def _clear_extra_headers(self, session) -> None:
         """直前に適用した追加ヘッダを、値を露出せず解除する。"""
         if not self._headers_applied:
@@ -843,9 +872,12 @@ class AgentBrowserScanner:
         cdp_client,
         cdp_session_id: str,
         target_id: str,
+        session=None,
     ) -> bool:
         """現在の client/session で未設定なら Fetch を有効化する。"""
         fetch_commands = None
+        existing_auth_handler = None
+        has_auth = False
         try:
             if not target_id:
                 return False
@@ -855,6 +887,12 @@ class AgentBrowserScanner:
 
             fetch_commands = cdp_client.send.Fetch
             fetch_registration = cdp_client.register.Fetch
+
+            active_session = session or getattr(self, "_active_session", None)
+            has_auth = has_proxy_auth(self.proxy, active_session)
+            proxy_username, proxy_password = extract_proxy_credentials(
+                self.proxy, active_session
+            )
 
             # cdp_use 1.4.5 / browser-use 0.12.6 の EventRegistry は async
             # callback を await する。Fetch.enable より先に登録し、有効化直後の
@@ -912,17 +950,103 @@ class AgentBrowserScanner:
                             # 最後の素通しも失敗した場合は Agent 全体を止めない。
                             pass
 
+            async def _continue_auth_challenge(event, event_session_id=None):
+                request_id = None
+                continue_session_id = event_session_id or cdp_session_id
+                try:
+                    request_id = event.get("requestId") or event.get("request_id")
+                    if not request_id:
+                        return
+                    challenge = event.get("authChallenge") or event.get("auth_challenge") or {}
+                    source = str(challenge.get("source") or "").lower()
+                    if source == "proxy":
+                        # プロキシ認証チャレンジへの応答
+                        if proxy_username is not None and proxy_password is not None:
+                            if hasattr(fetch_commands, "continueWithAuth"):
+                                await asyncio.wait_for(
+                                    fetch_commands.continueWithAuth(
+                                        params={
+                                            "requestId": request_id,
+                                            "authChallengeResponse": {
+                                                "response": "ProvideCredentials",
+                                                "username": proxy_username,
+                                                "password": proxy_password,
+                                            },
+                                        },
+                                        session_id=continue_session_id,
+                                    ),
+                                    timeout=3.0,
+                                )
+                            else:
+                                await self._warn_proxy_auth_failed(
+                                    "CDP client does not support continueWithAuth"
+                                )
+                        else:
+                            await self._warn_proxy_auth_failed(
+                                "プロキシ認証情報が未設定のため407チャレンジへ応答できません"
+                            )
+                            if hasattr(fetch_commands, "continueWithAuth"):
+                                await asyncio.wait_for(
+                                    fetch_commands.continueWithAuth(
+                                        params={
+                                            "requestId": request_id,
+                                            "authChallengeResponse": {
+                                                "response": "CancelAuth",
+                                            },
+                                        },
+                                        session_id=continue_session_id,
+                                    ),
+                                    timeout=3.0,
+                                )
+                    else:
+                        # プロキシ以外の認証（サーバ401など）はブラウザの既定処理に委ねる
+                        if hasattr(fetch_commands, "continueWithAuth"):
+                            await asyncio.wait_for(
+                                fetch_commands.continueWithAuth(
+                                    params={
+                                        "requestId": request_id,
+                                        "authChallengeResponse": {
+                                            "response": "Default",
+                                        },
+                                    },
+                                    session_id=continue_session_id,
+                                ),
+                                timeout=3.0,
+                            )
+                except Exception as exc:
+                    # パスワードなどの秘匿情報を漏らさず、失敗を可視化する
+                    await self._warn_proxy_auth_failed(f"{type(exc).__name__}")
+
             # 登録を先に行うことで、登録失敗時には Fetch を有効化しない。
             fetch_registration.requestPaused(_continue_paused_request)
+
+            enable_params = {"patterns": [{"urlPattern": "*"}]}
+            if has_auth:
+                enable_params["handleAuthRequests"] = True
+                if hasattr(cdp_client, "_event_registry"):
+                    existing_auth_handler = getattr(
+                        cdp_client._event_registry, "_handlers", {}
+                    ).get("Fetch.authRequired")
+                if hasattr(fetch_registration, "authRequired"):
+                    fetch_registration.authRequired(_continue_auth_challenge)
+
             await asyncio.wait_for(
                 fetch_commands.enable(
-                    params={"patterns": [{"urlPattern": "*"}]},
+                    params=enable_params,
                     session_id=cdp_session_id,
                 ),
                 timeout=3.0,
             )
         except Exception:
             # 登録または有効化が部分的に成功していても paused request を残さない。
+            if has_auth:
+                try:
+                    if existing_auth_handler is not None and hasattr(fetch_registration, "authRequired"):
+                        fetch_registration.authRequired(existing_auth_handler)
+                    elif hasattr(cdp_client, "_event_registry"):
+                        cdp_client._event_registry.unregister("Fetch.authRequired")
+                except Exception:
+                    pass
             if fetch_commands is not None:
                 try:
                     await asyncio.wait_for(
@@ -950,6 +1074,7 @@ class AgentBrowserScanner:
                 cdp_session.cdp_client,
                 cdp_session.session_id,
                 target_id,
+                session=session,
             )
         except Exception:
             return False
@@ -971,6 +1096,7 @@ class AgentBrowserScanner:
                     cdp_client,
                     cdp_session_id,
                     target_id,
+                    session=getattr(self, "_active_session", None),
                 )
         finally:
             if before_resume is not None:
@@ -1079,6 +1205,7 @@ class AgentBrowserScanner:
         if not all(hasattr(session, name) for name in required_apis):
             return False
 
+        self._active_session = session
         try:
             # BrowserSession.start() は冪等。Fetch を有効化する target を先に確立する。
             await session.start()
@@ -1214,6 +1341,7 @@ class AgentBrowserScanner:
                 model=resolved_model,
                 max_steps=self.max_steps,
                 auth_context_hash=self._auth_context_hash(),
+                proxy=self.proxy,
             )
             try:
                 self._harness = AgentHarness(
@@ -1938,6 +2066,7 @@ class AgentBrowserScanner:
                     else str(self.llm_base_url or "").strip().rstrip("/")
                 ),
                 "ollama_url": str(getattr(self, "ollama_url", "") or "").strip().rstrip("/"),
+                "proxy": normalize_proxy_endpoint(self.proxy),
             },
             ensure_ascii=False,
             sort_keys=True,
