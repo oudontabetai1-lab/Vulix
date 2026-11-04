@@ -3,7 +3,7 @@
 2. Serve command output points to /app.
 3. Legacy pages link clearly to /app.
 4. Navigation entries in /app resolve to registered views or an explicit unavailable state.
-5. No traffic view is registered or linked in /app.
+5. Navigation and views include registered views (including Traffic view).
 """
 from __future__ import annotations
 
@@ -488,7 +488,7 @@ class TestLegacyPagesLinkToApp:
 
 
 class TestAppNavigationResolutionAndTrafficAbsence:
-    """Verify every /app navigation item resolves properly and traffic is absent."""
+    """Verify every /app navigation item resolves properly."""
 
     def test_all_navigation_buttons_have_matching_routes(self):
         html = APP_HTML.read_text(encoding="utf-8")
@@ -503,6 +503,7 @@ class TestAppNavigationResolutionAndTrafficAbsence:
             "monitor",
             "findings",
             "crawl",
+            "traffic",
             "agent-skills",
             "settings",
         }
@@ -533,6 +534,8 @@ class TestAppNavigationResolutionAndTrafficAbsence:
           '#/findings?scan=20261104_100000&severity=high',
           '#/crawl',
           '#/crawl?scan=20261104_100000&mode=graph',
+          '#/traffic',
+          '#/traffic?scan=20261104_100000',
           '#/agent-skills',
           '#/settings'
         ];
@@ -544,8 +547,6 @@ class TestAppNavigationResolutionAndTrafficAbsence:
 
         // Invalid or unregistered routes
         const invalidRoutes = [
-          '#/traffic',
-          '#/traffic?mode=live',
           '#/unknown-view',
           '#/admin',
           '#/portal?unexpected_param=1',
@@ -573,12 +574,13 @@ class TestAppNavigationResolutionAndTrafficAbsence:
                 f"got {item['parsed']}"
             )
 
-    def test_no_traffic_view_linked_in_app_shell(self):
+    def test_traffic_view_linked_in_app_shell(self):
         app_html = APP_HTML.read_text(encoding="utf-8")
-        assert "traffic" not in app_html.lower()
+        assert 'data-route="traffic"' in app_html
+        assert "traffic-module.js" in app_html
 
         app_entry_js = APP_ENTRY_JS.read_text(encoding="utf-8")
-        assert "traffic" not in app_entry_js.lower()
+        assert "traffic" in app_entry_js.lower()
 
     def test_obsolete_portal_frame_markup_removed_from_app_shell(self):
         app_html = APP_HTML.read_text(encoding="utf-8")
@@ -590,32 +592,18 @@ class TestAppNavigationResolutionAndTrafficAbsence:
     def test_app_browser_navigation_all_entries_mount_or_explicit_unavailable(self, ui_harness: UIHarness):
         """Real browser test verifying that every /app navigation entry resolves to either
         a mounted registered view with visible view-specific element or an explicit unavailable
-        state with a reason (never a blank or broken view). Also asserts no navigation entry or link
-        targets a Traffic view."""
+        state with a reason (never a blank or broken view)."""
         ui_harness.seed_representative_scans()
         page = ui_harness.new_page()
         page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
         page.wait_for_selector("nav[aria-label='Application']", state="visible")
 
-        # 1. Assert no navigation entry or link anywhere targets a Traffic view
-        nav_texts = page.eval_on_selector_all(
-            "nav button, nav a",
-            "els => els.map(el => (el.textContent || '').trim().toLowerCase())",
-        )
+        # 1. Assert navigation entries contain expected routes
         all_routes = page.eval_on_selector_all(
             "[data-route]",
             "els => els.map(el => (el.getAttribute('data-route') || '').toLowerCase())",
         )
-        all_hrefs = page.eval_on_selector_all(
-            "a[href]",
-            "els => els.map(el => (el.getAttribute('href') || '').toLowerCase())",
-        )
-        for text in nav_texts:
-            assert "traffic" not in text, f"Navigation text contains traffic: {text}"
-        for route in all_routes:
-            assert "traffic" not in route, f"Navigation route contains traffic: {route}"
-        for href in all_hrefs:
-            assert "traffic" not in href, f"Link href targets traffic: {href}"
+        assert "traffic" in all_routes
 
         # 2. Get all navigation entries from the DOM
         nav_buttons = page.locator("nav [data-route]")
@@ -638,6 +626,7 @@ class TestAppNavigationResolutionAndTrafficAbsence:
             "monitor": "#monitorFrame",
             "findings": "#findingsSurface",
             "crawl": "#crawlSurface",
+            "traffic": "#trafficSurface",
             "agent-skills": "#agentSkillsSurface",
             "settings": "#settingsSurface",
         }
@@ -687,6 +676,9 @@ class TestAppNavigationResolutionAndTrafficAbsence:
                 elif route_id == "crawl":
                     assert page.locator("#crawlSurface").is_visible()
                     page.wait_for_selector("#crawlModeSelect, .crawl-toolbar, #crawlSvg", state="visible")
+                elif route_id == "traffic":
+                    assert page.locator("#trafficSurface").is_visible()
+                    page.wait_for_selector(".traffic-toolbar, .traffic-split-view, .traffic-table, .traffic-unavailable", state="visible")
                 elif route_id == "agent-skills":
                     assert page.locator("#agentSkillsSurface").is_visible()
                     assert len(page.locator("#agentSkillsSurface").inner_text().strip()) > 0

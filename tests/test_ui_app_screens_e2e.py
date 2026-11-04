@@ -74,6 +74,7 @@ def test_app_shell_full_navigation_and_history(e2e_harness: UIHarness):
             ("setup", "#setupSurface", "Scan Setup"),
             ("monitor", "#monitorFrame", "Monitor"),
             ("crawl", "#crawlSurface", "Crawl"),
+            ("traffic", "#trafficSurface", "Traffic"),
             ("findings", "#findingsSurface", "Findings"),
             ("agent-skills", "#agentSkillsSurface", "Agent Skills"),
             ("settings", "#settingsSurface", "Settings"),
@@ -103,6 +104,8 @@ def test_app_shell_full_navigation_and_history(e2e_harness: UIHarness):
                 assert page.locator("#agentSkillsSurface").is_hidden()
             if surface_selector != "#settingsSurface":
                 assert page.locator("#settingsSurface").is_hidden()
+            if surface_selector != "#trafficSurface":
+                assert page.locator("#trafficSurface").is_hidden()
 
         # 2. Back and forward browser navigation
         page.locator('[data-route="crawl"]').click()

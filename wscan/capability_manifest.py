@@ -137,7 +137,29 @@ DEFAULT_AGENT_CAPABILITIES: tuple[dict[str, Any], ...] = (
     },
 )
 
-ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(REQUIRED_TOP_LEVEL_FIELDS + ("agent_capabilities",))
+# Declared platform/subsystem capabilities (declared != runtime execution).
+# Replay, mutation, and proxy capabilities are NOT declared (they do not exist).
+DEFAULT_CAPABILITIES: dict[str, Any] = {
+    "traffic": {
+        "id": "traffic",
+        "name": "HTTPトラフィック閲覧",
+        "description": "スキャン中に記録されたHTTPリクエスト/レスポンスの読み取り専用閲覧",
+        "available": True,
+        "read_only": True,
+        "declaration_only": True,
+    },
+    "open_browser": {
+        "id": "open_browser",
+        "name": "ブラウザで開く",
+        "description": "対象URLを外部ブラウザで直接開く",
+        "available": True,
+        "declaration_only": True,
+    },
+}
+
+ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
+    REQUIRED_TOP_LEVEL_FIELDS + ("agent_capabilities", "capabilities")
+)
 ALLOWED_SCANNER_FIELDS: frozenset[str] = frozenset(REQUIRED_SCANNER_FIELDS)
 ALLOWED_CARRIER_FIELDS: frozenset[str] = frozenset(REQUIRED_CARRIER_FIELDS)
 ALLOWED_AGENT_CAPABILITY_FIELDS: frozenset[str] = frozenset(REQUIRED_AGENT_CAPABILITY_FIELDS)
@@ -308,6 +330,7 @@ def build_capability_manifest(
         "scanner_ids": sorted(scanners.keys()),
         "scanners": scanners,
         "agent_capabilities": caps,
+        "capabilities": copy.deepcopy(DEFAULT_CAPABILITIES),
     }
 
 
@@ -514,6 +537,25 @@ def validate_capability_manifest(
                     errors.append(f"Agent capability [{idx}] 'applicable_modes' must be a list of strings")
                 if "available" in cap and not isinstance(cap["available"], bool):
                     errors.append(f"Agent capability [{idx}] 'available' must be a boolean")
+
+    if "capabilities" in manifest:
+        caps_dict = manifest.get("capabilities")
+        if not isinstance(caps_dict, dict):
+            errors.append("Field 'capabilities' must be a dict")
+        else:
+            for cap_name, cap_meta in caps_dict.items():
+                if any(kw in str(cap_name).lower() for kw in FORBIDDEN_COVERAGE_KEYWORDS):
+                    errors.append(
+                        f"Capability '{cap_name}' contains forbidden runtime coverage keyword"
+                    )
+                if isinstance(cap_meta, dict):
+                    if cap_meta.get("declaration_only") is False:
+                        errors.append(f"Capability '{cap_name}' declaration_only cannot be False")
+                    for k in cap_meta.keys():
+                        if any(kw in str(k).lower() for kw in FORBIDDEN_COVERAGE_KEYWORDS):
+                            errors.append(
+                                f"Capability '{cap_name}' contains forbidden coverage field '{k}'"
+                            )
 
     return errors
 

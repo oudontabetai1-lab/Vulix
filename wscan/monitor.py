@@ -266,8 +266,9 @@ def due_schedule_ids(schedules: list, now_epoch: Optional[float] = None) -> list
 class MonitorServer:
     """Real-time monitoring server for scan progress."""
 
-    def __init__(self, port: int = 8765, auth_token: str = ""):
+    def __init__(self, port: int = 8765, auth_token: str = "", output_dir: Optional[Any] = None):
         self.port = port
+        self.output_dir: Optional[Path] = Path(output_dir) if output_dir else None
         # Shared access token. Empty string => authentication disabled.
         self.auth_token: str = (auth_token or "").strip()
         self._session_value: str = _session_value(self.auth_token) if self.auth_token else ""
@@ -1096,6 +1097,39 @@ class MonitorServer:
             data = self._get_live_crawl_graph_data()
             return JSONResponse(project_crawl_graph(data))
 
+        @app.get("/api/v1/scan/traffic")
+        async def api_scan_traffic(
+            scan_id: Optional[str] = None,
+            offset: int = 0,
+            limit: int = 100,
+        ):
+            """Return read-only snapshot projection of HTTP traffic for the active or requested scan."""
+            from wscan.traffic_reader import read_traffic_log
+
+            target_id = (scan_id or "").strip()
+            if target_id:
+                if (target_id == self.current_scan_id or target_id == self.api_scan_id or (self.output_dir and Path(self.output_dir).name == target_id)) and self.output_dir:
+                    return JSONResponse(read_traffic_log(self.output_dir, scan_id=target_id, offset=offset, limit=limit))
+                d = self._scan_dir(target_id)
+                if d is None or not d.is_dir():
+                    res = read_traffic_log(Path("nonexistent_dir"), scan_id=target_id, offset=offset, limit=limit)
+                    res["reason"] = f"スキャン '{target_id}' が見つかりません"
+                    return JSONResponse(res, status_code=404)
+                return JSONResponse(read_traffic_log(d, scan_id=target_id, offset=offset, limit=limit))
+
+            # Active scan fallback
+            active_id = self.current_scan_id or self.api_scan_id or ""
+            if self.output_dir and Path(self.output_dir).is_dir():
+                return JSONResponse(read_traffic_log(self.output_dir, scan_id=active_id, offset=offset, limit=limit))
+            if active_id:
+                d = self._scan_dir(active_id)
+                if d is not None and d.is_dir():
+                    return JSONResponse(read_traffic_log(d, scan_id=active_id, offset=offset, limit=limit))
+
+            res = read_traffic_log(Path("nonexistent_dir"), scan_id=active_id, offset=offset, limit=limit)
+            res["reason"] = "アクティブなスキャンまたは対象スキャンが指定されていません"
+            return JSONResponse(res, status_code=200)
+
         @app.post("/api/v1/manual-crawl/start")
         async def api_manual_crawl_start(request: Request):
             """Start a visible manual crawl recorder."""
@@ -1565,6 +1599,26 @@ class MonitorServer:
                 return JSONResponse({"error": "not found"}, status_code=404)
             data = self._load_crawl_graph_data_from_dir(d, target_id)
             return JSONResponse(project_crawl_graph(data))
+
+        @app.get("/api/v1/scans/{scan_id}/traffic")
+        async def api_scans_traffic(
+            scan_id: str,
+            offset: int = 0,
+            limit: int = 100,
+        ):
+            """Return read-only snapshot projection of HTTP traffic for a specific scan ID."""
+            from wscan.traffic_reader import read_traffic_log
+
+            target_id = (scan_id or "").strip()
+            if target_id and (target_id == self.current_scan_id or target_id == self.api_scan_id or (self.output_dir and Path(self.output_dir).name == target_id)) and self.output_dir:
+                return JSONResponse(read_traffic_log(self.output_dir, scan_id=target_id, offset=offset, limit=limit))
+
+            d = self._scan_dir(target_id)
+            if d is None or not d.is_dir():
+                res = read_traffic_log(Path("nonexistent_dir"), scan_id=target_id, offset=offset, limit=limit)
+                res["reason"] = f"スキャン '{target_id}' が見つかりません"
+                return JSONResponse(res, status_code=404)
+            return JSONResponse(read_traffic_log(d, scan_id=target_id, offset=offset, limit=limit))
 
         @app.delete("/api/v1/scans/{scan_id}")
         async def api_scan_delete(scan_id: str, request: Request):

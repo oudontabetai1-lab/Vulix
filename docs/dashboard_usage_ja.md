@@ -62,7 +62,7 @@ python3 main.py serve --host 127.0.0.1 --port 8765
 http://localhost:8765/app
 ```
 
-Vulix の標準ダッシュボードは `/app` です。公式ロゴ（`templates/ui/vulix-logo-mark.png`）を配した左ナビゲーションレイルと上部ヘッダー（現在画面タイトル・ライブ接続バッジ）を備え、ポータル、スキャン履歴、監査ログ、Scan Setup、Monitor、Findings（検出結果）、Crawl（クロールグラフ）、Agent Skills、Settings が統合され、通常操作に必要なすべての画面が揃っています。
+Vulix の標準ダッシュボードは `/app` です。公式ロゴ（`templates/ui/vulix-logo-mark.png`）を配した左ナビゲーションレイルと上部ヘッダー（現在画面タイトル・ライブ接続バッジ）を備え、ポータル、スキャン履歴、監査ログ、Scan Setup、Monitor、Findings（検出結果）、Crawl（クロールグラフ）、Traffic（通信ログ閲覧）、Agent Skills、Settings が統合され、通常操作に必要なすべての画面が揃っています。
 
 > ℹ️ **通常/serve ダッシュボードについて**: ここで説明する UI シェルやレイアウト、画面遷移は、スキャンの設定・観測・結果管理を行う Web ダッシュボード（通常/serve モード）の動作です。自律探索を行う Agent / Hybrid エンジン内部の探索アルゴリズムや判定処理（Phase 1 偵察 / Phase 2 ハンドオフ）そのものとは区別されます。
 
@@ -404,6 +404,15 @@ HTML レポートのバッジ:
 - **Findings 詳細からの遷移**: Finding 詳細の「クロールグラフで表示」から該当 URL の Crawl ノードへ移動できます。グラフのスナップショットに対象ノードが含まれていない場合は、架空ノードを捏造せず「クロールグラフ未検出（not in crawl graph）」と明示します。
 - **実装済み機能に限定したアクション入口**: 外部ブラウザで開くなどバックエンド実装が存在する操作のみ有効化され、未提供のアクション（リプレイ再生等）は理由（「not available in this version」）付きで無効化されます。
 - **URL Hash による状態保持**: 選択中の node ID、finding ID、URL フィルタ等の状態が URL hash に反映され、ブラウザの「戻る」「進む」や再読み込みでも表示状態を復元します。
+
+### 統合画面（/app）での Traffic 画面（HTTP 通信ログ閲覧）
+
+統合画面の「Traffic」画面（`/app#/traffic`）では、スキャン中に Vulix が記録した HTTP 通信ログ（`output/<日時>/http_requests.jsonl`）を安全に閲覧できます：
+
+- **読み取り専用の安全な通信閲覧**: 記録された HTTP リクエスト／レスポンスの一覧をメソッド、ステータスコード、入力点種別（Query、Form、JSON、XML、Multipart、Cookie、Header、GraphQL）等で絞り込み・確認できます。
+- **秘密値のマスク保護**: 認証ヘッダ（Authorization、Cookie 等）、URL userinfo、クエリやボディ内の機微な値は画面表示およびエクスポート時に自動的に伏字化（`<redacted>`）されます。
+- **Crawl / Findings との相互リンク**: 各通信行から対象 URL の Crawl ノードや Findings 画面へ遷移できます（Findings 件数はデータ未読込時は「unknown」と明示されます）。
+- **未提供機能の安全な無効化**: トラフィックの再送信（リプレイ）、改変送信（ミューテーション）、外部プロキシ連携は現バージョンでは未提供（not available in this version）のため無効化表示されます。
 
 ## 10. レポートと証跡を確認する
 

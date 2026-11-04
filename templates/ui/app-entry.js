@@ -13,6 +13,7 @@
   const findingsSurface = document.getElementById('findingsSurface');
   const settingsSurface = document.getElementById('settingsSurface');
   const crawlSurface = document.getElementById('crawlSurface');
+  const trafficSurface = document.getElementById('trafficSurface');
   const message = document.getElementById('message');
   const agentSkillsSurface = document.getElementById('agentSkillsSurface');
   const setupSurface = document.getElementById('setupSurface');
@@ -35,6 +36,7 @@
     if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     if (crawlSurface) crawlSurface.hidden = true;
+    if (trafficSurface) trafficSurface.hidden = true;
     message.hidden = false;
     message.replaceChildren();
     const heading = document.createElement('h2');
@@ -99,6 +101,7 @@
     if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     if (crawlSurface) crawlSurface.hidden = true;
+    if (trafficSurface) trafficSurface.hidden = true;
     monitor.hidden = Boolean(onReady);
     ensureMonitor((bridge) => {
       bridge.setSurface(surface);
@@ -128,6 +131,7 @@
       if (setupSurface) setupSurface.hidden = true;
       if (settingsSurface) settingsSurface.hidden = true;
       if (crawlSurface) crawlSurface.hidden = true;
+      if (trafficSurface) trafficSurface.hidden = true;
     },
   });
   summaryModules.forEach((module) => registry.register(module));
@@ -144,6 +148,7 @@
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     if (crawlSurface) crawlSurface.hidden = true;
+    if (trafficSurface) trafficSurface.hidden = true;
 
     if (global.VulixSetupModule && setupSurface) {
       if (setupSurface.childElementCount > 0) {
@@ -230,6 +235,7 @@
     if (findingsSurface) findingsSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     if (crawlSurface) crawlSurface.hidden = true;
+    if (trafficSurface) trafficSurface.hidden = true;
     let selectedScanVerified = false;
     let selectedIdentity = null;
     const unavailableText = '指定された scan のライブ Monitor は現在の server snapshot と一致しません。過去 scan は履歴から確認してください。';
@@ -316,6 +322,7 @@
     if (setupSurface) setupSurface.hidden = true;
     if (settingsSurface) settingsSurface.hidden = true;
     if (crawlSurface) crawlSurface.hidden = true;
+    if (trafficSurface) trafficSurface.hidden = true;
     if (agentSkillsSurface) {
       agentSkillsSurface.hidden = false;
       if (global.VulixAgentSkillsModule && typeof global.VulixAgentSkillsModule.loadAndRenderAgentSkills === 'function') {
@@ -349,6 +356,7 @@
           if (setupSurface) setupSurface.hidden = true;
           if (settingsSurface) settingsSurface.hidden = true;
           if (crawlSurface) crawlSurface.hidden = true;
+          if (trafficSurface) trafficSurface.hidden = true;
         },
       })
     );
@@ -370,6 +378,7 @@
           if (agentSkillsSurface) agentSkillsSurface.hidden = true;
           if (setupSurface) setupSurface.hidden = true;
           if (crawlSurface) crawlSurface.hidden = true;
+          if (trafficSurface) trafficSurface.hidden = true;
         },
       })
     );
@@ -391,6 +400,30 @@
           if (agentSkillsSurface) agentSkillsSurface.hidden = true;
           if (setupSurface) setupSurface.hidden = true;
           if (settingsSurface) settingsSurface.hidden = true;
+          if (trafficSurface) trafficSurface.hidden = true;
+        },
+      })
+    );
+  }
+
+  if (global.VulixTrafficModule && typeof global.VulixTrafficModule.createTrafficModule === 'function') {
+    registry.register(
+      global.VulixTrafficModule.createTrafficModule({
+        api: api,
+        surfaceEl: trafficSurface,
+        titleEl: title,
+        contextEl: context,
+        unavailable: unavailable,
+        clearMessage: clearMessage,
+        hideOthers: function () {
+          monitor.hidden = true;
+          if (monitorHost) monitorHost.hidden = true;
+          if (summarySurface) summarySurface.hidden = true;
+          if (findingsSurface) findingsSurface.hidden = true;
+          if (agentSkillsSurface) agentSkillsSurface.hidden = true;
+          if (setupSurface) setupSurface.hidden = true;
+          if (settingsSurface) settingsSurface.hidden = true;
+          if (crawlSurface) crawlSurface.hidden = true;
         },
       })
     );
@@ -402,7 +435,7 @@
     const raw = (hash || '').replace(/^#\/?/, '/');
     const parts = raw.split('?');
     const route = parts[0] || '/portal';
-    if (!['/portal', '/history', '/audit', '/setup', '/monitor', '/findings', '/crawl', '/agent-skills', '/settings'].includes(route) || parts.length > 2) return null;
+    if (!['/portal', '/history', '/audit', '/setup', '/monitor', '/findings', '/crawl', '/traffic', '/agent-skills', '/settings'].includes(route) || parts.length > 2) return null;
     const params = new URLSearchParams(parts[1] || '');
 
     const allowed = {
@@ -413,6 +446,7 @@
       '/monitor': ['scan'],
       '/findings': ['scan', 'finding', 'url', 'search', 'severity', 'checkType', 'verification', 'provenance'],
       '/crawl': ['scan', 'node', 'url', 'mode', 'kind', 'search'],
+      '/traffic': ['scan', 'entry', 'url', 'method', 'status', 'source', 'type', 'search'],
       '/agent-skills': [],
       '/settings': [],
     }[route] || [];
@@ -424,11 +458,15 @@
 
     const scanId = params.get('scan');
     if (scanId !== null && (!scanId || scanId.length > 128 || !/^[A-Za-z0-9._-]+$/.test(scanId))) return null;
-    if (scanId !== null && route !== '/monitor' && route !== '/findings' && route !== '/crawl') return null;
+    if (scanId !== null && route !== '/monitor' && route !== '/findings' && route !== '/crawl' && route !== '/traffic') return null;
 
     const findingId = params.get('finding');
     if (findingId !== null && (!findingId || findingId.length > 512)) return null;
     if (findingId !== null && route !== '/findings') return null;
+
+    const entryId = params.get('entry');
+    if (entryId !== null && (!entryId || entryId.length > 256)) return null;
+    if (entryId !== null && route !== '/traffic') return null;
 
     const nodeId = params.get('node');
     if (nodeId !== null && (!nodeId || nodeId.length > 256)) return null;
@@ -436,7 +474,7 @@
 
     const url = params.get('url');
     if (url !== null && (!url || url.length > 2048)) return null;
-    if (url !== null && route !== '/crawl' && route !== '/findings') return null;
+    if (url !== null && route !== '/crawl' && route !== '/findings' && route !== '/traffic') return null;
 
     const mode = params.get('mode');
     if (mode !== null && !['graph', 'explorer', 'list'].includes(mode)) return null;
@@ -454,6 +492,22 @@
     if (checkType !== null && (!checkType || checkType.length > 64)) return null;
     if (checkType !== null && route !== '/findings') return null;
 
+    const method = params.get('method');
+    if (method !== null && (!method || method.length > 32)) return null;
+    if (method !== null && route !== '/traffic') return null;
+
+    const status = params.get('status');
+    if (status !== null && (!status || status.length > 16)) return null;
+    if (status !== null && route !== '/traffic') return null;
+
+    const source = params.get('source');
+    if (source !== null && (!source || source.length > 32)) return null;
+    if (source !== null && route !== '/traffic') return null;
+
+    const type = params.get('type');
+    if (type !== null && (!type || type.length > 32)) return null;
+    if (type !== null && route !== '/traffic') return null;
+
     const verification = params.get('verification');
     if (verification !== null && !['all', 'reproduced', 'assumed', 'unreproduced', 'skipped'].includes(verification)) return null;
     if (verification !== null && route !== '/findings') return null;
@@ -466,12 +520,17 @@
     if (search !== null && search.length > 512) return null;
 
     const result = { id: route.slice(1), scanId, findingId };
+    if (entryId !== null) result.entryId = entryId;
     if (nodeId !== null) result.nodeId = nodeId;
     if (url !== null) result.url = url;
     if (mode !== null) result.mode = mode;
     if (kind !== null) result.kind = kind;
     if (severity !== null) result.severity = severity;
     if (checkType !== null) result.checkType = checkType;
+    if (method !== null) result.method = method;
+    if (status !== null) result.status = status;
+    if (source !== null) result.source = source;
+    if (type !== null) result.type = type;
     if (verification !== null) result.verification = verification;
     if (provenance !== null) result.provenance = provenance;
     if (search !== null) result.search = search;
