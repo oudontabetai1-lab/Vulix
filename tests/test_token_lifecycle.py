@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import pickle
 import pytest
 
 from wscan.token_lifecycle import (
@@ -159,8 +160,60 @@ def test_redaction_sentinel_never_leaks_raw_secret():
     assert snapshot.value_length == len(dummy_secret)
     assert len(snapshot.token_hash_hint) == 8
 
-    # 6. トランスポート層向けの明示的取得メソッドのみが生値を返すこと
+    # 6. vars(snapshot) および snapshot.__dict__ で生シークレットが漏洩しないこと
+    assert dummy_secret not in str(vars(snapshot))
+    assert dummy_secret not in vars(snapshot)
+    assert dummy_secret not in vars(snapshot).values()
+
+    if hasattr(snapshot, "__dict__"):
+        assert dummy_secret not in str(snapshot.__dict__)
+        assert dummy_secret not in snapshot.__dict__
+        assert dummy_secret not in snapshot.__dict__.values()
+        assert "_secret_holder" not in snapshot.__dict__
+
+    # 7. json.dumps(..., default=vars) 試行で生シークレットが漏洩しないこと
+    json_via_vars = json.dumps(snapshot, default=vars)
+    assert dummy_secret not in json_via_vars
+
+    # 8. pickle.dumps(snapshot) で生シークレットが漏洩しないこと
+    pickled = pickle.dumps(snapshot)
+    assert dummy_secret.encode("utf-8") not in pickled
+    assert dummy_secret not in str(pickled)
+
+    # 9. インスタンス属性に _secret_holder が存在しないこと
+    assert not hasattr(snapshot, "_secret_holder")
+
+    # 10. トランスポート層向けの明示的取得メソッドのみが生値を返すこと
     assert snapshot.reveal_secret_for_transport() == dummy_secret
+
+    # 11. pickle 復元後も安全性が維持され、明示的アクセサ経由でのみ生値が取得できること
+    restored = pickle.loads(pickled)
+    assert restored.token_ref_id == snapshot.token_ref_id
+    assert dummy_secret not in repr(restored)
+    assert dummy_secret not in str(vars(restored))
+    assert restored.reveal_secret_for_transport() == dummy_secret
+
+
+def test_token_snapshot_retain_secret_false_and_release():
+    """retain_secret_for_transport=False および release_secret の動作を検証。"""
+    dummy = "SECRET_VALUE_FOR_NO_RETAIN_12345"
+    snap_no_retain = create_token_snapshot(
+        raw_value=dummy,
+        provenance="header:X-CSRF-Token",
+        retain_secret_for_transport=False,
+    )
+    assert snap_no_retain.reveal_secret_for_transport() == ""
+    assert dummy not in str(vars(snap_no_retain))
+
+    # retain_secret_for_transport=True で作成後に明示的 release
+    snap_retain = create_token_snapshot(
+        raw_value="SECRET_TO_BE_RELEASED_ABC",
+        provenance="form:csrf",
+        retain_secret_for_transport=True,
+    )
+    assert snap_retain.reveal_secret_for_transport() == "SECRET_TO_BE_RELEASED_ABC"
+    snap_retain.release_secret()
+    assert snap_retain.reveal_secret_for_transport() == ""
 
 
 def test_redact_token_value_edge_cases():
@@ -433,36 +486,82 @@ def test_capability_matrix_construction_and_invariants():
     assert matrix.execution_coverage_claimed is False
     assert TOKEN_LIFECYCLE_DISCLAIMER in matrix.disclaimer
 
-    # 3. 各トランスポートの代表的宣言ステータスチェック
-    # Playwright: form, multipart, json, header が SUPPORTED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) == DeclaredStatus.SUPPORTED
-    assert matrix.get_status(TokenCarrier.MULTIPART, TokenTransport.PLAYWRIGHT) == DeclaredStatus.SUPPORTED
-    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) == DeclaredStatus.SUPPORTED
-    assert matrix.is_supported("form", "playwright") is True
+    # 3. 各トランスポートの代表的宣言ステータスチェック（現スライスでは未統合のため SUPPORTED は一切宣言せず PLANNED とする）
+    # Playwright: form, multipart, json, header が PLANNED
+    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
+    assert matrix.get_status(TokenCarrier.MULTIPART, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
+    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
+    assert matrix.is_supported("form", "playwright") is False
+    assert matrix.is_planned("form", "playwright") is True
 
-    # HTTPX: form, json, header が SUPPORTED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
-    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
+    # HTTPX: form, json, header が PLANNED
+    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX) == DeclaredStatus.PLANNED
+    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.HTTPX) == DeclaredStatus.PLANNED
+    assert matrix.is_supported("json", "httpx") is False
+    assert matrix.is_planned("json", "httpx") is True
 
-    # SPA API: form-urlencoded は UNSUPPORTED、JSON は SUPPORTED
+    # SPA API: form-urlencoded は UNSUPPORTED、JSON は PLANNED
     assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.SPA_API) == DeclaredStatus.UNSUPPORTED
-    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.SPA_API) == DeclaredStatus.SUPPORTED
+    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.SPA_API) == DeclaredStatus.PLANNED
+    assert matrix.is_supported(TokenCarrier.JSON, TokenTransport.SPA_API) is False
+    assert matrix.is_planned(TokenCarrier.JSON, TokenTransport.SPA_API) is True
 
     # HAR Replay: 静的記録再生のため動的 nonce は BLOCKED
     assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HAR_REPLAY) == DeclaredStatus.BLOCKED
     assert matrix.get_status(TokenCarrier.HTTP_HEADER, TokenTransport.HAR_REPLAY) == DeclaredStatus.BLOCKED
     assert matrix.get_status(TokenCarrier.COOKIE, TokenTransport.HAR_REPLAY) == DeclaredStatus.BLOCKED
 
-    # Agent: form-urlencoded は SUPPORTED、multipart は現時点で UNSUPPORTED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT) == DeclaredStatus.SUPPORTED
+    # Agent: form-urlencoded は PLANNED、multipart は現時点で UNSUPPORTED
+    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT) == DeclaredStatus.PLANNED
     assert matrix.get_status(TokenCarrier.MULTIPART, TokenTransport.AGENT) == DeclaredStatus.UNSUPPORTED
+    assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT) is False
+    assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT) is True
 
-    # Hybrid: form-urlencoded, multipart, json が SUPPORTED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) == DeclaredStatus.SUPPORTED
-    assert matrix.get_status(TokenCarrier.MULTIPART, TokenTransport.HYBRID) == DeclaredStatus.SUPPORTED
+    # Hybrid: form-urlencoded, multipart, json が PLANNED
+    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) == DeclaredStatus.PLANNED
+    assert matrix.get_status(TokenCarrier.MULTIPART, TokenTransport.HYBRID) == DeclaredStatus.PLANNED
+    assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) is False
+    assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) is True
 
-    # Flow: form, multipart, json, header が SUPPORTED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) == DeclaredStatus.SUPPORTED
+    # Flow: form, multipart, json, header が PLANNED
+    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) == DeclaredStatus.PLANNED
+    assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is False
+    assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is True
+
+    # 不誠実なステータス宣言の防止: 現スライスでは未統合のため SUPPORTED は 0 件であること
+    supported_entries = [e for e in matrix.entries if e.status == DeclaredStatus.SUPPORTED]
+    assert len(supported_entries) == 0
+    assert all(e.status in (DeclaredStatus.PLANNED, DeclaredStatus.UNSUPPORTED, DeclaredStatus.BLOCKED) for e in matrix.entries)
+
+
+def test_capability_matrix_distinguishes_supported_vs_planned():
+    """将来のスライスで統合が完了した際に SUPPORTED と PLANNED を明確に区別できることを検証。"""
+    default_matrix = build_token_capability_matrix()
+
+    # 現スライスでは未統合のため PLANNED であり、is_supported は False
+    assert default_matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
+    assert default_matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) is False
+    assert default_matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) is True
+
+    # 後続スライスでの統合完了を模したオーバーライド
+    integrated_matrix = build_token_capability_matrix(
+        overrides={
+            (TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT): DeclaredStatus.SUPPORTED,
+        }
+    )
+
+    # 統合後は SUPPORTED に遷移し、is_supported が True、is_planned が False となること
+    assert integrated_matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) == DeclaredStatus.SUPPORTED
+    assert integrated_matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) is True
+    assert integrated_matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT) is False
+
+    # 他の未統合トランスポートは依然として PLANNED のまま区別されること
+    assert integrated_matrix.get_status(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) == DeclaredStatus.PLANNED
+    assert integrated_matrix.is_supported(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) is False
+    assert integrated_matrix.is_planned(TokenCarrier.JSON, TokenTransport.PLAYWRIGHT) is True
+
+    # DeclaredStatus の Enum レベルで相違すること
+    assert DeclaredStatus.SUPPORTED != DeclaredStatus.PLANNED
 
 
 def test_capability_matrix_overrides_and_serialization():
@@ -504,5 +603,6 @@ def test_normalization_helpers():
     assert normalize_transport("hybrid") == TokenTransport.HYBRID
 
     assert normalize_status("supported") == DeclaredStatus.SUPPORTED
+    assert normalize_status("planned") == DeclaredStatus.PLANNED
     assert normalize_status("unsupported") == DeclaredStatus.UNSUPPORTED
     assert normalize_status("blocked") == DeclaredStatus.BLOCKED

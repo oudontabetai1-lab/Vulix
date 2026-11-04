@@ -122,7 +122,8 @@ class TokenTransport(str, Enum):
 
 class DeclaredStatus(str, Enum):
     """静的機能宣言ステータス。"""
-    SUPPORTED = "supported"        # 設計上対応可能
+    SUPPORTED = "supported"        # 実行時統合済み・対応完了
+    PLANNED = "planned"            # 将来スライスで統合予定（現スライス未統合）
     UNSUPPORTED = "unsupported"    # 設計上非対応
     BLOCKED = "blocked"            # 仕様上・構造上の制約により遮断（例: HAR 再生時のワンタイム nonce）
 
@@ -170,6 +171,22 @@ class RefreshStrategy:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+# ── 生シークレット隔離保管庫（Private Secret Vault） ──────────────────────
+# インスタンス属性（__dict__ / vars()）やデフォルトシリアライザ（pickle, json等）から
+# 生シークレットを完全に隔離し、token_ref_id をキーとするモジュール内マッピングに保持する。
+_RAW_SECRET_VAULT: dict[str, str] = {}
+
+
+def clear_token_secrets() -> None:
+    """隔離保管庫内の全生シークレットを消去する（テストクリーンアップ用等）。"""
+    _RAW_SECRET_VAULT.clear()
+
+
+def release_token_secret(token_ref_id: str) -> None:
+    """指定された参照IDの生シークレットを隔離保管庫から明示的に破棄する。"""
+    _RAW_SECRET_VAULT.pop(token_ref_id, None)
+
+
 @dataclass(frozen=True)
 class TokenSnapshot:
     """取得済みトークンの安全なスナップショット。
@@ -178,6 +195,8 @@ class TokenSnapshot:
     生シークレットはデフォルトのシリアライズ (asdict / json / repr / to_dict / to_evidence)
     に含まれない。非秘密の参照ID (token_ref_id) とマスク済み値 (redacted_value)、
     出自情報 (provenance) のみを公開する。
+    生シークレットはインスタンス属性（__dict__ / vars()）には一切保持されず、
+    モジュール内隔離保管庫 (_RAW_SECRET_VAULT) に隔離される。
     """
     token_ref_id: str                   # 安定した非秘密参照ID (例: tok_ref_xxxx)
     redacted_value: str                 # マスク済み値 (例: ab12***ef (len=32))
@@ -214,14 +233,36 @@ class TokenSnapshot:
         object.__setattr__(self, "value_length", value_length)
         object.__setattr__(self, "token_hash_hint", token_hash_hint)
         object.__setattr__(self, "metadata", dict(metadata) if metadata is not None else {})
-        # 生シークレットは dataclass field ではなく private non-field に分離保持
-        object.__setattr__(self, "_secret_holder", _raw_secret)
+        # 生シークレットはインスタンス属性（__dict__ / vars()）には一切保持せずモジュール外保管庫に隔離保持
+        retains = bool(_raw_secret)
+        object.__setattr__(self, "_retains_secret", retains)
+        if retains:
+            _RAW_SECRET_VAULT[token_ref_id] = _raw_secret
 
     def reveal_secret_for_transport(self) -> str:
         """トランスポート層での実送信時にのみ生シークレットを取り出す明示的メソッド。
+
+        生シークレットはインスタンス属性（__dict__ / vars()）には一切保持されず、
+        非秘密参照ID (token_ref_id) をキーとしてモジュール内隔離保管庫からのみ明示的に取得される。
         シリアライザや repr、ログ記録からは自動呼び出しされない。
         """
-        return getattr(self, "_secret_holder", "")
+        if not getattr(self, "_retains_secret", True):
+            return ""
+        return _RAW_SECRET_VAULT.get(self.token_ref_id, "")
+
+    def release_secret(self) -> None:
+        """このスナップショットに対応する生シークレットを隔離保管庫から明示的に破棄する。"""
+        _RAW_SECRET_VAULT.pop(self.token_ref_id, None)
+
+    def __getstate__(self) -> dict[str, Any]:
+        """シリアライズ時に生シークレットが万が一にも含まれないことを保証する。"""
+        state = dict(self.__dict__)
+        state.pop("_secret_holder", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        for k, v in state.items():
+            object.__setattr__(self, k, v)
 
     def to_dict(self) -> dict[str, Any]:
         """安全なシリアライズ用辞書を返す。生シークレットは含まれない。"""
@@ -318,6 +359,9 @@ class TokenCapabilityMatrix:
 
     def is_supported(self, carrier: TokenCarrier | str, transport: TokenTransport | str) -> bool:
         return self.get_status(carrier, transport) == DeclaredStatus.SUPPORTED
+
+    def is_planned(self, carrier: TokenCarrier | str, transport: TokenTransport | str) -> bool:
+        return self.get_status(carrier, transport) == DeclaredStatus.PLANNED
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -829,42 +873,42 @@ def normalize_status(val: DeclaredStatus | str) -> DeclaredStatus:
 _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredStatus, str]] = {
     # Playwright (ブラウザ DOM / ナビゲーション)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT): (
-        DeclaredStatus.SUPPORTED, "DOM form navigation and hidden token field extraction"
+        DeclaredStatus.PLANNED, "Planned: DOM form navigation and hidden token field extraction"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.PLAYWRIGHT): (
-        DeclaredStatus.SUPPORTED, "File input attachment with DOM token retention"
+        DeclaredStatus.PLANNED, "Planned: File input attachment with DOM token retention"
     ),
     (TokenCarrier.JSON, TokenTransport.PLAYWRIGHT): (
-        DeclaredStatus.SUPPORTED, "In-page fetch/XHR dispatch with page context token"
+        DeclaredStatus.PLANNED, "Planned: In-page fetch/XHR dispatch with page context token"
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.PLAYWRIGHT): (
-        DeclaredStatus.SUPPORTED, "Page client GraphQL dispatch with session context"
+        DeclaredStatus.PLANNED, "Planned: Page client GraphQL dispatch with session context"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.PLAYWRIGHT): (
-        DeclaredStatus.SUPPORTED, "Route interception and setExtraHTTPHeaders"
+        DeclaredStatus.PLANNED, "Planned: Route interception and setExtraHTTPHeaders"
     ),
     (TokenCarrier.COOKIE, TokenTransport.PLAYWRIGHT): (
-        DeclaredStatus.SUPPORTED, "Browser context cookie jar synchronization"
+        DeclaredStatus.PLANNED, "Planned: Browser context cookie jar synchronization"
     ),
 
     # HTTPX (直接 HTTP クライアント)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX): (
-        DeclaredStatus.SUPPORTED, "HTML response parsing for hidden token + re-GET fresh form"
+        DeclaredStatus.PLANNED, "Planned: HTML response parsing for hidden token + re-GET fresh form"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.HTTPX): (
-        DeclaredStatus.SUPPORTED, "Multipart body generation with extracted token part"
+        DeclaredStatus.PLANNED, "Planned: Multipart body generation with extracted token part"
     ),
     (TokenCarrier.JSON, TokenTransport.HTTPX): (
-        DeclaredStatus.SUPPORTED, "JSON body payload token injection"
+        DeclaredStatus.PLANNED, "Planned: JSON body payload token injection"
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.HTTPX): (
-        DeclaredStatus.SUPPORTED, "POST /graphql with token headers/variables"
+        DeclaredStatus.PLANNED, "Planned: POST /graphql with token headers/variables"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.HTTPX): (
-        DeclaredStatus.SUPPORTED, "Direct custom header setting (e.g. X-CSRF-Token)"
+        DeclaredStatus.PLANNED, "Planned: Direct custom header setting (e.g. X-CSRF-Token)"
     ),
     (TokenCarrier.COOKIE, TokenTransport.HTTPX): (
-        DeclaredStatus.SUPPORTED, "Client cookie jar propagation"
+        DeclaredStatus.PLANNED, "Planned: Client cookie jar propagation"
     ),
 
     # SPA API (SPA エンドポイント)
@@ -872,19 +916,19 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
         DeclaredStatus.UNSUPPORTED, "SPA endpoints communicate via JSON/GraphQL, not urlencoded forms"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.SPA_API): (
-        DeclaredStatus.SUPPORTED, "FormData multipart upload via SPA API client"
+        DeclaredStatus.PLANNED, "Planned: FormData multipart upload via SPA API client"
     ),
     (TokenCarrier.JSON, TokenTransport.SPA_API): (
-        DeclaredStatus.SUPPORTED, "Primary REST/JSON payload format with CSRF header"
+        DeclaredStatus.PLANNED, "Planned: Primary REST/JSON payload format with CSRF header"
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.SPA_API): (
-        DeclaredStatus.SUPPORTED, "Primary GraphQL API endpoint format"
+        DeclaredStatus.PLANNED, "Planned: Primary GraphQL API endpoint format"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API): (
-        DeclaredStatus.SUPPORTED, "Meta-tag / cookie extracted header (X-XSRF-TOKEN)"
+        DeclaredStatus.PLANNED, "Planned: Meta-tag / cookie extracted header (X-XSRF-TOKEN)"
     ),
     (TokenCarrier.COOKIE, TokenTransport.SPA_API): (
-        DeclaredStatus.SUPPORTED, "SameSite cookie credential inclusion"
+        DeclaredStatus.PLANNED, "Planned: SameSite cookie credential inclusion"
     ),
 
     # HAR Replay (記録トラフィックの再生)
@@ -910,62 +954,62 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
 
     # Flow (マルチステップ・シナリオ)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW): (
-        DeclaredStatus.SUPPORTED, "Prior step token extraction chained to subsequent step form"
+        DeclaredStatus.PLANNED, "Planned: Prior step token extraction chained to subsequent step form"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.FLOW): (
-        DeclaredStatus.SUPPORTED, "Flow state token injection into multipart step"
+        DeclaredStatus.PLANNED, "Planned: Flow state token injection into multipart step"
     ),
     (TokenCarrier.JSON, TokenTransport.FLOW): (
-        DeclaredStatus.SUPPORTED, "JSON body token substitution from flow context"
+        DeclaredStatus.PLANNED, "Planned: JSON body token substitution from flow context"
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.FLOW): (
-        DeclaredStatus.SUPPORTED, "GraphQL variable substitution from flow state"
+        DeclaredStatus.PLANNED, "Planned: GraphQL variable substitution from flow state"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.FLOW): (
-        DeclaredStatus.SUPPORTED, "Step-extracted token propagated to next step headers"
+        DeclaredStatus.PLANNED, "Planned: Step-extracted token propagated to next step headers"
     ),
     (TokenCarrier.COOKIE, TokenTransport.FLOW): (
-        DeclaredStatus.SUPPORTED, "Flow session cookie jar maintained across step boundaries"
+        DeclaredStatus.PLANNED, "Planned: Flow session cookie jar maintained across step boundaries"
     ),
 
     # Agent (自律 LLM エージェント)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT): (
-        DeclaredStatus.SUPPORTED, "Agent DOM exploration fills and submits forms"
+        DeclaredStatus.PLANNED, "Planned: Agent DOM exploration fills and submits forms"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.AGENT): (
         DeclaredStatus.UNSUPPORTED, "Agent raw multipart stream construction not currently declared"
     ),
     (TokenCarrier.JSON, TokenTransport.AGENT): (
-        DeclaredStatus.SUPPORTED, "Agent constructs structured JSON tool payloads"
+        DeclaredStatus.PLANNED, "Planned: Agent constructs structured JSON tool payloads"
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.AGENT): (
         DeclaredStatus.UNSUPPORTED, "Direct GraphQL AST generation not currently declared"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.AGENT): (
-        DeclaredStatus.SUPPORTED, "Agent specifies custom request headers"
+        DeclaredStatus.PLANNED, "Planned: Agent specifies custom request headers"
     ),
     (TokenCarrier.COOKIE, TokenTransport.AGENT): (
-        DeclaredStatus.SUPPORTED, "Agent operates within authenticated browser session"
+        DeclaredStatus.PLANNED, "Planned: Agent operates within authenticated browser session"
     ),
 
     # Hybrid (ハイブリッド探索)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID): (
-        DeclaredStatus.SUPPORTED, "Deterministic scanner handles form token lifecycle"
+        DeclaredStatus.PLANNED, "Planned: Deterministic scanner handles form token lifecycle"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.HYBRID): (
-        DeclaredStatus.SUPPORTED, "Deterministic scanner handles multipart token lifecycle"
+        DeclaredStatus.PLANNED, "Planned: Deterministic scanner handles multipart token lifecycle"
     ),
     (TokenCarrier.JSON, TokenTransport.HYBRID): (
-        DeclaredStatus.SUPPORTED, "Deterministic + agent coordinate JSON token lifecycle"
+        DeclaredStatus.PLANNED, "Planned: Deterministic + agent coordinate JSON token lifecycle"
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.HYBRID): (
-        DeclaredStatus.SUPPORTED, "Deterministic scanner handles GraphQL token injection"
+        DeclaredStatus.PLANNED, "Planned: Deterministic scanner handles GraphQL token injection"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.HYBRID): (
-        DeclaredStatus.SUPPORTED, "Both engines propagate authenticated token headers"
+        DeclaredStatus.PLANNED, "Planned: Both engines propagate authenticated token headers"
     ),
     (TokenCarrier.COOKIE, TokenTransport.HYBRID): (
-        DeclaredStatus.SUPPORTED, "Shared session cookies preserved across handoff"
+        DeclaredStatus.PLANNED, "Planned: Shared session cookies preserved across handoff"
     ),
 }
 
