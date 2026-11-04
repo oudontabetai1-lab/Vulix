@@ -11,7 +11,13 @@
         "remediation_overview": "SQLパラメーター化クエリを使い、DB権限を必要最小限にします。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "89.html",
+          "url": "https://cwe.mitre.org/data/definitions/89.html"
+        }
+      ],
       "en": {
         "title": "Sql injection",
         "short_description": "SQL injection",
@@ -32,7 +38,13 @@
         "remediation_overview": "出力箇所に応じたエンコードとフレームワークの自動エスケープを使います。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "79.html",
+          "url": "https://cwe.mitre.org/data/definitions/79.html"
+        }
+      ],
       "en": {
         "title": "Reflected cross-site scripting",
         "short_description": "Reflected cross-site scripting",
@@ -53,7 +65,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "79.html",
+          "url": "https://cwe.mitre.org/data/definitions/79.html"
+        }
+      ],
       "en": {
         "title": "Cross-site scripting",
         "short_description": "Cross-site scripting through client-side DOM operations",
@@ -74,7 +92,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "78.html",
+          "url": "https://cwe.mitre.org/data/definitions/78.html"
+        }
+      ],
       "en": {
         "title": "Os command injection",
         "short_description": "OS command injection",
@@ -95,7 +119,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "1336.html",
+          "url": "https://cwe.mitre.org/data/definitions/1336.html"
+        }
+      ],
       "en": {
         "title": "Server-side template injection",
         "short_description": "Server-side template injection",
@@ -116,7 +146,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "22.html",
+          "url": "https://cwe.mitre.org/data/definitions/22.html"
+        }
+      ],
       "en": {
         "title": "File access",
         "short_description": "File access through path traversal",
@@ -137,7 +173,13 @@
         "remediation_overview": "状態変更要求に予測困難なCSRFトークンを要求し、Origin等を検証します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "352.html",
+          "url": "https://cwe.mitre.org/data/definitions/352.html"
+        }
+      ],
       "en": {
         "title": "Csrf protections on state-changing requests",
         "short_description": "CSRF protections on state-changing requests",
@@ -158,7 +200,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "113.html",
+          "url": "https://cwe.mitre.org/data/definitions/113.html"
+        }
+      ],
       "en": {
         "title": "Http response header manipulation",
         "short_description": "HTTP response header manipulation through input",
@@ -179,7 +227,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "OOB確認には対応する外部受信先が必要です。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "93.html",
+          "url": "https://cwe.mitre.org/data/definitions/93.html"
+        }
+      ],
       "en": {
         "title": "Header injection in mail-related input",
         "short_description": "Header injection in mail-related input",
@@ -200,7 +254,13 @@
         "remediation_overview": "遷移先をサーバー側で管理するか、許可リストで検証します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "601.html",
+          "url": "https://cwe.mitre.org/data/definitions/601.html"
+        }
+      ],
       "en": {
         "title": "External redirects controlled by input",
         "short_description": "External redirects controlled by input",
@@ -221,7 +281,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "1021.html",
+          "url": "https://cwe.mitre.org/data/definitions/1021.html"
+        }
+      ],
       "en": {
         "title": "Restrictions on framing the page",
         "short_description": "Restrictions on framing the page",
@@ -242,7 +308,23 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "614.html",
+          "url": "https://cwe.mitre.org/data/definitions/614.html"
+        },
+        {
+          "kind": "CWE",
+          "id": "1004.html",
+          "url": "https://cwe.mitre.org/data/definitions/1004.html"
+        },
+        {
+          "kind": "CWE",
+          "id": "1275.html",
+          "url": "https://cwe.mitre.org/data/definitions/1275.html"
+        }
+      ],
       "en": {
         "title": "Protection attributes on session cookies",
         "short_description": "Protection attributes on session cookies",
@@ -263,7 +345,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "到達可能な認証状態と対象経路の範囲に限られます。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "OWASP",
+          "id": "WSTG-ATHZ-03",
+          "url": "https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/03-Testing_for_Privilege_Escalation/"
+        }
+      ],
       "en": {
         "title": "Authorization boundaries on authenticated routes",
         "short_description": "Authorization boundaries on authenticated routes",
@@ -284,7 +372,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "保存と再表示が実際に行われる経路に限られます。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "79.html",
+          "url": "https://cwe.mitre.org/data/definitions/79.html"
+        }
+      ],
       "en": {
         "title": "Script execution after stored content is displayed",
         "short_description": "Script execution after stored content is displayed",
@@ -305,7 +399,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "OWASP",
+          "id": "WSTG-CLNT-07",
+          "url": "https://wstg.owasp.org/latest/4-Web_Application_Security_Testing/11-Client-side/07-Cross_Origin_Resource_Sharing/"
+        }
+      ],
       "en": {
         "title": "Cors response headers and origin permissions",
         "short_description": "CORS response headers and origin permissions",
@@ -326,7 +426,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "200.html",
+          "url": "https://cwe.mitre.org/data/definitions/200.html"
+        }
+      ],
       "en": {
         "title": "Information exposed by responses and public paths",
         "short_description": "Information exposed by responses and public paths",
@@ -347,7 +453,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "候補パスの上限と対象スコープにより全ファイルを網羅しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "OWASP",
+          "id": "WSTG-CONF-04",
+          "url": "https://wstg.owasp.org/latest/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management/04-Review_Old_Backup_and_Unreferenced_Files_for_Sensitive_Information/"
+        }
+      ],
       "en": {
         "title": "Known artifacts in publicly reachable directories",
         "short_description": "Known artifacts in publicly reachable directories",
@@ -368,7 +480,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "OWASP",
+          "id": "WSTG-INJT-17",
+          "url": "https://wstg.owasp.org/latest/4-Web_Application_Security_Testing/07-Injection/17-Host_Header_Injection/"
+        }
+      ],
       "en": {
         "title": "Handling of host-related headers",
         "short_description": "Handling of Host-related headers",
@@ -410,7 +528,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "943.html",
+          "url": "https://cwe.mitre.org/data/definitions/943.html"
+        }
+      ],
       "en": {
         "title": "Input interpretation in nosql queries",
         "short_description": "Input interpretation in NoSQL queries",
@@ -431,7 +555,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "502.html",
+          "url": "https://cwe.mitre.org/data/definitions/502.html"
+        }
+      ],
       "en": {
         "title": "Handling of inputs in serialized formats",
         "short_description": "Handling of inputs in serialized formats",
@@ -452,7 +582,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "444.html",
+          "url": "https://cwe.mitre.org/data/definitions/444.html"
+        }
+      ],
       "en": {
         "title": "Http request boundary interpretation differences",
         "short_description": "HTTP request boundary interpretation differences",
@@ -473,7 +609,13 @@
         "remediation_overview": "送信先とプロトコルを許可リスト化し、内部アドレスへの接続を遮断します。",
         "limitations": "応答本文に内部リソース由来のマーカーが含まれる場合に検出します。応答時間による判定は行いません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "918.html",
+          "url": "https://cwe.mitre.org/data/definitions/918.html"
+        }
+      ],
       "en": {
         "title": "Server requests to supplied destinations",
         "short_description": "Server requests to supplied destinations",
@@ -536,7 +678,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "200.html",
+          "url": "https://cwe.mitre.org/data/definitions/200.html"
+        }
+      ],
       "en": {
         "title": "Cms identification and known public paths",
         "short_description": "CMS identification and known public paths",
@@ -557,7 +705,13 @@
         "remediation_overview": "XMLパーサーで外部エンティティとDOCTYPEを無効化します。",
         "limitations": "XMLを受理する到達可能な入力が必要で、応答に現れない外部アクセスは確定できません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "611.html",
+          "url": "https://cwe.mitre.org/data/definitions/611.html"
+        }
+      ],
       "en": {
         "title": "External entity processing in xml input",
         "short_description": "External entity processing in XML input",
@@ -578,7 +732,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "90.html",
+          "url": "https://cwe.mitre.org/data/definitions/90.html"
+        }
+      ],
       "en": {
         "title": "Interpretation of ldap search input",
         "short_description": "Interpretation of LDAP search input",
@@ -599,7 +759,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "434.html",
+          "url": "https://cwe.mitre.org/data/definitions/434.html"
+        }
+      ],
       "en": {
         "title": "File upload acceptance and response",
         "short_description": "File upload acceptance and response",
@@ -620,7 +786,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "実行可能な要求と観測可能な状態差の範囲に限られます。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "362.html",
+          "url": "https://cwe.mitre.org/data/definitions/362.html"
+        }
+      ],
       "en": {
         "title": "State races under concurrent requests",
         "short_description": "State races under concurrent requests",
@@ -662,7 +834,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "OWASP",
+          "id": "WSTG-INFO-05",
+          "url": "https://wstg.owasp.org/latest/4-Web_Application_Security_Testing/01-Information_Gathering/05-Review_Web_Page_Content_for_Information_Leakage/"
+        }
+      ],
       "en": {
         "title": "Secret-like strings in page resources",
         "short_description": "Secret-like strings in page resources",
@@ -683,7 +861,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "345.html",
+          "url": "https://cwe.mitre.org/data/definitions/345.html"
+        }
+      ],
       "en": {
         "title": "Subresource integrity on external script references",
         "short_description": "Subresource Integrity on external script references",
@@ -704,7 +888,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "79.html",
+          "url": "https://cwe.mitre.org/data/definitions/79.html"
+        }
+      ],
       "en": {
         "title": "Static findings in retrieved javascript",
         "short_description": "Static findings in retrieved JavaScript",
@@ -725,7 +915,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "1321.html",
+          "url": "https://cwe.mitre.org/data/definitions/1321.html"
+        }
+      ],
       "en": {
         "title": "Client- and server-side prototype pollution indicators",
         "short_description": "Client- and server-side prototype pollution indicators",
@@ -746,7 +942,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "OWASP",
+          "id": "Web Cache Security Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/Web_Cache_Security_Cheat_Sheet.html"
+        }
+      ],
       "en": {
         "title": "Input dependence of cached responses",
         "short_description": "Input dependence of cached responses",
@@ -788,7 +990,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "版を識別できない資源や外部照会の失敗は判定できません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "1104.html",
+          "url": "https://cwe.mitre.org/data/definitions/1104.html"
+        }
+      ],
       "en": {
         "title": "Known information about detected components",
         "short_description": "Known information about detected components",
@@ -830,7 +1038,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "プロキシまたはクライアント証明書が必要な接続は検査できない場合があります。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "326.html",
+          "url": "https://cwe.mitre.org/data/definitions/326.html"
+        }
+      ],
       "en": {
         "title": "Protocols and settings observable over tls",
         "short_description": "Protocols and settings observable over TLS",
@@ -851,7 +1065,13 @@
         "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
         "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
       },
-      "references": [],
+      "references": [
+        {
+          "kind": "CWE",
+          "id": "319.html",
+          "url": "https://cwe.mitre.org/data/definitions/319.html"
+        }
+      ],
       "en": {
         "title": "Http method responses and https transport behavior",
         "short_description": "HTTP method responses and HTTPS transport behavior",

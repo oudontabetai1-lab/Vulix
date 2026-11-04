@@ -35,7 +35,15 @@ def test_check_catalog_api_locales_and_empty_fallback(monkeypatch):
     fallback = client.get('/api/v1/check-catalog?lang=fr').json()
     assert ja['lang'] == 'ja' and ja['checks']['sqli']['title']
     assert ja['catalog_version'] == '1.0.0'
+    typed_refs = check_catalog.get_check_references('sqli')
+    assert typed_refs and all(isinstance(ref, check_catalog.CatalogReference) for ref in typed_refs)
+    assert ja['checks']['sqli']['references'] == [ref.__dict__ for ref in typed_refs]
+    assert ja['checks']['sqli']['references'] == [{
+        'kind': 'CWE', 'id': '89.html',
+        'url': 'https://cwe.mitre.org/data/definitions/89.html',
+    }]
     assert en['lang'] == 'en' and en['checks']['sqli']['title'] != ja['checks']['sqli']['title']
+    assert en['checks']['sqli']['references'] == ja['checks']['sqli']['references']
     assert fallback['lang'] == 'ja' and fallback['checks']['sqli']['title'] == ja['checks']['sqli']['title']
     monkeypatch.setattr(check_catalog, 'list_checks', lambda lang='ja': ())
     empty = client.get('/api/v1/check-catalog').json()
