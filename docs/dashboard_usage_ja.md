@@ -531,7 +531,7 @@ Cookie、ログイン URL、入力欄名、成功判定文字列、MFA を確認
 
 Depth、Max Forms、ペイロード上限、並列数を下げ、リクエスト間隔を増やします。状態変更プローブは有効にしないでください。
 
-詳細な切り分けは [トラブルシューティング](troubleshooting_ja.md)、実検査前の準備は [運用ガイド](operation_guide_ja.md) を参照してください。
+詳細な切り分けは [トラブルシューティング](troubleshooting_ja.md)、実検査前の準備は [運用ガイド](operation_guide_ja.md)、内部のモジュール構成や API・WebSocket 契約は [UI アーキテクチャ](ui_architecture_ja.md) を参照してください。
 
 ## 16. 最短手順まとめ
 

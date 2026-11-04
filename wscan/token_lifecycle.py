@@ -37,6 +37,7 @@
 from __future__ import annotations
 
 import hashlib
+from html.parser import HTMLParser
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -450,6 +451,76 @@ def is_token_field_name(name: str | None) -> bool:
         return False
     norm = name.strip().lower().replace("-", "_").replace(" ", "_")
     return norm in TOKEN_FIELD_NAMES
+
+
+class _PureFormParser(HTMLParser):
+    """HTML 内の <form> と入力フィールドを解析する純粋パーサ。"""
+
+    def __init__(self):
+        super().__init__()
+        self.forms: list[dict[str, Any]] = []
+        self._current_form: dict[str, Any] | None = None
+        self._form_index = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        tag_lower = tag.lower()
+        attr_dict = {k.lower(): (v or "") for k, v in attrs}
+        if tag_lower == "form":
+            self._current_form = {
+                "index": self._form_index,
+                "action": attr_dict.get("action", ""),
+                "method": (attr_dict.get("method") or "GET").upper(),
+                "fields": {},
+                "token_fields": {},
+            }
+            self.forms.append(self._current_form)
+            self._form_index += 1
+        elif self._current_form is not None:
+            name = attr_dict.get("name") or attr_dict.get("id")
+            if not name:
+                return
+            val = attr_dict.get("value", "")
+            if tag_lower == "input":
+                inp_type = (attr_dict.get("type") or "text").lower()
+                if inp_type in ("submit", "button", "reset", "image", "file"):
+                    return
+                self._current_form["fields"][name] = val
+                if is_token_field_name(name):
+                    self._current_form["token_fields"][name] = val
+            elif tag_lower in ("textarea", "select"):
+                self._current_form["fields"][name] = val
+
+    def handle_endtag(self, tag: str):
+        if tag.lower() == "form":
+            self._current_form = None
+
+
+def extract_form_tokens(html: str, form_index: int = 0) -> dict[str, str]:
+    """HTMLから指定されたフォームの anti-CSRF / nonce トークンフィールドとその値を抽出する純粋関数。"""
+    if not html or not isinstance(html, str):
+        return {}
+    parser = _PureFormParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return {}
+    if 0 <= form_index < len(parser.forms):
+        return dict(parser.forms[form_index]["token_fields"])
+    return {}
+
+
+def extract_form_details(html: str, form_index: int = 0) -> dict[str, Any] | None:
+    """HTMLから指定されたフォームの action, method, fields, token_fields を抽出する純粋関数。"""
+    if not html or not isinstance(html, str):
+        return None
+    parser = _PureFormParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return None
+    if 0 <= form_index < len(parser.forms):
+        return parser.forms[form_index]
+    return None
 
 
 # ── 5. レスポンス分類（Outcome Classification Pure Function） ────────────
@@ -890,7 +961,7 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
 
     # HTTPX (直接 HTTP クライアント)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX): (
-        DeclaredStatus.PLANNED, "Planned: HTML response parsing for hidden token + re-GET fresh form"
+        DeclaredStatus.SUPPORTED, "Supported: Pre-send HTML form re-extraction for fresh hidden token in shared HTTPX transport"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.HTTPX): (
         DeclaredStatus.PLANNED, "Planned: Multipart body generation with extracted token part"

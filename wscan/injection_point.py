@@ -440,6 +440,8 @@ class InjectionPoint:
     operation_id: str = ""          # 安定 operation identity（compute_operation_id）
     template_source: str = ""       # crawl / spa / har / openapi / manual / proxy
     template_digest: str = ""       # 機微値を除いた構造ダイジェスト（structure_digest）
+    form_tokens: tuple[str, ...] = ()  # フォームが保持する anti-CSRF / nonce トークンフィールド名
+    form_fields: tuple[tuple[str, str], ...] = ()
 
     @property
     def carrier(self) -> Carrier:
@@ -507,6 +509,8 @@ class InjectionPoint:
         operation_id: str = "",
         template_source: str = "",
         template_digest: str = "",
+        form_tokens: tuple[str, ...] = (),
+        form_fields: tuple[tuple[str, str], ...] = (),
     ) -> "InjectionPoint":
         """従来フォーム用の注入点を作る。"""
         return cls(
@@ -524,6 +528,8 @@ class InjectionPoint:
             operation_id=operation_id,
             template_source=template_source,
             template_digest=template_digest,
+            form_tokens=tuple(form_tokens or ()),
+            form_fields=tuple(form_fields or ()),
         )
 
     @classmethod
