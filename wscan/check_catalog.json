@@ -1,0 +1,866 @@
+{
+  "schema_version": "1.0.0",
+  "checks": {
+    "sqli": {
+      "ja": {
+        "title": "SQLインジェクション",
+        "short_description": "SQLインジェクション — ユーザー入力がSQLクエリに注入される",
+        "what_is_tested": "SQLインジェクションを確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "SQLインジェクションが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "SQLパラメーター化クエリを使い、DB権限を必要最小限にします。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Sql injection",
+        "short_description": "SQL injection",
+        "what_is_tested": "The scanner submits dedicated inputs for sql injection and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of sql injection may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Use parameterized SQL queries and least-privilege database accounts.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "xss": {
+      "ja": {
+        "title": "反射型クロスサイトスクリプティング",
+        "short_description": "クロスサイト・スクリプティング (反射型) — スクリプトが反射実行される",
+        "what_is_tested": "反射型クロスサイトスクリプティングを確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "反射型クロスサイトスクリプティングが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "出力箇所に応じたエンコードとフレームワークの自動エスケープを使います。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Reflected cross-site scripting",
+        "short_description": "Reflected cross-site scripting",
+        "what_is_tested": "The scanner submits dedicated inputs for reflected cross-site scripting and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of reflected cross-site scripting may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Use context-aware output encoding and framework auto-escaping.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "dom_xss": {
+      "ja": {
+        "title": "DOM操作を介したクロスサイトスクリプティング",
+        "short_description": "DOM-based XSS — クライアントサイドの DOM 操作による XSS",
+        "what_is_tested": "DOM操作を介したクロスサイトスクリプティングを確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "DOM操作を介したクロスサイトスクリプティングが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Cross-site scripting",
+        "short_description": "Cross-site scripting through client-side DOM operations",
+        "what_is_tested": "The scanner submits dedicated inputs for cross-site scripting through client-side dom operations and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of cross-site scripting through client-side dom operations may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "os": {
+      "ja": {
+        "title": "OSコマンドインジェクション",
+        "short_description": "OSコマンド・インジェクション — サーバー上のOSコマンドが実行される",
+        "what_is_tested": "OSコマンドインジェクションを確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "OSコマンドインジェクションが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Os command injection",
+        "short_description": "OS command injection",
+        "what_is_tested": "The scanner submits dedicated inputs for os command injection and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of os command injection may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "ssti": {
+      "ja": {
+        "title": "サーバーサイドテンプレートインジェクション",
+        "short_description": "サーバーサイド・テンプレート・インジェクション",
+        "what_is_tested": "サーバーサイドテンプレートインジェクションを確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "サーバーサイドテンプレートインジェクションが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Server-side template injection",
+        "short_description": "Server-side template injection",
+        "what_is_tested": "The scanner submits dedicated inputs for server-side template injection and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of server-side template injection may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "path_traversal": {
+      "ja": {
+        "title": "パストラバーサルによるファイルアクセス",
+        "short_description": "パス・トラバーサル — ディレクトリを越えた任意ファイルの読み取り",
+        "what_is_tested": "パストラバーサルによるファイルアクセスを確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "パストラバーサルによるファイルアクセスが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "File access",
+        "short_description": "File access through path traversal",
+        "what_is_tested": "The scanner submits dedicated inputs for file access through path traversal and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of file access through path traversal may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "csrf": {
+      "ja": {
+        "title": "状態変更リクエストに対するCSRF対策",
+        "short_description": "CSRF — 正規ユーザーに意図しないリクエストを送信させられる",
+        "what_is_tested": "ページ上のフォームと応答を解析します。",
+        "risk_if_vulnerable": "状態変更リクエストに対するCSRF対策が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "状態変更要求に予測困難なCSRFトークンを要求し、Origin等を検証します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Csrf protections on state-changing requests",
+        "short_description": "CSRF protections on state-changing requests",
+        "what_is_tested": "It analyzes page forms and responses.",
+        "risk_if_vulnerable": "Exploitation of csrf protections on state-changing requests may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Require unpredictable CSRF tokens for state-changing requests and validate origins.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "header_injection": {
+      "ja": {
+        "title": "入力値によるHTTPレスポンスヘッダーの改変",
+        "short_description": "HTTPヘッダ・インジェクション / レスポンス分割",
+        "what_is_tested": "入力値によるHTTPレスポンスヘッダーの改変を確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "入力値によるHTTPレスポンスヘッダーの改変が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Http response header manipulation",
+        "short_description": "HTTP response header manipulation through input",
+        "what_is_tested": "The scanner submits dedicated inputs for http response header manipulation through input and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of http response header manipulation through input may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "mail_header": {
+      "ja": {
+        "title": "メール関連入力のヘッダー注入",
+        "short_description": "メールヘッダ・インジェクション",
+        "what_is_tested": "メール関連入力のヘッダー注入を確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "メール関連入力のヘッダー注入が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "OOB確認には対応する外部受信先が必要です。"
+      },
+      "references": [],
+      "en": {
+        "title": "Header injection in mail-related input",
+        "short_description": "Header injection in mail-related input",
+        "what_is_tested": "The scanner submits dedicated inputs for header injection in mail-related input and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of header injection in mail-related input may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Out-of-band confirmation requires a configured external mail receiver."
+      }
+    },
+    "open_redirect": {
+      "ja": {
+        "title": "入力値を利用した外部リダイレクト",
+        "short_description": "オープンリダイレクト — 任意URLへのリダイレクトが可能",
+        "what_is_tested": "入力値を利用した外部リダイレクトを確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "入力値を利用した外部リダイレクトが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "遷移先をサーバー側で管理するか、許可リストで検証します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "External redirects controlled by input",
+        "short_description": "External redirects controlled by input",
+        "what_is_tested": "The scanner submits dedicated inputs for external redirects controlled by input and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of external redirects controlled by input may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Control redirect destinations server-side or validate them against an allowlist.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "clickjacking": {
+      "ja": {
+        "title": "ページのフレーム埋め込み制限",
+        "short_description": "クリックジャッキング — X-Frame-Options が未設定",
+        "what_is_tested": "ページ応答のフレーミング関連ヘッダーを確認します。",
+        "risk_if_vulnerable": "ページのフレーム埋め込み制限が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Restrictions on framing the page",
+        "short_description": "Restrictions on framing the page",
+        "what_is_tested": "It inspects framing-related headers in the page response.",
+        "risk_if_vulnerable": "Exploitation of restrictions on framing the page may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "session": {
+      "ja": {
+        "title": "セッションCookieの保護属性",
+        "short_description": "セッション管理の問題 — Cookie 属性の不備など",
+        "what_is_tested": "ページ応答のCookie属性を確認します。",
+        "risk_if_vulnerable": "セッションCookieの保護属性が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Protection attributes on session cookies",
+        "short_description": "Protection attributes on session cookies",
+        "what_is_tested": "It inspects cookie attributes in the page response.",
+        "risk_if_vulnerable": "Exploitation of protection attributes on session cookies may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "privesc": {
+      "ja": {
+        "title": "認証済み経路の権限境界",
+        "short_description": "権限昇格 — 低権限ユーザーが高権限リソースにアクセス可能",
+        "what_is_tested": "認証状態とページ/経路の応答を比較します。",
+        "risk_if_vulnerable": "認証済み経路の権限境界が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "到達可能な認証状態と対象経路の範囲に限られます。"
+      },
+      "references": [],
+      "en": {
+        "title": "Authorization boundaries on authenticated routes",
+        "short_description": "Authorization boundaries on authenticated routes",
+        "what_is_tested": "It compares responses across authenticated states and routes.",
+        "risk_if_vulnerable": "Exploitation of authorization boundaries on authenticated routes may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "到達可能な認証状態と対象経路の範囲に限られます。"
+      }
+    },
+    "stored_xss": {
+      "ja": {
+        "title": "保存後に表示されるスクリプトの実行",
+        "short_description": "蓄積型 XSS — 悪意あるスクリプトが保存され他ユーザーに影響する",
+        "what_is_tested": "保存後に表示されるスクリプトの実行を確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "保存後に表示されるスクリプトの実行が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "保存と再表示が実際に行われる経路に限られます。"
+      },
+      "references": [],
+      "en": {
+        "title": "Script execution after stored content is displayed",
+        "short_description": "Script execution after stored content is displayed",
+        "what_is_tested": "The scanner submits dedicated inputs for script execution after stored content is displayed and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of script execution after stored content is displayed may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "保存と再表示が実際に行われる経路に限られます。"
+      }
+    },
+    "cors": {
+      "ja": {
+        "title": "CORS応答ヘッダーとオリジン許可",
+        "short_description": "CORSの誤設定 — 任意オリジンからのクロスオリジンリクエストが可能",
+        "what_is_tested": "異なるOriginを用いた応答ヘッダーを確認します。",
+        "risk_if_vulnerable": "CORS応答ヘッダーとオリジン許可が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Cors response headers and origin permissions",
+        "short_description": "CORS response headers and origin permissions",
+        "what_is_tested": "It checks response headers using a different Origin.",
+        "risk_if_vulnerable": "Exploitation of cors response headers and origin permissions may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "info_disclosure": {
+      "ja": {
+        "title": "応答や公開パスから得られる情報",
+        "short_description": "情報漏洩 — エラーメッセージ・バージョン情報など",
+        "what_is_tested": "応答内容と候補パスの応答を調べます。",
+        "risk_if_vulnerable": "応答や公開パスから得られる情報が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Information exposed by responses and public paths",
+        "short_description": "Information exposed by responses and public paths",
+        "what_is_tested": "It inspects response content and candidate path responses.",
+        "risk_if_vulnerable": "Exploitation of information exposed by responses and public paths may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "directory_artifacts": {
+      "ja": {
+        "title": "公開ディレクトリ内の既知アーティファクト",
+        "short_description": "公開ディレクトリ内の既知アーティファクト",
+        "what_is_tested": "ページ資源から候補を集め、公開パスへ読み取り要求を行います。",
+        "risk_if_vulnerable": "公開ディレクトリ内の既知アーティファクトが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "候補パスの上限と対象スコープにより全ファイルを網羅しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Known artifacts in publicly reachable directories",
+        "short_description": "Known artifacts in publicly reachable directories",
+        "what_is_tested": "It gathers candidates from page resources and sends read requests to public paths.",
+        "risk_if_vulnerable": "Exploitation of known artifacts in publicly reachable directories may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "候補パスの上限と対象スコープにより全ファイルを網羅しません。"
+      }
+    },
+    "host_header": {
+      "ja": {
+        "title": "Host関連ヘッダーの処理",
+        "short_description": "Hostヘッダ・インジェクション",
+        "what_is_tested": "Host関連ヘッダーを変えた応答を比較します。",
+        "risk_if_vulnerable": "Host関連ヘッダーの処理が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Handling of host-related headers",
+        "short_description": "Handling of Host-related headers",
+        "what_is_tested": "It compares responses after varying Host-related headers.",
+        "risk_if_vulnerable": "Exploitation of handling of host-related headers may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "security_headers": {
+      "ja": {
+        "title": "HTTPセキュリティヘッダーの設定",
+        "short_description": "セキュリティヘッダーの欠如",
+        "what_is_tested": "ページ応答に所定のセキュリティヘッダーがあるか調べます。",
+        "risk_if_vulnerable": "HTTPセキュリティヘッダーの設定が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Http security header configuration",
+        "short_description": "HTTP security header configuration",
+        "what_is_tested": "It checks whether page responses include selected security headers.",
+        "risk_if_vulnerable": "Exploitation of http security header configuration may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "nosql": {
+      "ja": {
+        "title": "NoSQLクエリへの入力解釈",
+        "short_description": "NoSQLインジェクション",
+        "what_is_tested": "NoSQLクエリへの入力解釈を確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "NoSQLクエリへの入力解釈が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Input interpretation in nosql queries",
+        "short_description": "Input interpretation in NoSQL queries",
+        "what_is_tested": "The scanner submits dedicated inputs for input interpretation in nosql queries and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of input interpretation in nosql queries may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "deserialization": {
+      "ja": {
+        "title": "シリアライズ形式を含む入力の処理",
+        "short_description": "安全でないデシリアライゼーション",
+        "what_is_tested": "シリアライズ形式を含む入力の処理を確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "シリアライズ形式を含む入力の処理が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Handling of inputs in serialized formats",
+        "short_description": "Handling of inputs in serialized formats",
+        "what_is_tested": "The scanner submits dedicated inputs for handling of inputs in serialized formats and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of handling of inputs in serialized formats may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "request_smuggling": {
+      "ja": {
+        "title": "HTTPリクエスト境界の解釈差",
+        "short_description": "HTTPリクエスト・スマグリング",
+        "what_is_tested": "HTTPフレーミング関連ヘッダーへの応答を調べます。",
+        "risk_if_vulnerable": "HTTPリクエスト境界の解釈差が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Http request boundary interpretation differences",
+        "short_description": "HTTP request boundary interpretation differences",
+        "what_is_tested": "It examines responses to HTTP framing header probes.",
+        "risk_if_vulnerable": "Exploitation of http request boundary interpretation differences may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "ssrf": {
+      "ja": {
+        "title": "サーバーから指定先へのリクエスト挙動",
+        "short_description": "SSRF — サーバーを経由した内部リソースへのリクエスト送信",
+        "what_is_tested": "サーバーから指定先へのリクエスト挙動を確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "サーバーから指定先へのリクエスト挙動が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "送信先とプロトコルを許可リスト化し、内部アドレスへの接続を遮断します。",
+        "limitations": "応答本文に内部リソース由来のマーカーが含まれる場合に検出します。応答時間による判定は行いません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Server requests to supplied destinations",
+        "short_description": "Server requests to supplied destinations",
+        "what_is_tested": "The scanner submits dedicated inputs for server requests to supplied destinations and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of server requests to supplied destinations may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Allowlist destinations and protocols, and block requests to internal addresses.",
+        "limitations": "Detection relies on internal-resource markers in the response body; response timing is not used as an oracle."
+      }
+    },
+    "graphql": {
+      "ja": {
+        "title": "GraphQLエンドポイントの設定と応答",
+        "short_description": "GraphQL の脆弱性 (イントロスペクション有効・インジェクションなど)",
+        "what_is_tested": "GraphQLのエンドポイント、クエリ応答、設定を調べます。",
+        "risk_if_vulnerable": "GraphQLエンドポイントの設定と応答が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検出可能なGraphQL経路と応答の範囲に限られます。"
+      },
+      "references": [],
+      "en": {
+        "title": "Graphql endpoint configuration and responses",
+        "short_description": "GraphQL endpoint configuration and responses",
+        "what_is_tested": "It examines GraphQL endpoints, query responses, and configuration.",
+        "risk_if_vulnerable": "Exploitation of graphql endpoint configuration and responses may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "検出可能なGraphQL経路と応答の範囲に限られます。"
+      }
+    },
+    "jwt": {
+      "ja": {
+        "title": "ページ内のJWTとトークン検証上の問題",
+        "short_description": "JWT の脆弱性 (alg=none・弱い秘密鍵など)",
+        "what_is_tested": "取得ページに含まれるJWTを解析します。",
+        "risk_if_vulnerable": "ページ内のJWTとトークン検証上の問題が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Jwts exposed in pages and token validation issues",
+        "short_description": "JWTs exposed in pages and token validation issues",
+        "what_is_tested": "It parses JWTs found in retrieved pages.",
+        "risk_if_vulnerable": "Exploitation of jwts exposed in pages and token validation issues may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "cms": {
+      "ja": {
+        "title": "CMS識別情報と既知の公開パス",
+        "short_description": "CMS 固有の脆弱性",
+        "what_is_tested": "CMS識別用のパスと応答を調べます。",
+        "risk_if_vulnerable": "CMS識別情報と既知の公開パスが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Cms identification and known public paths",
+        "short_description": "CMS identification and known public paths",
+        "what_is_tested": "It checks CMS identification paths and responses.",
+        "risk_if_vulnerable": "Exploitation of cms identification and known public paths may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "xxe": {
+      "ja": {
+        "title": "XML入力の外部エンティティ処理",
+        "short_description": "XXE — XML外部エンティティ参照による情報漏洩",
+        "what_is_tested": "XML入力の外部エンティティ処理を確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "XML入力の外部エンティティ処理が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "XMLパーサーで外部エンティティとDOCTYPEを無効化します。",
+        "limitations": "XMLを受理する到達可能な入力が必要で、応答に現れない外部アクセスは確定できません。"
+      },
+      "references": [],
+      "en": {
+        "title": "External entity processing in xml input",
+        "short_description": "External entity processing in XML input",
+        "what_is_tested": "The scanner submits dedicated inputs for external entity processing in xml input and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of external entity processing in xml input may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Disable external entities and DOCTYPE processing in the XML parser.",
+        "limitations": "XMLを受理する到達可能な入力が必要で、応答に現れない外部アクセスは確定できません。"
+      }
+    },
+    "ldap": {
+      "ja": {
+        "title": "LDAP検索入力の解釈",
+        "short_description": "LDAPインジェクション",
+        "what_is_tested": "LDAP検索入力の解釈を確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "LDAP検索入力の解釈が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Interpretation of ldap search input",
+        "short_description": "Interpretation of LDAP search input",
+        "what_is_tested": "The scanner submits dedicated inputs for interpretation of ldap search input and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of interpretation of ldap search input may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "file_upload": {
+      "ja": {
+        "title": "アップロードファイルの受理と応答",
+        "short_description": "安全でないファイルアップロード",
+        "what_is_tested": "アップロードファイルの受理と応答を確認する専用入力を送信し、応答の内容や挙動を調べます。",
+        "risk_if_vulnerable": "アップロードファイルの受理と応答が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "File upload acceptance and response",
+        "short_description": "File upload acceptance and response",
+        "what_is_tested": "The scanner submits dedicated inputs for file upload acceptance and response and examines response content or behavior.",
+        "risk_if_vulnerable": "Exploitation of file upload acceptance and response may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "race_condition": {
+      "ja": {
+        "title": "並行リクエスト時の状態競合",
+        "short_description": "競合状態 (TOCTOU) の脆弱性",
+        "what_is_tested": "対応するリクエストを並行実行して応答/状態差を調べます。",
+        "risk_if_vulnerable": "並行リクエスト時の状態競合が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "実行可能な要求と観測可能な状態差の範囲に限られます。"
+      },
+      "references": [],
+      "en": {
+        "title": "State races under concurrent requests",
+        "short_description": "State races under concurrent requests",
+        "what_is_tested": "It sends supported requests concurrently and examines response or state differences.",
+        "risk_if_vulnerable": "Exploitation of state races under concurrent requests may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "実行可能な要求と観測可能な状態差の範囲に限られます。"
+      }
+    },
+    "websocket": {
+      "ja": {
+        "title": "WebSocket接続とメッセージ処理",
+        "short_description": "WebSocket インジェクション",
+        "what_is_tested": "検出したWebSocket経路でメッセージ応答を調べます。",
+        "risk_if_vulnerable": "WebSocket接続とメッセージ処理が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Websocket connections and message handling",
+        "short_description": "WebSocket connections and message handling",
+        "what_is_tested": "It examines message responses on detected WebSocket routes.",
+        "risk_if_vulnerable": "Exploitation of websocket connections and message handling may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "secret_leak": {
+      "ja": {
+        "title": "ページ資源内の秘密情報らしい文字列",
+        "short_description": "ページ資源内の秘密情報らしい文字列",
+        "what_is_tested": "取得したページ資源のテキストをパターン照合します。",
+        "risk_if_vulnerable": "ページ資源内の秘密情報らしい文字列が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Secret-like strings in page resources",
+        "short_description": "Secret-like strings in page resources",
+        "what_is_tested": "It pattern-matches text from retrieved page resources.",
+        "risk_if_vulnerable": "Exploitation of secret-like strings in page resources may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "sri": {
+      "ja": {
+        "title": "外部スクリプト参照のSubresource Integrity",
+        "short_description": "外部スクリプト参照のSubresource Integrity",
+        "what_is_tested": "HTML内の外部スクリプト参照とintegrity属性を調べます。",
+        "risk_if_vulnerable": "外部スクリプト参照のSubresource Integrityが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Subresource integrity on external script references",
+        "short_description": "Subresource Integrity on external script references",
+        "what_is_tested": "It checks external script references and integrity attributes in HTML.",
+        "risk_if_vulnerable": "Exploitation of subresource integrity on external script references may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "js_static": {
+      "ja": {
+        "title": "取得可能なJavaScript内の静的所見",
+        "short_description": "取得可能なJavaScript内の静的所見",
+        "what_is_tested": "取得したJavaScript資源を静的ルールで解析します。",
+        "risk_if_vulnerable": "取得可能なJavaScript内の静的所見が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Static findings in retrieved javascript",
+        "short_description": "Static findings in retrieved JavaScript",
+        "what_is_tested": "It statically analyzes retrieved JavaScript resources.",
+        "risk_if_vulnerable": "Exploitation of static findings in retrieved javascript may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "prototype_pollution": {
+      "ja": {
+        "title": "クライアント/サーバー側のプロトタイプ汚染兆候",
+        "short_description": "クライアント/サーバー側のプロトタイプ汚染兆候",
+        "what_is_tested": "クライアント側とサーバー側の候補入力に対する応答を調べます。",
+        "risk_if_vulnerable": "クライアント/サーバー側のプロトタイプ汚染兆候が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Client- and server-side prototype pollution indicators",
+        "short_description": "Client- and server-side prototype pollution indicators",
+        "what_is_tested": "It examines responses to client- and server-side candidate inputs.",
+        "risk_if_vulnerable": "Exploitation of client- and server-side prototype pollution indicators may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "cache_poisoning": {
+      "ja": {
+        "title": "キャッシュ応答の入力依存性",
+        "short_description": "キャッシュ応答の入力依存性",
+        "what_is_tested": "応答を基準/変異リクエスト間で比較します。",
+        "risk_if_vulnerable": "キャッシュ応答の入力依存性が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Input dependence of cached responses",
+        "short_description": "Input dependence of cached responses",
+        "what_is_tested": "It compares responses across baseline and varied requests.",
+        "risk_if_vulnerable": "Exploitation of input dependence of cached responses may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "mass_assignment": {
+      "ja": {
+        "title": "API JSON入力の許可外プロパティ受理",
+        "short_description": "API JSON入力の許可外プロパティ受理",
+        "what_is_tested": "API仕様由来のJSON要求で追加プロパティの扱いを調べます。",
+        "risk_if_vulnerable": "API JSON入力の許可外プロパティ受理が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Acceptance of unapproved properties in api json input",
+        "short_description": "Acceptance of unapproved properties in API JSON input",
+        "what_is_tested": "It checks handling of added properties in API-spec-derived JSON requests.",
+        "risk_if_vulnerable": "Exploitation of acceptance of unapproved properties in api json input may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "outdated_components": {
+      "ja": {
+        "title": "検出したコンポーネントの既知情報",
+        "short_description": "検出したコンポーネントの既知情報",
+        "what_is_tested": "ページのバナー/資源から識別した版を脆弱性情報源と照合します。",
+        "risk_if_vulnerable": "検出したコンポーネントの既知情報が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "版を識別できない資源や外部照会の失敗は判定できません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Known information about detected components",
+        "short_description": "Known information about detected components",
+        "what_is_tested": "It matches identified versions from page banners/resources against vulnerability sources.",
+        "risk_if_vulnerable": "Exploitation of known information about detected components may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "版を識別できない資源や外部照会の失敗は判定できません。"
+      }
+    },
+    "http_methods": {
+      "ja": {
+        "title": "対象オリジンが応答するHTTPメソッド",
+        "short_description": "対象オリジンが応答するHTTPメソッド",
+        "what_is_tested": "OPTIONS等のメソッド要求を対象オリジンへ送信します。",
+        "risk_if_vulnerable": "対象オリジンが応答するHTTPメソッドが悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Http methods that the target origin responds to",
+        "short_description": "HTTP methods that the target origin responds to",
+        "what_is_tested": "It sends methods such as OPTIONS to the target origin.",
+        "risk_if_vulnerable": "Exploitation of http methods that the target origin responds to may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    },
+    "tls_scan": {
+      "ja": {
+        "title": "TLS接続で観測できるプロトコルと設定",
+        "short_description": "TLS接続で観測できるプロトコルと設定",
+        "what_is_tested": "TLS接続設定をスキャナーで検査します。",
+        "risk_if_vulnerable": "TLS接続で観測できるプロトコルと設定が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "プロキシまたはクライアント証明書が必要な接続は検査できない場合があります。"
+      },
+      "references": [],
+      "en": {
+        "title": "Protocols and settings observable over tls",
+        "short_description": "Protocols and settings observable over TLS",
+        "what_is_tested": "It inspects TLS connection settings.",
+        "risk_if_vulnerable": "Exploitation of protocols and settings observable over tls may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "プロキシまたはクライアント証明書が必要な接続は検査できない場合があります。"
+      }
+    },
+    "transport_security": {
+      "ja": {
+        "title": "HTTPメソッド応答とHTTPS転送挙動",
+        "short_description": "HTTPメソッド応答とHTTPS転送挙動",
+        "what_is_tested": "読み取り用HTTPメソッドとHTTPS転送応答を観測します。",
+        "risk_if_vulnerable": "HTTPメソッド応答とHTTPS転送挙動が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
+        "verification_overview": "取得したページ、応答、または照合結果を実装済みの判定条件と比較します。",
+        "remediation_overview": "該当する入力を検証し、安全なAPIや制限的な設定を適用します。",
+        "limitations": "検査対象の入力・ページと観測できた応答の範囲に限られ、未検査や観測不能な経路の安全性は示しません。"
+      },
+      "references": [],
+      "en": {
+        "title": "Http method responses and https transport behavior",
+        "short_description": "HTTP method responses and HTTPS transport behavior",
+        "what_is_tested": "It observes read-only HTTP method and HTTPS redirect responses.",
+        "risk_if_vulnerable": "Exploitation of http method responses and https transport behavior may expose sensitive data, alter data, or affect users or services.",
+        "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
+        "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
+        "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
+      }
+    }
+  }
+}
