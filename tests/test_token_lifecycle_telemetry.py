@@ -60,3 +60,103 @@ def test_event_validation_and_planned_analyzer():
         TokenLifecycleEvent(None, None, "xss", TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX, 1, None, "200", "unknown")
     with pytest.raises(NotImplementedError):
         PlannedTokenDependencyAnalyzer().dependencies(injection_point=None, token_sources=[])
+
+
+@pytest.mark.asyncio
+async def test_managed_probe_stale_refresh_retry_records_one_event():
+    import json
+    import httpx
+    from tests.test_token_lifecycle_fixtures import _TestEngine, _TestFormScanner
+
+    app = object()
+    value = _TestEngine(app, base_url="http://app.test")
+    value.token_lifecycle_manager = True
+    value._is_access_allowed_url = lambda _url: True
+    value._is_url_excluded = lambda _url: False
+    scanner = _TestFormScanner(value)
+    value._token_lifecycle_events = []
+    value.record_token_lifecycle_event = value._token_lifecycle_events.append
+    gets = 0
+    def handler(request):
+        nonlocal gets
+        if request.method == "GET":
+            gets += 1
+            token = "stale" if gets == 1 else "fresh-123"
+            return httpx.Response(200, headers={"content-type": "text/html"},
+                                  text=f'<form><input type="hidden" name="csrf_token" value="{token}"></form>')
+        body = json.loads(request.content or b"{}")
+        if body.get("csrf_token") != "fresh-123":
+            return httpx.Response(419, text="CSRF token mismatch")
+        return httpx.Response(200, text="ok")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://app.test") as client:
+        response, _, _ = await scanner._send_httpx_token_managed(
+            client, "POST", "http://app.test/api", {"q": "x", "csrf_token": "stale"}, {}, "json")
+    assert response.status_code == 200
+    assert len(value._token_lifecycle_events) == 1
+    recorded = value._token_lifecycle_events[0]
+    assert recorded.attempt_count == 2
+    assert recorded.refresh_reason == "stale"
+    assert isinstance(recorded.final_status, int)
+
+
+@pytest.mark.asyncio
+async def test_stale_inconclusive_and_flag_off_are_recorder_independent():
+    import httpx
+    from tests.fixtures.large_vuln_app import create_app
+    from tests.test_token_lifecycle_spa_api import make_scanner
+
+    async def run(enabled, recorder_noop=False):
+        app = create_app()
+        app.state.json_csrf_force_stale = True
+        scanner, value, point = make_scanner(app, "http://large-fixture.test/token-json", enabled)
+        if enabled:
+            value._token_lifecycle_events = []
+            value.record_token_lifecycle_event = value._token_lifecycle_events.append
+        if recorder_noop:
+            value.record_token_lifecycle_event = lambda _event: None
+        async with httpx.AsyncClient(**value.httpx_client_kwargs()) as client:
+            response, _, _ = await scanner._send_httpx_token_managed(
+                client, "POST", point.url, {"email": "probe", "csrf_token": "stale-token"},
+                {"X-CSRF-Token": "stale-token"}, "json")
+        return response, value
+
+    response, value = await run(True)
+    assert any(n == "token_lifecycle:probe_inconclusive:mail_header" for n in value.wave_errors)
+    assert value._token_lifecycle_events[0].refresh_reason in {"stale", "refresh_failed"}
+    baseline, _ = await run(True, True)
+    assert (response.status_code, response.text) == (baseline.status_code, baseline.text)
+
+    response, value = await run(False)
+    baseline, _ = await run(False, True)
+    assert not hasattr(value, "_token_lifecycle_events")
+    assert not any("token_lifecycle_event_error" in n for n in value.wave_errors)
+    assert value.wave_errors == []
+    assert (response.status_code, response.text) == (baseline.status_code, baseline.text)
+
+
+def test_emitted_refresh_reasons_are_accepted_by_event_schema():
+    from pathlib import Path
+    import re
+    from wscan.token_lifecycle import _TOKEN_TELEMETRY_REASONS
+
+    source = Path("wscan/scanners/base.py").read_text()
+    body = source.split("async def _send_httpx_token_managed", 1)[1].split("@staticmethod", 1)[0]
+    emitted = set(re.findall(r'refresh_reason = "([^"]+)"', body))
+    assert emitted <= _TOKEN_TELEMETRY_REASONS
+
+
+@pytest.mark.asyncio
+async def test_managed_probe_swallows_recorder_exception():
+    import httpx
+    from tests.fixtures.large_vuln_app import create_app
+    from tests.test_token_lifecycle_spa_api import make_scanner
+
+    app = create_app()
+    scanner, value, point = make_scanner(app, "http://large-fixture.test/token-json")
+    value.record_token_lifecycle_event = lambda _event: (_ for _ in ()).throw(RuntimeError("recorder"))
+    async with httpx.AsyncClient(**value.httpx_client_kwargs()) as client:
+        response, _, _ = await scanner._send_httpx_token_managed(
+            client, "POST", point.url, {"email": "probe", "csrf_token": "stale-token"},
+            {"X-CSRF-Token": "stale-token"}, "json")
+    assert response.status_code == 200
+    assert value.wave_errors[-1] == "token_lifecycle_event_error:RuntimeError"
