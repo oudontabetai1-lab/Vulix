@@ -428,6 +428,136 @@ def test_shared_check_catalog_version_boundary_in_setup_and_findings(
         findings_page.close()
 
 
+def test_check_help_popover_references_rendering(a11y_harness: UIHarness):
+    """Verify structured catalog references render correctly in Check Help popover.
+
+    Tests:
+    - https:// URLs are rendered as links with rel="noopener noreferrer" and target="_blank"
+    - data-check-help-section="references" is present when references exist
+    - Non-HTTPS URLs (javascript:, http:) are rejected and never rendered as links
+    """
+    require_browser()
+
+    # Catalog data with structured references for sqli check
+    sqli_with_refs = {
+        "catalog_version": "1.0.0",
+        "lang": "en",
+        "checks": {
+            "sqli": {
+                "title": "SQL injection",
+                "what_is_tested": "Testing SQL injection",
+                "short_description": "SQL injection vulnerability",
+                "risk_if_vulnerable": "Data exfiltration",
+                "verification_overview": "Check for unsanitized input",
+                "remediation_overview": "Use parameterized queries",
+                "limitations": "May miss complex injection",
+                "references": [
+                    {"kind": "CWE", "id": "89.html", "url": "https://cwe.mitre.org/data/definitions/89.html"},
+                    {"kind": "OTHER", "id": "bad-ref", "url": "javascript:alert(1)"},
+                    {"kind": "OTHER", "id": "http-ref", "url": "http://example.com"},
+                ],
+            }
+        },
+    }
+
+    # --- Setup popover test ---
+    page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+
+    def setup_catalog_response(route):
+        route.fulfill(json=sqli_with_refs)
+
+    page.route("**/api/v1/check-catalog*", setup_catalog_response)
+
+    try:
+        page.goto(f"{a11y_harness.server_url}/app#/setup")
+        page.wait_for_selector("#setupChecks input[data-check='sqli']", state="attached")
+        page.locator(".setup-tab").filter(has_text="検査項目").click()
+        checkbox = page.locator('#setupChecks input[data-check="sqli"]')
+        checked = checkbox.is_checked()
+        page.locator('#setupChecks [data-check-id="sqli"] .setup-check-info').click()
+        dialog = page.get_by_role("dialog")
+
+        # Verify popover title
+        assert dialog.locator("h3").inner_text() == "SQL injection"
+
+        # Verify references section is rendered
+        ref_section = dialog.locator("[data-check-help-section='references']")
+        assert ref_section.count() == 1, "References section should be present"
+
+        # Verify the references list exists
+        ref_list = ref_section.locator("[data-check-help-references='true']")
+        assert ref_list.count() == 1, "References list should be present"
+
+        # Verify link has proper rel and target attributes
+        # normalizeReferences filters to only https:// URLs, so javascript: and http:// are rejected
+        links = ref_list.locator("a.check-help-reference-link")
+        assert links.count() == 1, f"Expected 1 reference link (https only), got {links.count()}"
+
+        # The single visible link should be the CWE reference with https://
+        link = links.first
+        assert link.get_attribute("rel") == "noopener noreferrer"
+        assert link.get_attribute("target") == "_blank"
+        assert link.get_attribute("href") == "https://cwe.mitre.org/data/definitions/89.html"
+        link_text = link.inner_text()
+        assert "89.html" in link_text, f"Link text should contain '89.html', got '{link_text}'"
+
+    finally:
+        page.close()
+
+    # --- Findings popover test ---
+    findings_page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
+
+    def findings_catalog_response(route):
+        route.fulfill(json=sqli_with_refs)
+
+    findings_page.route("**/api/v1/check-catalog*", findings_catalog_response)
+
+    def use_known_finding_check(route):
+        response = route.fetch()
+        data = response.json()
+        if data.get("findings"):
+            data["findings"][0]["check_type"] = "sqli"
+        route.fulfill(response=response, json=data)
+
+    findings_page.route(
+        "**/api/v1/scans/*/findings",
+        use_known_finding_check,
+    )
+
+    try:
+        findings_page.goto(f"{a11y_harness.server_url}/app#/findings?scan=20261026_100000")
+        findings_page.wait_for_selector(".findings-evidence-wrap")
+        findings_page.locator(".findings-meta-table-wrap tr").filter(has_text="Check Type").locator(
+            ".setup-check-info"
+        ).click()
+        dialog = findings_page.get_by_role("dialog")
+
+        # Verify references section is rendered in findings popover
+        ref_section = dialog.locator("[data-check-help-section='references']")
+        assert ref_section.count() == 1, "References section should be present in findings popover"
+
+        # Verify the references list exists
+        ref_list = ref_section.locator("[data-check-help-references='true']")
+        assert ref_list.count() == 1, "References list should be present in findings popover"
+
+        # Verify link has proper rel and target attributes
+        links = ref_list.locator("a.check-help-reference-link")
+        assert links.count() == 1, f"Expected 1 reference link in findings, got {links.count()}"
+
+        # Verify the link attributes
+        link = links.first
+        assert link.get_attribute("rel") == "noopener noreferrer"
+        assert link.get_attribute("target") == "_blank"
+        assert link.get_attribute("href") == "https://cwe.mitre.org/data/definitions/89.html"
+
+        # Verify link text contains the CWE id
+        link_text = link.inner_text()
+        assert "89.html" in link_text, f"Link text should contain '89.html', got '{link_text}'"
+
+    finally:
+        findings_page.close()
+
+
 def test_findings_check_help_fallback_and_preserves_evidence(a11y_harness: UIHarness):
     require_browser()
     page = a11y_harness.new_page(**STANDARD_VIEWPORTS[768])
