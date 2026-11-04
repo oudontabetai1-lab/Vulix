@@ -122,6 +122,7 @@
     'scanner_ids',
     'scanners',
     'agent_capabilities',
+    'capabilities',
   ]);
 
   const ALLOWED_SCANNER_FIELDS = new Set([
@@ -438,6 +439,32 @@
     }
 
     /**
+     * Check if a declared platform capability is available.
+     * @param {string} capabilityId
+     * @returns {boolean}
+     */
+    hasCapability(capabilityId) {
+      if (this.status !== 'ready' || !this.manifest || !this.manifest.capabilities) {
+        return false;
+      }
+      const cap = this.manifest.capabilities[capabilityId];
+      if (cap === true) return true;
+      if (cap && typeof cap === 'object' && cap.available !== false) return true;
+      return false;
+    }
+
+    /**
+     * Get declared platform capabilities map.
+     * @returns {Object}
+     */
+    getCapabilities() {
+      if (this.status !== 'ready' || !this.manifest || !this.manifest.capabilities) {
+        return {};
+      }
+      return Object.assign({}, this.manifest.capabilities);
+    }
+
+    /**
      * Check if a scanner is applicable under the given scan mode and permissions.
      *
      * INVARIANT: Never guess capability when missing or unavailable.
@@ -625,6 +652,12 @@
     },
     getAgentCapabilities: function () {
       return defaultReader.getAgentCapabilities();
+    },
+    hasCapability: function (capabilityId) {
+      return defaultReader.hasCapability(capabilityId);
+    },
+    getCapabilities: function () {
+      return defaultReader.getCapabilities();
     },
     isScannerApplicable: function (scannerId, mode, permissions) {
       return defaultReader.isScannerApplicable(scannerId, mode, permissions);
