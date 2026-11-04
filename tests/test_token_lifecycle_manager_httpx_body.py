@@ -97,6 +97,64 @@ class HttpxBodyManagerTests(IsolatedAsyncioTestCase):
         self.assertEqual(app.state.json_csrf_requests, 2)
         self.assertEqual(engine.wave_errors, ["token_lifecycle:probe_inconclusive:mail_header"])
 
+    async def test_retry_rediscovers_nonce_rotated_after_first_request(self):
+        app = FastAPI()
+        app.state.json_csrf_expected = {}
+        app.state.expected = "old-token"
+        app.state.page_reads = 0
+        app.state.received = []
+
+        @app.get("/{path}", response_class=HTMLResponse)
+        async def page(path: str):
+            app.state.page_reads += 1
+            token = f"rotated-{app.state.page_reads}"
+            app.state.expected = token
+            return HTMLResponse(f'<meta name="csrf-token" content="{token}">')
+
+        async def post(request: Request, safe: bool):
+            data = await request.json()
+            token = request.headers.get("x-csrf-token")
+            app.state.received.append((data["csrf_token"], token))
+            # Rotate after the initially valid token is submitted but before the
+            # retry; only its fresh GET can discover the replacement.
+            if app.state.page_reads and len(app.state.received) == 1 and token == app.state.expected and data["csrf_token"] == app.state.expected:
+                app.state.expected = "rotated-after-first-post"
+                return PlainTextResponse("CSRF token mismatch", status_code=419)
+            if data["csrf_token"] != app.state.expected or token != app.state.expected:
+                return PlainTextResponse("CSRF token mismatch", status_code=419)
+            value = str(data["email"])
+            if safe:
+                value = value.replace("\r", "").replace("\n", "")
+            return PlainTextResponse(f"accepted:{value}")
+
+        @app.post("/rotating-json", response_class=PlainTextResponse)
+        async def vulnerable(request: Request):
+            return await post(request, False)
+
+        @app.post("/rotating-json-safe", response_class=PlainTextResponse)
+        async def safe(request: Request):
+            return await post(request, True)
+
+        source, pair, engine = await apply(app, "/rotating-json", True)
+        self.assertEqual(pair["response"]["status"], 200)
+        self.assertIn("Cc: injected@example.test", source)
+        self.assertEqual(app.state.received, [("rotated-1", "rotated-1"), ("rotated-2", "rotated-2")])
+        self.assertEqual(engine.wave_errors, [])
+
+        safe_source, safe_pair, _ = await apply(app, "/rotating-json-safe", True)
+        self.assertEqual(safe_pair["response"]["status"], 200)
+        self.assertNotIn("probe\r\nCc: injected@example.test", safe_source)
+
+        # Flag off retains the legacy request and does not perform page discovery.
+        app.state.expected = "old-token"
+        app.state.page_reads = 0
+        app.state.received.clear()
+        _, legacy_pair, legacy_engine = await apply(app, "/rotating-json", False)
+        self.assertEqual(legacy_pair["response"]["status"], 200)
+        self.assertEqual(app.state.page_reads, 0)
+        self.assertEqual(app.state.received, [("old-token", "old-token")])
+        self.assertEqual(legacy_engine.wave_errors, [])
+
     async def test_discovery_failure_and_exception_fall_back_without_raising(self):
         app = create_app()
         app.state.json_csrf_page_error = True
