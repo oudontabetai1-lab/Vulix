@@ -187,7 +187,7 @@
         "risk_if_vulnerable": "Exploitation of header injection in mail-related input may expose sensitive data, alter data, or affect users or services.",
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
-        "limitations": "OOB確認には対応する外部受信先が必要です。"
+        "limitations": "Out-of-band confirmation requires a configured external mail receiver."
       }
     },
     "open_redirect": {
@@ -471,7 +471,7 @@
         "risk_if_vulnerable": "サーバーから指定先へのリクエスト挙動が悪用されると、機密情報の漏えい、データ改変、または利用者/サービスへの影響につながるおそれがあります。",
         "verification_overview": "専用プローブの応答をルール条件で評価し、条件に合う場合に所見を記録します。",
         "remediation_overview": "送信先とプロトコルを許可リスト化し、内部アドレスへの接続を遮断します。",
-        "limitations": "外部から観測できる応答/遅延の範囲で判断します。"
+        "limitations": "応答本文に内部リソース由来のマーカーが含まれる場合に検出します。応答時間による判定は行いません。"
       },
       "references": [],
       "en": {
@@ -481,7 +481,7 @@
         "risk_if_vulnerable": "Exploitation of server requests to supplied destinations may expose sensitive data, alter data, or affect users or services.",
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Allowlist destinations and protocols, and block requests to internal addresses.",
-        "limitations": "外部から観測できる応答/遅延の範囲で判断します。"
+        "limitations": "Detection relies on internal-resource markers in the response body; response timing is not used as an oracle."
       }
     },
     "graphql": {
