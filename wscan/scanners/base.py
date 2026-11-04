@@ -1229,15 +1229,19 @@ class BaseScanner(ABC):
             except Exception:
                 pass
         response = await client.request(method, url, content=(json.dumps(request_body) if carrier == "json" else request_body), headers=request_headers)
+        attempt_count = 1
+        refresh_reason = None
         if enabled:
             outcome = None
             try:
                 outcome = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
                 if outcome.outcome == TokenOutcomeKind.STALE:
+                    refresh_reason = "stale_response"
                     retry_body, retry_headers, refreshed = await self._refresh_httpx_token(client, url, body, headers, carrier)
                     if refreshed:
                         request_body, request_headers = retry_body, retry_headers
                         response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
+                        attempt_count += 1
                     final = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
                     if final.outcome == TokenOutcomeKind.STALE:
                         self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
@@ -1252,6 +1256,17 @@ class BaseScanner(ABC):
                         self.engine._probe_inconclusive = True
                     except Exception:
                         pass
+        # Telemetry is deliberately last: classification and inconclusive handling own verdicts.
+        if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
+            try:
+                from wscan.token_lifecycle import TokenLifecycleEvent, classify_token_response
+                final_outcome = classify_token_response(
+                    status_code=response.status_code, headers=dict(response.headers), body=response.text)
+                self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
+                    None, None, self.CHECK_TYPE, carrier_enum, transport, attempt_count,
+                    refresh_reason, response.status_code, final_outcome.outcome.value))
+            except Exception:
+                pass
         return response, request_body, request_headers
 
     @staticmethod
