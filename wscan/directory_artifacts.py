@@ -7,12 +7,74 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
+from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 from wscan.url_scope import same_origin
 
 
 MAX_BODY = 1_000_000
+SCRIPT_SNAPSHOT_LIMIT = 50_000
+BACKUP_SUFFIXES = (".bak", ".old", ".orig", ".swp", ".zip", ".gz", ".tgz", ".tar")
+
+
+def is_truncated_script_snapshot(body: str | bytes | None, limit: int = SCRIPT_SNAPSHOT_LIMIT) -> bool:
+    """NetworkCapture.enrich_response による 50KB 打ち切りスナップショットか判定する純粋関数。"""
+    if body is None:
+        return False
+    return len(body) >= limit
+
+
+def is_backup_artifact_name(name: str) -> bool:
+    """ファイル名またはパスがバックアップ拡張子（.bak/.old/.orig/.swp/.zip/.gz/.tgz/~）を持つか判定する純粋関数。"""
+    if not name:
+        return False
+    suffix = posixpath.splitext(name)[1].lower()
+    return suffix in BACKUP_SUFFIXES or name.endswith("~")
+
+
+def has_archive_signature(body: bytes | bytearray | None) -> bool:
+    """ZIP, gzip, tar (ustar) の先頭マジックバイトシグネチャを判定する純粋関数。"""
+    if not body:
+        return False
+    raw = bytes(body[:262])
+    return raw.startswith((b"PK\x03\x04", b"\x1f\x8b")) or (len(raw) >= 262 and raw[257:262] == b"ustar")
+
+
+def bind_verification_target(
+    targets: dict,
+    finding: Any,
+    raw_url: str,
+    display_url: str,
+    evidence_type: str,
+) -> bool:
+    """エミットされた Finding にのみ検証対象の生 URL を紐付ける純粋ロジック。
+    重複等で Finding が None の場合は既存の紐付けを上書きしない。
+    """
+    if finding is None or not raw_url:
+        return False
+    targets[id(finding)] = raw_url
+    if (display_url, evidence_type) not in targets:
+        targets[(display_url, evidence_type)] = raw_url
+    return True
+
+
+def lookup_verification_target(
+    targets: dict,
+    finding: Any,
+    default_url: str = "",
+) -> str:
+    """Finding または (display_url, evidence_type) に紐づく検証対象生 URL を取得する純粋ロジック。"""
+    if finding is not None:
+        target = targets.get(id(finding))
+        if target:
+            return target
+        url = getattr(finding, "url", "")
+        ev_type = getattr(finding, "evidence_type", "")
+        target = targets.get((url, ev_type))
+        if target:
+            return target
+    return default_url or (getattr(finding, "url", "") if finding is not None else "")
 
 
 class _Markup(HTMLParser):
@@ -187,9 +249,12 @@ def derive_artifact_candidates(observed_url: str) -> tuple[ArtifactCandidate, ..
     suffix = posixpath.splitext(name)[1].lower()
     if name and not suffix and not name.startswith("."):
         result.insert(0, ArtifactCandidate(clean, "directory", clean))
-    if not name or path.endswith("/") or (not suffix and not name.startswith(".")) or suffix in (".bak", ".old", ".orig", ".swp", ".zip", ".gz", ".tgz", ".map") or name.endswith("~"):
+        result.insert(0, ArtifactCandidate(clean, "resource", clean))
+    if not name or path.endswith("/") or (not suffix and not name.startswith(".")) or is_backup_artifact_name(name) or suffix == ".map":
         if suffix == ".map":
             result.insert(0, ArtifactCandidate(clean, "source_map", clean))
+        elif is_backup_artifact_name(name):
+            result.insert(0, ArtifactCandidate(clean, "backup", clean))
         return tuple(result)
     if suffix in (".js", ".mjs", ".cjs", ".css"):
         result.insert(0, ArtifactCandidate(clean, "resource", clean))
@@ -219,10 +284,10 @@ def control_matches(body: str, url: str, control_body: str, control_url: str) ->
     return bool(a and b) and (a == b or SequenceMatcher(None, a, b, autojunk=False).ratio() >= .9)
 
 
-def classify_backup(body: bytes, content_type: str, url: str) -> tuple[str, ...]:
+def classify_backup(body: bytes, content_type: str, url: str = "") -> tuple[str, ...]:
     if not body:
         return ()
-    if body.startswith((b"PK\x03\x04", b"\x1f\x8b")) or body[257:262] == b"ustar":
+    if has_archive_signature(body):
         return ("archive_signature",)
     text = body[:MAX_BODY].decode("utf-8", errors="replace")
     if re.search(r"(?i)<(?:!doctype|html|title|body)\b", text[:2000]) or "html" in content_type.lower():

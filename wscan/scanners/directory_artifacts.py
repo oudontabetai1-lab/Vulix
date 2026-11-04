@@ -10,8 +10,10 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 
 from wscan.directory_artifacts import (
-    MAX_BODY, ArtifactCandidate, classify_backup, classify_directory_listing,
-    control_matches, derive_artifact_candidates, extract_resource_urls,
+    MAX_BODY, ArtifactCandidate, bind_verification_target, classify_backup,
+    classify_directory_listing, control_matches, derive_artifact_candidates,
+    extract_resource_urls, has_archive_signature, is_backup_artifact_name,
+    is_truncated_script_snapshot, lookup_verification_target,
     normalize_candidate_url, parse_source_map, source_mapping_references,
 )
 from wscan.scanner_contract import (
@@ -115,8 +117,9 @@ class DirectoryArtifactsScanner(BaseScanner):
                     data = bytearray()
                     async for chunk in response.aiter_bytes():
                         data.extend(chunk)
-                        if len(data) > MAX_BODY:
-                            raise RuntimeError("artifact response exceeds byte budget")
+                        if len(data) >= MAX_BODY:
+                            data = data[:MAX_BODY]
+                            break
                     return httpx.Response(
                         response.status_code, headers=response.headers,
                         content=bytes(data), request=httpx.Request("GET", current),
@@ -248,6 +251,21 @@ class DirectoryArtifactsScanner(BaseScanner):
             try:
                 if candidate.kind == "resource" and candidate.url in body_cache:
                     body = body_cache[candidate.url]
+                    if is_truncated_script_snapshot(body):
+                        # 50KB 打ち切りスナップショットの場合は、checked にする前に完全な本文を再取得する
+                        response = await self._fetch(candidate.url, origin)
+                        self._note("executed")
+                        if response is None:
+                            self._note("skipped")
+                            self._checked.add(key)
+                            continue
+                        final = str(response.url)
+                        if response.status_code == 200:
+                            body_cache[candidate.url] = response.text
+                            body_cache[final] = response.text
+                            findings.extend(await self._references(final, response.text, origin, enqueue))
+                        self._checked.add(key)
+                        continue
                     self._note("executed")
                     self._checked.add(key)
                     findings.extend(await self._references(candidate.url, body, origin, enqueue))
@@ -261,6 +279,8 @@ class DirectoryArtifactsScanner(BaseScanner):
                 final = str(response.url)
                 if candidate.kind == "resource":
                     if response.status_code == 200:
+                        body_cache[candidate.url] = response.text
+                        body_cache[final] = response.text
                         findings.extend(await self._references(final, response.text, origin, enqueue))
                     self._checked.add(key)
                     continue
@@ -359,8 +379,7 @@ class DirectoryArtifactsScanner(BaseScanner):
             for existing in getattr(self.engine, "all_findings", []):
                 if existing.check_type == "info_disclosure" and existing.evidence_type == "info_directory_listing" and existing.url == display:
                     return None
-        self._verification_targets[(display, evidence_type)] = candidate.url
-        return await self.record_finding(
+        finding = await self.record_finding(
             url=display, field_name="(" + evidence_type + ")", payload="GET",
             evidence=f"Observed {evidence_type}: {', '.join(signals)}; re-fetch required for confirmation.",
             pair={"request": {"url": display, "method": "GET"}, "response": {"status": response.status_code, "body": "[Artifact body omitted to protect potential secrets]"}},
@@ -368,9 +387,12 @@ class DirectoryArtifactsScanner(BaseScanner):
             evidence_details={"signals": signals, "control_available": control_available, **details},
             reproduction_steps=[f"GET {display}", "Compare with a nonexistent sibling resource and re-fetch to confirm independent signals.", "Disable autoindex and remove public backup files or private source maps."],
         )
+        if finding:
+            bind_verification_target(self._verification_targets, finding, candidate.url, display, evidence_type)
+        return finding
 
     async def verify_finding(self, finding):
-        target = self._verification_targets.get((finding.url, finding.evidence_type), finding.url)
+        target = lookup_verification_target(self._verification_targets, finding, finding.url)
         if "[REDACTED]" in target or "<redacted>" in target:
             self.engine._json_probe_failed = True
             return None
