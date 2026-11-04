@@ -1199,6 +1199,19 @@ class TokenLifecycleEvent:
         if self.refresh_reason not in (None, *_TOKEN_TELEMETRY_REASONS):
             raise ValueError("invalid refresh_reason")
 
+    def to_dict(self) -> dict:
+        return {
+            "probe_attempt_id": self.probe_attempt_id,
+            "evidence_id": self.evidence_id,
+            "check": self.check,
+            "carrier": self.carrier.value,
+            "transport": self.transport.value,
+            "attempt_count": self.attempt_count,
+            "refresh_reason": self.refresh_reason,
+            "final_status": self.final_status,
+            "final_lifecycle_status": self.final_lifecycle_status,
+        }
+
 class TokenSourceAdapter(Protocol):
     async def read(self, *, transport: TokenTransport, url: str, carrier: TokenCarrier, session: Any, source: TokenSource | None = None) -> TokenRefreshResult: ...
 class ExpiryRecoveryAdapter(Protocol):

@@ -1879,10 +1879,36 @@ class ScanEngine:
 
     def _observability_report_data(self, sample_limit: int = 5) -> dict:
         """レポート用に集計と代表サンプルを同じデータ源から返す。"""
-        return {
+        data = {
             **self.observability_summary(),
             "samples": [str(note) for note in self.wave_errors[:sample_limit]],
         }
+        if getattr(self, "token_lifecycle_manager", False) is True:
+            events = getattr(self, "_token_lifecycle_events", [])
+            data["token_lifecycle"] = {
+                "total": len(events),
+                "events": [event.to_dict() for event in events[:100]],
+            }
+        return data
+
+    def record_token_lifecycle_event(self, event) -> None:
+        """Collect validated lifecycle events only when the feature is enabled."""
+        if getattr(self, "token_lifecycle_manager", False) is not True:
+            return
+        try:
+            from wscan.token_lifecycle import TokenLifecycleEvent
+            if not isinstance(event, TokenLifecycleEvent):
+                raise TypeError("event must be TokenLifecycleEvent")
+            if not hasattr(self, "_token_lifecycle_events"):
+                self._token_lifecycle_events = []
+            self._token_lifecycle_events.append(event)
+        except Exception as exc:
+            notes = getattr(self, "wave_errors", None)
+            if isinstance(notes, list):
+                try:
+                    notes.append(f"token_lifecycle_event_error:{type(exc).__name__}")
+                except Exception as note_exc:
+                    self._token_lifecycle_note_error_type = type(note_exc).__name__
 
     def new_oob_address(self) -> Optional[tuple[str, str]]:
         """OOB 受信用の一意トークンとメールアドレスを返す。
