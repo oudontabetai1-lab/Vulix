@@ -48,6 +48,7 @@ stdlib_imports:
 - hashlib
 - hmac
 - html
+- http
 - imaplib
 - importlib
 - inspect

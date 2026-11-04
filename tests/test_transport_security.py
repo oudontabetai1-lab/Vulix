@@ -1,6 +1,7 @@
 """Transport checks run without Chromium, sockets or optional TLS packages."""
 import asyncio
 from datetime import datetime, timezone
+import secrets
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -441,3 +442,67 @@ def test_check_registered_and_cli_defaults_preserved():
         assert main.parse_args().checks == ["transport_security"]
     with patch("sys.argv", ["vulix", "scan", "https://fixture.test"]):
         assert main.parse_args().checks == ["sqli", "xss", "os"]
+
+
+def test_anonymous_probe_policy_and_predicate():
+    assert rules.is_anonymous_probe("transport_security") is True
+    assert rules.is_anonymous_probe("sqli") is False
+
+    policy = rules.AnonymousCookiePolicy()
+    assert policy.set_ok(None, None) is False
+    assert policy.return_ok(None, None) is False
+
+
+def test_anonymous_probes_isolate_response_cookies():
+    sentinel_cookie_name = "test_anon_session_sentinel"
+    sentinel_cookie_value = "token_" + secrets.token_hex(8)
+    seen_requests = []
+    seen_responses = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        cookie_header = request.headers.get("cookie")
+        seen_requests.append({
+            "method": request.method,
+            "url": str(request.url),
+            "cookie": cookie_header,
+        })
+        # 最初のプローブに対して Set-Cookie ヘッダを返す
+        headers = {}
+        if len(seen_requests) == 1:
+            headers["set-cookie"] = f"{sentinel_cookie_name}={sentinel_cookie_value}; Path=/"
+
+        if request.url.path == "/":
+            resp = httpx.Response(200, headers=headers, text="<html>welcome</html>")
+        else:
+            resp = httpx.Response(404, headers=headers, text="not found")
+        seen_responses.append(resp)
+        return resp
+
+    transport = httpx.MockTransport(mock_handler)
+    engine, scanner = engine_for(transport)
+
+    async def scenario():
+        findings = await scan_fixture(scanner, "http://fixture.test/")
+        return findings
+
+    findings = asyncio.run(scenario())
+
+    # 複数回プローブが送信されたことを確認
+    assert len(seen_requests) >= 2
+    # 最初のプローブレスポンスが実際に Set-Cookie を返したことを確認（cookie jar が保持し得る状態にあったことの証明）
+    assert seen_responses[0].headers.get("set-cookie") == f"{sentinel_cookie_name}={sentinel_cookie_value}; Path=/"
+
+    # どの後続プローブにも Set-Cookie の値が送られていないことを確認（AnonymousCookiePolicy の隔離効果）
+    for req in seen_requests:
+        assert req["cookie"] is None or sentinel_cookie_value not in req["cookie"]
+        assert req["cookie"] is None or sentinel_cookie_name not in req["cookie"]
+
+    # 通常のデフォルト cookie jar であれば先行レスポンスの Set-Cookie が後続リクエストへ引き継がれることを対比実証
+    default_client = httpx.Client(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, headers={"set-cookie": f"{sentinel_cookie_name}={sentinel_cookie_value}; Path=/"}
+                                   if req.url.path == "/probe1" else {})
+    ))
+    resp1 = default_client.get("http://fixture.test/probe1")
+    assert resp1.headers.get("set-cookie") == f"{sentinel_cookie_name}={sentinel_cookie_value}; Path=/"
+    resp2 = default_client.get("http://fixture.test/probe2")
+    assert resp2.request.headers.get("cookie") == f"{sentinel_cookie_name}={sentinel_cookie_value}"
