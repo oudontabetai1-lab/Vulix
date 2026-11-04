@@ -120,13 +120,13 @@ class CapabilityMatrixIncrement3Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW), DeclaredStatus.SUPPORTED)
 
     def test_supported_entries_count(self):
-        """supported_entries should have 6 entries after Increment 3."""
+        """supported_entries should have 8 entries after Increment 3 and 4."""
         matrix = build_token_capability_matrix()
         supported_entries = [e for e in matrix.entries if e.status == DeclaredStatus.SUPPORTED]
-        self.assertEqual(len(supported_entries), 6)
+        self.assertEqual(len(supported_entries), 8)
 
     def test_other_entries_count(self):
-        """other_entries should have 43 entries after Increment 3."""
+        """other_entries should have 41 entries after Increment 3 and 4."""
         matrix = build_token_capability_matrix()
         other_entries = [e for e in matrix.entries if e.status != DeclaredStatus.SUPPORTED]
-        self.assertEqual(len(other_entries), 43)
+        self.assertEqual(len(other_entries), 41)

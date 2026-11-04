@@ -1193,15 +1193,41 @@ class BaseScanner(ABC):
         return new_body, new_headers, found
 
     async def _send_httpx_token_managed(self, client, method, url, body, headers, carrier):
-        from wscan.token_lifecycle import TokenCarrier, TokenOutcomeKind, classify_token_response
-        enabled = self._token_manager_enabled({"json": TokenCarrier.JSON, "xml": TokenCarrier.XML}.get(carrier, TokenCarrier.HTTP_HEADER))
+        from wscan.token_lifecycle import TokenCarrier, TokenOutcomeKind, TokenTransport, classify_token_response
+        carrier_enum = {"json": TokenCarrier.JSON, "xml": TokenCarrier.XML}.get(carrier, TokenCarrier.HTTP_HEADER)
+        # Increment 4: gate SPA_API path with explicit transport; fall back to legacy when flag off
+        transport = TokenTransport.SPA_API if carrier_enum in (TokenCarrier.JSON, TokenCarrier.HTTP_HEADER) else TokenTransport.HTTPX
+        enabled = self._token_manager_enabled(carrier_enum, transport)
+        if carrier_enum == TokenCarrier.JSON and any(
+            key.lower() in {"x-csrf-token", "x-xsrf-token", "x-csrftoken", "x-xsrftoken", "csrf-token", "x-request-verification-token"}
+            for key in headers
+        ):
+            header_enabled = self._token_manager_enabled(TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API)
+            enabled = enabled or header_enabled
         request_body, request_headers = body, headers
+        refreshed = False
         if enabled:
             try:
-                request_body, request_headers, _ = await self._refresh_httpx_token(
+                request_body, request_headers, refreshed = await self._refresh_httpx_token(
                     client, url, body, headers, carrier)
             except Exception:
                 request_body, request_headers = body, headers
+        if refreshed:
+            try:
+                from wscan.token_lifecycle import TOKEN_FIELD_NAMES, derive_token_ref_id
+                names = {name.replace("-", "_").lower() for name in TOKEN_FIELD_NAMES}
+                token_value = next((value for key, value in request_headers.items()
+                                    if key.lower() in {"x-csrf-token", "x-xsrf-token", "x-csrftoken", "x-xsrftoken", "csrf-token", "x-request-verification-token"}
+                                    and value != headers.get(key)), None)
+                if token_value is None and isinstance(request_body, dict):
+                    token_value = next((value for key, value in request_body.items()
+                                        if key.replace("-", "_").lower() in names and value != body.get(key)), None)
+                if token_value is not None:
+                    self._record_scan_note(
+                        f"token_lifecycle:refreshed:{self.CHECK_TYPE}:{derive_token_ref_id(str(token_value))}"
+                    )
+            except Exception:
+                pass
         response = await client.request(method, url, content=(json.dumps(request_body) if carrier == "json" else request_body), headers=request_headers)
         if enabled:
             outcome = None

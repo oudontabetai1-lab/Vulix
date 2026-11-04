@@ -95,7 +95,9 @@ class HttpxBodyManagerTests(IsolatedAsyncioTestCase):
         _, pair, engine = await apply(app, "/token-json", True)
         self.assertEqual(pair["response"]["status"], 419)
         self.assertEqual(app.state.json_csrf_requests, 2)
-        self.assertEqual(engine.wave_errors, ["token_lifecycle:probe_inconclusive:mail_header"])
+        self.assertEqual(len(engine.wave_errors), 2)
+        self.assertTrue(engine.wave_errors[0].startswith("token_lifecycle:refreshed:mail_header:tok_ref_"))
+        self.assertEqual(engine.wave_errors[1], "token_lifecycle:probe_inconclusive:mail_header")
 
     async def test_retry_rediscovers_nonce_rotated_after_first_request(self):
         app = FastAPI()
@@ -139,7 +141,8 @@ class HttpxBodyManagerTests(IsolatedAsyncioTestCase):
         self.assertEqual(pair["response"]["status"], 200)
         self.assertIn("Cc: injected@example.test", source)
         self.assertEqual(app.state.received, [("rotated-1", "rotated-1"), ("rotated-2", "rotated-2")])
-        self.assertEqual(engine.wave_errors, [])
+        self.assertEqual(len(engine.wave_errors), 1)
+        self.assertTrue(engine.wave_errors[0].startswith("token_lifecycle:refreshed:mail_header:tok_ref_"))
 
         safe_source, safe_pair, _ = await apply(app, "/rotating-json-safe", True)
         self.assertEqual(safe_pair["response"]["status"], 200)

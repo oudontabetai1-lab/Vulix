@@ -580,11 +580,14 @@ def test_capability_matrix_construction_and_invariants():
     assert matrix.get_status(TokenCarrier.HTTP_HEADER, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
     assert matrix.get_status(TokenCarrier.XML, TokenTransport.HTTPX) == DeclaredStatus.SUPPORTED
 
-    # SPA API: form-urlencoded は UNSUPPORTED、JSON は PLANNED
+    # SPA API: form-urlencoded は UNSUPPORTED、JSON・HTTP_HEADER は Increment 4 で SUPPORTED
     assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.SPA_API) == DeclaredStatus.UNSUPPORTED
-    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.SPA_API) == DeclaredStatus.PLANNED
-    assert matrix.is_supported(TokenCarrier.JSON, TokenTransport.SPA_API) is False
-    assert matrix.is_planned(TokenCarrier.JSON, TokenTransport.SPA_API) is True
+    assert matrix.get_status(TokenCarrier.JSON, TokenTransport.SPA_API) == DeclaredStatus.SUPPORTED
+    assert matrix.is_supported(TokenCarrier.JSON, TokenTransport.SPA_API) is True
+    assert matrix.is_planned(TokenCarrier.JSON, TokenTransport.SPA_API) is False
+    assert matrix.get_status(TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API) == DeclaredStatus.SUPPORTED
+    assert matrix.is_supported(TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API) is True
+    assert matrix.is_planned(TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API) is False
 
     # HAR Replay: 静的記録再生のため動的 nonce は BLOCKED
     assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HAR_REPLAY) == DeclaredStatus.BLOCKED
@@ -607,7 +610,7 @@ def test_capability_matrix_construction_and_invariants():
     assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is True
     assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is False
 
-    # SUPPORTED は実装済みの carrier のみに宣言（Increment 3 で PLAYWRIGHT と FLOW が追加）
+    # SUPPORTED は実装済みの carrier のみに宣言（Increment 4 で JSON+SPA_API と HTTP_HEADER+SPA_API を追加）
     supported_entries = [e for e in matrix.entries if e.status == DeclaredStatus.SUPPORTED]
     assert {(e.carrier, e.transport) for e in supported_entries} == {
         (TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX),
@@ -616,9 +619,11 @@ def test_capability_matrix_construction_and_invariants():
         (TokenCarrier.HTTP_HEADER, TokenTransport.HTTPX),
         (TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT),
         (TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW),
+        (TokenCarrier.JSON, TokenTransport.SPA_API),
+        (TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API),
     }
     other_entries = [e for e in matrix.entries if e.status != DeclaredStatus.SUPPORTED]
-    assert len(other_entries) == 43
+    assert len(other_entries) == 41
     assert all(e.status in (DeclaredStatus.PLANNED, DeclaredStatus.UNSUPPORTED, DeclaredStatus.BLOCKED) for e in other_entries)
 
 
