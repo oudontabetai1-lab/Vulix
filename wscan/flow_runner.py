@@ -267,6 +267,7 @@ class FlowRunner:
             # 古いトークン値がライブ DOM の新しい値で上書きされないように、
             # トークン欄がはじき出す前に live DOM から再抽出する。
             ident = step.selector or step.field
+            live_token_ref = None
             # フィールド名がトークン欄の場合、live DOM からトークン値を再抽出
             try:
                 if self._flow_token_manager_enabled():
@@ -295,6 +296,7 @@ class FlowRunner:
                     if dom_value:
                         # ライブ DOM 値を _flow_token_bindings で記録（生値はログ/notesから除去）
                         ref_id = derive_token_ref_id(dom_value)
+                        live_token_ref = ref_id
                         self._flow_token_bindings[field_lower] = ref_id
                         step.value = dom_value
             except Exception as exc:
@@ -365,7 +367,15 @@ class FlowRunner:
                 p in ident.lower()
                 for p in ("password", "passwd", "pass", "pwd", "secret")
             )
-            display_val = "***" if masked else step.value
+            if masked:
+                display_val = "***"
+            elif live_token_ref:
+                display_val = live_token_ref
+            elif self._flow_token_manager_enabled() and field_lower and is_token_field_name(field_lower):
+                from wscan.token_lifecycle import derive_token_ref_id
+                display_val = derive_token_ref_id(str(step.value))
+            else:
+                display_val = step.value
             # 記録値/selector に Rich markup（`[/admin]` 等）が含まれても MarkupError で fill 成功後に
             # 前提失敗扱いにならないよう escape する。
             console.print(f"  [dim]{label} fill \\[{escape(ident)}] = {escape(display_val[:40])}[/dim]")
