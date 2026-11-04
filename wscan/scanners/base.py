@@ -1237,11 +1237,9 @@ class BaseScanner(ABC):
             if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
                 try:
                     from wscan.token_lifecycle import TokenLifecycleEvent
-                    logger = getattr(self.engine, "request_logger", None)
-                    failed_request = getattr(request_error, "request", None)
-                    owner, attempt_id = getattr(failed_request, "extensions", {}).get("vulix_probe_submission", (None, None))
                     self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
-                        probe_attempt_id=attempt_id if owner is logger else None, evidence_id=None, check=self.CHECK_TYPE,
+                        probe_attempt_id=self._transport_error_attempt_id(
+                            request_error, getattr(self.engine, "request_logger", None)), evidence_id=None, check=self.CHECK_TYPE,
                         carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
                         refresh_reason="transport_error", final_status=None,
                         final_lifecycle_status="unknown"))
@@ -1260,12 +1258,13 @@ class BaseScanner(ABC):
                         attempt_count += 1
                         try:
                             response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
-                        except Exception:
+                        except Exception as retry_error:
                             if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
                                 try:
                                     from wscan.token_lifecycle import TokenLifecycleEvent
                                     self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
-                                        probe_attempt_id=None, evidence_id=None, check=self.CHECK_TYPE,
+                                        probe_attempt_id=self._transport_error_attempt_id(
+                                            retry_error, getattr(self.engine, "request_logger", None)), evidence_id=None, check=self.CHECK_TYPE,
                                         carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
                                         refresh_reason="transport_error", final_status=None,
                                         final_lifecycle_status="unknown"))
@@ -1308,6 +1307,15 @@ class BaseScanner(ABC):
             except Exception as exc:
                 self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
         return response, request_body, request_headers
+
+    @staticmethod
+    def _transport_error_attempt_id(exc, logger):
+        try:
+            request = exc.request
+        except (RuntimeError, AttributeError):
+            return None
+        owner, attempt_id = getattr(request, "extensions", {}).get("vulix_probe_submission", (None, None))
+        return attempt_id if owner is logger else None
 
     @staticmethod
     def _redact_managed_token_evidence(body, headers):

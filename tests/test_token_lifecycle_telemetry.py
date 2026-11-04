@@ -29,6 +29,21 @@ def test_disabled_recorder_preserves_observability():
     assert actual._observability_report_data() == untouched._observability_report_data()
 
 
+def test_transport_error_attempt_id_handles_unset_and_foreign_requests():
+    import httpx
+    from types import SimpleNamespace
+    from wscan.scanners.base import BaseScanner
+    logger = object()
+    error = httpx.ConnectError("x")
+    with pytest.raises(RuntimeError):
+        _ = error.request
+    assert BaseScanner._transport_error_attempt_id(error, logger) is None
+    error._request = SimpleNamespace(extensions={"vulix_probe_submission": (logger, "a1")})
+    assert BaseScanner._transport_error_attempt_id(error, logger) == "a1"
+    error._request = SimpleNamespace(extensions={"vulix_probe_submission": (object(), "a2")})
+    assert BaseScanner._transport_error_attempt_id(error, logger) is None
+
+
 def test_enabled_events_are_serialized_without_sensitive_values():
     value = engine(True)
     value.record_token_lifecycle_event(event())
@@ -196,6 +211,8 @@ async def test_managed_transport_error_emits_event_and_reraises():
 @pytest.mark.asyncio
 async def test_managed_retry_transport_error_emits_one_event_and_preserves_response():
     import httpx
+    import tempfile
+    from wscan.request_logger import RequestLogger
     from tests.test_token_lifecycle_fixtures import _TestEngine, _TestFormScanner
 
     async def run(recorder):
@@ -206,11 +223,15 @@ async def test_managed_retry_transport_error_emits_one_event_and_preserves_respo
         scanner = _TestFormScanner(value)
         events = []
         value.record_token_lifecycle_event = events.append if recorder else lambda _event: None
+        value.request_logger = RequestLogger(tempfile.mkdtemp())
+        value.tls_config = type("TLS", (), {"httpx_options": lambda _self: {}})()
+        value.proxy = None
         posts = gets = 0
+        retry_attempt_id = None
         error = httpx.ConnectError("retry offline")
 
         def handler(request):
-            nonlocal posts, gets
+            nonlocal posts, gets, retry_attempt_id
             if request.method == "GET":
                 gets += 1
                 token = "stale" if gets == 1 else "fresh-123"
@@ -219,23 +240,28 @@ async def test_managed_retry_transport_error_emits_one_event_and_preserves_respo
             posts += 1
             if posts == 1:
                 return httpx.Response(419, text="CSRF token mismatch")
+            retry_attempt_id = request.extensions["vulix_probe_submission"][1]
             raise error
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://app.test") as client:
+        from wscan.engine import ScanEngine
+        kwargs = ScanEngine.httpx_client_kwargs(value, transport=httpx.MockTransport(handler))
+        async with httpx.AsyncClient(**kwargs, base_url="http://app.test") as client:
             try:
                 result = await scanner._send_httpx_token_managed(
                     client, "POST", "http://app.test/api", {"q": "x", "csrf_token": "stale"}, {}, "json")
             except Exception as exc:
                 return ("raised", type(exc), str(exc)), events
-        return ("returned", result[0].status_code), events
+        return ("returned", result[0].status_code), events, retry_attempt_id
 
-    observed, events = await run(True)
-    noop_observed, _ = await run(False)
+    observed, events, retry_attempt_id = await run(True)
+    noop_observed, _, _ = await run(False)
     assert observed == noop_observed == ("returned", 419)
     assert len(events) == 1
     recorded = events[0]
     assert (recorded.refresh_reason, recorded.attempt_count, recorded.final_status,
             recorded.final_lifecycle_status) == ("transport_error", 2, None, "unknown")
+    assert recorded.probe_attempt_id == retry_attempt_id
+    assert recorded.evidence_id is None
 
 
 @pytest.mark.asyncio
