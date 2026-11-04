@@ -2163,9 +2163,9 @@ async def run_agent(args):
         await asyncio.sleep(1.5)
         console.print(
             f"\n[cyan]Monitoring dashboard:[/cyan] "
-            f"[underline]http://localhost:{args.port}[/underline]"
+            f"[underline]http://localhost:{args.port}/app[/underline]"
         )
-        webbrowser.open(f"http://localhost:{args.port}")
+        webbrowser.open(f"http://localhost:{args.port}/app")
 
         try:
             engine = AgentEngine(
@@ -2850,9 +2850,9 @@ async def run_scan(args):
 
         console.print(
             f"\n[cyan]Monitoring dashboard:[/cyan] "
-            f"[underline]http://localhost:{args.port}[/underline]"
+            f"[underline]http://localhost:{args.port}/app[/underline]"
         )
-        webbrowser.open(f"http://localhost:{args.port}")
+        webbrowser.open(f"http://localhost:{args.port}/app")
 
         try:
             engine = ScanEngine(**_engine_kwargs(monitor))
@@ -2976,7 +2976,7 @@ async def run_serve(args):
             s.connect(("8.8.8.8", 80))
             lan_ip = s.getsockname()[0]
             s.close()
-            lan_hint = f"\n  Intranet : [underline]http://{lan_ip}:{port}[/underline]"
+            lan_hint = f"\n  Intranet : [underline]http://{lan_ip}:{port}/app[/underline]"
         except Exception:
             lan_hint = ""
 
@@ -2987,9 +2987,9 @@ async def run_serve(args):
     )
     console.print(Panel.fit(
         f"[bold cyan]WScan — Server Mode[/bold cyan]\n"
-        f"  Bind     : [underline]http://{host}:{port}[/underline]"
+        f"  Bind     : [underline]http://{host}:{port}/app[/underline]"
         f"{lan_hint}\n"
-        f"  Local    : [underline]http://localhost:{port}[/underline]\n"
+        f"  Local    : [underline]http://localhost:{port}/app[/underline]\n"
         f"{auth_line}\n"
         "  The dashboard stays up — run as many scans as you like.\n"
         "  Press Ctrl+C to stop.",
@@ -3533,7 +3533,7 @@ async def run_serve(args):
         await asyncio.sleep(1.2)
         if open_browser:
             try:
-                webbrowser.open(f"http://localhost:{port}")
+                webbrowser.open(f"http://localhost:{port}/app")
             except Exception:
                 pass
 

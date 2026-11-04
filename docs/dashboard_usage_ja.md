@@ -56,13 +56,17 @@ Python 3.11 以上を推奨します。
 python3 main.py serve --host 127.0.0.1 --port 8765
 ```
 
-ブラウザで次を開きます。
+ブラウザで自動的に統合ダッシュボードが開きます（手動で開く場合: `http://localhost:8765/app`）。
 
 ```text
-http://localhost:8765/
+http://localhost:8765/app
 ```
 
-`/` はスキャン履歴、現在の実行、定期スキャンを扱う Server Portal です。画面上の対象 URL（スキャン一覧・実行中バナー・差分・定期スキャン）は `/monitor` と同様に表示時のみ資格情報（query/fragment/matrix/cookieless session）を伏せ、HTTP(S) として解釈できない値や曖昧な入力は中立のプレースホルダ（`（URL非表示）`）で表示して画面共有時の漏えいを防ぎます（保存済みの設定やスキャン入力は変更しません）。「新規スキャン」を押すと `/monitor` の設定画面へ移動します。直接 `http://localhost:8765/monitor` を開いても構いません。
+Vulix の標準ダッシュボードは `/app` です。ポータル、スキャン履歴、監査ログ、Scan Setup、Monitor、Findings（検出結果）、Crawl（クロールグラフ）、Agent Skills、Settings が統合され、通常操作に必要なすべての画面が揃っています。
+
+従来の単体画面である `/`（Server Portal）や `/monitor`（ライブモニター）も後方互換としてそのまま動作し、画面上から新ダッシュボードへのリンクも提供しています。
+
+`/` はスキャン履歴、現在の実行、定期スキャンを扱う従来の Server Portal です。画面上の対象 URL（スキャン一覧・実行中バナー・差分・定期スキャン）は `/monitor` と同様に表示時のみ資格情報（query/fragment/matrix/cookieless session）を伏せ、HTTP(S) として解釈できない値や曖昧な入力は中立のプレースホルダ（`（URL非表示）`）で表示して画面共有時の漏えいを防ぎます（保存済みの設定やスキャン入力は変更しません）。「新規スキャン」を押すと `/monitor` の設定画面へ移動します。直接 `http://localhost:8765/monitor` を開いても構いません。
 
 イントラネットから利用する場合は、認証トークンを設定してください。
 

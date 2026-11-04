@@ -1401,13 +1401,16 @@ body { padding-left: 212px; }
 .ws-rail .foot{margin-top:auto;padding:0 18px;display:flex;flex-direction:column;gap:8px;font-size:11.5px;color:var(--text-muted)}
 .ws-rail .foot .ln{height:1px;background:linear-gradient(to right,transparent,rgba(233,233,237,.14),transparent)}
 .ws-rail .dot{width:6px;height:6px;border-radius:50%;background:var(--low);display:inline-block;margin-right:7px}
-.hdr-newscan{display:none;flex-shrink:0;margin-left:8px;padding:4px 12px;border-radius:6px;font-size:0.72rem;font-weight:700;cursor:pointer;color:#f3f1ff;border:1px solid #6f64a8;background:linear-gradient(to bottom,#655a9e,#544a86)}@media(max-width:1200px){body{padding-left:0}.ws-rail{display:none}.hdr-newscan{display:inline-flex;align-items:center}}
+.hdr-newscan{display:none;flex-shrink:0;margin-left:8px;padding:4px 12px;border-radius:6px;font-size:0.72rem;font-weight:700;cursor:pointer;color:#f3f1ff;border:1px solid #6f64a8;background:linear-gradient(to bottom,#655a9e,#544a86)}@media(max-width:1200px){body{padding-left:0}.ws-rail{display:none}.hdr-newscan{display:inline-flex;align-items:center}.header{gap:8px;padding:8px 12px}}
 </style>
 </head>
 <body>
 <aside class="ws-rail">
   <div class="brand"><img src="/ui/vulix-logo-mark.png" alt="Vulix" style="width:20px;height:20px;border-radius:4px;object-fit:contain;flex:none">Vulix</div>
   <nav>
+    <a href="/app" class="ws-nav" id="railAppDashboardLink" target="_top" style="text-decoration:none;display:flex;align-items:center;color:var(--accent);font-weight:600" title="新ダッシュボード (/app)">
+      <span class="m">🚀</span><span style="flex:1">新ダッシュボード (/app)</span>
+    </a>
     <button type="button" class="ws-nav active" id="navLiveMonitor" aria-current="page" onclick="switchMainView('live')">
       <span class="m"></span><span style="flex:1">ライブモニター</span>
     </button>
@@ -1434,8 +1437,13 @@ body { padding-left: 212px; }
   <div class="cfg-header">
     <div class="logo"><img src="/ui/vulix-logo-mark.png" alt="Vulix" style="width:22px;height:22px;border-radius:4px;object-fit:contain;flex-shrink:0">Vulix <span>Scan Setup</span></div>
     <div class="subtitle">すべての設定をここで行い、ブラウザから直接スキャンを開始できます</div>
-    <a href="/" title="管理画面(ポータル)へ戻る" style="
+    <a href="/app#/setup" target="_top" title="新ダッシュボードのセットアップ画面へ移動" style="
       margin-left:auto; padding:6px 12px; border-radius:6px; font-size:0.78rem;
+      font-weight:700; text-decoration:none; color:var(--text);
+      border:1px solid var(--accent); background:rgba(79,209,197,0.15);
+    ">🚀 新Setup画面 (/app)</a>
+    <a href="/" title="管理画面(ポータル)へ戻る" style="
+      margin-left:8px; padding:6px 12px; border-radius:6px; font-size:0.78rem;
       font-weight:700; text-decoration:none; color:var(--text-muted);
       border:1px solid var(--border); background:var(--surface2);
     ">🏠 ポータルへ戻る</a><button type="button" title="ライブモニターに戻る" onclick="document.getElementById('scanConfigOverlay').classList.remove('active')" style="margin-left:8px;padding:6px 12px;border-radius:6px;font-size:0.78rem;font-weight:700;cursor:pointer;color:var(--text-muted);border:1px solid var(--border);background:var(--surface2)">✕ 閉じる</button>
@@ -2305,6 +2313,11 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
     </div>
   </div>
   <div class="ws-badge" id="wsBadge">WS: ―</div><button type="button" class="hdr-newscan" onclick="document.getElementById('scanConfigOverlay').classList.add('active')" title="新規スキャン">＋ 新規スキャン</button>
+  <a href="/app" id="hdrAppDashboardLink" target="_top" title="新ダッシュボードへ移動" style="
+    margin-left:8px; padding:4px 10px; border-radius:6px;
+    font-size:0.72rem; text-decoration:none; color:var(--text); font-weight:700;
+    border:1px solid var(--accent); background:rgba(79,209,197,0.15);
+  ">🚀 新ダッシュボード (/app)</a>
   <a href="/" title="管理画面(ポータル)へ戻る" style="
     margin-left:8px; padding:4px 10px; border-radius:6px;
     font-size:0.72rem; text-decoration:none; color:var(--text-muted);

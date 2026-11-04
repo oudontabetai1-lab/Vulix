@@ -7,7 +7,6 @@
   const { ApiClient } = global.VulixApiClient;
   const registry = new ModuleRegistry();
   const api = new ApiClient();
-  const portal = document.getElementById('portalFrame');
   const monitor = document.getElementById('monitorFrame');
   const monitorHost = document.getElementById('monitorModule');
   const summarySurface = document.getElementById('summarySurface');
@@ -28,7 +27,6 @@
   let pendingMonitorLoad = null; // 未発火の monitor load リスナ（unmount で解除する）
 
   function unavailable(text) {
-    portal.hidden = true;
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
     if (summarySurface) summarySurface.hidden = true;
@@ -96,7 +94,6 @@
 
   function showMonitorSurface(surface, onReady) {
     clearMessage();
-    portal.hidden = true;
     if (findingsSurface) findingsSurface.hidden = true;
     if (agentSkillsSurface) agentSkillsSurface.hidden = true;
     if (setupSurface) setupSurface.hidden = true;
@@ -124,7 +121,6 @@
     contextEl: context,
     clearMessage,
     hideOthers() {
-      portal.hidden = true;
       monitor.hidden = true;
       if (monitorHost) monitorHost.hidden = true;
       if (findingsSurface) findingsSurface.hidden = true;
@@ -142,7 +138,6 @@
     clearMessage();
     cancelPendingMonitorLoad();
     stopContextSubscription();
-    portal.hidden = true;
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
     if (findingsSurface) findingsSurface.hidden = true;
@@ -315,7 +310,6 @@
     clearMessage();
     cancelPendingMonitorLoad();
     stopContextSubscription();
-    portal.hidden = true;
     monitor.hidden = true;
     if (monitorHost) monitorHost.hidden = true;
     if (findingsSurface) findingsSurface.hidden = true;
@@ -349,7 +343,6 @@
         unavailable: unavailable,
         clearMessage: clearMessage,
         hideOthers: function () {
-          portal.hidden = true;
           monitor.hidden = true;
           if (monitorHost) monitorHost.hidden = true;
           if (agentSkillsSurface) agentSkillsSurface.hidden = true;
@@ -371,7 +364,6 @@
         unavailable: unavailable,
         clearMessage: clearMessage,
         hideOthers: function () {
-          portal.hidden = true;
           monitor.hidden = true;
           if (monitorHost) monitorHost.hidden = true;
           if (findingsSurface) findingsSurface.hidden = true;
@@ -393,7 +385,6 @@
         unavailable: unavailable,
         clearMessage: clearMessage,
         hideOthers: function () {
-          portal.hidden = true;
           monitor.hidden = true;
           if (monitorHost) monitorHost.hidden = true;
           if (findingsSurface) findingsSurface.hidden = true;
