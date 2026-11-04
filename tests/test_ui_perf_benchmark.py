@@ -2,7 +2,7 @@
 
 Measures render/update time and DOM/memory bounds in Chromium for:
 1. Monitor log/event view loaded with 10,000+ entries (local fixtures, no network).
-   - Threshold: render/update time <= 5,000 ms, based on the full-retention measurement, with only the visible window rendered.
+   - Threshold: render/update time <= 250 ms, about 9.8x the slowest (25.50 ms) post-batching measurement, allowing a 4x CI slowdown plus variance headroom.
 2. Findings list loaded with 10,000+ entries (local fixtures, no network).
    - Threshold: initial render time <= 250 ms, DOM count bounded <= 100 items.
    - Memory and DOM remain strictly bounded via incremental rendering.
@@ -50,7 +50,7 @@ def test_monitor_event_log_10k_entries_benchmark(perf_harness: UIHarness):
         page.wait_for_function("() => typeof addEventLog === 'function'")
 
         # Measure 10,000 sequential event log additions
-        res = page.evaluate("""() => {
+        res = page.evaluate("""async () => {
             const start = performance.now();
             const startMem = performance.memory ? performance.memory.usedJSHeapSize : 0;
 
@@ -61,6 +61,7 @@ def test_monitor_event_log_10k_entries_benchmark(perf_harness: UIHarness):
                 const kind = i % 10 === 0 ? "finding" : (i % 5 === 0 ? "error" : "status");
                 addEventLog(kind, `Event [seq=${i}]: tested parameter param_${i} on http://store.internal.local/api/v1/resource/item?token=dummy_val`);
             }
+            await new Promise(requestAnimationFrame);
 
             const durationMs = performance.now() - start;
             const endMem = performance.memory ? performance.memory.usedJSHeapSize : 0;
@@ -89,7 +90,7 @@ def test_monitor_event_log_10k_entries_benchmark(perf_harness: UIHarness):
         }""")
 
         print(f"Monitor 10k events: {res['durationMs']:.2f} ms; store={res['storedCount']}; searchable={res['searchableCount']}; visible={res['domCount']}")
-        assert res["durationMs"] < 5000.0, f"Monitor 10k update time exceeded threshold: {res['durationMs']} ms"
+        assert res["durationMs"] < 250.0, f"Monitor 10k update time exceeded threshold: {res['durationMs']} ms"
         assert res["storedCount"] == 10000
         assert res["searchableCount"] == 10000
         assert res["domCount"] == 500
@@ -111,9 +112,10 @@ def test_monitor_event_log_live_entry_preserves_older_window(perf_harness: UIHar
         page.goto(f"{perf_harness.server_url}/monitor")
         page.wait_for_selector("#eventLog")
         page.wait_for_function("() => typeof addEventLog === 'function'")
-        page.evaluate("""() => {
+        page.evaluate("""async () => {
             window._eventLogEntries.length = 0;
             for (let i = 0; i < 10000; i++) addEventLog('status', `Event seq=${i}`);
+            await new Promise(requestAnimationFrame);
             const log = document.getElementById('eventLog');
             log.scrollTop = 0;
             log.dispatchEvent(new Event('scroll'));
@@ -123,19 +125,24 @@ def test_monitor_event_log_live_entry_preserves_older_window(perf_harness: UIHar
         assert "seq=9250" in older_window[0]
         assert "seq=9749" in older_window[-1]
 
-        page.evaluate("addEventLog('status', 'Event seq=10000')")
+        page.evaluate("""() => {
+            addEventLog('status', 'Event seq=10000');
+            addEventLog('status', 'Event seq=10001');
+            addEventLog('status', 'Event seq=10002');
+        }""")
         assert page.locator("#eventLog .event-item").all_text_contents() == older_window
+        page.wait_for_function("() => !document.getElementById('eventLogNewEntries').hidden")
         assert page.locator("#eventLogNewEntries").is_visible()
-        assert page.locator("#eventLogNewEntryCount").inner_text() == "1 new entry"
+        assert page.locator("#eventLogNewEntryCount").inner_text() == "3 new entries"
 
         page.locator("#eventLogNewEntries").focus()
         page.keyboard.press("Enter")
         latest_window = page.locator("#eventLog .event-item").all_text_contents()
         assert len(latest_window) == 500
-        assert "seq=9501" in latest_window[0]
-        assert "seq=10000" in latest_window[-1]
+        assert "seq=9503" in latest_window[0]
+        assert "seq=10002" in latest_window[-1]
         assert page.locator("#eventLogNewEntries").is_hidden()
-        assert page.evaluate("window._eventLogWindowStart") == 9501
+        assert page.evaluate("window._eventLogWindowStart") == 9503
     finally:
         page.close()
 

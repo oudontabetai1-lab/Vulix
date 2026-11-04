@@ -5870,6 +5870,7 @@ function resetLiveScanState() {
   const eventLog = document.getElementById('eventLog');
   _eventLogEntries.length = 0;
   _eventLogWindowStart = 0;
+  _eventLogFollowingLatest = true;
   _eventLogNewEntryCount = 0;
   const newEntries = document.getElementById('eventLogNewEntries');
   if (newEntries) newEntries.hidden = true;
@@ -6081,6 +6082,8 @@ let _eventLogWindowStart = 0;
 const _eventLogWindowSize = 500;
 const _eventLogPageSize = 250;
 let _eventLogNewEntryCount = 0;
+let _eventLogFollowingLatest = true;
+let _eventLogRenderPending = false;
 function _renderEventLogWindow(log) {
   const end = Math.min(_eventLogEntries.length, _eventLogWindowStart + _eventLogWindowSize);
   const fragment = document.createDocumentFragment();
@@ -6099,6 +6102,7 @@ function _loadOlderEventLogEntries(log) {
   if (_eventLogWindowStart === 0 || log.scrollTop > 0) return;
   const priorHeight = log.scrollHeight;
   _eventLogWindowStart = Math.max(0, _eventLogWindowStart - _eventLogPageSize);
+  _eventLogFollowingLatest = false;
   _renderEventLogWindow(log);
   log.scrollTop = Math.max(1, log.scrollHeight - priorHeight);
 }
@@ -6109,6 +6113,7 @@ document.getElementById('eventLogNewEntries')?.addEventListener('click', functio
   const log = document.getElementById('eventLog');
   if (!log) return;
   _eventLogWindowStart = Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
+  _eventLogFollowingLatest = true;
   _renderEventLogWindow(log);
   log.scrollTop = log.scrollHeight;
   _eventLogNewEntryCount = 0;
@@ -6116,26 +6121,29 @@ document.getElementById('eventLogNewEntries')?.addEventListener('click', functio
   document.getElementById('eventLogNewEntryCount').textContent = '';
 });
 function addEventLog(type, message) {
-  const log = document.getElementById('eventLog');
-  if (!log) return;
-  // Remove placeholder
-  const placeholder = log.querySelector('.no-findings-msg');
-  if (placeholder) placeholder.remove();
-
   const ts = new Date().toTimeString().split(' ')[0];
   const entry = { type, message: String(message), ts };
-  const viewingOlderEntries = _eventLogWindowStart < Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
   _eventLogEntries.push(entry);
-  if (viewingOlderEntries) {
-    _eventLogNewEntryCount += 1;
-    document.getElementById('eventLogNewEntries').hidden = false;
-    document.getElementById('eventLogNewEntryCount').textContent = `${_eventLogNewEntryCount} new ${_eventLogNewEntryCount === 1 ? 'entry' : 'entries'}`;
-  } else {
-    if (_eventLogEntries.length > _eventLogWindowSize) log.removeChild(log.firstElementChild);
-    log.appendChild(_makeEventLogItem(entry));
-    _eventLogWindowStart = Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
-    if (state.autoScroll) log.scrollTop = Number.MAX_SAFE_INTEGER;
-  }
+  if (!_eventLogFollowingLatest) _eventLogNewEntryCount += 1;
+  if (_eventLogRenderPending) return;
+  _eventLogRenderPending = true;
+  requestAnimationFrame(() => {
+    _eventLogRenderPending = false;
+    const log = document.getElementById('eventLog');
+    if (!log) return;
+    if (_eventLogFollowingLatest) {
+      _eventLogWindowStart = Math.max(0, _eventLogEntries.length - _eventLogWindowSize);
+      _renderEventLogWindow(log);
+      if (state.autoScroll) log.scrollTop = Number.MAX_SAFE_INTEGER;
+    } else if (_eventLogNewEntryCount) {
+      const newEntries = document.getElementById('eventLogNewEntries');
+      const newEntryCount = document.getElementById('eventLogNewEntryCount');
+      if (newEntries && newEntryCount) {
+        newEntries.hidden = false;
+        newEntryCount.textContent = `${_eventLogNewEntryCount} new ${_eventLogNewEntryCount === 1 ? 'entry' : 'entries'}`;
+      }
+    }
+  });
 }
 
 function updateScreenshot(b64, label) {
