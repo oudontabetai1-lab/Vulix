@@ -21,6 +21,26 @@ from urllib.parse import urlparse
 #   parameterless `/GetDefault()`）なのでここには入れない。regex らしい括弧だけ `_parens_look_like_regex`
 #   で別途弾く。`?;=&` はクエリで正当（path から除かれる）。`~ . - _ % @ , ! $ ' :` 等も path で正当。
 _STRONG_METACHARS = re.compile(r"[\\|^{}<>`\[\]]")
+_SCRIPT_EXTENSIONS = frozenset({".js", ".mjs", ".cjs"})
+
+
+def is_script_subresource_url(url: str) -> bool:
+    """URL がナビゲーション対象ではなく JavaScript スクリプトサブリソース（.js/.mjs/.cjs）を指しているかを判定する（純粋）。
+
+    クエリパラメータやフラグメントを除去した path の末尾拡張子で判定する。
+    クロールの BFS キューへのスクリプト混入（クロール肥大化）を防ぎつつ、通常ページや API ルートは維持する。
+    """
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    path = (parsed.path or "").lower()
+    for ext in _SCRIPT_EXTENSIONS:
+        if path.endswith(ext):
+            return True
+    return False
 
 def _parens_look_like_regex(path: str) -> bool:
     """path 中の丸括弧が正規表現片らしいかを返す（純粋）。

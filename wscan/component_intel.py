@@ -244,6 +244,53 @@ def _is_js_script_type(value: str) -> bool:
     return t.split(";", 1)[0].strip() in _JS_MIME_ESSENCES
 
 
+def normalize_script_src(src: str) -> str:
+    """HTML 文字参照（&amp; や &#38; 等）をデコードし、前後の空白を除去して正規化する（純粋）。"""
+    import html
+    return html.unescape((src or "").strip())
+
+
+def follow_redirect_chain_in_network(network, start_url: str, max_redirects: int = 5) -> tuple[str, Optional[dict]]:
+    """network 捕捉からリダイレクト（301/302/303/307/308）を追跡し、最終 URL と response pair を返す（純粋・ブラウザ非依存）。
+
+    外部スクリプトの snapshot 時にリダイレクト応答（302 等）の空本文で打ち切らず、最終的なスクリプト実体の
+    本文と pair を解決する。ループや過剰リダイレクトは安全に中断する。
+    """
+    from urllib.parse import urljoin
+
+    if not network or not hasattr(network, "latest_for_url"):
+        return start_url, None
+
+    curr_url = start_url
+    visited: set[str] = set()
+    final_pair: Optional[dict] = None
+
+    for _ in range(max_redirects + 1):
+        if curr_url in visited:
+            break
+        visited.add(curr_url)
+        try:
+            pair = network.latest_for_url(curr_url, match_query=True)
+            if not pair:
+                pair = network.latest_for_url(curr_url, match_query=False)
+        except Exception:
+            pair = None
+        if not pair:
+            break
+        final_pair = pair
+        resp = pair.get("response", {})
+        status = resp.get("status")
+        headers = resp.get("headers", {}) or {}
+        # 大小文字非依存で location ヘッダを取得
+        loc = next((v for k, v in headers.items() if str(k).lower() == "location"), None)
+        if status in (301, 302, 303, 307, 308) and loc:
+            curr_url = urljoin(curr_url, str(loc).strip())
+            continue
+        break
+
+    return curr_url, final_pair
+
+
 def _active_script_srcs(html: str) -> tuple[list[str], str]:
     """HTML から**実際に読み込まれる**外部 script の src と最初の ``<base href>`` を返す（純粋）。
 
@@ -267,9 +314,10 @@ def _active_script_srcs(html: str) -> tuple[list[str], str]:
             elif (tag == "base" and not self._inert and not self.base
                   and a.get("href", "").strip()):
                 # template/noscript 内の <base> はブラウザが無視する。
-                self.base = a["href"].strip()
+                self.base = normalize_script_src(a["href"])
             elif tag == "script" and not self._inert:
-                src = a.get("src", "").strip()
+                raw_src = a.get("src", "").strip()
+                src = normalize_script_src(raw_src)
                 if (src and _is_js_script_type(a.get("type", ""))
                         and not src.startswith(("data:", "javascript:", "about:"))
                         and src not in self.srcs):

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
@@ -31,7 +31,7 @@ from wscan.scanner_contract import (
     ValueKind,
 )
 
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, PageDocumentUnavailable
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -241,6 +241,19 @@ def scan_text_for_secrets(text: str) -> list[dict]:
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
 
+def is_script_scan_allowed(
+    url: str,
+    in_scope_fn: Optional[Callable[[str], bool]] = None,
+    is_excluded_fn: Optional[Callable[[str], bool]] = None,
+) -> bool:
+    """捕捉済みスクリプトがスキャン対象（スコープ内かつ除外対象外）かを判定する（純粋）。"""
+    if in_scope_fn and callable(in_scope_fn) and not in_scope_fn(url):
+        return False
+    if is_excluded_fn and callable(is_excluded_fn) and is_excluded_fn(url):
+        return False
+    return True
+
+
 class SecretLeakScanner(BaseScanner):
     """Detect hard-coded secrets shipped to the browser (page-level)."""
 
@@ -310,17 +323,52 @@ class SecretLeakScanner(BaseScanner):
         return []
 
     async def scan_page_context(self, page) -> list[Finding]:
-        findings = await self.scan_page(page.url)
+        findings: list[Finding] = []
+        page_url = getattr(page, "url", "") or ""
+        page_html = getattr(page, "html", None)
+        doc_error: PageDocumentUnavailable | None = None
+
+        # 1. 参照ドキュメントの走査:
+        # クロール時に捕捉済みの page.html があれば優先利用し、direct GET 失敗に依存させない。
+        # html が無ければ scan_page を試みるが、PageDocumentUnavailable で例外終了させず
+        # 捕捉済みスクリプトの走査を必ず実行する。
+        if page_url and page_url not in self._checked_urls:
+            is_excluded = getattr(self.engine, "_is_url_excluded", None)
+            if not (callable(is_excluded) and is_excluded(page_url)):
+                if page_html and page_html.strip():
+                    self._checked_urls.add(page_url)
+                    findings.extend(await self._record_body_findings(page_url, page_html))
+                else:
+                    try:
+                        findings.extend(await self.scan_page(page_url))
+                    except PageDocumentUnavailable as exc:
+                        doc_error = exc
+                    except Exception:
+                        pass
+
+        # 2. 捕捉済み外部スクリプトの走査:
+        # 参照ドキュメントの再取得（direct GET）成否にかかわらず、すでに crawl で捕捉済みの本文を走査する。
+        # オペレータ指定の URL 除外ルール（_is_url_excluded）も適用する。
         in_scope = getattr(self.engine, "_is_access_allowed_url", None)
+        is_excluded = getattr(self.engine, "_is_url_excluded", None)
         for url, body in (getattr(page, "external_scripts", None) or {}).items():
-            # A page may load third-party resources outside the configured scan scope.
-            if callable(in_scope) and not in_scope(url):
+            if not is_script_scan_allowed(url, in_scope_fn=in_scope, is_excluded_fn=is_excluded):
                 continue
-            findings.extend(await self._scan_body(url, body, referring_page_url=page.url))
+            findings.extend(await self._scan_body(url, body, referring_page_url=page_url))
+
+        # page.html が無く、direct GET も PageDocumentUnavailable だった場合、
+        # 捕捉済みスクリプトの findings を保持して PageDocumentUnavailable を送出し
+        # engine の resume 経路に error（未完了）として記録させる。
+        if doc_error is not None and not (page_html and page_html.strip()):
+            raise PageDocumentUnavailable(str(doc_error), findings=findings)
+
         return findings
 
     async def scan_page(self, url: str) -> list[Finding]:
         if url in self._checked_urls:
+            return []
+        is_excluded = getattr(self.engine, "_is_url_excluded", None)
+        if callable(is_excluded) and is_excluded(url):
             return []
         self._checked_urls.add(url)
 

@@ -14,6 +14,7 @@ from wscan.url_extraction import (
     preceding_nonspace,
     strip_trailing_noise,
     extend_query_bracket_tail,
+    is_script_subresource_url,
 )
 
 
@@ -322,6 +323,43 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
                 any(c in path for c in "[]{}|^`\\<>"),
                 f"ゴミ URL が残った(path): {u}",
             )
+
+
+
+class ScriptSubresourceFilterTests(unittest.TestCase):
+    def test_script_subresources_recognized(self):
+        scripts = [
+            "http://example.com/assets/app.js",
+            "http://example.com/assets/vendor.min.js?v=1.2.3",
+            "https://cdn.test/chunks/main.mjs",
+            "https://scope.test/module.cjs#hash",
+            "http://example.com/static/BUNDLE.JS",
+        ]
+        for url in scripts:
+            with self.subTest(url=url):
+                self.assertTrue(
+                    is_script_subresource_url(url),
+                    f"{url} should be recognized as a script subresource",
+                )
+
+    def test_safe_twin_navigable_pages_not_excluded(self):
+        # 安全ツイン: 通常ページや API エンドポイントはスクリプトサブリソースと誤判定されない。
+        navigable = [
+            "http://example.com/about",
+            "http://example.com/index.html",
+            "http://example.com/api/v1/users",
+            "http://example.com/rest/products/search?q=js",
+            "http://example.com/docs/guide.htm",
+            "http://example.com/terms/",
+            "",
+            None,
+        ]
+        for url in navigable:
+            with self.subTest(url=url):
+                self.assertFalse(
+                    is_script_subresource_url(url),
+                    f"{url} must not be classified as a script subresource",
+                )
 
 
 if __name__ == "__main__":

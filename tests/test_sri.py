@@ -165,6 +165,39 @@ class SRIDetectionTests(unittest.TestCase):
         self.assertEqual(find_unprotected_externals("", PAGE), [])
         self.assertEqual(find_unprotected_externals(None, PAGE), [])
 
+    def test_script_with_html_entity_character_reference_is_flagged(self):
+        # Edge 3: script src 中の &amp; 等の HTML 文字参照を正規化して突合・検出する。
+        html = '<script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js?v=1&amp;opt=2"></script>'
+        hits = find_unprotected_externals(html, PAGE)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["src"], "https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js?v=1&opt=2")
+        self.assertEqual(hits[0]["host"], "cdn.jsdelivr.net")
+
+    def test_safe_twin_script_with_html_entity_and_integrity_not_flagged(self):
+        # 安全ツイン: integrity が付与された保護済み外部スクリプトは &amp; が含まれても検知しない。
+        html = (
+            '<script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js?v=1&amp;opt=2" '
+            'integrity="sha384-abcdef" crossorigin="anonymous"></script>'
+        )
+        self.assertEqual(find_unprotected_externals(html, PAGE), [])
+
+    def test_safe_twin_same_origin_script_with_html_entity_not_flagged(self):
+        # 安全ツイン: 同一オリジンのスクリプトは &amp; が含まれても検知しない。
+        html = '<script src="/static/app.js?v=1&amp;opt=2"></script>'
+        self.assertEqual(find_unprotected_externals(html, PAGE), [])
+
+    def test_safe_twin_template_script_with_html_entity_not_flagged(self):
+        # 安全ツイン: inert な <template> 内のスクリプトは &amp; が含まれても検知しない。
+        html = '<template><script src="https://cdn.jsdelivr.net/lib.js?a=1&amp;b=2"></script></template>'
+        self.assertEqual(find_unprotected_externals(html, PAGE), [])
+
+    def test_normalize_script_src_helper(self):
+        from wscan.component_intel import normalize_script_src
+        self.assertEqual(normalize_script_src(" /a.js?x=1&amp;y=2 "), "/a.js?x=1&y=2")
+        self.assertEqual(normalize_script_src("/b.js?val=&#38;"), "/b.js?val=&")
+        self.assertEqual(normalize_script_src(""), "")
+        self.assertEqual(normalize_script_src(None), "")
+
 
 if __name__ == "__main__":
     unittest.main()
