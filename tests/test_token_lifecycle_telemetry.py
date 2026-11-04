@@ -100,6 +100,75 @@ async def test_managed_probe_stale_refresh_retry_records_one_event():
 
 
 @pytest.mark.asyncio
+async def test_managed_probe_correlates_real_request_logger_ids():
+    import json
+    import tempfile
+    import httpx
+    from wscan.engine import ScanEngine
+    from wscan.request_logger import RequestLogger
+    from tests.test_token_lifecycle_fixtures import _TestEngine, _TestFormScanner
+
+    async def run(with_logger):
+        value = _TestEngine(object(), base_url="http://app.test")
+        value.token_lifecycle_manager = True
+        value._is_access_allowed_url = lambda _url: True
+        value._is_url_excluded = lambda _url: False
+        scanner = _TestFormScanner(value)
+        events = []
+        value.record_token_lifecycle_event = events.append
+        logger = RequestLogger(tempfile.mkdtemp()) if with_logger else None
+        value.request_logger = logger
+        value.tls_config = type("TLS", (), {"httpx_options": lambda _self: {}})()
+        value.proxy = None
+        gets = 0
+
+        def handler(request):
+            nonlocal gets
+            if request.method == "GET":
+                gets += 1
+                token = "stale" if gets == 1 else "fresh-123"
+                return httpx.Response(200, text=f'<form><input type="hidden" name="csrf_token" value="{token}"></form>')
+            body = json.loads(request.content or b"{}")
+            return httpx.Response(200, text="ok") if body.get("csrf_token") == "fresh-123" else httpx.Response(419, text="CSRF token mismatch")
+
+        kwargs = ScanEngine.httpx_client_kwargs(value, transport=httpx.MockTransport(handler)) if logger else {"transport": httpx.MockTransport(handler)}
+        async with httpx.AsyncClient(**kwargs) as client:
+            response, _, _ = await scanner._send_httpx_token_managed(
+                client, "POST", "http://app.test/api", {"q": "x", "csrf_token": "stale"}, {}, "json")
+        assert response.status_code == 200 and len(events) == 1
+        expected_attempt = response.request.extensions["vulix_probe_submission"][1] if logger else None
+        expected_evidence = response.extensions["vulix_probe_observation"][1] if logger else None
+        return events[0], expected_attempt, expected_evidence
+
+    correlated, expected_attempt, expected_evidence = await run(True)
+    assert expected_attempt and expected_evidence
+    assert correlated.probe_attempt_id == expected_attempt
+    assert correlated.evidence_id == expected_evidence
+    plain, _, _ = await run(False)
+    assert plain.probe_attempt_id is None and plain.evidence_id is None
+
+
+@pytest.mark.asyncio
+async def test_managed_probe_refresh_failed_emits_one_event():
+    import httpx
+    from tests.test_token_lifecycle_fixtures import _TestEngine, _TestFormScanner
+    value = _TestEngine(object(), base_url="http://app.test")
+    value.token_lifecycle_manager = True
+    value._is_access_allowed_url = lambda _url: True
+    value._is_url_excluded = lambda _url: False
+    scanner = _TestFormScanner(value)
+    events = []
+    value.record_token_lifecycle_event = events.append
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, text="<form></form>")
+        return httpx.Response(419, text="CSRF token mismatch")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await scanner._send_httpx_token_managed(client, "POST", "http://app.test/api", {"csrf_token": "stale"}, {}, "json")
+    assert len(events) == 1 and events[0].refresh_reason == "refresh_failed"
+
+
+@pytest.mark.asyncio
 async def test_managed_transport_error_emits_event_and_reraises():
     import httpx
     from tests.test_token_lifecycle_fixtures import _TestEngine, _TestFormScanner
@@ -121,6 +190,7 @@ async def test_managed_transport_error_emits_event_and_reraises():
     recorded = value._token_lifecycle_events[0]
     assert (recorded.refresh_reason, recorded.final_status, recorded.final_lifecycle_status, recorded.attempt_count) == (
         "transport_error", None, "unknown", 1)
+    assert recorded.probe_attempt_id is None
 
 
 @pytest.mark.asyncio
