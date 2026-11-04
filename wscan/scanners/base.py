@@ -1228,16 +1228,52 @@ class BaseScanner(ABC):
                     )
             except Exception:
                 pass
-        response = await client.request(method, url, content=(json.dumps(request_body) if carrier == "json" else request_body), headers=request_headers)
+        attempt_count = 1
+        refresh_reason = None
+        retry_transport_error_recorded = False
+        try:
+            response = await client.request(method, url, content=(json.dumps(request_body) if carrier == "json" else request_body), headers=request_headers)
+        except Exception as request_error:
+            if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
+                try:
+                    from wscan.token_lifecycle import TokenLifecycleEvent
+                    self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
+                        probe_attempt_id=self._transport_error_attempt_id(
+                            request_error, getattr(self.engine, "request_logger", None)), evidence_id=None, check=self.CHECK_TYPE,
+                        carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
+                        refresh_reason="transport_error", final_status=None,
+                        final_lifecycle_status="unknown"))
+                except Exception as exc:
+                    self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
+            raise
         if enabled:
             outcome = None
             try:
                 outcome = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
                 if outcome.outcome == TokenOutcomeKind.STALE:
+                    refresh_reason = "stale"
                     retry_body, retry_headers, refreshed = await self._refresh_httpx_token(client, url, body, headers, carrier)
                     if refreshed:
                         request_body, request_headers = retry_body, retry_headers
-                        response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
+                        attempt_count += 1
+                        try:
+                            response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
+                        except Exception as retry_error:
+                            if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
+                                try:
+                                    from wscan.token_lifecycle import TokenLifecycleEvent
+                                    self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
+                                        probe_attempt_id=self._transport_error_attempt_id(
+                                            retry_error, getattr(self.engine, "request_logger", None)), evidence_id=None, check=self.CHECK_TYPE,
+                                        carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
+                                        refresh_reason="transport_error", final_status=None,
+                                        final_lifecycle_status="unknown"))
+                                    retry_transport_error_recorded = True
+                                except Exception as exc:
+                                    self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
+                            raise
+                    else:
+                        refresh_reason = "refresh_failed"
                     final = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
                     if final.outcome == TokenOutcomeKind.STALE:
                         self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
@@ -1252,7 +1288,34 @@ class BaseScanner(ABC):
                         self.engine._probe_inconclusive = True
                     except Exception:
                         pass
+        # Telemetry is deliberately last: classification and inconclusive handling own verdicts.
+        if (enabled and not retry_transport_error_recorded and self.engine
+                and hasattr(self.engine, "record_token_lifecycle_event")):
+            try:
+                from wscan.token_lifecycle import TokenLifecycleEvent, classify_token_response
+                final_outcome = classify_token_response(
+                    status_code=response.status_code, headers=dict(response.headers), body=response.text)
+                logger = getattr(self.engine, "request_logger", None)
+                request_owner, attempt_id = response.request.extensions.get("vulix_probe_submission", (None, None))
+                evidence_owner, observation_id = response.extensions.get("vulix_probe_observation", (None, None))
+                self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
+                    probe_attempt_id=attempt_id if request_owner is logger else None,
+                    evidence_id=observation_id if evidence_owner is logger else None, check=self.CHECK_TYPE,
+                    carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
+                    refresh_reason=refresh_reason, final_status=response.status_code,
+                    final_lifecycle_status=final_outcome.outcome.value))
+            except Exception as exc:
+                self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
         return response, request_body, request_headers
+
+    @staticmethod
+    def _transport_error_attempt_id(exc, logger):
+        try:
+            request = exc.request
+        except (RuntimeError, AttributeError):
+            return None
+        owner, attempt_id = getattr(request, "extensions", {}).get("vulix_probe_submission", (None, None))
+        return attempt_id if owner is logger else None
 
     @staticmethod
     def _redact_managed_token_evidence(body, headers):

@@ -35,7 +35,7 @@ from html.parser import HTMLParser
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 
 # ── 1. 定数および免責事項 ────────────────────────────────────────────────
@@ -1175,3 +1175,52 @@ def build_token_capability_matrix(
         execution_coverage_claimed=False,
         disclaimer=TOKEN_LIFECYCLE_DISCLAIMER,
     )
+
+# Opt-in, write-only lifecycle telemetry. Values are deliberately primitive and secret-free.
+_TOKEN_TELEMETRY_REASONS = frozenset({"stale", "refresh_failed", "retry", "transport_error", "unknown"})
+
+@dataclass(frozen=True)
+class TokenLifecycleEvent:
+    probe_attempt_id: str | None
+    evidence_id: str | None
+    check: str
+    carrier: TokenCarrier
+    transport: TokenTransport
+    attempt_count: int
+    refresh_reason: str | None
+    final_status: int | None
+    final_lifecycle_status: str
+
+    def __post_init__(self):
+        if self.attempt_count < 1:
+            raise ValueError("attempt_count must be >= 1")
+        if self.final_status is not None and (type(self.final_status) is not int):
+            raise TypeError("final_status must be int or None")
+        if self.refresh_reason not in (None, *_TOKEN_TELEMETRY_REASONS):
+            raise ValueError("invalid refresh_reason")
+
+    def to_dict(self) -> dict:
+        return {
+            "probe_attempt_id": self.probe_attempt_id,
+            "evidence_id": self.evidence_id,
+            "check": self.check,
+            "carrier": self.carrier.value,
+            "transport": self.transport.value,
+            "attempt_count": self.attempt_count,
+            "refresh_reason": self.refresh_reason,
+            "final_status": self.final_status,
+            "final_lifecycle_status": self.final_lifecycle_status,
+        }
+
+class TokenSourceAdapter(Protocol):
+    async def read(self, *, transport: TokenTransport, url: str, carrier: TokenCarrier, session: Any, source: TokenSource | None = None) -> TokenRefreshResult: ...
+class ExpiryRecoveryAdapter(Protocol):
+    def classify(self, *, status_code: int | None, headers: Mapping[str, str], body: str | bytes | None) -> TokenOutcome: ...
+    async def recover(self, *, outcome: TokenOutcome, attempt_count: int, max_retries: int, source: TokenSourceAdapter, session: Any, request: Any) -> RetryDecision: ...
+class ParallelSessionIsolation(Protocol):
+    def session_for(self, *, worker_id: str, base_session: Any) -> Any: ...
+class TokenDependencyAnalyzer(Protocol):
+    def dependencies(self, *, injection_point: Any, token_sources: Sequence[TokenSource]) -> Sequence[str]: ...
+class PlannedTokenDependencyAnalyzer:
+    def dependencies(self, *, injection_point: Any, token_sources: Sequence[TokenSource]) -> Sequence[str]:
+        raise NotImplementedError("token dependency analysis is PLANNED")
