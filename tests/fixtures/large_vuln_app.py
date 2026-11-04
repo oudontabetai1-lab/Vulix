@@ -58,6 +58,8 @@ def _layout(title: str, body: str) -> str:
             '<a href="/csrf-contact-safe">CSRF Contact Safe</a>',
             '<a href="/csrf-static">CSRF Static</a>',
             '<a href="/csrf-failing-form">CSRF Failing Form</a>',
+            '<a href="/csrf-contact-oneshot-stuck">CSRF Oneshot Stuck</a>',
+            '<a href="/csrf-contact-oneshot-stuck-safe">CSRF Oneshot Stuck Safe</a>',
             '<a href="/coupon">Coupon</a>',
             '<a href="/ws-lab">WebSocket Lab</a>',
             '<a href="/login">Login</a>',
@@ -84,6 +86,7 @@ def create_app(page_count: int = 48) -> FastAPI:
     app.state.tickets = []
     app.state.csrf_nonces = {}
     app.state.csrf_nonces_safe = {}
+    app.state.csrf_stuck_expected = {}
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
@@ -602,6 +605,44 @@ def create_app(page_count: int = 48) -> FastAPI:
         if csrf_token != "static-token-fixed-9999":
             return PlainTextResponse("CSRF token mismatch", status_code=403)
         return PlainTextResponse(f"Sending confirmation...\nTo: {email}\nSubject: Thanks", status_code=200)
+
+    # ── token lifecycle: refresh しても再送が stale のままのフォーム（脆弱 / 安全ツイン） ──
+    def _stuck_form(action):
+        return HTMLResponse(_layout("CSRF Stuck", f"""
+        <form method="post" action="{action}">
+          <input type="hidden" name="csrf_token" value="token_{secrets.token_hex(8)}">
+          <input name="email" value="user@example.com">
+          <button>Send</button>
+        </form>
+        """))
+
+    @app.get("/csrf-contact-oneshot-stuck", response_class=HTMLResponse)
+    async def csrf_stuck_form(request: Request):
+        sid = request.cookies.get("session_id") or secrets.token_hex(16)
+        returned = f"token_{secrets.token_hex(8)}"
+        # The server rotates to a different nonce before returning the already-expired value.
+        app.state.csrf_stuck_expected[sid] = f"token_{secrets.token_hex(8)}"
+        body = f'<form method="post" action="/csrf-contact-oneshot-stuck"><input type="hidden" name="csrf_token" value="{returned}"><input name="email" value="user@example.com"></form>'
+        resp = HTMLResponse(_layout("CSRF Stuck", body))
+        if not request.cookies.get("session_id"):
+            resp.set_cookie("session_id", sid)
+        return resp
+
+    @app.post("/csrf-contact-oneshot-stuck", response_class=PlainTextResponse)
+    async def csrf_stuck(request: Request, email: str = Form(""), csrf_token: str = Form("")):
+        sid = request.cookies.get("session_id")
+        if not sid or csrf_token != app.state.csrf_stuck_expected.get(sid):
+            return PlainTextResponse("CSRF token expired", status_code=419)
+        return PlainTextResponse(f"Sending confirmation\nTo: {email}\nSubject: Thanks")
+
+    @app.get("/csrf-contact-oneshot-stuck-safe", response_class=HTMLResponse)
+    async def csrf_stuck_safe_form():
+        return _stuck_form("/csrf-contact-oneshot-stuck-safe")
+
+    @app.post("/csrf-contact-oneshot-stuck-safe", response_class=PlainTextResponse)
+    async def csrf_stuck_safe(email: str = Form(""), csrf_token: str = Form("")):
+        clean = email.replace("\r", "").replace("\n", "")
+        return PlainTextResponse(f"Sending confirmation\nTo: {clean}\nSubject: Thanks")
 
     @app.get("/csrf-failing-form", response_class=PlainTextResponse)
     async def csrf_failing_form_get():

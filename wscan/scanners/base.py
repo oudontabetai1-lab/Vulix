@@ -1078,6 +1078,19 @@ class BaseScanner(ABC):
             pass
         return jar
 
+    def _token_manager_enabled(self) -> bool:
+        """engine.token_lifecycle_manager（既定 off）かつ FORM×HTTPX が SUPPORTED の時のみ true。"""
+        try:
+            if getattr(getattr(self, "engine", None), "token_lifecycle_manager", False) is not True:
+                return False
+            from wscan.token_lifecycle import (
+                TokenCarrier, TokenTransport, build_token_capability_matrix,
+            )
+            return build_token_capability_matrix().is_supported(
+                TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX)
+        except Exception:
+            return False
+
     async def _apply_form_with_token_refresh(
         self,
         ip: InjectionPoint,
@@ -1209,11 +1222,23 @@ class BaseScanner(ABC):
                 self._record_probe_status(resp)
 
                 # レスポンス分類と有界リトライ判定 (最大1回)
-                outcome = classify_token_response(
-                    status_code=resp.status_code,
-                    headers=dict(resp.headers),
-                    body=resp.text,
-                )
+                manager_enabled = self._token_manager_enabled()
+                try:
+                    if manager_enabled:
+                        from wscan.token_lifecycle import refresh_form_tokens
+                        outcome = refresh_form_tokens(
+                            token_fields, provenance=action, status_code=resp.status_code,
+                            headers=dict(resp.headers), body=resp.text, fields=fields,
+                        ).outcome
+                    else:
+                        outcome = classify_token_response(
+                            status_code=resp.status_code, headers=dict(resp.headers), body=resp.text,
+                        )
+                except Exception:
+                    manager_enabled = False
+                    outcome = classify_token_response(
+                        status_code=resp.status_code, headers=dict(resp.headers), body=resp.text,
+                    )
                 if outcome.outcome == TokenOutcomeKind.STALE:
                     retry_dec = decide_token_retry(
                         outcome,
@@ -1238,8 +1263,20 @@ class BaseScanner(ABC):
                             if not form_info2 or any(k not in fresh for k in token_fields):
                                 self._record_scan_note(f"token_lifecycle:refresh_unavailable:{self.CHECK_TYPE}")
                             else:
-                                fields2 = dict(fields)
-                                fields2.update({k: fresh[k] for k in token_fields})
+                                if manager_enabled:
+                                    try:
+                                        from wscan.token_lifecycle import refresh_form_tokens
+                                        fields2 = refresh_form_tokens(
+                                            {k: fresh[k] for k in token_fields}, provenance=action,
+                                            status_code=200, fields=fields,
+                                        ).fields
+                                    except Exception:
+                                        manager_enabled = False
+                                        fields2 = dict(fields)
+                                        fields2.update({k: fresh[k] for k in token_fields})
+                                else:
+                                    fields2 = dict(fields)
+                                    fields2.update({k: fresh[k] for k in token_fields})
                                 req_time = time.time()
                                 if method == "GET":
                                     resp = await client.get(action, params=fields2)
@@ -1247,6 +1284,25 @@ class BaseScanner(ABC):
                                     resp = await client.post(action, data=fields2)
                                 resp_time = time.time()
                                 self._record_probe_status(resp)
+
+                # token lifecycle: manager classifies the final retry response; flag-off remains legacy.
+                if manager_enabled:
+                    try:
+                        from wscan.token_lifecycle import refresh_form_tokens
+                        _fin = fields2 if "fields2" in locals() else fields
+                        _res = refresh_form_tokens(
+                            {k: _fin.get(k, "") for k in token_fields},
+                            provenance=action,
+                            status_code=resp.status_code,
+                            headers=dict(resp.headers),
+                            body=resp.text,
+                            refreshed="fields2" in locals(),
+                        )
+                        if _res.residual_stale:
+                            self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                    except Exception:
+                        # The legacy request has already completed; classification failure must not raise.
+                        pass
 
                 # 生トークン値を秘匿した安全な post_data を作成
                 final_fields = fields2 if "fields2" in locals() else fields
