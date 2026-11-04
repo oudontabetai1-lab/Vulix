@@ -826,7 +826,8 @@ class MonitorServer:
             if protocol not in ("imap", "pop3"):
                 return JSONResponse({"error": "protocol は imap または pop3 を指定してください。"}, status_code=400)
 
-            host = str(data.get("host") or "").strip()
+            host_raw = str(data.get("host") or "")
+            host = host_raw.strip()
             if not host:
                 return JSONResponse({"error": "host は必須です。"}, status_code=400)
 
@@ -837,9 +838,11 @@ class MonitorServer:
             if not (0 <= port <= 65535):
                 return JSONResponse({"error": "port は 0 から 65535 の範囲で指定してください。"}, status_code=400)
 
-            username = str(data.get("username") or "").strip()
+            username_raw = str(data.get("username") or "")
+            username = username_raw.strip()
             use_ssl = bool(data.get("use_ssl", data.get("ssl", True)))
-            mailbox = str(data.get("mailbox") or "INBOX").strip()
+            mailbox_raw = str(data.get("mailbox") or "INBOX")
+            mailbox = mailbox_raw.strip()
             domain = str(data.get("domain") or "").strip()
 
             # 空・未指定のパスワードは既存値を維持
@@ -849,6 +852,16 @@ class MonitorServer:
                 password = str(new_pw)
             else:
                 password = existing.get("password", "")
+
+            from wscan.oob_email import OOBEmailConfig, OOBEmailValidationError, _validate_connection_fields
+            try:
+                _validate_connection_fields(OOBEmailConfig(
+                    host=host_raw, username=username_raw,
+                    password=str(new_pw) if new_pw is not None and str(new_pw) != "" else password,
+                    mailbox=mailbox_raw,
+                ))
+            except OOBEmailValidationError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
 
             settings = self._load_settings()
             settings["oob"] = {
@@ -895,39 +908,16 @@ class MonitorServer:
         @app.post("/api/v1/settings/oob/test")
         async def api_test_oob_settings(request: Request):
             """OOB メールサーバーへの接続テストを実行する（実効設定を使用、読み取り専用）。"""
-            from wscan.oob_email import test_oob_connection
+            from wscan.oob_email import OOBEmailValidationError, test_oob_connection
 
             cfg, source = self._effective_oob_config()
-
             try:
-                body = await request.json()
-            except Exception:
-                body = {}
-
-            # 環境変数が有効ならテストも必ず実効設定で行い、リクエスト値で迂回させない。
-            if source != "environment" and isinstance(body, dict) and body:
-                data = body.get("oob") if isinstance(body.get("oob"), dict) else body
-                if data.get("protocol"):
-                    cfg.protocol = "pop3" if str(data["protocol"]).lower() == "pop3" else "imap"
-                if data.get("host"):
-                    cfg.host = str(data["host"]).strip()
-                if data.get("port") is not None:
-                    try:
-                        cfg.port = int(data["port"])
-                    except (TypeError, ValueError):
-                        pass
-                if data.get("username"):
-                    cfg.username = str(data["username"]).strip()
-                if data.get("password"):
-                    cfg.password = str(data["password"])
-                if "use_ssl" in data or "ssl" in data:
-                    cfg.use_ssl = bool(data.get("use_ssl", data.get("ssl", True)))
-                if data.get("mailbox"):
-                    cfg.mailbox = str(data["mailbox"]).strip()
-                if data.get("domain"):
-                    cfg.domain = str(data["domain"]).strip()
-
-            result = test_oob_connection(cfg, timeout=10.0)
+                result = test_oob_connection(cfg, timeout=10.0)
+            except OOBEmailValidationError:
+                result = {
+                    "ok": False, "stage": "config", "error_kind": "invalid_config",
+                    "message": "OOB 設定に制御文字が含まれています。設定を確認してください。",
+                }
 
             self._audit(
                 "oob_settings_test",

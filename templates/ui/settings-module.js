@@ -792,6 +792,8 @@
       }
     }
 
+    let oobDirty = false;
+
     async function loadOobSettings() {
       dom.oobLoading.hidden = false;
       dom.oobError.hidden = true;
@@ -827,6 +829,7 @@
           : '未設定';
         dom.oobMailbox.value = data.mailbox || 'INBOX';
         dom.oobDomain.value = data.domain || '';
+        oobDirty = false;
 
         // 環境変数がアクティブな場合は編集・削除を無効化（読み取り専用）
         [
@@ -902,24 +905,14 @@
     }
 
     async function testOobSettings() {
-      dom.oobStatus.textContent = '接続テスト中…';
-      const payload = {
-        protocol: dom.oobProtocol.value || 'imap',
-        host: dom.oobHost.value.trim(),
-        port: parseInt(dom.oobPort.value || '0', 10) || 0,
-        ssl: Boolean(dom.oobSsl.checked),
-        use_ssl: Boolean(dom.oobSsl.checked),
-        username: dom.oobUsername.value.trim(),
-        mailbox: dom.oobMailbox.value.trim() || 'INBOX',
-        domain: dom.oobDomain.value.trim(),
-      };
-      const pw = dom.oobPassword.value;
-      if (pw) {
-        payload.password = pw;
+      if (oobDirty) {
+        dom.oobStatus.textContent = '未保存の変更があります。先に設定を保存してください。';
+        return;
       }
+      dom.oobStatus.textContent = '接続テスト中…';
 
       try {
-        const res = await scope.post('/api/v1/settings/oob/test', payload);
+        const res = await scope.post('/api/v1/settings/oob/test', {});
         if (!res.ok || !res.data) {
           const err = (res.data && res.data.message) || (res.data && res.data.error) || res.errorMessage || '接続テストに失敗しました';
           dom.oobStatus.textContent = '✗ 失敗: ' + err;
@@ -992,6 +985,10 @@
     dom.saveOobBtn.addEventListener('click', saveOobSettings);
     dom.clearOobBtn.addEventListener('click', clearOobSettings);
     dom.testOobBtn.addEventListener('click', testOobSettings);
+    [dom.oobProtocol, dom.oobHost, dom.oobPort, dom.oobSsl, dom.oobUsername, dom.oobPassword, dom.oobMailbox, dom.oobDomain].forEach(function (el) {
+      el.addEventListener('input', function () { oobDirty = true; });
+      el.addEventListener('change', function () { oobDirty = true; });
+    });
 
     dom.modeSelect.addEventListener('change', function () {
       const mode = dom.modeSelect.value;

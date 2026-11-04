@@ -234,6 +234,9 @@ class ServerSettingsTests(unittest.TestCase):
     def test_oob_test_connection_fake_clients(self):
         """接続テストエンドポイントの動作（成功・認証失敗・タイムアウト）および秘匿値非漏洩の検証。"""
         secret_pw = "super_classified_pw_999"
+        self.client.post("/api/v1/settings/oob", json={
+            "protocol": "imap", "host": "imap.test", "username": "user", "password": secret_pw,
+        })
 
         # 1. IMAP 成功
         mock_imap_inst = MagicMock()
@@ -310,6 +313,9 @@ class ServerSettingsTests(unittest.TestCase):
             oob_mod.imaplib.IMAP4_SSL = orig_imap
 
         # 4. POP3 成功
+        self.client.post("/api/v1/settings/oob", json={
+            "protocol": "pop3", "host": "pop.test", "username": "user", "password": secret_pw,
+        })
         mock_pop_inst = MagicMock()
         mock_pop_inst.user.return_value = b"+OK User accepted"
         mock_pop_inst.pass_.return_value = b"+OK Pass accepted"
@@ -339,15 +345,12 @@ class ServerSettingsTests(unittest.TestCase):
         mock_pop_fail.pass_.side_effect = poplib.error_proto(f"-ERR [AUTH] invalid password {secret_pw}")
         mock_pop_fail_cls = MagicMock(return_value=mock_pop_fail)
 
+        self.client.post("/api/v1/settings/oob", json={
+            "protocol": "pop3", "host": "pop.test", "username": "user", "password": secret_pw,
+        })
         oob_mod.poplib.POP3_SSL = mock_pop_fail_cls
         try:
-            res = self.client.post("/api/v1/settings/oob/test", json={
-                "protocol": "pop3",
-                "host": "pop.test",
-                "username": "user",
-                "password": secret_pw,
-                "use_ssl": True,
-            })
+            res = self.client.post("/api/v1/settings/oob/test", json={"host": "ignored.test"})
             self.assertEqual(res.status_code, 200)
             data = res.json()
             self.assertFalse(data["ok"])
@@ -359,6 +362,59 @@ class ServerSettingsTests(unittest.TestCase):
             self.assertNotIn(secret_pw, audit_lines)
         finally:
             oob_mod.poplib.POP3_SSL = orig_pop
+
+    def test_oob_test_uses_saved_config_and_unset_never_connects(self):
+        saved_pw = "saved-secret"
+        self.client.post("/api/v1/settings/oob", json={
+            "protocol": "imap", "host": "saved.mail.test", "username": "saved-user", "password": saved_pw,
+        })
+        mock = MagicMock()
+        mock.return_value.login.return_value = ("OK", [])
+        mock.return_value.select.return_value = ("OK", [])
+        with unittest.mock.patch.object(oob_mod.imaplib, "IMAP4_SSL", mock):
+            res = self.client.post("/api/v1/settings/oob/test", json={
+                "host": "127.0.0.1", "username": "attacker", "password": "attacker-secret", "port": 25,
+            })
+        self.assertTrue(res.json()["ok"])
+        self.assertEqual(mock.call_args.args[:2], ("saved.mail.test", 993))
+        mock.return_value.login.assert_called_once_with("saved-user", saved_pw)
+
+        self.client.delete("/api/v1/settings/oob")
+        with unittest.mock.patch.object(oob_mod.imaplib, "IMAP4_SSL") as client:
+            unset = self.client.post("/api/v1/settings/oob/test", json={"host": "127.0.0.1"})
+        self.assertFalse(unset.json()["ok"])
+        self.assertEqual(unset.json()["error_kind"], "not_configured")
+        client.assert_not_called()
+
+    def test_oob_controls_rejected_at_save_and_client_boundary(self):
+        for field in ("host", "username", "password", "mailbox"):
+            for control in ("\r", "\n", "\x00", "\x01"):
+                data = {"host": "mail.test", "username": "user", "password": "safe-secret", "mailbox": "INBOX"}
+                data[field] += control
+                res = self.client.post("/api/v1/settings/oob", json=data)
+                self.assertEqual(res.status_code, 400, (field, repr(control)))
+                self.assertIn("制御文字", res.json()["error"])
+                self.assertNotIn("safe-secret", res.text)
+
+                cfg = oob_mod.OOBEmailConfig(host="mail.test", username="user", password="safe-secret")
+                setattr(cfg, field, getattr(cfg, field) + control)
+                with unittest.mock.patch.object(oob_mod.imaplib, "IMAP4_SSL") as client:
+                    with self.assertRaises(oob_mod.OOBEmailValidationError):
+                        oob_mod.test_oob_connection(cfg)
+                client.assert_not_called()
+
+    def test_oob_imap_select_failure_is_mailbox_failure(self):
+        self.client.post("/api/v1/settings/oob", json={
+            "host": "imap.test", "username": "user", "password": "pw",
+        })
+        mock = MagicMock()
+        mock.return_value.login.return_value = ("OK", [])
+        mock.return_value.select.return_value = ("NO", [b"missing"])
+        with unittest.mock.patch.object(oob_mod.imaplib, "IMAP4_SSL", mock):
+            result = self.client.post("/api/v1/settings/oob/test").json()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], "select")
+        self.assertEqual(result["error_kind"], "mailbox")
 
     def test_engine_oob_precedence(self):
         """ScanEngine での OOB 設定の優先順位（環境変数 > ダッシュボード保存設定 > 未設定）を確認。"""

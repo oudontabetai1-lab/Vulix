@@ -575,7 +575,7 @@ def test_oob_settings_ui_env_source_read_only():
 
 
 def test_oob_settings_ui_clear_and_test_connection():
-    """Verify Clear calls DELETE and Test Connection calls POST /test and updates status banner."""
+    """Verify Test uses saved settings and Clear calls DELETE."""
     script = f"""
     {COMMON_DOM_STUB}
     const settingsMod = require('{SETTINGS_MODULE_JS}');
@@ -649,6 +649,34 @@ def test_oob_settings_ui_clear_and_test_connection():
     """
     res = _run_node(script)
     assert any(d["method"] == "POST" and d["path"] == "/api/v1/settings/oob/test" for d in res["dispatches"])
+    test_call = next(d for d in res["dispatches"] if d["path"] == "/api/v1/settings/oob/test")
+    assert test_call["body"] == {}
     assert any(d["method"] == "DELETE" and d["path"] == "/api/v1/settings/oob" for d in res["dispatches"])
     assert "成功" in res["statusAfterTest"]
     assert "削除" in res["statusAfterClear"]
+
+
+def test_oob_settings_ui_requires_save_before_testing_edits():
+    script = f"""
+    {COMMON_DOM_STUB}
+    const settingsMod = require('{SETTINGS_MODULE_JS}');
+    let testCalls = 0;
+    const mockApi = {{ createScope: () => ({{
+      getActiveCount: () => 1,
+      get: async (path) => path === '/api/v1/settings/oob'
+        ? {{ ok: true, data: {{ host: 'mail.test', source: 'dashboard' }} }}
+        : {{ ok: true, data: {{ notifications: {{}} }} }},
+      post: async (path) => {{ if (path === '/api/v1/settings/oob/test') testCalls++; return {{ ok: true, data: {{ ok: true }} }}; }},
+      cancelAll: () => {{}},
+    }}) }};
+    const view = settingsMod.renderSettingsView(document.createElement('div'), {{ api: mockApi }});
+    setTimeout(() => {{
+      view.dom.oobHost.value = 'edited.mail.test';
+      view.dom.oobHost.trigger('input');
+      view.dom.testOobBtn.trigger('click');
+      setTimeout(() => console.log(JSON.stringify({{ testCalls, status: view.dom.oobStatus.textContent }})), 20);
+    }}, 20);
+    """
+    res = _run_node(script)
+    assert res["testCalls"] == 0
+    assert "先に設定を保存" in res["status"]

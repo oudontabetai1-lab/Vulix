@@ -27,6 +27,7 @@ import secrets
 import socket
 import ssl
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from email.message import Message
 from email.utils import getaddresses
@@ -36,6 +37,16 @@ from typing import Mapping, Optional
 
 # ── トークン / アドレス生成 ────────────────────────────────────────────────
 _TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+class OOBEmailValidationError(ValueError):
+    """Raised when a mail setting contains protocol control characters."""
+
+
+def _validate_connection_fields(cfg: "OOBEmailConfig") -> None:
+    for name in ("host", "username", "password", "mailbox"):
+        if any(unicodedata.category(char) == "Cc" for char in getattr(cfg, name)):
+            raise OOBEmailValidationError(f"{name} に制御文字は使用できません。")
 
 
 def make_oob_token(scan_id: str = "") -> str:
@@ -182,6 +193,7 @@ def resolve_oob_config(
 
 # ── 接続テスト ────────────────────────────────────────────────────────────
 def _test_imap_connection(cfg: OOBEmailConfig, timeout: float = 10.0) -> dict:
+    _validate_connection_fields(cfg)
     stage = "connect"
     conn = None
     try:
@@ -194,7 +206,9 @@ def _test_imap_connection(cfg: OOBEmailConfig, timeout: float = 10.0) -> dict:
         conn.login(cfg.username, cfg.password)
 
         stage = "select"
-        conn.select(cfg.mailbox or "INBOX", readonly=True)
+        status, _ = conn.select(cfg.mailbox or "INBOX", readonly=True)
+        if status != "OK":
+            raise imaplib.IMAP4.error("mailbox selection failed")
         conn.list()
 
         return {
@@ -259,6 +273,7 @@ def _test_imap_connection(cfg: OOBEmailConfig, timeout: float = 10.0) -> dict:
 
 
 def _test_pop3_connection(cfg: OOBEmailConfig, timeout: float = 10.0) -> dict:
+    _validate_connection_fields(cfg)
     stage = "connect"
     conn = None
     try:
@@ -347,6 +362,7 @@ def test_oob_connection(config: OOBEmailConfig, timeout: float = 10.0) -> dict:
             "error_kind": "not_configured",
             "message": "OOB 設定が不完全です（host, username, password を指定してください）。",
         }
+    _validate_connection_fields(config)
     if config.protocol == "pop3":
         return _test_pop3_connection(config, timeout=timeout)
     return _test_imap_connection(config, timeout=timeout)
@@ -461,6 +477,7 @@ class EmailSink:
     # -- IMAP --
     def _connect_imap(self):
         cfg = self.config
+        _validate_connection_fields(cfg)
         if cfg.use_ssl:
             conn = imaplib.IMAP4_SSL(cfg.host, cfg.effective_port)
         else:
@@ -509,6 +526,7 @@ class EmailSink:
     # -- POP3 (サーバ側検索が無いので全件取得してフィルタ) --
     def _search_pop3(self, token: str) -> list:
         cfg = self.config
+        _validate_connection_fields(cfg)
         if cfg.use_ssl:
             conn = poplib.POP3_SSL(cfg.host, cfg.effective_port)
         else:
