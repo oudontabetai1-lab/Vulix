@@ -1233,12 +1233,15 @@ class BaseScanner(ABC):
         retry_transport_error_recorded = False
         try:
             response = await client.request(method, url, content=(json.dumps(request_body) if carrier == "json" else request_body), headers=request_headers)
-        except Exception:
+        except Exception as request_error:
             if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
                 try:
                     from wscan.token_lifecycle import TokenLifecycleEvent
+                    logger = getattr(self.engine, "request_logger", None)
+                    failed_request = getattr(request_error, "request", None)
+                    owner, attempt_id = getattr(failed_request, "extensions", {}).get("vulix_probe_submission", (None, None))
                     self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
-                        probe_attempt_id=None, evidence_id=None, check=self.CHECK_TYPE,
+                        probe_attempt_id=attempt_id if owner is logger else None, evidence_id=None, check=self.CHECK_TYPE,
                         carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
                         refresh_reason="transport_error", final_status=None,
                         final_lifecycle_status="unknown"))
@@ -1293,8 +1296,12 @@ class BaseScanner(ABC):
                 from wscan.token_lifecycle import TokenLifecycleEvent, classify_token_response
                 final_outcome = classify_token_response(
                     status_code=response.status_code, headers=dict(response.headers), body=response.text)
+                logger = getattr(self.engine, "request_logger", None)
+                request_owner, attempt_id = response.request.extensions.get("vulix_probe_submission", (None, None))
+                evidence_owner, observation_id = response.extensions.get("vulix_probe_observation", (None, None))
                 self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
-                    probe_attempt_id=None, evidence_id=None, check=self.CHECK_TYPE,
+                    probe_attempt_id=attempt_id if request_owner is logger else None,
+                    evidence_id=observation_id if evidence_owner is logger else None, check=self.CHECK_TYPE,
                     carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
                     refresh_reason=refresh_reason, final_status=response.status_code,
                     final_lifecycle_status=final_outcome.outcome.value))
