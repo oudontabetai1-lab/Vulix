@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from scripts.check_reference_docs import OUTPUTS, _text, render_documents
-from wscan.capability_manifest import build_capability_manifest
+from wscan.capability_manifest import SCHEMA_VERSION, build_capability_manifest
 from wscan.check_catalog import catalog_version, get_check_category, get_check_description, get_check_references
 from wscan.scanners import SCANNERS
 
@@ -19,7 +19,13 @@ def test_checked_in_pages_match_generator_and_all_registry_metadata():
         content = path.read_text(encoding="utf-8")
         assert content == generated[locale]
         assert len([line for line in content.splitlines() if line.startswith("## ")]) == len(SCANNERS)
+        assert f"Manifest schema version: {_text(SCHEMA_VERSION)}" in content
         assert ("Catalog version: " if locale == "en" else "カタログ版: ") + _text(catalog_version()) in content
+        version_contract = "no cross-version negotiation is implemented" if locale == "en" else "version 間の negotiation は実装されていません"
+        assert version_contract in content
+        catalog_gate = ("catalog reader currently accepts only version 1.0.0" if locale == "en"
+                        else "catalog reader が現在受け付けるのは 1.0.0 のみ")
+        assert catalog_gate in content
         for check_id in sorted(SCANNERS):
             assert f"## {_text(check_id)}\n" in content
             assert _text(manifest["scanners"][check_id]["name"]) in content

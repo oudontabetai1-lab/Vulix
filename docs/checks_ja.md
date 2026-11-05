@@ -1,7 +1,8 @@
 # チェックリファレンス
 
-この資料はカタログ情報と静的な capability 宣言を示します。宣言はチェックの実行、実行カバレッジ、検出の保証を示しません。
+Capability manifest と check catalog は別形式で、それぞれ独立した schema version を持ち、安定した check ID で対応します。version 間の negotiation は実装されていません。Manifest schema version は 1\.0\.0、catalog version は 1\.0\.0 です。catalog reader が現在受け付けるのは 1.0.0 のみで、未対応または読込不能な catalog は利用不可・空のメタデータへフォールバックします。Manifest validator が受け付けるのは現在の schema version 1\.0\.0 です。manifest の宣言は静的メタデータであり、検査実行、runtime coverage、検出保証の証拠ではありません。
 
+Manifest schema version: 1\.0\.0
 カタログ版: 1\.0\.0
 
 ## cache\_poisoning
