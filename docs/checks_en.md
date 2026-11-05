@@ -1,7 +1,8 @@
 # Check reference (English)
 
-This reference describes catalog metadata and declared static capabilities. A declaration does not prove that a check ran, provide runtime coverage, or guarantee detection.
+The capability manifest and check catalog are separate formats with independent schema versions; they join by stable check ID, and no cross-version negotiation is implemented. The manifest schema version is 1\.0\.0; the catalog version is 1\.0\.0. The catalog reader currently accepts only version 1.0.0 and falls back to unavailable/empty metadata for an unsupported or unreadable catalog. The manifest validator accepts its current schema version 1\.0\.0. A manifest declaration is static metadata, not evidence that a check ran, runtime coverage, or a detection guarantee.
 
+Manifest schema version: 1\.0\.0
 Catalog version: 1\.0\.0
 
 ## cache\_poisoning

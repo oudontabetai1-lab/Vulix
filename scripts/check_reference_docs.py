@@ -47,7 +47,7 @@ def _description_lines(description: Any, locale: str) -> list[str]:
 
 
 def render_documents() -> dict[str, str]:
-    from wscan.capability_manifest import build_capability_manifest
+    from wscan.capability_manifest import SCHEMA_VERSION, build_capability_manifest
     from wscan.check_catalog import (
         catalog_version, get_check_category, get_check_description,
         get_check_references,
@@ -59,16 +59,21 @@ def render_documents() -> dict[str, str]:
     entries = manifest.get("scanners", {})
     locales = {"ja": "日本語", "en": "English"}
     version = catalog_version() or "不明"  # Unknown stays explicit; no version is inferred.
+    manifest_version = SCHEMA_VERSION
     rendered = {}
     for locale, language_name in locales.items():
         label = locale
         lines = [
             f"# Check reference ({language_name})" if locale == "en" else "# チェックリファレンス",
             "",
-            ("This reference describes catalog metadata and declared static capabilities. "
-             "A declaration does not prove that a check ran, provide runtime coverage, or guarantee detection." if locale == "en"
-             else "この資料はカタログ情報と静的な capability 宣言を示します。宣言はチェックの実行、実行カバレッジ、検出の保証を示しません。"),
+            ("The capability manifest and check catalog are separate formats with independent schema versions; they join by stable check ID, and no cross-version negotiation is implemented. "
+             "The manifest schema version is {manifest_version}; the catalog version is {version}. The catalog reader currently accepts only version 1.0.0 and falls back to unavailable/empty metadata for an unsupported or unreadable catalog. "
+             "The manifest validator accepts its current schema version {manifest_version}. A manifest declaration is static metadata, not evidence that a check ran, runtime coverage, or a detection guarantee.".format(manifest_version=_text(manifest_version), version=_text(version)) if locale == "en"
+             else "Capability manifest と check catalog は別形式で、それぞれ独立した schema version を持ち、安定した check ID で対応します。version 間の negotiation は実装されていません。"
+             "Manifest schema version は {manifest_version}、catalog version は {version} です。catalog reader が現在受け付けるのは 1.0.0 のみで、未対応または読込不能な catalog は利用不可・空のメタデータへフォールバックします。"
+             "Manifest validator が受け付けるのは現在の schema version {manifest_version} です。manifest の宣言は静的メタデータであり、検査実行、runtime coverage、検出保証の証拠ではありません。".format(manifest_version=_text(manifest_version), version=_text(version))),
             "",
+            f"Manifest schema version: {_text(manifest_version)}" if locale == "en" else f"Manifest schema version: {_text(manifest_version)}",
             f"Catalog version: {_text(version)}" if locale == "en" else f"カタログ版: {_text(version)}",
             "",
         ]
