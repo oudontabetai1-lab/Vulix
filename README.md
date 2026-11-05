@@ -39,6 +39,7 @@ Vulix のモジュール入口では `python -m vulix explore URL` を `scan` �
 | [実検査運用ガイド](docs/operation_guide_ja.md) | 認証、スコープ、検査強度、証跡、再検査 |
 | [サーバー導入ガイド](docs/server_deployment_ja.md) | 常駐、イントラネット公開、トークン認証、Docker |
 | [高度機能](docs/advanced_features.md) | batch、flow、HAR などの詳細 |
+| [チェックリファレンス（日本語）](docs/checks_ja.md) / [English](docs/checks_en.md) | カタログ説明と静的な capability 宣言 |
 | [OOB メール設定](docs/oob_email_ja.md) | blind XSS/SSRF、メールヘッダ注入の確証 |
 | [トラブルシューティング](docs/troubleshooting_ja.md) | アクセス失敗、認証、検出漏れの切り分け |
 
@@ -358,6 +359,12 @@ Vulix ブランドの別名として `explore`（=`scan`）と `replay`（=`scan
 python3 main.py --help
 python3 main.py scan --help
 ```
+
+### `checks` / `check` — チェック情報
+
+`python3 main.py checks [--lang ja|en]` はカタログのチェック一覧と宣言された入力経路を表示します。`python3 main.py check CHECK_ID [--lang ja|en]` は説明、制約、前提条件、carrier、参考資料を表示します。これらはメタデータ参照用でありスキャンを実行しません。静的な capability 宣言は実行カバレッジや検出保証を意味しません。カタログから生成する詳細ページは[日本語](docs/checks_ja.md)と[英語](docs/checks_en.md)を参照してください。
+
+生成済みページの整合性は `python3 scripts/check_reference_docs.py --check` で確認できます。通常のテストスイートでもこの同期チェックを実行します。
 
 ### `scan` — 通常スキャン
 
