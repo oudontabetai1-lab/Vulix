@@ -214,16 +214,7 @@ else:
 
 ### 使い方
 
-```bash
-# audit レポート（デフォルト）
-python main.py scan --template audit https://target.example.com
-
-# 経営向け
-python main.py scan --template executive https://target.example.com
-
-# 開発者向け
-python main.py scan --template developer https://target.example.com
-```
+スキャン完了時に `report.html`、`report_executive.html`、`report_developer.html` を同じ出力先へ自動生成します。テンプレート選択用のCLIオプションはありません。
 
 ---
 
@@ -351,8 +342,8 @@ URL が、そのシナリオの攻撃対象ページになる。
 ### 使い方
 
 ```bash
-# --diff-scan で前回出力ディレクトリを指定
-python main.py scan --diff-scan ./output_2026-04-01 https://target.example.com
+# --previous-scan で前回出力ディレクトリを指定
+python main.py scan https://target.example.com --previous-scan ./output_2026-04-01
 ```
 
 ### 出力例
@@ -583,10 +574,10 @@ Playwright の WebSocket イベントフックを使い、WS エンドポイン�
 
 ```bash
 # WebSocket スキャンを有効化
-python main.py scan --checks websocket https://target.example.com
+python main.py scan https://target.example.com --checks websocket
 
 # 他のチェックと組み合わせ
-python main.py scan --checks xss sqli websocket https://target.example.com
+python main.py scan https://target.example.com --checks xss sqli websocket
 ```
 
 ---
