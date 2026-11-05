@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from .i18n import DEFAULT_LANG, normalize_lang, translator
+from .check_catalog import get_check_description, get_check_references
 from .scanners.base import Finding
 
 if TYPE_CHECKING:
@@ -528,6 +529,7 @@ class ReportGenerator:
                     <div class="finding-url">{self._escape(f.url)}</div>
                 </div>
                 <div class="finding-body">
+                    {self._catalog_guidance_html(f.check_type)}
                     <div class="finding-detail">
                         <h4>Evidence</h4>
                         <p class="evidence-text">{self._escape(f.evidence)}</p>
@@ -1854,6 +1856,30 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             .replace('"', "&quot;")
             .replace("'", "&#39;")
         )
+
+    def _catalog_guidance_html(self, check_id: str) -> str:
+        description = get_check_description(check_id, self.lang)
+        if description is None:
+            fallback = "一般的なチェックガイダンスは利用できません。" if self.lang == "ja" else "General check guidance is unavailable."
+            return f'<div class="catalog-guidance" style="background:#f7f8fc;border-left:3px solid #5d5294;padding:10px 12px;font-size:.85rem"><h4 style="margin:0 0 6px;color:#5d5294;font-size:.72rem">{"一般的なチェックガイダンス" if self.lang == "ja" else "General check guidance"}</h4><p style="margin:4px 0">{fallback}</p></div>'
+
+        labels = ("一般的なチェックガイダンス", "概要", "リスク", "緩和策", "参照") if self.lang == "ja" else ("General check guidance", "Overview", "Risk", "Mitigation", "References")
+        fields = (description.short_description, description.risk_if_vulnerable, description.remediation_overview)
+        parts = [f'<p><strong>{self._escape(label)}:</strong> {self._escape(value)}</p>'
+                 for label, value in zip(labels[1:4], fields)]
+        references = []
+        for ref in get_check_references(check_id):
+            text = f"{ref.kind} {ref.id}"
+            safe_text = self._escape(text)
+            if ref.url and re.match(r"^https?://", ref.url, re.IGNORECASE):
+                references.append(f'<a href="{self._escape(ref.url)}">{safe_text}</a>')
+            else:
+                references.append(safe_text)
+        if references:
+            parts.append(f'<p><strong>{self._escape(labels[4])}:</strong> {" / ".join(references)}</p>')
+        styled_parts = "".join(part.replace("<p>", '<p style="margin:4px 0">') for part in parts)
+        return (f'<div class="catalog-guidance" style="background:#f7f8fc;border-left:3px solid #5d5294;padding:10px 12px;font-size:.85rem">'
+                f'<h4 style="margin:0 0 6px;color:#5d5294;font-size:.72rem">{self._escape(labels[0])}</h4>{styled_parts}</div>')
 
     def _agent_badges_html(self, finding: Finding) -> str:
         """Agent由来の解釈と、任意の決定論再現結果を明示する。"""

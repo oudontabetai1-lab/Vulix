@@ -54,6 +54,13 @@ BASELINE_DIR = Path(__file__).parent / "fixtures" / "report_i18n_baseline"
 def test_default_output_is_byte_identical_to_pre_i18n_baseline(tmp_path, name):
     # 期待値は多言語化前の main に同じ固定入力を与えて生成したバイト列（新実装同士の比較ではない）。
     rendered = report_i18n_inputs.render_all(tmp_path)
+    if name == "audit.html":
+        # Shared catalog guidance is the one intentional addition to audit cards;
+        # compare the remaining output against the pre-catalog baseline.
+        rendered[name] = re.sub(
+            rb'\n(\s*)<div class="catalog-guidance"[^>]*>.*?</div>\n\s*',
+            rb"\n\1", rendered[name], flags=re.DOTALL
+        )
     assert rendered[name] == (BASELINE_DIR / name).read_bytes()
 
 
@@ -61,6 +68,10 @@ def test_explicit_ja_matches_baseline(tmp_path, monkeypatch):
     original = ReportGenerator.__init__
     monkeypatch.setattr(ReportGenerator, "__init__", lambda self, out: original(self, out, lang="ja"))
     rendered = report_i18n_inputs.render_all(tmp_path)
+    rendered["audit.html"] = re.sub(
+        rb'\n(\s*)<div class="catalog-guidance"[^>]*>.*?</div>\n\s*',
+        rb"\n\1", rendered["audit.html"], flags=re.DOTALL
+    )
     assert rendered["audit.html"] == (BASELINE_DIR / "audit.html").read_bytes()
 
 
