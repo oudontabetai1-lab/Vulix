@@ -48,7 +48,8 @@ def make_scanner(responses, enabled=True, gate=True, raising=False):
     calls = iter(responses)
 
     async def apply_payload(*_args):
-        return "PLAYWRIGHT", {"response": next(calls)}
+        response = next(calls)
+        return "PLAYWRIGHT", response if "response" in response else {"request": {}, "response": response}
 
     scanner._apply_payload = apply_payload
     return scanner, notes, attempts
@@ -71,12 +72,20 @@ def stale():
 
 def test_retry_emits_one_event_with_final_attempt_details():
     scanner, _notes, _attempts, (source, pair) = run(
-        [stale(), {"status": 200, "headers": {}, "body": "ok"}])
+        [stale(), {"request": {"_probe_attempt_id": "att-1"},
+                   "response": {"status": 200, "headers": {}, "body": "ok"}}])
     assert len(scanner.engine.events) == 1
     event = scanner.engine.events[0]
     assert (event.attempt_count, event.refresh_reason, event.final_status,
             event.transport.value) == (2, "stale", 200, "playwright")
+    assert event.probe_attempt_id == "att-1" and event.evidence_id is None
     assert source == "PLAYWRIGHT" and pair["response"]["status"] == 200
+
+
+def test_pair_without_probe_attempt_id_emits_none():
+    scanner, _notes, _attempts, _result = run([{"status": 200, "headers": {}, "body": "ok"}])
+    event = scanner.engine.events[0]
+    assert event.probe_attempt_id is None and event.evidence_id is None
 
 
 def test_stale_retry_note_and_verdict_do_not_depend_on_recorder():

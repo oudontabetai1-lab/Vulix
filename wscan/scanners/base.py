@@ -1915,8 +1915,11 @@ class BaseScanner(ABC):
                                 headers=final_response.get("headers") or {},
                                 body=final_response.get("body") or "",
                             )
+                        final_request = pair.get("request") if isinstance(pair, dict) else None
+                        attempt_id = (final_request or {}).get("_probe_attempt_id") if isinstance(final_request, dict) else None
                         self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
-                            probe_attempt_id=None, evidence_id=None, check=self.CHECK_TYPE,
+                            probe_attempt_id=attempt_id if isinstance(attempt_id, str) and attempt_id else None,
+                            evidence_id=None, check=self.CHECK_TYPE,
                             carrier=TokenCarrier.FORM_URLENCODED, transport=TokenTransport.PLAYWRIGHT,
                             attempt_count=attempt_count, refresh_reason=refresh_reason,
                             final_status=final_status,
