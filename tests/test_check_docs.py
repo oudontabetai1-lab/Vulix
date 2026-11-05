@@ -27,6 +27,7 @@ def test_missing_files_images_anchors_and_cli_options_are_actionable():
     assert "README.md:4: absent.png: local target does not exist" in rendered
     assert "README.md:5: docs/target.md#absent: anchor #absent does not exist" in rendered
     assert "README.md:8: --not-a-vulix-option: option is not defined" in rendered
+    assert "README.md:11: --not-inline: option is not defined" in rendered
 
 
 def test_malformed_and_undefined_reference_syntax_fails_explicitly():

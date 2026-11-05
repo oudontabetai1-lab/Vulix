@@ -11,6 +11,7 @@
 ![diagram][image]
 
 `[code](missing.md)` and https://example.invalid/missing.md are examples only.
+The module alias is valid: `python -m vulix explore https://example.invalid --depth 1`.
 
 [guide]: docs/guide.md#repeat-1
 [image]: docs/pixel.png

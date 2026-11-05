@@ -205,6 +205,10 @@ def _cli_examples(text: str):
             i += 1
             continue
         if not fence:
+            for span in re.finditer(r"(`+)(.*?)\1", lines[i]):
+                command = span.group(2).strip()
+                if _CLI_COMMAND.match(command):
+                    yield i + 1, command
             i += 1
             continue
         start = i + 1
@@ -226,7 +230,11 @@ def _check_cli(root: Path, path: Path, text: str, parser, findings: list[Finding
             findings.append(Finding(path.relative_to(root).as_posix(), line, command,
                                     f"malformed CLI example: {exc}"))
             continue
-        for token in tokens:
+        if tokens[0].startswith("python"):
+            option_tokens = tokens[3:] if len(tokens) > 1 and tokens[1] == "-m" else tokens[2:]
+        else:
+            option_tokens = tokens[1:]
+        for token in option_tokens:
             candidate = token.strip("[](),")
             if _OPTION_TOKEN.fullmatch(candidate):
                 name = candidate.split("=", 1)[0]
@@ -241,6 +249,8 @@ def _check_cli(root: Path, path: Path, text: str, parser, findings: list[Finding
             args = args[3:] if len(args) > 1 and args[1] == "-m" else args[2:]
         else:
             args = args[1:]
+        if not args or args[0].startswith("<") or "…" in args or "..." in args:
+            continue
         if module_entry and args and args[0] == "explore":
             args[0] = "scan"  # vulix.__main__ maps this product alias before main.parse_args.
         try:
