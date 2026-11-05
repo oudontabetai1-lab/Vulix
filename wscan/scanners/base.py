@@ -1705,7 +1705,11 @@ class BaseScanner(ABC):
                     classify_token_response,
                     decide_token_retry,
                     derive_token_ref_id,
+                    RefreshStrategy,
+                    RefreshKind,
                 )
+                attempt_count = 1
+                refresh_reason = None
                 # 1. 生 DOM からトークン値を抽出（テスト対象フィールドを除く）
                 form_index = ip.submit_index
                 try:
@@ -1796,10 +1800,12 @@ class BaseScanner(ABC):
                     # 5. STALE かつリトライ許可（attempt_count=1, max_retries=2）の場合、
                     # 1 回のみ bounded re-navigation + re-submit
                     if outcome.outcome == TokenOutcomeKind.STALE:
+                        refresh_reason = "stale"
                         retry_dec = decide_token_retry(
                             outcome,
                             attempt_count=1,
                             max_retries=2,
+                            refresh_strategy=RefreshStrategy(strategy=RefreshKind.PAGE_RELOAD),
                         )
                         if retry_dec.should_retry:
                             # 1 回のみ再ナビゲーション + re-submit with fresh DOM tokens
@@ -1856,6 +1862,7 @@ class BaseScanner(ABC):
                                     # ペア更新
                                     pair = pair2
                                     source = source2
+                                    attempt_count += 1
 
                                     # 最終分類（refresh_attempted=True）
                                     resp2 = pair.get("response")
@@ -1890,6 +1897,36 @@ class BaseScanner(ABC):
                             except Exception:
                                 # 例外時は握りつぶし、既存の pair のまま継続
                                 pass
+
+                # Record once after classification so telemetry cannot change the verdict.
+                if (
+                    self._token_manager_enabled(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT)
+                    and self.engine and hasattr(self.engine, "record_token_lifecycle_event")
+                ):
+                    try:
+                        from wscan.token_lifecycle import TokenLifecycleEvent
+                        final_response = pair.get("response") if isinstance(pair, dict) else None
+                        final_status = None
+                        final_outcome = None
+                        if isinstance(final_response, dict):
+                            final_status = final_response.get("status") or final_response.get("status_code")
+                            final_outcome = classify_token_response(
+                                status_code=int(final_status or 200),
+                                headers=final_response.get("headers") or {},
+                                body=final_response.get("body") or "",
+                            )
+                        final_request = pair.get("request") if isinstance(pair, dict) else None
+                        attempt_id = (final_request or {}).get("_probe_attempt_id") if isinstance(final_request, dict) else None
+                        self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
+                            probe_attempt_id=attempt_id if isinstance(attempt_id, str) and attempt_id else None,
+                            evidence_id=None, check=self.CHECK_TYPE,
+                            carrier=TokenCarrier.FORM_URLENCODED, transport=TokenTransport.PLAYWRIGHT,
+                            attempt_count=attempt_count, refresh_reason=refresh_reason,
+                            final_status=final_status,
+                            final_lifecycle_status=final_outcome.outcome.value if final_outcome else "unknown",
+                        ))
+                    except Exception as exc:
+                        self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
 
                 if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
                     self._record_scan_note(
