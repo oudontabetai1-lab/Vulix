@@ -161,6 +161,7 @@ ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
     REQUIRED_TOP_LEVEL_FIELDS + ("agent_capabilities", "capabilities")
 )
 ALLOWED_SCANNER_FIELDS: frozenset[str] = frozenset(REQUIRED_SCANNER_FIELDS)
+ALLOWED_SCANNER_FIELDS = ALLOWED_SCANNER_FIELDS | frozenset(("category",))
 ALLOWED_CARRIER_FIELDS: frozenset[str] = frozenset(REQUIRED_CARRIER_FIELDS)
 ALLOWED_AGENT_CAPABILITY_FIELDS: frozenset[str] = frozenset(REQUIRED_AGENT_CAPABILITY_FIELDS)
 ALLOWED_CVSS_FIELDS: frozenset[str] = frozenset(("score", "vector"))
@@ -255,6 +256,7 @@ def _extract_scanner_capability(
     return {
         "id": scanner_id,
         "name": scanner_cls.__name__,
+        "category": _check_category(scanner_id),
         "check_type": check_type,
         "severity": severity,
         "cvss": {
@@ -274,6 +276,12 @@ def _extract_scanner_capability(
         "declared_carriers": carriers_dict,
         "declaration_only": True,
     }
+
+
+def _check_category(scanner_id: str) -> str:
+    """Read the shared product grouping without treating missing metadata as support."""
+    from wscan.check_catalog import get_check_category
+    return get_check_category(scanner_id)
 
 
 def build_agent_capabilities() -> list[dict[str, Any]]:
@@ -443,6 +451,11 @@ def validate_capability_manifest(
 
         if sc.get("declaration_only") is not True:
             errors.append(f"Scanner '{scanner_id}' declaration_only must be True")
+
+        if "category" in sc and sc["category"] not in {
+            "injection", "xss", "access", "header", "proto", "file", "unclassified",
+        }:
+            errors.append(f"Scanner '{scanner_id}' has invalid category")
 
         for req_field in REQUIRED_SCANNER_FIELDS:
             if req_field not in sc:

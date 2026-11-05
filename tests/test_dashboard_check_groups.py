@@ -77,6 +77,7 @@ def test_dashboard_capability_reader_matches_scanner_registry():
         defaultChecks: defaultChecks,
         allGroupedIds: allGroupedScanners.map(s => s.id),
         defaultsFromGroups: allGroupedScanners.filter(s => s.def).map(s => s.id),
+        categoryById: Object.fromEntries(allGroupedScanners.map(s => [s.id, Object.keys(grouped).find(k => grouped[k].includes(s))])),
       }}));
     }})();
     """
@@ -96,12 +97,14 @@ def test_dashboard_capability_reader_matches_scanner_registry():
     # Defaults must be strictly {"sqli", "os", "xss"}
     assert set(data["defaultChecks"]) == {"sqli", "os", "xss"}
     assert set(data["defaultsFromGroups"]) == {"sqli", "os", "xss"}
+    assert {check_id: entry["category"] for check_id, entry in manifest["scanners"].items()} == data["categoryById"]
 
 
 def test_dummy_scanner_addition_requires_no_ui_code_change():
     """Demonstrate that adding a dummy scanner requires zero UI template/code modifications."""
     manifest = build_capability_manifest()
     dummy_id = "test_synthetic_custom_probe"
+    assert build_capability_manifest({dummy_id: type("SyntheticScanner", (), {})})["scanners"][dummy_id]["category"] == "unclassified"
     manifest["scanners"][dummy_id] = {
         "id": dummy_id,
         "name": "SyntheticCustomProbeScanner",

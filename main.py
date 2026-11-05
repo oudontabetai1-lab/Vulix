@@ -790,6 +790,12 @@ Examples:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    checks = sub.add_parser("checks", help="List catalog check descriptions and declared support")
+    checks.add_argument("--lang", choices=("ja", "en"), default="ja", help="Display language")
+    check = sub.add_parser("check", help="Show one catalog check and its declared capabilities")
+    check.add_argument("check_id", help="Stable scanner check ID")
+    check.add_argument("--lang", choices=("ja", "en"), default="ja", help="Display language")
+
     # ── scan subcommand ────────────────────────────────────────────
     # `replay` は scan の別名（Vulix 語彙）。flow/HAR 再生は
     # scan と同じ --flows/--har 経路で行うため、独立実装せず alias で委譲する
@@ -3979,6 +3985,86 @@ def run_capability_matrix(args):
         print(text)
 
 
+def run_check_catalog(args):
+    """Print catalog and static scanner-contract declarations without running a scan."""
+    from wscan.capability_manifest import build_capability_manifest
+    from wscan.check_catalog import (
+        catalog_version, get_check_category, get_check_description,
+        get_check_references, list_checks,
+    )
+
+    lang = args.lang
+    manifest = build_capability_manifest()
+    scanners = manifest["scanners"]
+
+    def support_summary(scanner):
+        states = {}
+        for carrier, declaration in scanner["declared_carriers"].items():
+            state = declaration["state"]
+            states.setdefault(state, []).append(carrier)
+        return "; ".join(
+            f"{state}: {','.join(sorted(carriers))}"
+            for state, carriers in sorted(states.items())
+        ) or "unclassified"
+
+    if args.command == "checks":
+        headings = {
+            "ja": "検査ID | 名前 | 説明 | 分類 | 宣言された入力経路 (静的)",
+            "en": "ID | Name | Description | Category | Declared support (static)",
+        }
+        print(headings[lang])
+        for check_id, description in list_checks(lang):
+            scanner = scanners.get(check_id)
+            print(f"{check_id} | {description.title} | {description.short_description} | "
+                  f"{get_check_category(check_id)} | {support_summary(scanner) if scanner else 'unclassified'}")
+        return
+
+    description = get_check_description(args.check_id, lang)
+    scanner = scanners.get(args.check_id)
+    if description is None or scanner is None:
+        print(f"Unknown check ID: {args.check_id}. Use 'checks' to list catalog checks.", file=sys.stderr)
+        raise SystemExit(2)
+
+    labels = {
+        "ja": {"version": "カタログ版", "category": "分類", "tested": "検査対象", "risk": "脆弱な場合のリスク",
+               "verification": "確認方法", "remediation": "修正概要", "limitations": "制約",
+               "carriers": "入力経路の宣言", "prerequisites": "前提条件", "references": "参考資料",
+               "declaration": "静的宣言のみ。実行カバレッジを示しません"},
+        "en": {"version": "Catalog version", "category": "Category", "tested": "What is tested", "risk": "Risk if vulnerable",
+               "verification": "Verification", "remediation": "Remediation", "limitations": "Limitations",
+               "carriers": "Declared carriers", "prerequisites": "Prerequisites", "references": "References",
+               "declaration": "Static declaration only; does not indicate execution coverage"},
+    }[lang]
+    print(f"{description.title} ({args.check_id})")
+    print(f"{labels['version']}: {catalog_version()}")
+    print(f"{labels['category']}: {get_check_category(args.check_id)}")
+    print(description.short_description)
+    for label, value in ((labels["tested"], description.what_is_tested),
+                         (labels["risk"], description.risk_if_vulnerable),
+                         (labels["verification"], description.verification_overview),
+                         (labels["remediation"], description.remediation_overview),
+                         (labels["limitations"], description.limitations)):
+        print(f"{label}: {value}")
+    print(f"{labels['declaration']}.")
+    print(f"{labels['prerequisites']}: {', '.join(scanner['prerequisites']) or 'none'}")
+    print(f"{labels['carriers']}:")
+    for carrier, declaration in scanner["declared_carriers"].items():
+        fields = [f"state={declaration['state']}"]
+        for key in ("value_kinds", "transports", "payload_shapes"):
+            if declaration[key]:
+                fields.append(f"{key}={','.join(declaration[key])}")
+        if declaration["browser_required"]:
+            fields.append("browser_required=true")
+        if declaration["structured_payload"]:
+            fields.append("structured_payload=true")
+        if declaration["reason"]:
+            fields.append(f"reason={declaration['reason']}")
+        print(f"  {carrier}: {'; '.join(fields)}")
+    print(f"{labels['references']}:")
+    for reference in get_check_references(args.check_id):
+        print(f"  {reference.kind} {reference.id}" + (f" — {reference.url}" if reference.url else ""))
+
+
 def run_import_payloads(args):
     """公開ペイロード集を取得して community_payloads.yaml を生成する。"""
     from rich.console import Console
@@ -4053,6 +4139,8 @@ def main():
             run_import_payloads(args)
         elif args.command == "capability-matrix":
             run_capability_matrix(args)
+        elif args.command in {"checks", "check"}:
+            run_check_catalog(args)
         else:
             asyncio.run(run_scan(args))
     except KeyboardInterrupt:

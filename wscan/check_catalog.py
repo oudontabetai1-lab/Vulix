@@ -41,6 +41,7 @@ class CatalogEntry:
     ja: LocalizedDescription
     en: LocalizedDescription | None
     references: tuple[CatalogReference, ...]
+    category: str = "unclassified"
 
     def localized(self, lang: str = "ja") -> LocalizedDescription:
         return self.en if normalize_lang(lang) == "en" and self.en else self.ja
@@ -91,7 +92,10 @@ def _load() -> None:
                                                or not ref["url"].startswith("https://")))):
                     raise ValueError("invalid catalog reference")
                 references.append(CatalogReference(ref["kind"], ref["id"], ref.get("url")))
-            entries.append(CatalogEntry(check_id, ja, en, tuple(references)))
+            category = localized.get("category", "unclassified")
+            if category not in {"injection", "xss", "access", "header", "proto", "file"}:
+                category = "unclassified"
+            entries.append(CatalogEntry(check_id, ja, en, tuple(references), category))
         _version = data["schema_version"]
         _entries = tuple(entries)
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -116,3 +120,9 @@ def get_check_description(check_id: str, lang: str = "ja") -> LocalizedDescripti
 def get_check_references(check_id: str) -> tuple[CatalogReference, ...]:
     _load()
     return next((entry.references for entry in _entries if entry.check_id == check_id), ())
+
+
+def get_check_category(check_id: str) -> str:
+    """Return the shared product group or ``unclassified`` for older/unknown entries."""
+    _load()
+    return next((entry.category for entry in _entries if entry.check_id == check_id), "unclassified")
