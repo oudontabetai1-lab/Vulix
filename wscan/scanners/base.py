@@ -1705,6 +1705,8 @@ class BaseScanner(ABC):
                     classify_token_response,
                     decide_token_retry,
                     derive_token_ref_id,
+                    RefreshStrategy,
+                    RefreshKind,
                 )
                 attempt_count = 1
                 refresh_reason = None
@@ -1803,6 +1805,7 @@ class BaseScanner(ABC):
                             outcome,
                             attempt_count=1,
                             max_retries=2,
+                            refresh_strategy=RefreshStrategy(strategy=RefreshKind.PAGE_RELOAD),
                         )
                         if retry_dec.should_retry:
                             # 1 回のみ再ナビゲーション + re-submit with fresh DOM tokens
