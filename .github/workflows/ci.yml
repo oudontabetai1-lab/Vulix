@@ -37,6 +37,9 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-asyncio
 
+      - name: Validate offline documentation references and CLI examples
+        run: python scripts/check_docs.py
+
       # PR 毎の高速 E2E スモークと /app 画面群 E2E ブラウザテスト。
       # Chromium をインストールし、UI テストが silent skip されず確実に実行されることを担保する。
       - name: Install Chromium for Playwright

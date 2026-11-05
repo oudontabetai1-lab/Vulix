@@ -775,7 +775,7 @@ def _effective_mfa_type(args):
     return _CFG.get("mfa_type") or None
 
 
-def parse_args(argv=None):
+def _build_parser():
     parser = argparse.ArgumentParser(
         description="WScan - Web Security Scanner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1846,7 +1846,11 @@ Examples:
         help="標準出力ではなくファイルへ書き出す",
     )
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def parse_args(argv=None):
+    args = _build_parser().parse_args(argv)
     argv_list = sys.argv[1:] if argv is None else argv
     args.ollama_model_explicit = any(
         a == "--ollama-model" or a.startswith("--ollama-model=")
