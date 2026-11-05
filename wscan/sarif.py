@@ -77,6 +77,7 @@ _SARIF_SCHEMA = (
 
 from wscan.scanners.base import finding_dict_confirmed
 from .i18n import DEFAULT_LANG, normalize_lang, translate, translate_or
+from .check_catalog import get_check_description, get_check_references
 
 
 class SarifExporter:
@@ -190,10 +191,15 @@ class SarifExporter:
             if ct in _RULE_DESCS:
                 desc = translate_or(f"sarif.rule.{ct}", self.lang, desc)
 
-            # 修正ガイダンス (remediation._STATIC_FIX から流用)
-            help_text = self._get_remediation(ct)
+            catalog_desc = get_check_description(ct, self.lang)
+            if catalog_desc is not None:
+                desc = catalog_desc.short_description
+                help_text = f"{catalog_desc.risk_if_vulnerable}\n\n{catalog_desc.remediation_overview}"
+            else:
+                # Keep legacy wording when the optional catalog has no entry.
+                help_text = self._get_remediation(ct)
 
-            rules.append({
+            rule = {
                 "id": ct,
                 "name": ct.replace("_", " ").title(),
                 "shortDescription": {"text": desc},
@@ -205,7 +211,15 @@ class SarifExporter:
                     "precision": "medium",
                     "problem.severity": severity,
                 },
-            })
+            }
+            if catalog_desc is not None:
+                rule["fullDescription"] = {"text": desc}
+                rule["shortDescription"] = {"text": desc}
+                help_uri = next((ref.url for ref in get_check_references(ct)
+                                 if ref.url and ref.url.lower().startswith(("http://", "https://"))), None)
+                if help_uri:
+                    rule["helpUri"] = help_uri
+            rules.append(rule)
         return rules
 
     @staticmethod

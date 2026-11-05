@@ -61,6 +61,20 @@ def test_default_output_is_byte_identical_to_pre_i18n_baseline(tmp_path, name):
             rb'\n(\s*)<div class="catalog-guidance"[^>]*>.*?</div>\n\s*',
             rb"\n\1", rendered[name], flags=re.DOTALL
         )
+    elif name == "report.sarif.json":
+        actual = json.loads(rendered[name])
+        baseline = json.loads((BASELINE_DIR / name).read_bytes())
+        actual_rules = actual["runs"][0]["tool"]["driver"]["rules"]
+        baseline_rules = {rule["id"]: rule for rule in baseline["runs"][0]["tool"]["driver"]["rules"]}
+        # Catalog-backed descriptions/help are the intentional rule metadata change.
+        for rule in actual_rules:
+            old_rule = baseline_rules[rule["id"]]
+            for key in ("shortDescription", "fullDescription", "help", "helpUri"):
+                if key in old_rule:
+                    rule[key] = old_rule[key]
+                else:
+                    rule.pop(key, None)
+        rendered[name] = json.dumps(actual, ensure_ascii=False, indent=2).encode("utf-8")
     assert rendered[name] == (BASELINE_DIR / name).read_bytes()
 
 
@@ -94,6 +108,8 @@ def test_untranslated_keys_fall_back_to_japanese(tmp_path, monkeypatch):
     assert translate_or("sarif.rule.sqli", "fr", "ja原文") == "ja原文"
     monkeypatch.delitem(i18n._MESSAGES["en"], "sarif.rule.sqli")
     monkeypatch.delitem(i18n._MESSAGES["en"], "remediation.sqli")
+    from wscan import sarif
+    monkeypatch.setattr(sarif, "get_check_description", lambda *_: None)
     finding = dict(check_type="sqli", severity="high", url="http://fixture.test/", field_name="q",
                    payload="'", evidence="e", verification_state="assumed")
     rule = SarifExporter("en").export([finding])["runs"][0]["tool"]["driver"]["rules"][0]
