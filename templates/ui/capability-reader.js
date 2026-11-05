@@ -66,7 +66,7 @@
   };
 
   // Known UI category group mappings for known scanner IDs.
-  // Unknown scanners will be automatically categorized via heuristic or fallback to 'file'.
+  // Used as a compatibility fallback when older manifests omit shared category metadata.
   const KNOWN_GROUP_MAPPING = {
     sqli: 'injection',
     os: 'injection',
@@ -111,6 +111,8 @@
     cache_poisoning: 'file',
   };
 
+  const GROUP_NAMES = new Set(['injection', 'xss', 'access', 'header', 'proto', 'file']);
+
   const ALLOWED_TOP_LEVEL_FIELDS = new Set([
     'schema_version',
     'manifest_kind',
@@ -128,6 +130,7 @@
   const ALLOWED_SCANNER_FIELDS = new Set([
     'id',
     'name',
+    'category',
     'check_type',
     'severity',
     'cvss',
@@ -291,6 +294,9 @@
               errors.push(`Scanner '${id}' contains unexpected extra field '${key}'`);
             }
           }
+        }
+        if (sc.category !== undefined && ![...GROUP_NAMES, 'unclassified'].includes(sc.category)) {
+          errors.push(`Scanner '${id}' has invalid category`);
         }
       }
 
@@ -570,7 +576,9 @@
 
       for (const id of scannerIds) {
         const sc = this.manifest.scanners[id];
-        const groupName = KNOWN_GROUP_MAPPING[id] || this._inferGroup(id, sc);
+        const groupName = GROUP_NAMES.has(sc.category)
+          ? sc.category
+          : (KNOWN_GROUP_MAPPING[id] || this._inferGroup(id, sc));
         const targetGroup = groups[groupName] || groups.file;
 
         const label = KNOWN_LABELS[id] || this._formatLabel(id, sc);
@@ -632,7 +640,13 @@
     MANIFEST_KIND: MANIFEST_KIND,
     DEFAULT_CHECKS: DEFAULT_CHECKS,
     KNOWN_LABELS: KNOWN_LABELS,
-    KNOWN_GROUP_MAPPING: KNOWN_GROUP_MAPPING,
+    get KNOWN_GROUP_MAPPING() {
+      const scanners = defaultReader.manifest && defaultReader.manifest.scanners || {};
+      const fromManifest = Object.fromEntries(Object.entries(scanners)
+        .filter(([, scanner]) => GROUP_NAMES.has(scanner.category))
+        .map(([id, scanner]) => [id, scanner.category]));
+      return { ...KNOWN_GROUP_MAPPING, ...fromManifest };
+    },
     CapabilityReader: CapabilityReader,
     defaultReader: defaultReader,
     loadCapabilities: function (options) {

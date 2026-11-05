@@ -997,13 +997,14 @@ class MonitorServer:
         @app.get("/api/v1/check-catalog")
         async def api_check_catalog(lang: str = "ja"):
             """検査項目の説明カタログを読み取り専用で返す。"""
-            from wscan.check_catalog import catalog_version, get_check_references, list_checks
+            from wscan.check_catalog import catalog_version, get_check_category, get_check_references, list_checks
             language = "en" if lang.lower().split("-")[0].split("_")[0] == "en" else "ja"
             try:
                 checks = {}
                 for check_id, description in list_checks(language):
                     checks[check_id] = {
                         **description.__dict__,
+                        "category": get_check_category(check_id),
                         "references": [ref.__dict__ for ref in get_check_references(check_id)],
                     }
                 return JSONResponse({"catalog_version": catalog_version(), "lang": language, "checks": checks})

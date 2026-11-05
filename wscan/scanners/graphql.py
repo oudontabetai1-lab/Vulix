@@ -253,7 +253,7 @@ class GraphQLScanner(BaseScanner):
             ),
             CarrierCapability(
                 carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
-                reason="_GRAPHQL_PATHS は endpoint 探索で findings を生まない。path carrier への注入検査ではない",
+                reason="既知の候補パス探索は endpoint 検出のみで findings を生まない。path carrier への注入検査ではない",
             ),
             CarrierCapability(
                 # _test_batch() が array-wrapped batch query（graphql_batch）を送るため ARRAY も含む。

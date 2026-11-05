@@ -26,7 +26,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Use parameterized SQL queries and least-privilege database accounts.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "injection"
     },
     "xss": {
       "ja": {
@@ -53,7 +54,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Use context-aware output encoding and framework auto-escaping.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "xss"
     },
     "dom_xss": {
       "ja": {
@@ -80,7 +82,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "xss"
     },
     "os": {
       "ja": {
@@ -107,7 +110,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "injection"
     },
     "ssti": {
       "ja": {
@@ -134,7 +138,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "injection"
     },
     "path_traversal": {
       "ja": {
@@ -161,7 +166,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "header"
     },
     "csrf": {
       "ja": {
@@ -188,7 +194,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Require unpredictable CSRF tokens for state-changing requests and validate origins.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "access"
     },
     "header_injection": {
       "ja": {
@@ -215,7 +222,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "header"
     },
     "mail_header": {
       "ja": {
@@ -242,7 +250,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Out-of-band confirmation requires a configured external mail receiver."
-      }
+      },
+      "category": "header"
     },
     "open_redirect": {
       "ja": {
@@ -269,7 +278,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Control redirect destinations server-side or validate them against an allowlist.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "header"
     },
     "clickjacking": {
       "ja": {
@@ -296,7 +306,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "file"
     },
     "session": {
       "ja": {
@@ -333,7 +344,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "access"
     },
     "privesc": {
       "ja": {
@@ -360,7 +372,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "到達可能な認証状態と対象経路の範囲に限られます。"
-      }
+      },
+      "category": "access"
     },
     "stored_xss": {
       "ja": {
@@ -387,7 +400,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "保存と再表示が実際に行われる経路に限られます。"
-      }
+      },
+      "category": "xss"
     },
     "cors": {
       "ja": {
@@ -414,7 +428,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     },
     "info_disclosure": {
       "ja": {
@@ -441,7 +456,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     },
     "directory_artifacts": {
       "ja": {
@@ -468,7 +484,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "候補パスの上限と対象スコープにより全ファイルを網羅しません。"
-      }
+      },
+      "category": "proto"
     },
     "host_header": {
       "ja": {
@@ -495,7 +512,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "header"
     },
     "security_headers": {
       "ja": {
@@ -516,7 +534,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     },
     "nosql": {
       "ja": {
@@ -543,7 +562,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "injection"
     },
     "deserialization": {
       "ja": {
@@ -570,7 +590,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "injection"
     },
     "request_smuggling": {
       "ja": {
@@ -597,7 +618,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     },
     "ssrf": {
       "ja": {
@@ -624,7 +646,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Allowlist destinations and protocols, and block requests to internal addresses.",
         "limitations": "Detection relies on internal-resource markers in the response body; response timing is not used as an oracle."
-      }
+      },
+      "category": "proto"
     },
     "graphql": {
       "ja": {
@@ -645,7 +668,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "検出可能なGraphQL経路と応答の範囲に限られます。"
-      }
+      },
+      "category": "injection"
     },
     "jwt": {
       "ja": {
@@ -666,7 +690,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     },
     "cms": {
       "ja": {
@@ -693,7 +718,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "file"
     },
     "xxe": {
       "ja": {
@@ -720,7 +746,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Disable external entities and DOCTYPE processing in the XML parser.",
         "limitations": "XMLを受理する到達可能な入力が必要で、応答に現れない外部アクセスは確定できません。"
-      }
+      },
+      "category": "header"
     },
     "ldap": {
       "ja": {
@@ -747,7 +774,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "injection"
     },
     "file_upload": {
       "ja": {
@@ -774,7 +802,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "file"
     },
     "race_condition": {
       "ja": {
@@ -801,7 +830,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "実行可能な要求と観測可能な状態差の範囲に限られます。"
-      }
+      },
+      "category": "access"
     },
     "websocket": {
       "ja": {
@@ -822,7 +852,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     },
     "secret_leak": {
       "ja": {
@@ -849,7 +880,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     },
     "sri": {
       "ja": {
@@ -876,7 +908,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     },
     "js_static": {
       "ja": {
@@ -903,7 +936,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "xss"
     },
     "prototype_pollution": {
       "ja": {
@@ -930,7 +964,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "injection"
     },
     "cache_poisoning": {
       "ja": {
@@ -957,7 +992,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "file"
     },
     "mass_assignment": {
       "ja": {
@@ -978,7 +1014,8 @@
         "verification_overview": "It evaluates probe responses against scanner rules and records findings when conditions match.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "injection"
     },
     "outdated_components": {
       "ja": {
@@ -1005,7 +1042,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "版を識別できない資源や外部照会の失敗は判定できません。"
-      }
+      },
+      "category": "file"
     },
     "http_methods": {
       "ja": {
@@ -1026,7 +1064,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     },
     "tls_scan": {
       "ja": {
@@ -1053,7 +1092,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "プロキシまたはクライアント証明書が必要な接続は検査できない場合があります。"
-      }
+      },
+      "category": "proto"
     },
     "transport_security": {
       "ja": {
@@ -1080,7 +1120,8 @@
         "verification_overview": "It compares retrieved pages, responses, or lookup results with implemented decision rules.",
         "remediation_overview": "Validate the relevant input and use safe APIs or restrictive configuration.",
         "limitations": "Coverage is limited to inspected inputs/pages and observable responses; untested or unobservable paths are not shown to be safe."
-      }
+      },
+      "category": "proto"
     }
   }
 }

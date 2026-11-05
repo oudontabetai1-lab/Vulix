@@ -38,6 +38,27 @@ def _run_node_script(script: str) -> dict:
     return json.loads(res.stdout)
 
 
+def _grouped_categories(manifest):
+    script = f"""
+    class MockApiClient {{
+      async get() {{ return {{
+        isSuccess: () => true, isUnauthorized: () => false, isNetworkError: () => false,
+        isDecodeError: () => false, isHttpError: () => false, isAborted: () => false,
+        data: {json.dumps(manifest)},
+      }}; }}
+    }}
+    (async () => {{
+      const reader = new CapabilityReader({{apiClient: new MockApiClient()}});
+      await reader.loadCapabilities();
+      const grouped = reader.getGroupedScanners('normal');
+      console.log(JSON.stringify(Object.fromEntries(Object.entries(grouped).flatMap(
+        ([group, scanners]) => scanners.map(scanner => [scanner.id, group])
+      ))));
+    }})();
+    """
+    return _run_node_script(script)
+
+
 def test_dashboard_capability_reader_matches_scanner_registry():
     """Verify that CapabilityReader with manifest matches the SCANNERS registry exactly."""
     manifest = build_capability_manifest()
@@ -77,6 +98,7 @@ def test_dashboard_capability_reader_matches_scanner_registry():
         defaultChecks: defaultChecks,
         allGroupedIds: allGroupedScanners.map(s => s.id),
         defaultsFromGroups: allGroupedScanners.filter(s => s.def).map(s => s.id),
+        categoryById: Object.fromEntries(allGroupedScanners.map(s => [s.id, Object.keys(grouped).find(k => grouped[k].includes(s))])),
       }}));
     }})();
     """
@@ -96,12 +118,14 @@ def test_dashboard_capability_reader_matches_scanner_registry():
     # Defaults must be strictly {"sqli", "os", "xss"}
     assert set(data["defaultChecks"]) == {"sqli", "os", "xss"}
     assert set(data["defaultsFromGroups"]) == {"sqli", "os", "xss"}
+    assert {check_id: entry["category"] for check_id, entry in manifest["scanners"].items()} == data["categoryById"]
 
 
 def test_dummy_scanner_addition_requires_no_ui_code_change():
     """Demonstrate that adding a dummy scanner requires zero UI template/code modifications."""
     manifest = build_capability_manifest()
     dummy_id = "test_synthetic_custom_probe"
+    assert build_capability_manifest({dummy_id: type("SyntheticScanner", (), {})})["scanners"][dummy_id]["category"] == "unclassified"
     manifest["scanners"][dummy_id] = {
         "id": dummy_id,
         "name": "SyntheticCustomProbeScanner",
@@ -176,3 +200,34 @@ def test_dummy_scanner_addition_requires_no_ui_code_change():
     assert data["foundDummy"]["scanner"]["applicable"] is True
     # Label is automatically formatted from class name or id without UI hardcoding
     assert data["foundDummy"]["scanner"]["label"] == "SyntheticCustomProbe"
+
+
+def test_category_override_and_categoryless_legacy_manifest_grouping():
+    manifest = build_capability_manifest()
+    expected = {check_id: entry["category"] for check_id, entry in manifest["scanners"].items()}
+
+    legacy = json.loads(json.dumps(manifest))
+    for scanner in legacy["scanners"].values():
+        scanner.pop("category")
+    assert _grouped_categories(legacy) == expected
+
+    override = json.loads(json.dumps(manifest))
+    override["scanners"]["sqli"]["category"] = "file"
+    override["scanners"]["security_headers"]["category"] = "unclassified"
+    unknown_inferred = "test_synthetic_sql_probe"
+    unknown_fallback = "test_synthetic_unmapped_probe"
+    override["scanners"][unknown_inferred] = {
+        **override["scanners"]["sqli"], "id": unknown_inferred, "name": "SyntheticSqlScanner",
+        "check_type": unknown_inferred, "category": "unclassified",
+    }
+    override["scanners"][unknown_fallback] = {
+        **override["scanners"]["sqli"], "id": unknown_fallback, "name": "SyntheticScanner",
+        "check_type": unknown_fallback, "category": "unclassified",
+    }
+    override["scanner_ids"].extend([unknown_inferred, unknown_fallback])
+    override["scanner_count"] += 2
+    grouped = _grouped_categories(override)
+    assert grouped["sqli"] == "file"
+    assert grouped["security_headers"] == "proto"
+    assert grouped[unknown_inferred] == "injection"
+    assert grouped[unknown_fallback] == "file"

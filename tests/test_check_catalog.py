@@ -22,7 +22,8 @@ def test_catalog_matches_registry_and_has_plain_text_in_both_languages():
         "security_headers", "graphql", "jwt", "websocket", "mass_assignment", "http_methods",
     }
     for check_id, item in data["checks"].items():
-        assert set(item) == {"ja", "en", "references"}
+        assert set(item) == {"ja", "en", "references", "category"}
+        assert item["category"] in {"injection", "xss", "access", "header", "proto", "file"}
         for lang in ("ja", "en"):
             assert set(item[lang]) == set(FIELDS)
             for field in FIELDS:
@@ -48,6 +49,9 @@ def test_getters_normalize_locale_and_fall_back_to_japanese(monkeypatch):
     assert catalog.get_check_description("missing") is None
     assert len(catalog.list_checks("en")) == len(SCANNERS)
     assert catalog.list_checks("en-US") == catalog.list_checks("en")
+    assert {catalog.get_check_category(check_id) for check_id in SCANNERS} <= {
+        "injection", "xss", "access", "header", "proto", "file",
+    }
 
 
 def test_missing_english_entry_falls_back_to_japanese(monkeypatch):
@@ -61,6 +65,44 @@ def test_missing_english_entry_falls_back_to_japanese(monkeypatch):
     monkeypatch.setattr(catalog, "_CATALOG_PATH", Source())
     monkeypatch.setattr(catalog, "_loaded", False)
     assert catalog.get_check_description("sample", "en") == catalog.get_check_description("sample", "ja")
+    assert catalog.get_check_category("sample") == "unclassified"
+
+
+@pytest.mark.parametrize("category", [None, "future_group", ["injection"], {"group": "injection"}])
+def test_invalid_optional_category_keeps_valid_catalog_entries(monkeypatch, category):
+    def entry(value_marker, category_value="injection"):
+        item = {
+            lang: {key: f"{value_marker} {key}" for key in FIELDS}
+            for lang in ("ja", "en")
+        }
+        result = {"ja": item["ja"], "en": item["en"], "references": []}
+        if category_value != "missing":
+            result["category"] = category_value
+        return result
+
+    raw = {
+        "schema_version": "1.0.0",
+        "checks": {
+            "valid": entry("valid"),
+            "malformed_category": entry("retained", category),
+            "missing_category": entry("legacy", "missing"),
+        },
+    }
+
+    class Source:
+        def read_text(self, encoding):
+            return json.dumps(raw)
+
+    monkeypatch.setattr(catalog, "_CATALOG_PATH", Source())
+    monkeypatch.setattr(catalog, "_loaded", False)
+    assert catalog.catalog_version() == "1.0.0"
+    assert {check_id for check_id, _ in catalog.list_checks("en")} == {
+        "valid", "malformed_category", "missing_category",
+    }
+    assert catalog.get_check_description("malformed_category", "en").title == "retained title"
+    assert catalog.get_check_category("valid") == "injection"
+    assert catalog.get_check_category("malformed_category") == "unclassified"
+    assert catalog.get_check_category("missing_category") == "unclassified"
 
 
 @pytest.mark.parametrize("contents", [None, "{broken", '{"schema_version":"2.0.0","checks":{}}'])
