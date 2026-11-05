@@ -1896,7 +1896,10 @@ class BaseScanner(ABC):
                                 pass
 
                 # Record once after classification so telemetry cannot change the verdict.
-                if self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
+                if (
+                    self._token_manager_enabled(TokenCarrier.FORM_URLENCODED, TokenTransport.PLAYWRIGHT)
+                    and self.engine and hasattr(self.engine, "record_token_lifecycle_event")
+                ):
                     try:
                         from wscan.token_lifecycle import TokenLifecycleEvent
                         final_response = pair.get("response") if isinstance(pair, dict) else None
