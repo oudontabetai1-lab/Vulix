@@ -68,6 +68,43 @@ def test_missing_english_entry_falls_back_to_japanese(monkeypatch):
     assert catalog.get_check_category("sample") == "unclassified"
 
 
+@pytest.mark.parametrize("category", [None, "future_group", ["injection"], {"group": "injection"}])
+def test_invalid_optional_category_keeps_valid_catalog_entries(monkeypatch, category):
+    def entry(value_marker, category_value="injection"):
+        item = {
+            lang: {key: f"{value_marker} {key}" for key in FIELDS}
+            for lang in ("ja", "en")
+        }
+        result = {"ja": item["ja"], "en": item["en"], "references": []}
+        if category_value != "missing":
+            result["category"] = category_value
+        return result
+
+    raw = {
+        "schema_version": "1.0.0",
+        "checks": {
+            "valid": entry("valid"),
+            "malformed_category": entry("retained", category),
+            "missing_category": entry("legacy", "missing"),
+        },
+    }
+
+    class Source:
+        def read_text(self, encoding):
+            return json.dumps(raw)
+
+    monkeypatch.setattr(catalog, "_CATALOG_PATH", Source())
+    monkeypatch.setattr(catalog, "_loaded", False)
+    assert catalog.catalog_version() == "1.0.0"
+    assert {check_id for check_id, _ in catalog.list_checks("en")} == {
+        "valid", "malformed_category", "missing_category",
+    }
+    assert catalog.get_check_description("malformed_category", "en").title == "retained title"
+    assert catalog.get_check_category("valid") == "injection"
+    assert catalog.get_check_category("malformed_category") == "unclassified"
+    assert catalog.get_check_category("missing_category") == "unclassified"
+
+
 @pytest.mark.parametrize("contents", [None, "{broken", '{"schema_version":"2.0.0","checks":{}}'])
 def test_missing_or_malformed_catalog_is_empty_without_exception(monkeypatch, contents):
     class Source:

@@ -38,6 +38,27 @@ def _run_node_script(script: str) -> dict:
     return json.loads(res.stdout)
 
 
+def _grouped_categories(manifest):
+    script = f"""
+    class MockApiClient {{
+      async get() {{ return {{
+        isSuccess: () => true, isUnauthorized: () => false, isNetworkError: () => false,
+        isDecodeError: () => false, isHttpError: () => false, isAborted: () => false,
+        data: {json.dumps(manifest)},
+      }}; }}
+    }}
+    (async () => {{
+      const reader = new CapabilityReader({{apiClient: new MockApiClient()}});
+      await reader.loadCapabilities();
+      const grouped = reader.getGroupedScanners('normal');
+      console.log(JSON.stringify(Object.fromEntries(Object.entries(grouped).flatMap(
+        ([group, scanners]) => scanners.map(scanner => [scanner.id, group])
+      ))));
+    }})();
+    """
+    return _run_node_script(script)
+
+
 def test_dashboard_capability_reader_matches_scanner_registry():
     """Verify that CapabilityReader with manifest matches the SCANNERS registry exactly."""
     manifest = build_capability_manifest()
@@ -179,3 +200,34 @@ def test_dummy_scanner_addition_requires_no_ui_code_change():
     assert data["foundDummy"]["scanner"]["applicable"] is True
     # Label is automatically formatted from class name or id without UI hardcoding
     assert data["foundDummy"]["scanner"]["label"] == "SyntheticCustomProbe"
+
+
+def test_category_override_and_categoryless_legacy_manifest_grouping():
+    manifest = build_capability_manifest()
+    expected = {check_id: entry["category"] for check_id, entry in manifest["scanners"].items()}
+
+    legacy = json.loads(json.dumps(manifest))
+    for scanner in legacy["scanners"].values():
+        scanner.pop("category")
+    assert _grouped_categories(legacy) == expected
+
+    override = json.loads(json.dumps(manifest))
+    override["scanners"]["sqli"]["category"] = "file"
+    override["scanners"]["security_headers"]["category"] = "unclassified"
+    unknown_inferred = "test_synthetic_sql_probe"
+    unknown_fallback = "test_synthetic_unmapped_probe"
+    override["scanners"][unknown_inferred] = {
+        **override["scanners"]["sqli"], "id": unknown_inferred, "name": "SyntheticSqlScanner",
+        "check_type": unknown_inferred, "category": "unclassified",
+    }
+    override["scanners"][unknown_fallback] = {
+        **override["scanners"]["sqli"], "id": unknown_fallback, "name": "SyntheticScanner",
+        "check_type": unknown_fallback, "category": "unclassified",
+    }
+    override["scanner_ids"].extend([unknown_inferred, unknown_fallback])
+    override["scanner_count"] += 2
+    grouped = _grouped_categories(override)
+    assert grouped["sqli"] == "file"
+    assert grouped["security_headers"] == "proto"
+    assert grouped[unknown_inferred] == "injection"
+    assert grouped[unknown_fallback] == "file"

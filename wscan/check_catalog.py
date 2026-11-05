@@ -93,7 +93,7 @@ def _load() -> None:
                     raise ValueError("invalid catalog reference")
                 references.append(CatalogReference(ref["kind"], ref["id"], ref.get("url")))
             category = localized.get("category", "unclassified")
-            if category not in {"injection", "xss", "access", "header", "proto", "file"}:
+            if not isinstance(category, str) or category not in {"injection", "xss", "access", "header", "proto", "file"}:
                 category = "unclassified"
             entries.append(CatalogEntry(check_id, ja, en, tuple(references), category))
         _version = data["schema_version"]

@@ -53,6 +53,10 @@ def test_entrypoint_details_use_catalog_and_contract_and_unknown_id_fails():
         if carrier["task"]
     }
     assert not any(task_ref in result.stdout for task_ref in task_refs)
+    graphql = _cli("check", "graphql")
+    assert graphql.returncode == 0
+    assert "_GRAPHQL_PATHS" not in graphql.stdout
+    assert "path: state=unsupported" in graphql.stdout
     unknown = _cli("check", "no_such_check")
     assert unknown.returncode != 0
     assert "Unknown check ID" in unknown.stderr

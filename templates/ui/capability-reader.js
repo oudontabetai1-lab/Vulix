@@ -65,6 +65,52 @@
     cache_poisoning: 'キャッシュポイズニング',
   };
 
+  // Known UI category group mappings for known scanner IDs.
+  // Used as a compatibility fallback when older manifests omit shared category metadata.
+  const KNOWN_GROUP_MAPPING = {
+    sqli: 'injection',
+    os: 'injection',
+    nosql: 'injection',
+    ssti: 'injection',
+    deserialization: 'injection',
+    graphql: 'injection',
+    ldap: 'injection',
+    mass_assignment: 'injection',
+    prototype_pollution: 'injection',
+    xss: 'xss',
+    stored_xss: 'xss',
+    dom_xss: 'xss',
+    js_static: 'xss',
+    csrf: 'access',
+    session: 'access',
+    privesc: 'access',
+    race_condition: 'access',
+    header_injection: 'header',
+    mail_header: 'header',
+    open_redirect: 'header',
+    path_traversal: 'header',
+    host_header: 'header',
+    xxe: 'header',
+    cors: 'proto',
+    security_headers: 'proto',
+    http_methods: 'proto',
+    request_smuggling: 'proto',
+    info_disclosure: 'proto',
+    directory_artifacts: 'proto',
+    ssrf: 'proto',
+    websocket: 'proto',
+    secret_leak: 'proto',
+    sri: 'proto',
+    tls_scan: 'proto',
+    transport_security: 'proto',
+    jwt: 'proto',
+    clickjacking: 'file',
+    file_upload: 'file',
+    cms: 'file',
+    outdated_components: 'file',
+    cache_poisoning: 'file',
+  };
+
   const GROUP_NAMES = new Set(['injection', 'xss', 'access', 'header', 'proto', 'file']);
 
   const ALLOWED_TOP_LEVEL_FIELDS = new Set([
@@ -530,7 +576,9 @@
 
       for (const id of scannerIds) {
         const sc = this.manifest.scanners[id];
-        const groupName = GROUP_NAMES.has(sc.category) ? sc.category : this._inferGroup(id, sc);
+        const groupName = GROUP_NAMES.has(sc.category)
+          ? sc.category
+          : (KNOWN_GROUP_MAPPING[id] || this._inferGroup(id, sc));
         const targetGroup = groups[groupName] || groups.file;
 
         const label = KNOWN_LABELS[id] || this._formatLabel(id, sc);
@@ -594,9 +642,10 @@
     KNOWN_LABELS: KNOWN_LABELS,
     get KNOWN_GROUP_MAPPING() {
       const scanners = defaultReader.manifest && defaultReader.manifest.scanners || {};
-      return Object.fromEntries(Object.entries(scanners)
+      const fromManifest = Object.fromEntries(Object.entries(scanners)
         .filter(([, scanner]) => GROUP_NAMES.has(scanner.category))
         .map(([id, scanner]) => [id, scanner.category]));
+      return { ...KNOWN_GROUP_MAPPING, ...fromManifest };
     },
     CapabilityReader: CapabilityReader,
     defaultReader: defaultReader,
