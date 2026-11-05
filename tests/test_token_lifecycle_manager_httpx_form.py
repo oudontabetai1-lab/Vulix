@@ -118,8 +118,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         m = build_token_capability_matrix()
         self.assertTrue(m.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX))
         supported = [(c, t) for c in TokenCarrier for t in TokenTransport if m.is_supported(c, t)]
-        # PLAYWRIGHT と FLOW が SUPPORTED に追加されたため、8 エントリになる
-        expected = sorted(supported, key=lambda x: (x[0].value, x[1].value))
+        # Hybrid declarations add the three deterministic managed carriers.
         self.assertEqual(sorted(supported, key=lambda x: (x[0].value, x[1].value)), sorted([
             (TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX),
             (TokenCarrier.JSON, TokenTransport.HTTPX),
@@ -129,4 +128,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
             (TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW),
             (TokenCarrier.JSON, TokenTransport.SPA_API),
             (TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API),
+            (TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID),
+            (TokenCarrier.JSON, TokenTransport.HYBRID),
+            (TokenCarrier.HTTP_HEADER, TokenTransport.HYBRID),
         ], key=lambda x: (x[0].value, x[1].value)))

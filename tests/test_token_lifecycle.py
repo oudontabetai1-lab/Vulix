@@ -589,28 +589,38 @@ def test_capability_matrix_construction_and_invariants():
     assert matrix.is_supported(TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API) is True
     assert matrix.is_planned(TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API) is False
 
-    # HAR Replay: 静的記録再生のため動的 nonce は BLOCKED
+    # HAR Replay: imports seed crawl state; captured HAR requests are not replayed
     assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HAR_REPLAY) == DeclaredStatus.BLOCKED
     assert matrix.get_status(TokenCarrier.HTTP_HEADER, TokenTransport.HAR_REPLAY) == DeclaredStatus.BLOCKED
     assert matrix.get_status(TokenCarrier.COOKIE, TokenTransport.HAR_REPLAY) == DeclaredStatus.BLOCKED
+    har_reasons = [e.reason for e in matrix.entries if e.transport == TokenTransport.HAR_REPLAY]
+    assert all("HAR import only seeds crawl URLs, cookies, and headers" in reason for reason in har_reasons)
+    assert all("HAR requests are not replayed today" in reason for reason in har_reasons)
+    assert all("HAR-seeded pages are probed through managed crawl paths" in reason for reason in har_reasons)
 
-    # Agent: form-urlencoded は PLANNED、multipart は現時点で UNSUPPORTED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT) == DeclaredStatus.PLANNED
+    # Agent: live browser submits current DOM token values; no captured token is replayed
+    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT) == DeclaredStatus.UNSUPPORTED
     assert matrix.get_status(TokenCarrier.MULTIPART, TokenTransport.AGENT) == DeclaredStatus.UNSUPPORTED
     assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT) is False
-    assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT) is True
+    assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT) is False
+    agent_form_reason = next(e.reason for e in matrix.entries if e.carrier == TokenCarrier.FORM_URLENCODED and e.transport == TokenTransport.AGENT)
+    assert "live browser" in agent_form_reason and "current DOM token values" in agent_form_reason and "no captured token is replayed" in agent_form_reason
 
-    # Hybrid: form-urlencoded, multipart, json が PLANNED
-    assert matrix.get_status(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) == DeclaredStatus.PLANNED
+    # Hybrid deterministic scan phase supports managed form, JSON, and header paths
+    for carrier in (TokenCarrier.FORM_URLENCODED, TokenCarrier.JSON, TokenCarrier.HTTP_HEADER):
+        assert matrix.get_status(carrier, TokenTransport.HYBRID) == DeclaredStatus.SUPPORTED
+        assert "deterministic scan phase" in next(e.reason for e in matrix.entries if e.carrier == carrier and e.transport == TokenTransport.HYBRID)
+        assert "managed scanner paths" in next(e.reason for e in matrix.entries if e.carrier == carrier and e.transport == TokenTransport.HYBRID)
+        assert "when the token lifecycle manager is enabled" in next(e.reason for e in matrix.entries if e.carrier == carrier and e.transport == TokenTransport.HYBRID)
     assert matrix.get_status(TokenCarrier.MULTIPART, TokenTransport.HYBRID) == DeclaredStatus.PLANNED
-    assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) is False
-    assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) is True
+    assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) is True
+    assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID) is False
 
     # Flow: form-urlencoded は SUPPORTED (Increment 3)、multipart, json, header が PLANNED
     assert matrix.is_supported(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is True
     assert matrix.is_planned(TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW) is False
 
-    # SUPPORTED は実装済みの carrier のみに宣言（Increment 4 で JSON+SPA_API と HTTP_HEADER+SPA_API を追加）
+    # SUPPORTED entries mirror implemented deterministic paths and declared integrations.
     supported_entries = [e for e in matrix.entries if e.status == DeclaredStatus.SUPPORTED]
     assert {(e.carrier, e.transport) for e in supported_entries} == {
         (TokenCarrier.FORM_URLENCODED, TokenTransport.HTTPX),
@@ -621,9 +631,12 @@ def test_capability_matrix_construction_and_invariants():
         (TokenCarrier.FORM_URLENCODED, TokenTransport.FLOW),
         (TokenCarrier.JSON, TokenTransport.SPA_API),
         (TokenCarrier.HTTP_HEADER, TokenTransport.SPA_API),
+        (TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID),
+        (TokenCarrier.JSON, TokenTransport.HYBRID),
+        (TokenCarrier.HTTP_HEADER, TokenTransport.HYBRID),
     }
     other_entries = [e for e in matrix.entries if e.status != DeclaredStatus.SUPPORTED]
-    assert len(other_entries) == 41
+    assert len(other_entries) == 38
     assert all(e.status in (DeclaredStatus.PLANNED, DeclaredStatus.UNSUPPORTED, DeclaredStatus.BLOCKED) for e in other_entries)
 
 

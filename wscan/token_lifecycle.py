@@ -22,8 +22,11 @@
 
 【統合状況】
 opt-in フラグの下で、HTTPX の form / JSON・XML・header、Playwright の form と FlowRunner、
-SPA API の JSON・header は token manager に接続済み。HAR replay、Agent、Hybrid、multipart、
-cookie は未接続（宣言上の能力と実行時の接続は別）。
+SPA API の JSON・header は token manager に接続済み。Agent の form は live browser が DOM の現行値を
+送信し、captured token は再生しない。Hybrid の form / JSON / header は deterministic scan phase が
+manager 有効時に対応経路を使う。HAR import は crawl URL・cookie・header の seed のみで、HAR request
+自体は再生せず、seed pages は managed crawl paths で probe するため HAR_REPLAY は BLOCKED のまま。
+multipart、cookie などの宣言上の能力と実行時の接続は別。
 flow_runner.py のページ全体 DOM 抽出と base.py の browser manager 経路、および
 mail_header.py のフォーム範囲・リクエストごとの抽出は意図して分離する。selector、key の大文字小文字、
 テスト済みフィールドの除外、抽出範囲の意味が異なり、統合すると検出結果が変わる。
@@ -1002,24 +1005,24 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
     ),
 
     # HAR Replay (記録トラフィックの再生)
-    # HAR 再生では静的記録値を用いるため、動的/回転する nonce は構造的に遮断される
+    # HAR request は再生せず、HAR seed pages は managed crawl paths で probe する
     (TokenCarrier.FORM_URLENCODED, TokenTransport.HAR_REPLAY): (
-        DeclaredStatus.BLOCKED, "Static recorded form tokens fail dynamic one-time/rotating nonce checks"
+        DeclaredStatus.BLOCKED, "HAR import only seeds crawl URLs, cookies, and headers; HAR requests are not replayed today; HAR-seeded pages are probed through managed crawl paths"
     ),
     (TokenCarrier.MULTIPART, TokenTransport.HAR_REPLAY): (
-        DeclaredStatus.BLOCKED, "Recorded multipart bodies contain expired nonces"
+        DeclaredStatus.BLOCKED, "HAR import only seeds crawl URLs, cookies, and headers; HAR requests are not replayed today; HAR-seeded pages are probed through managed crawl paths"
     ),
     (TokenCarrier.JSON, TokenTransport.HAR_REPLAY): (
-        DeclaredStatus.BLOCKED, "Recorded JSON payload tokens are stale upon replay"
+        DeclaredStatus.BLOCKED, "HAR import only seeds crawl URLs, cookies, and headers; HAR requests are not replayed today; HAR-seeded pages are probed through managed crawl paths"
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.HAR_REPLAY): (
-        DeclaredStatus.BLOCKED, "Recorded GraphQL operation tokens fail dynamic validation"
+        DeclaredStatus.BLOCKED, "HAR import only seeds crawl URLs, cookies, and headers; HAR requests are not replayed today; HAR-seeded pages are probed through managed crawl paths"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.HAR_REPLAY): (
-        DeclaredStatus.BLOCKED, "Recorded CSRF headers fail server-side session checks"
+        DeclaredStatus.BLOCKED, "HAR import only seeds crawl URLs, cookies, and headers; HAR requests are not replayed today; HAR-seeded pages are probed through managed crawl paths"
     ),
     (TokenCarrier.COOKIE, TokenTransport.HAR_REPLAY): (
-        DeclaredStatus.BLOCKED, "Recorded session cookies/nonces expire across sessions"
+        DeclaredStatus.BLOCKED, "HAR import only seeds crawl URLs, cookies, and headers; HAR requests are not replayed today; HAR-seeded pages are probed through managed crawl paths"
     ),
 
     # Flow (マルチステップ・シナリオ)
@@ -1044,7 +1047,7 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
 
     # Agent (自律 LLM エージェント)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.AGENT): (
-        DeclaredStatus.PLANNED, "Planned: Agent DOM exploration fills and submits forms"
+        DeclaredStatus.UNSUPPORTED, "Not managed: Agent mode submits through a live browser, so forms carry the current DOM token values; no captured token is replayed."
     ),
     (TokenCarrier.MULTIPART, TokenTransport.AGENT): (
         DeclaredStatus.UNSUPPORTED, "Agent raw multipart stream construction not currently declared"
@@ -1064,19 +1067,19 @@ _DEFAULT_DECLARATIONS: dict[tuple[TokenCarrier, TokenTransport], tuple[DeclaredS
 
     # Hybrid (ハイブリッド探索)
     (TokenCarrier.FORM_URLENCODED, TokenTransport.HYBRID): (
-        DeclaredStatus.PLANNED, "Planned: Deterministic scanner handles form token lifecycle"
+        DeclaredStatus.SUPPORTED, "Via the deterministic scan phase, which uses the managed scanner paths when the token lifecycle manager is enabled."
     ),
     (TokenCarrier.MULTIPART, TokenTransport.HYBRID): (
         DeclaredStatus.PLANNED, "Planned: Deterministic scanner handles multipart token lifecycle"
     ),
     (TokenCarrier.JSON, TokenTransport.HYBRID): (
-        DeclaredStatus.PLANNED, "Planned: Deterministic + agent coordinate JSON token lifecycle"
+        DeclaredStatus.SUPPORTED, "Via the deterministic scan phase, which uses the managed scanner paths when the token lifecycle manager is enabled."
     ),
     (TokenCarrier.GRAPHQL, TokenTransport.HYBRID): (
         DeclaredStatus.PLANNED, "Planned: Deterministic scanner handles GraphQL token injection"
     ),
     (TokenCarrier.HTTP_HEADER, TokenTransport.HYBRID): (
-        DeclaredStatus.PLANNED, "Planned: Both engines propagate authenticated token headers"
+        DeclaredStatus.SUPPORTED, "Via the deterministic scan phase, which uses the managed scanner paths when the token lifecycle manager is enabled."
     ),
     (TokenCarrier.COOKIE, TokenTransport.HYBRID): (
         DeclaredStatus.PLANNED, "Planned: Shared session cookies preserved across handoff"
@@ -1154,7 +1157,7 @@ def build_token_capability_matrix(
                 status, reason = _DEFAULT_DECLARATIONS[pair]
             elif c == TokenCarrier.XML:
                 status = DeclaredStatus.BLOCKED if t == TokenTransport.HAR_REPLAY else DeclaredStatus.PLANNED
-                reason = "Planned: XML request body token refresh" if status == DeclaredStatus.PLANNED else "Recorded XML tokens may be stale"
+                reason = "HAR import only seeds crawl URLs, cookies, and headers; HAR requests are not replayed today; HAR-seeded pages are probed through managed crawl paths" if t == TokenTransport.HAR_REPLAY else "Planned: XML request body token refresh"
             else:
                 status = DeclaredStatus.UNSUPPORTED
                 reason = "Not declared in default matrix"
