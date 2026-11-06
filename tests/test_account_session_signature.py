@@ -97,7 +97,7 @@ def test_auto_login_uses_login_form_with_default_named_registration_fields(field
     bm.get_page_source = AsyncMock(side_effect=[PAGES["/mixed-default-login"],
                                                '<h1>Dashboard</h1><a href="/logout">Log out</a>'])
     bm._editable_auth_selector = AsyncMock(side_effect=lambda s: s if s.startswith("input[") else "")
-    assert asyncio.run(bm.auto_login("http://t/login", **fields))
+    assert asyncio.run(bm.auto_login("http://t/login", success_indicator="Dashboard", **fields))
     assert [call.args[0] for call in bm.page.fill.call_args_list] == expected
 
 

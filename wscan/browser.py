@@ -2761,6 +2761,7 @@ class BrowserManager:
         pass_field: str = "password",
         success_indicator: str = "",
         logged_in_marker: str = "",
+        protected_access_check=None,
     ) -> bool:
         """明示欄を優先し、form 単位の計画と独立証拠で自動ログインする。"""
         from . import login_surface as ls
@@ -2883,12 +2884,25 @@ class BrowserManager:
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 body = await self.get_page_source()
-                self.last_login_assessment = ls.assess_login_state(ls.LoginObservation(
+                obs = ls.LoginObservation(
                     post_url=self.page.url, login_url=login_url, body=body,
                     success_indicator=success_indicator, logged_in_marker=logged_in_marker,
                     status=observation["status"], api_token_issued=observation["token"],
                     transport_error=observation["error"] or ("ReadError" if not body else ""),
-                ))
+                    protected_access="unknown", protected_access_reason="protected_access_unknown",
+                )
+                surface = ls.classify_surface(body, visible_only=True)
+                form_present = any(f.kind == ls.LOGIN for f in surface.forms)
+                preliminary = ls.assess_login_state(obs)
+                if (protected_access_check is not None and not form_present
+                        and preliminary.state not in {ls.FAILURE, ls.CHALLENGE}
+                        and (obs.status is None or obs.status < 400) and not obs.transport_error):
+                    obs.protected_access, obs.protected_access_reason = await protected_access_check(
+                        api_token_issued=observation["token"])
+                self.last_login_assessment = ls.assess_login_state(obs)
+                if form_present and self.last_login_assessment.authenticated:
+                    # A configured marker inside the login script may precede the actual transition.
+                    self.last_login_assessment = ls.LoginAssessment(ls.INCOMPLETE, reasons=["login_form_still_present"])
                 # 解決した OTP の実要素が残っている場合は明示 marker よりも challenge を優先。
                 if mfa_status == "solved" and self._submitted_mfa_input is not None:
                     try:

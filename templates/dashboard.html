@@ -50,6 +50,7 @@ body {
 .status-dot.done { background: var(--success); }
 .status-dot.error { background: var(--critical); }
 .status-dot.aborted { background: var(--high); }
+.status-dot.incomplete { background: var(--medium); }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 .status-text { color: var(--text-muted); font-size: 0.85rem; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.status-bar{min-width:0}
 .header-stats {
@@ -5685,8 +5686,9 @@ function dispatchLegacyEvent(event) {
       // 必要に応じて「📤 設定をエクスポート」ボタンから手動でダウンロード可能。
       // replaceFindings が 0 件時の中断注記を判定するため、state を先に確定させる。
       const isAborted = data.status === 'aborted' || !!data.aborted;
+      const isIncomplete = data.status === 'incomplete';
       state.scanDone = true;
-      state.status = isAborted ? 'aborted' : 'done';
+      state.status = isAborted ? 'aborted' : (isIncomplete ? 'incomplete' : 'done');
       state.aborted = isAborted;
       if (Array.isArray(data.findings)) {
         replaceFindings(data.findings);
@@ -5715,6 +5717,10 @@ function dispatchLegacyEvent(event) {
         setStatus(`Scan aborted (partial report) — ${data.total_findings} finding(s)`, 'aborted');
         addEventLog('status', `Scan aborted (partial report). Report: ${data.report_path || ''}`);
         document.getElementById('statRemain').textContent = '中断';
+      } else if (isIncomplete) {
+        setStatus(`Authentication unconfirmed (partial report) — ${data.total_findings} finding(s)`, 'incomplete');
+        addEventLog('status', 'Authenticated coverage is incomplete.');
+        document.getElementById('statRemain').textContent = '未完了';
       } else {
         const evidenceLabel = evidenceCompletion ? ` / evidence ${evidenceCompletion.status}` : '';
         setStatus(`Scan complete${evidenceLabel} — ${data.total_findings} finding(s)`, 'done');
@@ -5938,7 +5944,7 @@ function applyScanSnapshot(event) {
   state.urlStatuses = data.url_statuses && typeof data.url_statuses === 'object'
     ? {...data.url_statuses} : {};
   state.phase = data.phase || null;
-  state.scanDone = status === 'done' || status === 'aborted';
+  state.scanDone = ['done', 'aborted', 'incomplete'].includes(status);
   document.getElementById('eventCount').textContent = state.eventCount;
   document.getElementById('statPages').textContent = state.pageCount;
   renderCheckCounters();
@@ -5958,7 +5964,7 @@ function applyScanSnapshot(event) {
   document.getElementById('statPct').textContent = pct + '%';
   document.getElementById('statCurrent').textContent = progress.current ?? 0;
   document.getElementById('statTotal').textContent = progress.total > 0 ? '/' + progress.total : '';
-  document.getElementById('progressStripe').style.display = (status === 'done' || status === 'aborted') ? 'none' : (pct < 100 ? 'block' : 'none');
+  document.getElementById('progressStripe').style.display = (['done', 'aborted', 'incomplete'].includes(status)) ? 'none' : (pct < 100 ? 'block' : 'none');
   if (status === 'scanning' || status === 'aborting') {
     updateETA(progress.eta_current ?? progress.current ?? 0, progress.eta_total ?? progress.total ?? 0, event.timestamp,
       progress.phase || '', progress.unit || '', progress.total_known !== false);
@@ -5980,6 +5986,9 @@ function applyScanSnapshot(event) {
     } else {
       setStatus(`Scan complete — ${findings.length} finding(s)`, 'done');
     }
+  } else if (status === 'incomplete') {
+    handleEvent({type: 'scan_complete', data: {...(data.complete || {}), status: 'incomplete',
+      total_findings: findings.length, findings}, timestamp: event.timestamp});
   } else if (status === 'aborted') {
     const complete = data.complete || {};
     const abortPayload = {
@@ -6288,6 +6297,8 @@ function replaceFindings(findings) {
   if (!findings.length) {
     if (state.scanDone && (state.status === 'aborted' || state.aborted)) {
       panel.innerHTML = '<div class="no-findings-msg" style="color:var(--high)">⚠ スキャンは中断されました — 中断前に検出された脆弱性はありません (部分結果)。<br><span style="font-size:0.75rem;color:var(--text-muted)">No vulnerabilities detected before scan was aborted.</span></div>';
+    } else if (state.scanDone && state.status === 'incomplete') {
+      panel.innerHTML = '<div class="no-findings-msg">Authentication unconfirmed — authenticated coverage is incomplete. No findings in the tested surface.</div>';
     } else if (state.scanGapCount > 0 || Object.values(state.urlStatuses).some(s => s === 'error')) {
       const errCount = state.scanGapCount || Object.values(state.urlStatuses).filter(s => s === 'error').length;
       panel.innerHTML = `<div class="no-findings-msg">検査済み対象に脆弱性は検出されませんでした。<br><span style="color:#facc15;font-size:0.75rem">⚠ 注意: ${errCount} 件の対象/入力は未検査(エラー/除外)です。</span></div>`;
