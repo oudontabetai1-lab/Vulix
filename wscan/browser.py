@@ -10,6 +10,8 @@ import logging
 import re
 import socket
 import time
+from email import policy
+from email.parser import BytesParser
 from functools import wraps
 import urllib.request
 from collections.abc import Mapping
@@ -35,30 +37,38 @@ def _playwright_proxy_options(proxy: str) -> dict[str, str] | None:
     return options
 
 
-def _request_carries_form_value(pair: dict, field: str, payload: str) -> bool:
+def _request_carries_form_value(pair: dict, field: str, payload: str, *, submission=None, since=None) -> bool:
     request = (pair or {}).get("request") or {}
-    values = parse_qs(urlparse(request.get("url") or "").query, keep_blank_values=True).get(field, [])
+    if submission is not None:
+        action = submission.get("action") or ""
+        if (since is None or request.get("_capture_sequence", 0) <= since
+                or str(request.get("method") or "GET").upper() != submission.get("method", "GET")
+                or urlsplit(request.get("url") or "")._replace(query="", fragment="") != urlsplit(action)._replace(query="", fragment="")):
+            return False
+    method = str(request.get("method") or "GET").upper()
+    values = parse_qs(urlparse(request.get("url") or "").query, keep_blank_values=True).get(field, []) if method == "GET" else []
     body = request.get("post_data") or ""
-    content_type = next((str(value).lower() for name, value in (request.get("headers") or {}).items()
+    content_type = next((str(value) for name, value in (request.get("headers") or {}).items()
                          if str(name).lower() == "content-type"), "")
-    if body:
-        if "application/json" in content_type:
+    if body and method != "GET":
+        if "application/json" in content_type.lower():
             try:
                 data = json.loads(body)
                 value = data.get(field) if isinstance(data, dict) else None
                 values.extend(value if isinstance(value, list) else [value] if value is not None else [])
             except (TypeError, ValueError):
                 pass
-        elif "multipart/form-data" in content_type:
-            boundary = content_type.split("boundary=", 1)[1].strip().strip('"') if "boundary=" in content_type else ""
-            for part in body.split(f"--{boundary}") if boundary else ():
-                headers, separator, value = part.partition("\r\n\r\n")
-                if (separator and f'name="{field}"' in headers
-                        and value.rstrip("\r\n") == payload):
-                    values.append(payload)
+        elif "multipart/form-data" in content_type.lower():
+            message = BytesParser(policy=policy.default).parsebytes(
+                ("Content-Type: " + content_type + "\r\nMIME-Version: 1.0\r\n\r\n").encode() + body.encode("utf-8"))
+            for part in message.iter_parts():
+                if part.get_param("name", header="content-disposition") == field:
+                    values.append((part.get_payload(decode=True) or b"").decode("utf-8", errors="replace"))
         else:
             values.extend(parse_qs(body, keep_blank_values=True).get(field, []))
-    return payload in values
+    normalize = lambda value: re.sub(r"\r\n|\r|\n", "\r\n", value) if isinstance(value, str) else value
+    return normalize(payload) in [normalize(value) for value in values]
+
 from .url_extraction import (
     is_plausible_route_candidate,
     truncated_regex_literal,
@@ -89,6 +99,8 @@ def _bind_probe_capture(send):
         try:
             return await send(self, *args, **kwargs)
         finally:
+            if context is not None and send.__name__ == "fill_and_submit_form":
+                context["form_delivery"] = self.last_probe_delivered
             capture.probe_context = previous
             capture.pending_probe_context = previous_pending
             capture.probe_frame = previous_frame
@@ -2083,6 +2095,7 @@ class BrowserManager:
         # submit 直前の送信済みリクエスト数。None は submit 前の失敗を表す。
         self.last_probe_delivery_reason = "not_submitted"
         net_before_submit = None
+        result = None
         try:
             result = await self.page.evaluate(
                 """
@@ -2233,12 +2246,9 @@ class BrowserManager:
             # アナリティクス等の別 URL ビーコンを掴まないよう、対象ページを最も
             # よく表すペアを選ぶ（同一オリジンの文書本体を優先）。
             pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
-            request = (pair.get("request") or {})
             field = result.get("fieldName") or field_name
-            self.last_probe_delivered = (
-                request.get("_capture_sequence", 0) > net_before_submit
-                and _request_carries_form_value(pair, field, payload)
-            )
+            self.last_probe_delivered = _request_carries_form_value(
+                pair, field, payload, submission=result, since=net_before_submit)
             self.last_probe_delivery_reason = "delivered" if self.last_probe_delivered else "request_value_unverified"
             return source, pair
         except Exception as e:
@@ -2248,11 +2258,9 @@ class BrowserManager:
             # 例外を握りつぶして空 pair を返すが、送達は相関済みrequest本文でのみ確定する。
             pair = self.network.latest() or {}
             request = (pair.get("request") or {})
-            self.last_probe_delivered = bool(
-                net_before_submit is not None
-                and request.get("_capture_sequence", 0) > net_before_submit
-                and _request_carries_form_value(pair, field_name, payload)
-            )
+            self.last_probe_delivered = bool(result and _request_carries_form_value(
+                pair, result.get("fieldName") or field_name, payload,
+                submission=result, since=net_before_submit))
             if self.last_probe_delivered:
                 self.last_probe_delivery_reason = "delivered"
             if not self.last_probe_delivered:

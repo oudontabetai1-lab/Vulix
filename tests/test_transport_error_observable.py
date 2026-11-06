@@ -346,7 +346,7 @@ class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
         from wscan.browser import _request_carries_form_value
 
         pair = {"request": {
-            "url": "http://x/submit",
+            "url": "http://x/submit", "method": "POST",
             "headers": {"Content-Type": "multipart/form-data; boundary=fixture-boundary"},
             "post_data": (
                 "--fixture-boundary\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n"
