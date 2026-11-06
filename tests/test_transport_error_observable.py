@@ -160,6 +160,7 @@ class _NullNetwork:
     def __init__(self, base_count=0):
         # base_count＝clear() 後に残る fill 由来 XHR/背景 polling のノイズ。
         self.count = base_count
+        self.pair = None
 
     def clear(self):
         pass
@@ -171,22 +172,26 @@ class _NullNetwork:
         return None
 
     def latest(self):
-        return None
+        return self.pair
 
     def request_count(self):
         return self.count
 
 
 class _FakeSubmitBtn:
-    def __init__(self, network, *, sends=True, raises=False):
+    def __init__(self, network, *, sends=True, raises=False, value="payload"):
         self._network = network
         self._sends = sends
         self._raises = raises
+        self._value = value
 
     async def click(self):
         if self._sends:
             # submit がリクエストを送る＝network カウントが増える。
             self._network.count += 1
+            self._network.pair = {"request": {
+                "url": f"http://x/?q={self._value}", "_capture_sequence": self._network.count
+            }}
         if self._raises:
             # click() が post-dispatch の navigation 待ちで raise する状況を模す。
             raise RuntimeError("navigation interrupted after request sent")
@@ -196,12 +201,13 @@ class _FakeFormPage:
     """実 fill_and_submit_form を駆動する fake page。evaluate 結果と各種例外を制御。"""
 
     def __init__(self, *, network, result, wait_raises=False, click_raises=False,
-                 submit_sends=True):
+                 submit_sends=True, request_value="payload"):
         self._network = network
         self._result = result
         self._wait_raises = wait_raises
         self._click_raises = click_raises
         self._submit_sends = submit_sends
+        self._request_value = request_value
 
     async def evaluate(self, *a, **k):
         # 1 回目=fill JS（result を返す）。submit 経路（btn 無し）では 2 回目に submit JS が
@@ -210,7 +216,8 @@ class _FakeFormPage:
 
     async def query_selector(self, *a, **k):
         return _FakeSubmitBtn(
-            self._network, sends=self._submit_sends, raises=self._click_raises
+            self._network, sends=self._submit_sends, raises=self._click_raises,
+            value=self._request_value,
         )
 
     async def wait_for_load_state(self, *a, **k):
@@ -222,11 +229,13 @@ class _FakeFormBrowser:
     """実 BrowserManager.fill_and_submit_form を駆動する最小 fake。"""
 
     def __init__(self, *, result, nav_status=200, wait_raises=False, click_raises=False,
-                 submit_sends=True, net_base=0, prior_delivered=None):
+                 submit_sends=True, net_base=0, prior_delivered=None,
+                 request_value="payload"):
         self.network = _NullNetwork(base_count=net_base)
         self.page = _FakeFormPage(
             network=self.network, result=result, wait_raises=wait_raises,
             click_raises=click_raises, submit_sends=submit_sends,
+            request_value=request_value,
         )
         self.timeout = 5
         self.sleep_factor = 0.0
@@ -246,10 +255,7 @@ class _FakeFormBrowser:
 class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
     """fill_and_submit_form の送達フラグ。
 
-    P1: フォーム不在は直前 navigate が応答を得ていれば speculative（True）、応答なし
-        （status None＝失敗ロード）なら未送達（False）。
-    P2: submit dispatch 後の wait/get_source 例外は送達済みを維持（True）。dispatch 前の
-        例外のみ未送達（False）。
+    成功制御は実リクエストの相関フィールド値で証明し、欠落・改変・未送信は未配達とする。
     """
 
     async def _run(self, **kw):
@@ -257,77 +263,98 @@ class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
 
         fake = _FakeFormBrowser(**kw)
         await BrowserManager.fill_and_submit_form(fake, 0, "q", "payload")
-        return fake.last_probe_delivered
+        return fake.last_probe_delivered, fake.last_probe_delivery_reason
 
     async def test_success_marks_delivered(self):
-        # submit を dispatch できたら送達成功（dispatch 点で確定）。
+        # request body が選択フィールドの候補値を持つ場合のみ送達。
         self.assertTrue(
-            await self._run(result={"success": True, "action": "http://x/"}, submit_sends=True)
+            (await self._run(result={"success": True, "action": "http://x/", "fieldName": "q"}, submit_sends=True))[0]
         )
 
-    async def test_form_absent_after_loaded_page_is_speculative_delivered(self):
-        # ページは正常ロード（status 200）だが form 不在＝speculative probe＝送達成功扱い。
-        self.assertTrue(
-            await self._run(result={"success": False, "error": "form not found"}, nav_status=200)
-        )
+    async def test_form_absent_after_loaded_page_is_undelivered(self):
+        # 正常ロードしたページでもフォーム不在は配達されていない。
+        delivered, reason = await self._run(result={"success": False, "error": "form not found"}, nav_status=200)
+        self.assertFalse(delivered)
+        self.assertEqual(reason, "form_not_found")
 
     async def test_form_absent_after_failed_load_is_undelivered(self):
         # 直前 navigate が応答なし（status None＝失敗ロード）→ stale ページの form 不在＝未送達。
         self.assertFalse(
-            await self._run(result={"success": False, "error": "form not found"}, nav_status=None)
+            (await self._run(result={"success": False, "error": "form not found"}, nav_status=None))[0]
         )
 
     async def test_post_dispatch_exception_keeps_delivered(self):
-        # submit 済みで wait_for_load_state が例外（slow/streaming）→ 送達済みを維持。
+        # post-submit wait error後も、相関request bodyが確認できれば送達済み。
         self.assertTrue(
-            await self._run(result={"success": True, "action": "http://x/"}, wait_raises=True)
+            (await self._run(result={"success": True, "action": "http://x/", "fieldName": "q"}, wait_raises=True))[0]
         )
 
     async def test_click_raises_but_request_sent_is_delivered(self):
-        # click() が post-dispatch の navigation 待ちで raise しても、submit がリクエストを
-        # 送っていれば（差分 +1）送達成功。
+        # click navigation errorでも実リクエストに値があれば送達済み。
         self.assertTrue(
-            await self._run(
-                result={"success": True, "action": "http://x/"},
+            (await self._run(
+                result={"success": True, "action": "http://x/", "fieldName": "q"},
                 click_raises=True, submit_sends=True,
-            )
+            ))[0]
         )
 
     async def test_click_raises_without_request_is_undelivered(self):
         # click() が raise し submit がリクエストを送っていない（差分 0）＝未送達。
         self.assertFalse(
-            await self._run(
-                result={"success": True, "action": "http://x/"},
+            (await self._run(
+                result={"success": True, "action": "http://x/", "fieldName": "q"},
                 click_raises=True, submit_sends=False,
-            )
+            ))[0]
         )
 
     async def test_prior_noise_not_mistaken_for_submission(self):
         # fill 由来 XHR/背景 polling が clear() 後に残っていても（net_base=3）、submit が
         # リクエストを送らず raise した場合は差分 0＝未送達。ノイズを submit と取り違えない。
         self.assertFalse(
-            await self._run(
-                result={"success": True, "action": "http://x/"},
+            (await self._run(
+                result={"success": True, "action": "http://x/", "fieldName": "q"},
                 click_raises=True, submit_sends=False, net_base=3,
-            )
+            ))[0]
         )
 
     async def test_submission_over_prior_noise_is_delivered(self):
-        # ノイズ（net_base=3）があっても submit が実際にリクエストを送れば差分 +1＝送達。
+        # ノイズが先行しても候補値入りリクエストなら送達。
         self.assertTrue(
-            await self._run(
-                result={"success": True, "action": "http://x/"},
+            (await self._run(
+                result={"success": True, "action": "http://x/", "fieldName": "q"},
                 click_raises=True, submit_sends=True, net_base=3,
-            )
+            ))[0]
         )
 
     async def test_form_absent_does_not_leak_prior_true(self):
         # 失敗ロードの form 不在は、直前 probe が True でも False にする（stale を漏らさない）。
         self.assertFalse(
-            await self._run(
+            (await self._run(
                 result={"success": False}, nav_status=None, prior_delivered=True
-            )
+            ))[0]
         )
+
+    async def test_request_with_rewritten_value_is_not_delivered(self):
+        delivered, reason = await self._run(
+            result={"success": True, "action": "http://x/", "fieldName": "q"},
+            request_value="replacement",
+        )
+        self.assertFalse(delivered)
+        self.assertEqual(reason, "request_value_unverified")
+
+    def test_multipart_payload_with_sql_comment_suffix_is_matched_exactly(self):
+        from wscan.browser import _request_carries_form_value
+
+        pair = {"request": {
+            "url": "http://x/submit",
+            "headers": {"Content-Type": "multipart/form-data; boundary=fixture-boundary"},
+            "post_data": (
+                "--fixture-boundary\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n"
+                "probe--\r\n--fixture-boundary--\r\n"
+            ),
+        }}
+        self.assertTrue(_request_carries_form_value(pair, "q", "probe--"))
+        self.assertFalse(_request_carries_form_value(pair, "other", "probe--"))
 
 
 class _FakeUrlParamBrowser:
