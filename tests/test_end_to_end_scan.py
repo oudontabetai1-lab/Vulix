@@ -35,6 +35,8 @@ import unittest
 from urllib.parse import urlparse
 
 import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, Response
 
 from tests.fixtures.realistic_site import (
     EXPECTED_FINDINGS,
@@ -355,6 +357,91 @@ class EndToEndSpaJsonSqlInjectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(_e2e_enabled() and _CHROMIUM_OK,
+                     "WSCAN_E2E=1 と Chromium が必要です")
+class FormPayloadDeliveryBrowserTests(unittest.TestCase):
+    def test_selected_field_delivery_requires_browser_and_wire_value(self):
+        from urllib.parse import parse_qs
+        from wscan.browser import BrowserManager
+
+        app = FastAPI()
+        received = {}
+        candidate = "scan-probe-safe-value"
+
+        @app.get("/form", response_class=HTMLResponse)
+        async def form(case: str):
+            if case == "missing":
+                field = '<input name="other">'
+            elif case == "rewritten":
+                field = '''<input name="username" id="username"><script>
+                    document.querySelector('#username').addEventListener('input', event => {
+                      event.target.value = 'safe-replacement';
+                    });
+                </script>'''
+            elif case == "invalid":
+                field = '<input type="email" name="username" required>'
+            else:
+                field = '<input name="username">'
+            return f'<form method="post" action="/capture/{case}">{field}<button>Send</button></form>'
+
+        @app.post("/capture/{case}")
+        async def capture(case: str, request: Request):
+            fields = parse_qs((await request.body()).decode("utf-8", "replace"), keep_blank_values=True)
+            received[case] = {
+                "field_names": sorted(fields),
+                "candidate_present": candidate in fields.get("username", []),
+            }
+            return Response("ok", status_code=200)
+
+        port = _free_port()
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
+                                               log_level="error", access_log=False))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        browser = None
+        try:
+            _wait_until_serving(port)
+
+            async def exercise():
+                nonlocal browser
+                browser = BrowserManager(headless=True, timeout=5, sleep_factor=0)
+                await browser.init()
+                try:
+                    outcomes = {}
+                    responses = {}
+                    for case, field_name, form_index in (
+                        ("normal", "username", 0),
+                        ("missing", "username", 0),
+                        ("rewritten", "username", 0),
+                        ("invalid", "username", 0),
+                        ("normal", "username", 1),
+                    ):
+                        await browser.navigate(f"http://127.0.0.1:{port}/form?case={case}")
+                        _, pair = await browser.fill_and_submit_form(form_index, field_name, candidate)
+                        key = "invalid_index" if form_index == 1 else case
+                        outcomes[key] = browser.last_probe_delivered
+                        response = (pair or {}).get("response", {})
+                        responses[key] = response.get("status")
+                    return outcomes, responses
+                finally:
+                    await browser.close()
+
+            outcomes, responses = asyncio.run(exercise())
+            self.assertEqual(outcomes, {
+                "normal": True,
+                "missing": False,
+                "rewritten": False,
+                "invalid": False,
+                "invalid_index": False,
+            })
+            self.assertEqual(received, {
+                "normal": {"field_names": ["username"], "candidate_present": True},
+            }, f"server did not observe form submission (responses={responses})")
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
 
 
 @unittest.skipUnless(_e2e_enabled(), "WSCAN_E2E=1 で認証の実ブラウザ検証")

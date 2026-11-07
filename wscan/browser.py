@@ -10,10 +10,12 @@ import logging
 import re
 import socket
 import time
+from email import policy
+from email.parser import BytesParser
 from functools import wraps
 import urllib.request
 from collections.abc import Mapping
-from urllib.parse import urlparse as _urlparse
+from urllib.parse import parse_qs, urlparse as _urlparse
 from typing import Optional, Callable, Any
 from urllib.parse import urljoin, urlparse, urlsplit
 
@@ -33,6 +35,40 @@ def _playwright_proxy_options(proxy: str) -> dict[str, str] | None:
     if username is not None or password is not None:
         options.update(username=username or "", password=password or "")
     return options
+
+
+def _request_carries_form_value(pair: dict, field: str, payload: str, *, submission=None, since=None) -> bool:
+    request = (pair or {}).get("request") or {}
+    if submission is not None:
+        action = submission.get("action") or ""
+        if (since is None or request.get("_capture_sequence", 0) <= since
+                or str(request.get("method") or "GET").upper() != submission.get("method", "GET")
+                or urlsplit(request.get("url") or "")._replace(query="", fragment="") != urlsplit(action)._replace(query="", fragment="")):
+            return False
+    method = str(request.get("method") or "GET").upper()
+    values = parse_qs(urlparse(request.get("url") or "").query, keep_blank_values=True).get(field, []) if method == "GET" else []
+    body = request.get("post_data") or ""
+    content_type = next((str(value) for name, value in (request.get("headers") or {}).items()
+                         if str(name).lower() == "content-type"), "")
+    if body and method != "GET":
+        if "application/json" in content_type.lower():
+            try:
+                data = json.loads(body)
+                value = data.get(field) if isinstance(data, dict) else None
+                values.extend(value if isinstance(value, list) else [value] if value is not None else [])
+            except (TypeError, ValueError):
+                pass
+        elif "multipart/form-data" in content_type.lower():
+            message = BytesParser(policy=policy.default).parsebytes(
+                ("Content-Type: " + content_type + "\r\nMIME-Version: 1.0\r\n\r\n").encode() + body.encode("utf-8"))
+            for part in message.iter_parts():
+                if part.get_param("name", header="content-disposition") == field:
+                    values.append((part.get_payload(decode=True) or b"").decode("utf-8", errors="replace"))
+        else:
+            values.extend(parse_qs(body, keep_blank_values=True).get(field, []))
+    normalize = lambda value: re.sub(r"\r\n|\r|\n", "\r\n", value) if isinstance(value, str) else value
+    return normalize(payload) in [normalize(value) for value in values]
+
 from .url_extraction import (
     is_plausible_route_candidate,
     truncated_regex_literal,
@@ -63,6 +99,8 @@ def _bind_probe_capture(send):
         try:
             return await send(self, *args, **kwargs)
         finally:
+            if context is not None and send.__name__ == "fill_and_submit_form":
+                context["form_delivery"] = self.last_probe_delivered
             capture.probe_context = previous
             capture.pending_probe_context = previous_pending
             capture.probe_frame = previous_frame
@@ -2054,11 +2092,10 @@ class BrowserManager:
         """Fill a form field with payload and submit. Returns (page_source, network_pair)."""
         self.reset_dialog()
         self.network.clear()
-        # submit を dispatch したか。dispatch できれば送達成功、以降の wait/get_source 例外で
-        # 覆さない。
-        dispatched = False
-        # submit 直前の送信済みリクエスト数。None＝submit まで到達せず（送達判定に使わない）。
+        # submit 直前の送信済みリクエスト数。None は submit 前の失敗を表す。
+        self.last_probe_delivery_reason = "not_submitted"
         net_before_submit = None
+        result = None
         try:
             result = await self.page.evaluate(
                 """
@@ -2144,12 +2181,26 @@ class BrowserManager:
                         el => (el.name || el.id) === fieldName
                     );
                     if (target) {
-                        target.value = payload;
+                        const setter = Object.getOwnPropertyDescriptor(
+                            Object.getPrototypeOf(target), 'value'
+                        )?.set;
+                        if (setter) setter.call(target, payload);
+                        else target.value = payload;
                         dispatchEvents(target);
                     }
 
+                    if (!target) return {success: false, error: 'target not found'};
+                    // Let controlled inputs apply synchronous/microtask state updates before
+                    // checking the successful-control serialization used by native submission.
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                    const formValues = new FormData(form).getAll(target.name);
+                    if (!target.name || target.disabled || target.value !== payload
+                        || !formValues.includes(payload))
+                        return {success: false, error: 'target value not successful'};
+
                     return {
                         success: true,
+                        fieldName: target.name,
                         action: form.action || window.location.href,
                         method: (form.method || 'GET').toUpperCase()
                     };
@@ -2158,16 +2209,15 @@ class BrowserManager:
                 [form_index, field_name, payload, safe_values or {}, self.auth_user, self.auth_pass],
             )
 
-            # Check whether the form was found before attempting submit
+            # Never submit an unrelated safe-filled form when the selected field is absent
+            # or is not a successful control carrying the requested value.
             if not result or not result.get("success"):
-                # フォーム不在。直前 navigate が応答を得ていれば（status あり）ページは正常ロード
-                # されており、URL param を form field として試した speculative probe＝送達成功扱い
-                # （True）。応答なし（status None＝transport 例外/失敗ロード）なら stale ページによる
-                # form 不在＝未送達（False）。scanner は navigate の戻り値を見ずに本メソッドを呼ぶため
-                # （xss.py 等）、ここで失敗ロードを取りこぼさない。speculative を
-                # False にしないのは、check 粒度の _degraded_checks が当該 check の tested を全除外し
-                # 無関係な url_param safe twin まで NOT_REACHED 化して benchmark を壊すため。
-                self.last_probe_delivered = self.last_navigation_status is not None
+                self.last_probe_delivered = False
+                error = result.get("error") if result else "form not found"
+                self.last_probe_delivery_reason = {
+                    "form not found": "form_not_found",
+                    "target not found": "target_not_found",
+                }.get(error, "target_value_not_successful")
                 source = await self.get_page_source()
                 return source, {}
 
@@ -2184,12 +2234,8 @@ class BrowserManager:
                 await submit_btn.click()
             else:
                 await self.page.evaluate(
-                    f"document.querySelectorAll('form')[{form_index}].submit()"
+                    f"document.querySelectorAll('form')[{form_index}].requestSubmit()"
                 )
-            # submit を dispatch した＝probe 送達。以降の wait/get_source 例外で覆さない。
-            dispatched = True
-            self.last_probe_delivered = True
-
             await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
             _js_wait = 0.2 * self.sleep_factor
             if _js_wait > 0:
@@ -2197,24 +2243,36 @@ class BrowserManager:
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
-            # アナリティクス等の別 URL ビーコンを掴まないよう、対象ページを最も
-            # よく表すペアを選ぶ（同一オリジンの文書本体を優先）。
-            pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
+            field = result.get("fieldName") or field_name
+            # A redirect GET must not replace the submitted carrier and its own response.
+            pair = next((captured for captured in reversed(self.network.pairs)
+                         if _request_carries_form_value(
+                             captured, field, payload, submission=result, since=net_before_submit)), None)
+            pair = pair or self.network.best_pair_for_page(action_url) or self.network.latest() or {}
+            self.last_probe_delivered = _request_carries_form_value(
+                pair, field, payload, submission=result, since=net_before_submit)
+            self.last_probe_delivery_reason = "delivered" if self.last_probe_delivered else "request_value_unverified"
             return source, pair
         except Exception as e:
             context = getattr(self.network, "probe_context", None)
             if context is not None:
                 context["failure"] = "timeout" if isinstance(e, (asyncio.TimeoutError,)) or type(e).__name__ == "TimeoutError" else "transport_error"
-            # 例外を握りつぶし空 pair を返す。送達判定: submit を dispatch
-            # 済みなら送達成功を維持。未 dispatch でも、Playwright の click() は post-dispatch の
-            # navigation 待ちを含むため、リクエスト送信後に slow/interrupted navigation で click() 自体が
-            # raise しうる。その場合 dispatched に到達しないが、submit 直前からのリクエスト増分
-            # （request_count は on_request 発火数＝送信数。clear() 後の in-flight 応答で水増しされない）で
-            # 送達を検出する。net_before_submit is None＝submit 到達前の例外（未送信）＝未送達。
-            self.last_probe_delivered = dispatched or (
-                net_before_submit is not None
-                and self.network.request_count() > net_before_submit
-            )
+            # 例外を握りつぶして空 pair を返すが、送達は相関済みrequest本文でのみ確定する。
+            pair = self.network.latest() or {}
+            request = (pair.get("request") or {})
+            self.last_probe_delivered = bool(result and _request_carries_form_value(
+                pair, result.get("fieldName") or field_name, payload,
+                submission=result, since=net_before_submit))
+            if self.last_probe_delivered:
+                self.last_probe_delivery_reason = "delivered"
+            if not self.last_probe_delivered:
+                sent_after_submit = bool(
+                    net_before_submit is not None
+                    and request.get("_capture_sequence", 0) > net_before_submit
+                )
+                self.last_probe_delivery_reason = (
+                    "request_value_unverified" if sent_after_submit else "submit_not_dispatched"
+                )
             source = await self.get_page_source()
             return source, {}
 

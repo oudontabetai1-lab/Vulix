@@ -13,10 +13,31 @@ from wscan.probe_ledger import ProbeRole
 from wscan.request_logger import RequestLogger, register_sensitive_headers, clear_sensitive_headers
 from wscan.scanners.base import BaseScanner
 from wscan.scanners.websocket import WebSocketScanner
+from wscan.scanners.sqli import SQLiScanner
+from wscan.injection_point import InjectionPoint
 
 
 def rows(logger):
     return [json.loads(line) for line in logger.probe_ledger.path.read_text().splitlines()]
+
+
+@pytest.mark.asyncio
+async def test_unexecuted_sqli_form_probe_cannot_be_recorded_as_no_match(tmp_path):
+    logger = RequestLogger(tmp_path)
+    scanner = object.__new__(SQLiScanner)
+    scanner.engine = SimpleNamespace(request_logger=logger)
+    ip = InjectionPoint.for_form("http://127.0.0.1/form", "username", form_index=0)
+
+    async def no_request():
+        return "", {}
+
+    _, pair = await BaseScanner._send_probe(scanner, ip, no_request)
+
+    assert pair == {}
+    assert BaseScanner._probe_decision(scanner, pair, False, "sqli_form_oracle") is None
+    decisions = [row for row in rows(logger) if row.get("record_kind") == "decision"]
+    assert len(decisions) == 1
+    assert decisions[0]["outcome"] == "unexecutable"
 
 
 @pytest.mark.asyncio
