@@ -2819,6 +2819,7 @@ class BrowserManager:
         pass_field: str = "password",
         success_indicator: str = "",
         logged_in_marker: str = "",
+        protected_access_check=None,
     ) -> bool:
         """明示欄を優先し、form 単位の計画と独立証拠で自動ログインする。"""
         from . import login_surface as ls
@@ -2829,7 +2830,7 @@ class BrowserManager:
         self.last_login_assessment = ls.LoginAssessment(ls.INCOMPLETE, reasons=["credentials_missing"])
         if not self.auth_user or not self.auth_pass:
             return False
-        observation = {"status": None, "token": None, "error": ""}
+        observation = {"status": None, "token": None, "error": "", "submitted": False}
 
         def is_api_login(request):
             try:
@@ -2837,6 +2838,12 @@ class BrowserManager:
                 return isinstance(data, dict) and ls.locate_api_login(request.url, request.method, data.keys()) is not None
             except (ValueError, TypeError):
                 return False
+
+        def observe_request(request):
+            if (request.method in ("POST", "PUT", "PATCH") or is_api_login(request)
+                    or (request.resource_type == "document" and request.frame == self.page.main_frame
+                        and request.url != login_url)):
+                observation["submitted"] = True
 
         async def observe_response(response):
             request = response.request
@@ -2855,6 +2862,7 @@ class BrowserManager:
             if (request.resource_type == "document" and request.frame == self.page.main_frame) or is_api_login(request):
                 observation["error"] = "ConnectionError"
 
+        self.page.on("request", observe_request)
         self.page.on("response", observe_response)
         self.page.on("requestfailed", observe_failure)
         self.network.authentication_active = True
@@ -2941,12 +2949,29 @@ class BrowserManager:
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 body = await self.get_page_source()
-                self.last_login_assessment = ls.assess_login_state(ls.LoginObservation(
+                obs = ls.LoginObservation(
                     post_url=self.page.url, login_url=login_url, body=body,
                     success_indicator=success_indicator, logged_in_marker=logged_in_marker,
                     status=observation["status"], api_token_issued=observation["token"],
                     transport_error=observation["error"] or ("ReadError" if not body else ""),
-                ))
+                    protected_access="unknown", protected_access_reason="protected_access_unknown",
+                    submitted=observation["submitted"],
+                )
+                surface = ls.classify_surface(body, visible_only=True)
+                form_present = any(f.kind == ls.LOGIN for f in surface.forms)
+                preliminary = ls.assess_login_state(obs)
+                if (protected_access_check is not None and not form_present
+                        and preliminary.state not in {ls.FAILURE, ls.CHALLENGE}
+                        and (obs.status is None or obs.status < 400) and not obs.transport_error):
+                    obs.protected_access, obs.protected_access_reason = await protected_access_check(
+                        api_token_issued=observation["token"])
+                self.last_login_assessment = ls.assess_login_state(obs)
+                if form_present and self.last_login_assessment.authenticated:
+                    # A configured marker inside the login script may precede the actual transition.
+                    self.last_login_assessment = ls.LoginAssessment(ls.INCOMPLETE, reasons=["login_form_still_present"])
+                elif (not observation["submitted"] and not ("left_login_page" in self.last_login_assessment.evidence)
+                        and self.last_login_assessment.authenticated and obs.protected_access != "verified"):
+                    self.last_login_assessment = ls.LoginAssessment(ls.INCOMPLETE, reasons=["unsubmitted_login"])
                 # 解決した OTP の実要素が残っている場合は明示 marker よりも challenge を優先。
                 if mfa_status == "solved" and self._submitted_mfa_input is not None:
                     try:
@@ -2967,6 +2992,7 @@ class BrowserManager:
             return False
         finally:
             self.network.authentication_active = False
+            self.page.remove_listener("request", observe_request)
             self.page.remove_listener("response", observe_response)
             self.page.remove_listener("requestfailed", observe_failure)
 

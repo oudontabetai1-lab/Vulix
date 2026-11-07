@@ -170,6 +170,40 @@ API_SAFE_ENDPOINTS = ("/api/register", "/api/reset", "/api/forgot", "/api/passwo
 
 def create_app() -> FastAPI:
     app = FastAPI(title="login surface fixture")
+    app.state.proof_session_valid = True
+    app.state.proof_requests = []
+
+    @app.get("/proof-login/{mode}")
+    async def proof_login(mode: str):
+        return HTMLResponse('<h1>Sign in</h1><form method="post"><input name="username">'
+                            '<input type="password" name="password"><button>Log in</button></form>')
+
+    @app.post("/proof-login/{mode}")
+    async def proof_submit(mode: str, request: Request):
+        data = await request.form()
+        if data.get("username") != USERNAME or data.get("password") != PASSWORD:
+            return HTMLResponse('<p>Invalid credentials</p>', status_code=401)
+        if mode in {"challenge", "limited", "unavailable"}:
+            if mode == "challenge":
+                return HTMLResponse(PAGES["/mfa"])
+            return HTMLResponse("Unavailable", status_code=429 if mode == "limited" else 503)
+        response = RedirectResponse("/proof-public" if mode in {"public", "guest"}
+                                    else "/proof-resource", status_code=303)
+        if mode != "public":
+            response.set_cookie("guest" if mode == "guest" else "session", "fixture-session", httponly=True)
+        return response
+
+    @app.get("/proof-public")
+    async def proof_public():
+        return HTMLResponse('<h1>Public information</h1>' + '<p>Public content</p>' * 30
+                            + '<a href="/logout">Log out</a>')
+
+    @app.get("/proof-resource")
+    async def proof_resource(request: Request):
+        allowed = app.state.proof_session_valid and request.cookies.get("session") == "fixture-session"
+        app.state.proof_requests.append({"allowed": allowed, "cookie_present": bool(request.cookies)})
+        return HTMLResponse('<h1>Private resource</h1>' if allowed else "Authentication required",
+                            status_code=200 if allowed else 401)
 
     for path, html in PAGES.items():
         app.add_api_route(path, (lambda h=html: HTMLResponse(h)), methods=["GET"])

@@ -585,6 +585,36 @@ def locate_api_login(url: str, method: str, body_keys) -> Optional[ApiLoginTarge
     return ApiLoginTarget(url=url, user_key=users[0], pass_key=pw[0])
 
 
+def assess_protected_access(*, before_status=None, before_body="", after_status=None,
+                            after_body="", before_login_redirect=False,
+                            after_login_redirect=False) -> tuple[str, str]:
+    """Compare access snapshots bound by the caller to one validated URL; retain safe codes only."""
+    def barrier(body):
+        doc = _Doc(body)
+        surface = classify_surface(body, visible_only=True)
+        if doc.captcha_widget or any(f.step == "otp" for f in surface.forms):
+            return "challenge"
+        if auth_detect.has_failure_text(" ".join(doc.visible_text)):
+            return "denied"
+        if any(f.kind == LOGIN for f in surface.forms):
+            return "login"
+        return ""
+
+    after_barrier = barrier(after_body)
+    if after_status in (401, 403) and after_barrier != "challenge":
+        return "denied", "protected_access_denied"
+    if after_login_redirect or (after_status == 200 and after_barrier in {"login", "denied"}):
+        return "denied", "protected_access_denied"
+    if after_status != 200 or not after_body.strip() or after_barrier:
+        return "unknown", "protected_response_unconfirmed"
+    before_barrier = barrier(before_body)
+    if before_barrier == "challenge":
+        return "unknown", "anonymous_challenge"
+    if before_login_redirect or before_status in (401, 403) or (before_status == 200 and before_barrier == "login"):
+        return "verified", "protected_access_verified"
+    return "unknown", "anonymous_access_not_denied"
+
+
 @dataclass
 class LoginObservation:
     """ログイン送信後の観測（本文は判定にだけ使い、結果へは残さない）。"""
@@ -598,6 +628,9 @@ class LoginObservation:
     auth_cookie_set: Optional[bool] = None   # 送信後に新しい認証 Cookie が付いたか（値は渡さない）
     api_token_issued: Optional[bool] = None  # API 応答に token/session が含まれたか
     mfa_field: str = ""
+    protected_access: Optional[str] = None  # verified / denied / unknown; None for legacy observations
+    protected_access_reason: str = ""
+    submitted: Optional[bool] = None
 
 
 @dataclass
@@ -628,6 +661,8 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
         return LoginAssessment(INCOMPLETE, reasons=[f"transport_error:{err}"])
     if obs.status == 429 or (obs.status or 0) >= 500:
         return LoginAssessment(INCOMPLETE, reasons=[f"http_{obs.status}"])
+    if obs.protected_access == "denied":
+        return LoginAssessment(FAILURE, reasons=["protected_access_denied"])
     body = obs.body or ""
     if obs.status == 401:
         return LoginAssessment(FAILURE, reasons=["http_401"])
@@ -668,14 +703,15 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
         # token 認証の API では Cookie 不在は否定シグナルにならない
         reasons.append("auth_cookie_absent")
     explicit = False
+    visible_content = " ".join(doc.visible_text)
     if obs.success_indicator:
-        if obs.success_indicator in (obs.post_url or "") or obs.success_indicator in body:
+        if obs.success_indicator in (obs.post_url or "") or obs.success_indicator in visible_content:
             evidence.append("success_indicator")
             explicit = True
         else:
             reasons.append("success_indicator_missing")
     if obs.logged_in_marker:
-        if obs.logged_in_marker in body:
+        if obs.logged_in_marker in visible_content:
             evidence.append("logged_in_marker")
             explicit = True
         else:
@@ -692,8 +728,28 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
     # 本文の説明文ではなく、可視の操作要素（リンク/ボタン/ログアウト form）に限る。
     if _has_word(" ".join(doc.controls), _LOGOUT_WORDS):
         evidence.append("logout_control")
+    if obs.protected_access == "verified":
+        return LoginAssessment(SUCCESS, evidence + ["protected_access_verified"]
+                               + (["configured_indicator"] if explicit else []))
     if explicit:
-        return LoginAssessment(SUCCESS, evidence)
+        has_transition = (
+            "left_login_page" in evidence
+            or bool(obs.success_indicator and obs.post_url and obs.success_indicator in obs.post_url
+                    and not auth_detect.on_login_page(obs.post_url, obs.login_url))
+        )
+        has_submission = (
+            bool(obs.auth_cookie_set)
+            or bool(obs.api_token_issued)
+            or "logout_control" in evidence
+            or obs.submitted is True
+            or (obs.status is not None and obs.status < 400)
+        )
+        if has_transition or has_submission or obs.submitted is None:
+            return LoginAssessment(SUCCESS, evidence + ["configured_indicator"])
+        return LoginAssessment(INCOMPLETE, evidence, ["unsubmitted_login"])
+    if obs.protected_access == "unknown":
+        return LoginAssessment(INCOMPLETE, evidence,
+                               [obs.protected_access_reason or "protected_access_unknown"])
     if reasons:
         return LoginAssessment(INCOMPLETE, evidence, reasons)
     if len(evidence) >= 2:

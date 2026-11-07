@@ -460,7 +460,7 @@ class LoginSurfaceBrowserTests(unittest.TestCase):
                     await browser.init()
                     try:
                         fields = {"user_field": 'input[name="user"]', "pass_field": 'input[name="pw"]'} if path == "/login-explicit" else {}
-                        self.assertTrue(await browser.auto_login(url + ("/login" if fields else path), **fields),
+                        self.assertTrue(await browser.auto_login(url + ("/login" if fields else path), success_indicator="Dashboard", **fields),
                                         (path, browser.last_login_assessment))
                         self.assertTrue(browser.last_login_success)
                         self.assertEqual(urlparse(browser.last_login_url).path,
@@ -525,7 +525,7 @@ class LoginSurfaceBrowserTests(unittest.TestCase):
                     browser = BrowserManager(headless=True, auth_user=fx.USERNAME, auth_pass=fx.PASSWORD)
                     await browser.init()
                     try:
-                        self.assertTrue(await browser.auto_login(url + "/mixed-default-login", **fields),
+                        self.assertTrue(await browser.auto_login(url + "/mixed-default-login", success_indicator="Dashboard", **fields),
                                         (fields, browser.last_login_assessment))
                         self.assertEqual(await browser.page.evaluate(
                             'JSON.parse(sessionStorage.getItem("registration-values"))'), ["", ""])

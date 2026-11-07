@@ -423,6 +423,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
             **kwargs,
         )
         engine._browser = _FakeCrawlBrowser()
+        engine._protected_resource_response = AsyncMock(return_value=(None, "", False))
         return engine
 
     async def test_manual_redirect_seed_is_an_attack_target(self):

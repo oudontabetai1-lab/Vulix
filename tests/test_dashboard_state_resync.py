@@ -377,6 +377,31 @@ class ScanSnapshotTests(unittest.TestCase):
 class DashboardResyncChromiumTests(unittest.TestCase):
     """Exercise the production dashboard and WebSocket against a loopback fixture only."""
 
+    def test_chromium_incomplete_auth_live_and_snapshot_zero_findings(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.continue_()
+                       if route.request.url.startswith(self.base_url) else route.abort())
+            page.request.post(f"{self.base_url}/__test__/seed")
+            page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+            page.wait_for_function("() => state.scanRunId && state.findingCount === 1")
+            for snapshot in (False, True):
+                page.evaluate("""snapshot => {
+                    const data = {status: 'incomplete', total_findings: 0, findings: [],
+                        authentication: {state: 'incomplete', protected_access: 'denied'}};
+                    if (snapshot) applyScanSnapshot({data: {...data, complete: data}, timestamp: Date.now()/1000});
+                    else handleEvent({type: 'scan_complete', data, timestamp: Date.now()/1000});
+                }""", snapshot)
+                self.assertEqual(page.evaluate("state.status"), "incomplete")
+                self.assertTrue(page.evaluate("state.scanDone"))
+                self.assertIn("Authentication unconfirmed", page.locator("#statusText").inner_text())
+                self.assertIn("coverage is incomplete", page.locator("#findingsPanel").inner_text())
+                self.assertEqual(page.locator("#statETA").inner_text(), "—")
+            browser.close()
+
     @classmethod
     def setUpClass(cls):
         import uvicorn
