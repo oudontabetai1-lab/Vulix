@@ -979,7 +979,11 @@ class BaseScanner(ABC):
                 raise
             req = (pair or {}).get("request") or {}
             attempt = req.get("_probe_attempt_id")
-            if (attempt in context["requests"] and req.get("_probe_context") is context
+            if context.get("form_delivery") is False:
+                pair.pop("_probe_evidence", None)
+                logger.scoped_probe(context, record_kind="decision", outcome="unexecutable",
+                                    rationale="selected form value was not delivered", decision_version="1")
+            elif (attempt in context["requests"] and req.get("_probe_context") is context
                     and (pair.get("response") or {}).get("status") is not None):
                 evidence_pair = {"request": req.get("_probe_request", req), "response": pair["response"]}
                 observed = logger.observe_request(context, attempt, evidence_pair,
