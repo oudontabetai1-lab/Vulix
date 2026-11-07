@@ -21,6 +21,7 @@ from wscan.settings_schema import FIELDS, PROFILES, SCHEMA_VERSION, build_settin
 from fastapi.testclient import TestClient
 import wscan.check_catalog as check_catalog
 from wscan.monitor import MonitorServer
+from tests.ui_harness import UIHarness, require_browser
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_MODULE_JS = ROOT / "templates" / "ui" / "setup-module.js"
@@ -850,6 +851,162 @@ Promise.all([view.applyPreset('triage', false), unavailable.applyPreset('triage'
     assert result["notApplicable"] is True
     assert result["reasonListsApplicableModes"] is True
     assert result["payloadUnchangedByReadout"] is True
+
+
+def test_unified_setup_dom_credentials_propagation():
+    """Verify that in the unified /app#/setup DOM (where only cfgLoginUrl, cfgAuthUser,
+    cfgAuthPass, cfgLoginUserField, cfgLoginPassField, cfgLoginSuccess, cfgLowPrivCookies
+    exist and agentLoginUrl/agentAuthUser/agentAuthPass are absent), buildScanPayload
+    across normal, agent, and hybrid modes propagates credentials, and normal/hybrid
+    propagate custom login field selectors, indicators, accounts, and low_priv_cookies.
+    """
+    script = """
+const { buildScanPayload } = require('./templates/ui/setup-module.js');
+
+// Unified DOM simulation: only cfg* IDs exist, agent* IDs return null
+const domElements = {
+  cfgInputUrl: { value: 'https://unified.test' },
+  cfgLoginUrl: { value: 'https://unified.test/login' },
+  cfgAuthUser: { value: 'unified_admin' },
+  cfgAuthPass: { value: 'unified_secret_token' },
+  cfgLoginUserField: { value: 'custom_user_field' },
+  cfgLoginPassField: { value: 'custom_pass_field' },
+  cfgLoginSuccess: { value: 'Welcome In' },
+  cfgLowPrivCookies: { value: 'sid=low_priv_123' },
+};
+
+const accounts = [{ username: 'acct1', password: 'pw1', role: 'admin' }];
+
+const mockDoc = {
+  getElementById: (id) => {
+    // agentLoginUrl, agentAuthUser, agentAuthPass do NOT exist in unified DOM
+    if (id.startsWith('agent')) return null;
+    return domElements[id] || { value: '' };
+  },
+  querySelectorAll: () => [],
+};
+
+const normalPayload = buildScanPayload('normal', { document: mockDoc, accounts });
+const agentPayload = buildScanPayload('agent', { document: mockDoc, accounts });
+const hybridPayload = buildScanPayload('hybrid', { document: mockDoc, accounts });
+
+console.log(JSON.stringify({
+  normal: normalPayload,
+  agent: agentPayload,
+  hybrid: hybridPayload,
+}));
+"""
+    res = _run_node(script)
+    norm = res["normal"]
+    agent = res["agent"]
+    hybrid = res["hybrid"]
+
+    # All three modes propagate configured credentials from cfg* in unified DOM
+    for mode_name, payload in [("normal", norm), ("agent", agent), ("hybrid", hybrid)]:
+        assert payload["login_url"] == "https://unified.test/login", f"{mode_name} missing login_url"
+        assert payload["auth_user"] == "unified_admin", f"{mode_name} missing auth_user"
+        assert payload["auth_pass"] == "unified_secret_token", f"{mode_name} missing auth_pass"
+
+    # Both normal and hybrid propagate custom login field selectors, indicator, accounts, and low_priv_cookies
+    for mode_name, payload in [("normal", norm), ("hybrid", hybrid)]:
+        assert payload["login_user_field"] == "custom_user_field", f"{mode_name} missing login_user_field"
+        assert payload["login_pass_field"] == "custom_pass_field", f"{mode_name} missing login_pass_field"
+        assert payload["login_success_indicator"] == "Welcome In", f"{mode_name} missing login_success_indicator"
+        assert payload["accounts"] == [{"username": "acct1", "password": "pw1", "role": "admin"}], f"{mode_name} missing accounts"
+        assert payload["low_priv_cookies"] == "sid=low_priv_123", f"{mode_name} missing low_priv_cookies"
+
+
+def test_setup_credentials_e2e_websocket_payload():
+    """Owned-loopback UIHarness E2E test verifying real DOM filling of auth fields
+    on /app#/setup across Normal, Agent, and Hybrid modes produces non-empty
+    credentials in the WebSocket start_scan payload.
+    """
+    require_browser()
+    with UIHarness(seed_fixtures=False) as harness:
+        page = harness.new_page()
+        try:
+            messages = []
+
+            def on_ws(ws):
+                def on_frame(payload):
+                    try:
+                        data = json.loads(payload)
+                        if data.get("action") == "start_scan":
+                            messages.append(data)
+                    except Exception:
+                        pass
+
+                ws.on("framesent", on_frame)
+
+            page.on("websocket", on_ws)
+            page.goto(f"{harness.server_url}/app#/setup", wait_until="domcontentloaded")
+            page.wait_for_selector("#setupSurface")
+            page.wait_for_function("() => Boolean(document.querySelector('#monitorFrame')?.contentWindow?.state?.ws)")
+
+            # Fill target URL
+            page.locator("#cfgInputUrl").fill("http://127.0.0.1:18080")
+
+            # Switch to Auth tab
+            page.locator(".setup-tab").filter(has_text="認証・ネットワーク").click()
+            page.evaluate("() => document.querySelectorAll('details').forEach(d => d.open = true)")
+
+            # Fill credentials and custom login fields in unified DOM
+            page.locator("#cfgLoginUrl").fill("http://127.0.0.1:18080/login")
+            page.locator("#cfgAuthUser").fill("admin_tester")
+            page.locator("#cfgAuthPass").fill("supersecret123")
+            page.locator("#cfgLoginUserField").fill("uname_custom")
+            page.locator("#cfgLoginPassField").fill("passwd_custom")
+            page.locator("#cfgLoginSuccess").fill("Welcome Dashboard")
+
+            # 1. Normal mode submission
+            page.locator("#setupStartScanBtn").click()
+            page.wait_for_function("() => location.hash.includes('/monitor')")
+
+            # Return to setup
+            page.locator('[data-route="setup"]').click()
+            page.wait_for_function("() => location.hash.includes('/setup')")
+
+            # 2. Agent mode submission
+            page.locator('.setup-mode-btn[data-mode="agent"]').click()
+            page.locator("#setupStartScanBtn").click()
+            page.wait_for_function("() => location.hash.includes('/monitor')")
+
+            # Return to setup
+            page.locator('[data-route="setup"]').click()
+            page.wait_for_function("() => location.hash.includes('/setup')")
+
+            # 3. Hybrid mode submission
+            page.locator('.setup-mode-btn[data-mode="hybrid"]').click()
+            page.locator("#setupStartScanBtn").click()
+            page.wait_for_function("() => location.hash.includes('/monitor')")
+
+            assert len(messages) >= 3, f"Expected at least 3 start_scan messages, got {len(messages)}"
+
+            # Inspect payloads
+            configs_by_mode = {}
+            for msg in messages:
+                cfg = msg["config"]
+                mode = "agent" if cfg.get("agent_mode") else ("hybrid" if cfg.get("hybrid_mode") else "normal")
+                configs_by_mode[mode] = cfg
+
+            assert "normal" in configs_by_mode
+            assert "agent" in configs_by_mode
+            assert "hybrid" in configs_by_mode
+
+            for mode_name in ["normal", "agent", "hybrid"]:
+                cfg = configs_by_mode[mode_name]
+                assert cfg["login_url"] == "http://127.0.0.1:18080/login", f"{mode_name} missing login_url"
+                assert cfg["auth_user"] == "admin_tester", f"{mode_name} missing auth_user"
+                assert cfg["auth_pass"] == "supersecret123", f"{mode_name} missing auth_pass"
+
+            for mode_name in ["normal", "hybrid"]:
+                cfg = configs_by_mode[mode_name]
+                assert cfg["login_user_field"] == "uname_custom", f"{mode_name} missing login_user_field"
+                assert cfg["login_pass_field"] == "passwd_custom", f"{mode_name} missing login_pass_field"
+                assert cfg["login_success_indicator"] == "Welcome Dashboard", f"{mode_name} missing login_success_indicator"
+        finally:
+            page.close()
+
 
 
 def test_start_scan_validation_and_submission():
