@@ -2243,10 +2243,12 @@ class BrowserManager:
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
-            # アナリティクス等の別 URL ビーコンを掴まないよう、対象ページを最も
-            # よく表すペアを選ぶ（同一オリジンの文書本体を優先）。
-            pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             field = result.get("fieldName") or field_name
+            # A redirect GET must not replace the submitted carrier and its own response.
+            pair = next((captured for captured in reversed(self.network.pairs)
+                         if _request_carries_form_value(
+                             captured, field, payload, submission=result, since=net_before_submit)), None)
+            pair = pair or self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             self.last_probe_delivered = _request_carries_form_value(
                 pair, field, payload, submission=result, since=net_before_submit)
             self.last_probe_delivery_reason = "delivered" if self.last_probe_delivered else "request_value_unverified"
