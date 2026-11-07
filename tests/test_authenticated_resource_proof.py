@@ -68,7 +68,9 @@ def test_candidate_scope_exclusions_and_no_guessed_resource(tmp_path):
     engine.exclude_urls = [engine.target_url]
     assert engine._protected_access_candidate() == ""
     engine.exclude_urls = []
-    for target in (engine.login_url, "http://fixture.test/logout", "file:///private", "http://u:p@fixture.test/x"):
+    for target in (engine.login_url, "http://fixture.test/logout", "http://fixture.test/%6cogout",
+                   "http://fixture.test/%256cogout", "http://fixture.test/api?action=%6cogout",
+                   "file:///private", "http://u:p@fixture.test/x"):
         engine.target_url = target
         engine.target_urls = [target]
         assert engine._protected_access_candidate() == ""
@@ -166,6 +168,78 @@ def test_failed_initial_login_keeps_preauth_order_and_incomplete_completion(tmp_
         asyncio.run(check())
 
 
+def test_evidence_serialization_terminal_truth_and_abort_precedence(tmp_path):
+    import json
+
+    # 1. Unverified / failed auth produces "incomplete" terminal truth in saved evidence
+    eng_failed = engine_for("http://127.0.0.1:9", tmp_path / "failed")
+    eng_failed.authentication_state = {"state": "failure", "protected_access": "unknown", "configured": True}
+    eng_failed.wave_errors.append("authentication_unverified:protected_access_denied")
+    eng_failed._save_evidence()
+    saved = json.loads((tmp_path / "failed" / "evidence.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "incomplete"
+    assert saved["coverage"]["evidence_completion"]["status"] == "EVIDENCE_INCOMPLETE"
+    assert saved["aborted"] is False
+
+    # 2. Aborted scan dominates and produces "aborted", even with failed auth
+    eng_aborted = engine_for("http://127.0.0.1:9", tmp_path / "aborted")
+    eng_aborted.scan_aborted = True
+    eng_aborted.authentication_state = {"state": "failure", "protected_access": "unknown", "configured": True}
+    eng_aborted.wave_errors.append("authentication_unverified:protected_access_denied")
+    eng_aborted._save_evidence()
+    saved = json.loads((tmp_path / "aborted" / "evidence.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "aborted"
+    assert saved["aborted"] is True
+
+    # 3. Normal scan without authentication produces "done"
+    eng_noauth = ScanEngine("http://127.0.0.1:9/target", output_dir=str(tmp_path / "noauth"),
+                            checks=["sqli"], llm_provider="none", open_report=False)
+    eng_noauth._save_evidence()
+    saved = json.loads((tmp_path / "noauth" / "evidence.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "done"
+    assert saved["aborted"] is False
+
+
+def test_loopback_encoded_logout_handler_not_reached(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.responses import HTMLResponse
+    from tests.test_totp_login_e2e import serving
+
+    app = FastAPI()
+    app.state.calls = 0
+
+    @app.get("/logout")
+    async def logout():
+        app.state.calls += 1
+        return HTMLResponse("Session ended")
+
+    with serving(app) as url:
+        engine = engine_for(url, tmp_path)
+        engine.target_url = url + "/%6cogout"
+        candidate = engine._protected_access_candidate()
+        assert candidate == ""
+        result = asyncio.run(engine._protected_resource_response(candidate))
+        assert result == (None, "", False)
+        # Direct call with encoded destructive URL is also refused without HTTP request
+        direct_result = asyncio.run(engine._protected_resource_response(url + "/%6cogout"))
+        assert direct_result == (None, "", False)
+        assert app.state.calls == 0
+
+
+def test_script_only_indicator_not_matched_as_body_content():
+    obs = ls.LoginObservation(
+        post_url="http://127.0.0.1/home",
+        login_url="http://127.0.0.1/login",
+        body='<h1>Public</h1><script>const message="Welcome private user";</script>',
+        success_indicator="Welcome private user",
+        protected_access="unknown",
+    )
+    result = ls.assess_login_state(obs)
+    assert not result.authenticated
+    assert result.state == ls.INCOMPLETE
+    assert "success_indicator" not in result.evidence
+
+
 @pytest.mark.skipif(os.getenv("WSCAN_E2E") != "1", reason="WSCAN_E2E=1 for real Chromium")
 def test_chromium_cookie_proof_deception_expiry_and_no_candidate(tmp_path):
     from tests.fixtures import login_surface_app as fx
@@ -220,3 +294,47 @@ def test_chromium_cookie_proof_deception_expiry_and_no_candidate(tmp_path):
                 finally:
                     await browser.close()
         asyncio.run(check())
+
+
+@pytest.mark.skipif(os.getenv("WSCAN_E2E") != "1", reason="WSCAN_E2E=1 for real Chromium")
+def test_chromium_unsubmitted_form_with_script_marker_fails_auto_login(tmp_path):
+    from fastapi import FastAPI, Request
+    from fastapi.responses import HTMLResponse
+    from tests.test_totp_login_e2e import serving
+
+    app = FastAPI()
+    app.state.submissions = 0
+
+    @app.get("/login")
+    async def login():
+        return HTMLResponse(
+            '<h1>Public</h1><form onsubmit="event.preventDefault();this.remove()">'
+            '<input name="username"><input type="password" name="password"><button>Log in</button></form>'
+            '<script>const unusedSuccessText="Welcome private user";</script>'
+        )
+
+    @app.post("/login")
+    async def submit(request: Request):
+        app.state.submissions += 1
+        return HTMLResponse("Not authenticated", status_code=401)
+
+    with serving(app) as url:
+        async def exercise():
+            engine = engine_for(url, tmp_path)
+            engine.target_url = engine.login_url = url + "/login"
+            engine.login_success_indicator = "Welcome private user"
+            browser = engine._browser
+            await browser.init()
+            try:
+                await browser.page.context.route(
+                    "**/*",
+                    lambda route: route.continue_() if route.request.url.startswith(url + "/") else route.abort(),
+                )
+                ok = await engine._auto_login(browser)
+                assert app.state.submissions == 0
+                assert not ok, "Script-only configured marker returned successful auto_login with no submitted request"
+                assert engine.authentication_state.get("state") != "configured"
+            finally:
+                await browser.close()
+
+        asyncio.run(exercise())

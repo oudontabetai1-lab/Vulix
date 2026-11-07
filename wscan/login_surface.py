@@ -630,6 +630,7 @@ class LoginObservation:
     mfa_field: str = ""
     protected_access: Optional[str] = None  # verified / denied / unknown; None for legacy observations
     protected_access_reason: str = ""
+    submitted: Optional[bool] = None
 
 
 @dataclass
@@ -702,14 +703,15 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
         # token 認証の API では Cookie 不在は否定シグナルにならない
         reasons.append("auth_cookie_absent")
     explicit = False
+    visible_content = " ".join(doc.visible_text)
     if obs.success_indicator:
-        if obs.success_indicator in (obs.post_url or "") or obs.success_indicator in body:
+        if obs.success_indicator in (obs.post_url or "") or obs.success_indicator in visible_content:
             evidence.append("success_indicator")
             explicit = True
         else:
             reasons.append("success_indicator_missing")
     if obs.logged_in_marker:
-        if obs.logged_in_marker in body:
+        if obs.logged_in_marker in visible_content:
             evidence.append("logged_in_marker")
             explicit = True
         else:
@@ -730,7 +732,21 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
         return LoginAssessment(SUCCESS, evidence + ["protected_access_verified"]
                                + (["configured_indicator"] if explicit else []))
     if explicit:
-        return LoginAssessment(SUCCESS, evidence + ["configured_indicator"])
+        has_transition = (
+            "left_login_page" in evidence
+            or bool(obs.success_indicator and obs.post_url and obs.success_indicator in obs.post_url
+                    and not auth_detect.on_login_page(obs.post_url, obs.login_url))
+        )
+        has_submission = (
+            bool(obs.auth_cookie_set)
+            or bool(obs.api_token_issued)
+            or "logout_control" in evidence
+            or obs.submitted is True
+            or (obs.status is not None and obs.status < 400)
+        )
+        if has_transition or has_submission or obs.submitted is None:
+            return LoginAssessment(SUCCESS, evidence + ["configured_indicator"])
+        return LoginAssessment(INCOMPLETE, evidence, ["unsubmitted_login"])
     if obs.protected_access == "unknown":
         return LoginAssessment(INCOMPLETE, evidence,
                                [obs.protected_access_reason or "protected_access_unknown"])

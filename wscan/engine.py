@@ -37,7 +37,7 @@ from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
-from urllib.parse import urlparse, urljoin, parse_qs, urlsplit
+from urllib.parse import urlparse, urljoin, parse_qs, urlsplit, unquote
 
 from wscan import url_scope
 from wscan.state_profile import VALID_PROFILES
@@ -1730,9 +1730,10 @@ class ScanEngine:
             "http_status": http_status,
             "check_coverage": check_coverage,
             "prerequisite_coverage": prerequisite_coverage,
-            "authentication": getattr(self, "authentication_state", {"state": "unknown", "protected_access": "unknown",
+            **({"authentication": getattr(self, "authentication_state", {"state": "unknown", "protected_access": "unknown",
                 "configured": bool(getattr(self, "login_url", "") or getattr(self, "cookies", "")
-                                   or getattr(self, "cookie_list", []))}),
+                                   or getattr(self, "cookie_list", []))})}
+               if hasattr(self, "login_url") or hasattr(self, "authentication_state") else {}),
             "capability_matrix": capability_matrix,
             **({"evidence_completion": self.evidence_completion()}
                if getattr(getattr(self, "request_logger", None), "probe_ledger", None) is not None else {}),
@@ -2880,9 +2881,50 @@ class ScanEngine:
     # Session expiry / auto re-login
     # =========================================================================
 
+    def _is_destructive_candidate(self, url: str) -> bool:
+        """選択肢URLの生URL・デコード後URLでの破壊判定。
+        raw URL の urlparse tokenization で /%6cogout /logout に偽装して scope を通過するのを防ぐ。
+        """
+        if not url:
+            return False
+        from .state_profile import looks_destructive
+        from .browser import is_session_ending_link
+
+        decoded = unquote(url)
+        if "%" in decoded:
+            decoded = unquote(decoded)
+        if looks_destructive(method="POST", action=url) or looks_destructive(method="POST", action=decoded):
+            return True
+        if is_session_ending_link(url, "") or is_session_ending_link(decoded, ""):
+            return True
+
+        parts = urlsplit(url)
+        p = unquote(parts.path)
+        destructive_words = ("/logout", "/delete", "/signout", "/disconnect")
+        if any(w in p.lower() for w in destructive_words):
+            return True
+
+        v = parts.query
+        if v:
+            q_v = unquote(v)
+            if looks_destructive(method="POST", action=q_v):
+                return True
+            vals = parse_qs(v)
+            for vals_list in vals.values():
+                for val in vals_list:
+                    d_val = unquote(val)
+                    if looks_destructive(method="POST", action=d_val) or any(
+                        w in d_val.lower() for w in destructive_words
+                    ):
+                        return True
+        return False
+
     def _protected_access_candidate(self) -> str:
+        """選択肢URLのデコード破壊判定を含める。raw URL の urlparse tokenization で
+        /%6cogout /logout に偽装して scope を通過するのを防ぐ。"""
         from . import auth_detect
         from .state_profile import looks_destructive, may_submit
+
         for url in [getattr(self, "target_url", ""), *getattr(self, "additional_target_urls", []),
                     *getattr(self, "access_urls", [])]:
             parsed = urlparse(url)
@@ -2891,6 +2933,8 @@ class ScanEngine:
                     or auth_detect.url_looks_like_login(url) or self._is_login_target_url(url)
                     or not self._is_access_allowed_url(url) or self._is_url_excluded(url)
                     or not may_submit(self.state_profile, method="GET", action=url)
+                    # デコード後の path/query で破壊に該当する URL は候補外にする。
+                    or self._is_destructive_candidate(url)
                     # Even a GET logout/delete URL must not become a session probe.
                     or looks_destructive(method="POST", action=url)):
                 continue
@@ -2900,7 +2944,8 @@ class ScanEngine:
     async def _protected_resource_response(self, url: str, *, browser=None):
         import httpx
         from . import auth_detect
-        if not url or not self._is_access_allowed_url(url) or self._is_url_excluded(url):
+        if (not url or not self._is_access_allowed_url(url)
+                or self._is_url_excluded(url) or self._is_destructive_candidate(url)):
             return None, "", False
         headers = {}
         if browser is not None:
@@ -3480,9 +3525,7 @@ class ScanEngine:
 
             if self.monitor:
                 self.monitor.api_findings = [f.to_dict() for f in self.all_findings]
-                terminal_status = "aborted" if scan_aborted else (
-                    "incomplete" if any(e.startswith(("authentication_incomplete:", "authentication_unverified:"))
-                                        for e in self.wave_errors) else "done")
+                terminal_status = self._terminal_status(scan_aborted=scan_aborted)
                 self.monitor.api_scan_status = terminal_status
                 # Only expose a portal-servable scan id when the output folder
                 # lives under OUTPUT_BASE; the /reports endpoint resolves ids
@@ -8418,6 +8461,21 @@ class ScanEngine:
         except Exception:
             pass
 
+    def _terminal_status(self, *, scan_aborted: Optional[bool] = None) -> str:
+        """暗号化された保存証明・live completion 共通の終端ステータス判定。
+        aborted を最優先し、authentication failure または unverified のとき「incomplete」に
+        し、正常完了時のみ「done」とする（不一致 terminal truth を防止）。
+        """
+        aborted = self.scan_aborted if scan_aborted is None else scan_aborted
+        if aborted:
+            return "aborted"
+        auth_state = getattr(self, "authentication_state", {"state": "unknown"})
+        auth_failed = (auth_state.get("state") in ("failure", "configured")) or any(
+            e.startswith(("authentication_incomplete:", "authentication_unverified:"))
+            for e in getattr(self, "wave_errors", [])
+        )
+        return "incomplete" if auth_failed else "done"
+
     def _save_evidence(self):
         findings_dicts = [f.to_dict() for f in self.all_findings]
 
@@ -8434,7 +8492,7 @@ class ScanEngine:
                 console.print(f"  [yellow]差分スキャン失敗: {exc}[/yellow]")
 
         llm_summary = self._llm_runtime_summary()
-        terminal_status = "aborted" if self.scan_aborted else "done"
+        terminal_status = self._terminal_status()
         evidence = {
             "target": self.target_url,
             "scan_date": datetime.datetime.now().isoformat(),
