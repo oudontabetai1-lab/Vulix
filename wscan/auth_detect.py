@@ -218,3 +218,180 @@ def login_succeeded(
     if has_login_form(body):
         return False
     return True
+
+
+AGENT_AUTH_VERIFIED = "verified"
+AGENT_AUTH_UNVERIFIED = "unverified_auth_claim"
+AGENT_AUTH_COVERAGE_GAP = "auth:login_not_verified"
+
+
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Mapping, Optional
+
+
+@dataclass
+class AgentAuthVerification:
+    status: str
+    reasons: list[str] = field(default_factory=list)
+    cookie_or_token_gained: bool = False
+    left_login_page: bool = False
+    login_form_absent: bool = False
+    coverage_gap: str = ""
+
+    @property
+    def is_verified(self) -> bool:
+        return self.status == AGENT_AUTH_VERIFIED
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reasons": list(self.reasons),
+            "cookie_or_token_gained": self.cookie_or_token_gained,
+            "left_login_page": self.left_login_page,
+            "login_form_absent": self.login_form_absent,
+            "coverage_gap": self.coverage_gap,
+            "is_verified": self.is_verified,
+        }
+
+
+def _detect_token_diff(
+    before_tokens: Optional[Iterable[Mapping[str, Any]]] = None,
+    after_tokens: Optional[Iterable[Mapping[str, Any]]] = None,
+) -> bool:
+    """localStorage/sessionStorage トークンの新規獲得または変更を検出する（純粋関数）。"""
+    if not after_tokens:
+        return False
+
+    def _normalize(items: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str], str]:
+        normalized = {}
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            storage = str(item.get("storage") or "local").strip().lower()
+            key = str(item.get("key") or item.get("name") or "").strip()
+            val = str(item.get("value") or "")
+            if key and val:
+                normalized[(storage, key)] = val
+        return normalized
+
+    before_map = _normalize(before_tokens or [])
+    after_map = _normalize(after_tokens)
+
+    # 1. 新規または変更されたストレージ項目が存在するか
+    for key_tuple, val in after_map.items():
+        if key_tuple not in before_map:
+            return True
+        if before_map[key_tuple] != val:
+            return True
+
+    # 2. 認証トークンらしいキー（token/session/jwt/auth/bearer/access_token/id_token等）が存在するか
+    token_keys = ("token", "session", "jwt", "auth", "bearer", "access_token", "id_token")
+    for (_storage, key), val in after_map.items():
+        low_key = key.lower()
+        if any(tk in low_key for tk in token_keys) and len(val) >= 8:
+            return True
+
+    return False
+
+
+def verify_agent_auth_claim(
+    *,
+    claimed_success: bool = True,
+    before_cookies: Optional[Iterable[Mapping[str, Any]]] = None,
+    after_cookies: Optional[Iterable[Mapping[str, Any]]] = None,
+    before_tokens: Optional[Iterable[Mapping[str, Any]]] = None,
+    after_tokens: Optional[Iterable[Mapping[str, Any]]] = None,
+    has_cookie_diff: Optional[bool] = None,
+    has_token_diff: Optional[bool] = None,
+    current_url: str = "",
+    login_url: str = "",
+    body: str = "",
+    left_login_page: Optional[bool] = None,
+    login_form_present: Optional[bool] = None,
+) -> AgentAuthVerification:
+    """Agent の認証完了主張（AUTH COMPLETE 等）を決定論的シグナルで検証する（純粋関数）。
+
+    LLM の自己申告のみを信頼せず、以下の独立した3つのグラウンドトゥルースを検証する:
+    1. セッション成果物の獲得: ログイン前後に新規/変更 Cookie または トークンが獲得されたか
+       （login_surface.detect_cookie_diff / _detect_token_diff）
+    2. ログインページ離脱: 現在 URL がログインページから遷移したか（auth_detect.on_login_page）
+    3. ログインフォーム非残存: ログインフォームおよび失敗文言が本文に残っていないか
+       （auth_detect.has_login_form / has_failure_text）
+
+    全て満たせば "verified"、1つでも欠ければ "unverified_auth_claim"（カバレッジ注記
+    "auth:login_not_verified"）を返す。Agent の Finding やその severity は変更しない。
+    """
+    reasons = []
+
+    if not claimed_success:
+        return AgentAuthVerification(
+            status=AGENT_AUTH_UNVERIFIED,
+            reasons=["auth_not_claimed"],
+            coverage_gap=AGENT_AUTH_COVERAGE_GAP,
+        )
+
+    # 1. Cookie / Token 差分
+    if has_cookie_diff is None:
+        if after_cookies is not None:
+            from wscan.login_surface import detect_cookie_diff
+            has_cookie_diff = detect_cookie_diff(before_cookies, after_cookies, target_url=login_url)
+        else:
+            has_cookie_diff = False
+
+    if has_token_diff is None:
+        if after_tokens is not None:
+            has_token_diff = _detect_token_diff(before_tokens, after_tokens)
+        else:
+            has_token_diff = False
+
+    cookie_or_token_gained = bool(has_cookie_diff or has_token_diff)
+    if not cookie_or_token_gained:
+        reasons.append("missing_session_artifact")
+
+    # 2. ログインページ離脱
+    if left_login_page is None:
+        if current_url:
+            norm_cur = _norm(current_url)
+            norm_login = _norm(login_url) if login_url else ""
+            left_login_page = (
+                not on_login_page(current_url, login_url)
+                and (norm_cur != norm_login if norm_login else True)
+            )
+        else:
+            left_login_page = False
+    if not left_login_page:
+        reasons.append("still_on_login_page")
+
+    # 3. ログインフォーム非残存 & 失敗文言非存在
+    if login_form_present is None:
+        form_present = has_login_form(body) if body else False
+        failure_detected = has_failure_text(body) if body else False
+        login_form_absent = (not form_present) and (not failure_detected)
+        if form_present:
+            reasons.append("login_form_still_present")
+        if failure_detected:
+            reasons.append("auth_failure_text_detected")
+    else:
+        login_form_absent = not login_form_present
+        if login_form_present:
+            reasons.append("login_form_still_present")
+
+    if cookie_or_token_gained and left_login_page and login_form_absent:
+        return AgentAuthVerification(
+            status=AGENT_AUTH_VERIFIED,
+            reasons=[],
+            cookie_or_token_gained=True,
+            left_login_page=True,
+            login_form_absent=True,
+            coverage_gap="",
+        )
+    else:
+        return AgentAuthVerification(
+            status=AGENT_AUTH_UNVERIFIED,
+            reasons=reasons,
+            cookie_or_token_gained=cookie_or_token_gained,
+            left_login_page=left_login_page,
+            login_form_absent=login_form_absent,
+            coverage_gap=AGENT_AUTH_COVERAGE_GAP,
+        )
+

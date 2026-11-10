@@ -605,6 +605,17 @@ class ReportGenerator:
         observability_html = self._build_observability_html(observability)
         coverage_html = self._build_coverage_html(coverage)
 
+        auth_status = (coverage or {}).get("auth_verification_status")
+        auth_meta_html = ""
+        if auth_status:
+            auth_color = "#2f855a" if auth_status == "verified" else "#b7791f"
+            auth_meta_html = (
+                f'\n            <div class="meta-item">\n'
+                f'                <span class="meta-label">Agent Auth</span>\n'
+                f'                <span class="meta-value" style="color:{auth_color}">{self._escape(auth_status)}</span>\n'
+                f'            </div>'
+            )
+
         return f"""<!DOCTYPE html>
 <html lang="{t('report.lang.html')}">
 <head>
@@ -925,7 +936,7 @@ a {{ color:var(--accent); }}
             <div class="meta-item">
                 <span class="meta-label">Remediation Plan</span>
                 <span class="meta-value"><a href="remediation_plan.md">remediation_plan.md</a> / <a href="remediation_tasks.json">remediation_tasks.json</a></span>
-            </div>
+            </div>{auth_meta_html}
         </div>
     </div>
 
@@ -1624,6 +1635,36 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         if not coverage:
             return ""
         t = self._t
+
+        auth_verification_status = coverage.get("auth_verification_status")
+        auth_reasons = coverage.get("auth_verification_reasons") or []
+        coverage_gaps = coverage.get("coverage_gaps") or []
+        auth_cov_html = ""
+        if auth_verification_status:
+            is_ver = auth_verification_status == "verified"
+            cov_color = "#2f855a" if is_ver else "#b7791f"
+            reasons_html = ""
+            if auth_reasons and not is_ver:
+                reasons_html = f"<p style='color:#718096;font-size:.85rem;margin-top:4px'>Reasons: {self._escape(', '.join(auth_reasons))}</p>"
+            auth_cov_html = f"""
+            <h3 style="margin-top:14px">Agent Auth Ground-Truth Verification</h3>
+            <p>Status: <strong style="color:{cov_color}">{self._escape(auth_verification_status)}</strong></p>
+            {reasons_html}"""
+        gaps_html = ""
+        if coverage_gaps:
+            gaps_items = "".join(f"<li><code>{self._escape(g)}</code></li>" for g in coverage_gaps)
+            gaps_html = f"""
+            <h3 style="margin-top:14px">Coverage Gaps</h3>
+            <ul>{gaps_items}</ul>"""
+
+        if not coverage.get("http_status") and (auth_verification_status or coverage_gaps):
+            return f"""
+        <div class="section coverage-section">
+            <h2>{t('report.coverage.heading')}</h2>
+            {auth_cov_html}
+            {gaps_html}
+        </div>"""
+
         none_label = t("report.common.none")
         http_status = coverage.get("http_status", {}) or {}
         reached_count = self._escape(coverage.get("reached_count", 0))
@@ -1945,6 +1986,18 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
               </div>
             </div>"""
 
+        agent_auth_status = (coverage or {}).get("auth_verification_status")
+        agent_auth_html = ""
+        if agent_auth_status:
+            is_ver = agent_auth_status == "verified"
+            color = "#2f855a" if is_ver else "#b7791f"
+            subtext = "ground-truth confirmed" if is_ver else "unverified claim (auth:login_not_verified)"
+            agent_auth_html = f"""\n    <div class="exec-card" style="border-left:4px solid {color}">
+      <div class="exec-count" style="color:{color};font-size:1.15rem;margin-bottom:4px">{self._escape(agent_auth_status)}</div>
+      <div class="exec-label">Agent Auth Verification</div>
+      <div style="font-size:.75rem;color:#718096;margin-top:6px">{subtext}</div>
+    </div>"""
+
         # リスクスコア (CVSS重み付き平均)
         cvss_scores = [getattr(f, "cvss_score", 0.0) for f in confirmed_findings]
         avg_cvss = (sum(cvss_scores) / len(cvss_scores)) if cvss_scores else 0.0
@@ -2045,7 +2098,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
       <div class="exec-count" style="color:#805ad5">{avg_cvss:.1f}</div>
       <div class="exec-label">Avg CVSS Score</div>
     </div>
-    {agent_summary_html}
+    {agent_summary_html}{agent_auth_html}
     {diff_html}
   </div>
   <div class="section">
