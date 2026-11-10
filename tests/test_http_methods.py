@@ -208,6 +208,9 @@ class _FakeEngine:
         # 準備区間（失効チェック/flow）回復後の健全性確認の最小スタブ。
         return True
 
+    def _record_external_script_scan_matrix(self, *args, **kwargs):
+        pass
+
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
     def _scanner(self):

@@ -516,6 +516,7 @@ class PageLevelWedgeTests(unittest.IsolatedAsyncioTestCase):
         e._checkpoint_mark_done = mock.Mock()
         e._save_checkpoint = mock.Mock()
         e._record_scan_matrix = mock.Mock()
+        e._record_external_script_scan_matrix = mock.Mock()
         e._record_finding = mock.Mock()
         return e
 
@@ -1466,6 +1467,7 @@ class EntryNavigateFloodTests(unittest.IsolatedAsyncioTestCase):
         e._checkpoint_mark_done = mock.Mock()
         e._save_checkpoint = mock.Mock()
         e._record_scan_matrix = mock.Mock()
+        e._record_external_script_scan_matrix = mock.Mock()
         page = SimpleNamespace(url="http://t/p", forms=[{"x": 1}], url_params={})
         await ScanEngine._attack_one_page(e, page, {})
         self.assertEqual(order[:2], ["recreate", "attack"])
