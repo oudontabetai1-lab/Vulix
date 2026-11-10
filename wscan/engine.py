@@ -101,6 +101,34 @@ def _effective_cookies(engine) -> str:
     return engine.cookies if override is _COOKIES_UNSET else override
 
 
+# Per-worker 認証トークン状態。SPA の Bearer/API-key をブラウザから httpx auth_headers へ橋渡しする。
+_AUTH_TOKEN_UNSET = object()
+_WORKER_AUTH_TOKEN: ContextVar = ContextVar("wscan_worker_auth_token", default=_AUTH_TOKEN_UNSET)
+
+
+def _store_synced_token(engine, origin_url: str, headers: dict) -> None:
+    """同期した認証トークンヘッダを保存する（純粋な振り分け）。
+
+    並列 worker task 内なら task-local な ContextVar へ、直列時は共有 engine へ書く。
+    """
+    data = (
+        {"origin": url_scope.origin_string(origin_url), "headers": dict(headers)}
+        if headers and origin_url
+        else {}
+    )
+    if _WORKER_AUTH_TOKEN.get(_AUTH_TOKEN_UNSET) is not _AUTH_TOKEN_UNSET:
+        _WORKER_AUTH_TOKEN.set(data)
+    else:
+        engine._synced_token = data
+
+
+def _effective_synced_token(engine) -> dict:
+    """auth_headers が使う実効認証トークン情報を返す（worker 内なら task-local を優先）。"""
+    override = _WORKER_AUTH_TOKEN.get(_AUTH_TOKEN_UNSET)
+    return getattr(engine, "_synced_token", {}) if override is _AUTH_TOKEN_UNSET else override
+
+
+
 class _FlowGate:
     """pre-attack flow 付きページを排他実行する読み書きゲート。
 
@@ -980,6 +1008,7 @@ class ScanEngine:
         self.navigation_retries: int = max(0, int(navigation_retries))
         self.scan_aborted: bool = False
         self._cookies: str = cookies
+        self._synced_token: dict = {}
         self.cookie_list: list = list(cookie_list or [])
         # Normalise low-privilege cookies: prefer list form when both are given
         self.low_priv_cookies: str = low_priv_cookies
@@ -2258,6 +2287,18 @@ class ScanEngine:
             # Don't clobber an explicit Cookie header from --header.
             if not any(k.lower() == "cookie" for k in headers):
                 headers["Cookie"] = cookie
+
+        # Token bridge: capture 由来の Authorization / token ヘッダを同 origin 宛のみ付与する。
+        # 利用者が --header / refresh で同名ヘッダを明示している場合はそれを最優先（上書きしない）。
+        synced_token = _effective_synced_token(self)
+        if url and synced_token:
+            captured_origin = synced_token.get("origin", "")
+            if captured_origin and url_scope.same_origin(url, captured_origin):
+                token_headers = synced_token.get("headers", {})
+                for k, v in token_headers.items():
+                    if not any(ek.lower() == k.lower() for ek in headers):
+                        headers[k] = v
+
         if extra:
             for k, v in extra.items():
                 if v is None:
@@ -3162,6 +3203,18 @@ class ScanEngine:
             cookies = await page.context.cookies()
         except Exception:
             return False
+
+        # Token bridge: 観測された in-scope な Authorization/token ヘッダを抽出して同期する。
+        # SPA が localStorage/sessionStorage 等に JWT を持ち、fetch/XHR で送っている場合、
+        # cookie jar は空でも auth_headers が当該ヘッダを担げるようにする。ログインフロー中の
+        # 送信は pairs では伏字になるため、capture の非永続スロット（redaction 前の最新値）も読む。
+        target = for_url or getattr(self, "target_url", "")
+        capture = getattr(browser, "network", None)
+        from wscan import session_guard
+        token_hdr = session_guard.extract_latest_auth_header(capture, target)
+        if token_hdr:
+            _store_synced_token(self, target, token_hdr)
+
         if not cookies:
             # jar が空（ログアウトで消去 / Bearer・localStorage 認証など）。stale な
             # Cookie を送り続けないようクリアする。なお page 取得不能・例外時は判定
@@ -5307,6 +5360,8 @@ class ScanEngine:
                 # 汚染しない。slot 0（メインブラウザ・_CURRENT_WORKER=None）も独立して種付けされる。
                 cookie_seed = None
                 cookie_token = None
+                token_seed = None
+                token_ctx = None
                 exclusive = False
                 gate_held = False
                 skip_this_page = False
@@ -5323,6 +5378,8 @@ class ScanEngine:
                     # 取り込まれる。グローバル昇格を足すと URL スコープ違いの Cookie が混線する。
                     cookie_seed = self._cookies
                     cookie_token = _WORKER_COOKIES.set(cookie_seed)
+                    token_seed = getattr(self, "_synced_token", {})
+                    token_ctx = _WORKER_AUTH_TOKEN.set(token_seed)
                     try:
                         await self.controller.checkpoint()
                     except SkipPage:
@@ -5348,6 +5405,8 @@ class ScanEngine:
                     # worker ごとに独立した BrowserContext を保持して cookie jar を隔離。
                     if cookie_token is not None:
                         _WORKER_COOKIES.reset(cookie_token)
+                    if token_ctx is not None:
+                        _WORKER_AUTH_TOKEN.reset(token_ctx)
                     if gate_held:
                         await flow_gate.release(exclusive)
                     _CURRENT_WORKER.reset(token)
