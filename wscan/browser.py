@@ -403,7 +403,10 @@ class NetworkCapture:
                 if getattr(request, "redirected_from", None) is not None else None
             ),
         }
-        if self.authentication_active:
+        if self.authentication_active and not any(
+            str(k).lower() in ("authorization", "x-api-key", "x-auth-token", "x-access-token")
+            for k in getattr(request, "headers", {})
+        ):
             # 認証欄の名前に依存せず、秘密値を捕捉・永続化しない。
             self._pending[key].update(url="[authentication]", headers={}, post_data="[REDACTED]",
                                       _authentication=True)
@@ -2855,6 +2858,8 @@ class BrowserManager:
                     data = await response.json()
                     observation["token"] = isinstance(data, dict) and any(
                         data.get(k) for k in ("token", "access_token", "session"))
+                    if observation["token"]:
+                        self.network.authentication_active = False
                 except Exception:
                     pass
 

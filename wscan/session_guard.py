@@ -57,3 +57,71 @@ def looks_logged_out(
             return True
 
     return False
+
+
+from .url_scope import same_origin
+
+_RECOGNIZED_AUTH_HEADERS = ("authorization", "x-api-key", "x-auth-token", "x-access-token")
+_CANONICAL_AUTH_HEADER_NAMES = {
+    "authorization": "Authorization",
+    "x-api-key": "X-API-Key",
+    "x-auth-token": "X-Auth-Token",
+    "x-access-token": "X-Access-Token",
+}
+
+
+def _normalize_auth_header(name: str, value: str) -> tuple[str, str] | None:
+    """認証ヘッダ名と値が対象スキーム（Bearer/Token または API-key）に合致するか判定する。"""
+    lowered = str(name or "").lower()
+    val = str(value or "").strip()
+    if not val:
+        return None
+    if lowered == "authorization":
+        parts = val.split(None, 1)
+        if len(parts) >= 2 and parts[0].lower() in ("bearer", "token") and parts[1].strip():
+            return "Authorization", val
+        return None
+    elif lowered in _CANONICAL_AUTH_HEADER_NAMES:
+        return _CANONICAL_AUTH_HEADER_NAMES[lowered], val
+    return None
+
+
+def extract_latest_auth_header(
+    pairs: list[dict] | None,
+    target_url: str,
+    user_headers: dict | None = None,
+) -> dict[str, str]:
+    """捕捉レコードから target_url と同一 origin 宛に送られた最新の認証ヘッダを抽出する（純粋）。
+
+    対象:
+      - Authorization（スキーム Bearer または Token）
+      - X-API-Key / X-Auth-Token / X-Access-Token
+
+    規則:
+      - target_url と同一 origin 宛のリクエストのみ対象（cross-origin は一切含めない）。
+      - 直近に送信されたヘッダを優先採用（latest wins）。
+      - user_headers に同名ヘッダが既に存在する場合、そのヘッダは採用しない（ユーザー設定優先）。
+    """
+    if not pairs or not target_url:
+        return {}
+    user_keys = {str(k).lower() for k in (user_headers or {})}
+    for pair in reversed(pairs):
+        req = pair.get("request") if isinstance(pair, dict) and "request" in pair else pair
+        if not isinstance(req, dict):
+            continue
+        req_url = req.get("url") or ""
+        if not req_url or not same_origin(req_url, target_url):
+            continue
+        headers = req.get("headers")
+        if not isinstance(headers, dict) or not headers:
+            continue
+        for cand in _RECOGNIZED_AUTH_HEADERS:
+            if cand in user_keys:
+                continue
+            for k, v in headers.items():
+                if str(k).lower() == cand:
+                    normalized = _normalize_auth_header(str(k), str(v))
+                    if normalized:
+                        return {normalized[0]: normalized[1]}
+    return {}
+
