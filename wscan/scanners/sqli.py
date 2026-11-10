@@ -129,6 +129,90 @@ def _pair_status(pair: dict) -> int | None:
     return response.get("redirect_status", response.get("status"))
 
 
+def classify_sqli_response(
+    *,
+    status: int | None,
+    final_url: str = "",
+    body: str = "",
+    target_url: str = "",
+    login_url: str = "",
+    logged_in_marker: str = "",
+    has_sql_error: bool = False,
+) -> tuple[str, str] | None:
+    """SQLi 検査時のレスポンスが失効・遮断・未実行（indeterminate）か判定する（純粋関数）。
+
+    401/403/429/5xx やログイン画面へのリダイレクトなど、攻撃が正常にバックエンドへ
+    送達・実行されなかった応答を分類する。正常に評価可能な応答なら None を返す。
+    ログインフォーム自身の検査（pre-auth）は失効とみなさない。
+    """
+    from wscan import auth_detect, session_guard
+
+    # 1. 真正の SQL エラーがある場合は脆弱性応答（ログイン画面含む、500 エラーでも検出優先）
+    if has_sql_error:
+        return None
+
+    # 2. 検査対象自身がログイン画面なら pre-auth 検査として評価（401 拒絶やログインフォーム表示は失効ではない）
+    if target_url:
+        is_preauth_login = False
+        if login_url and auth_detect.on_login_page(target_url, login_url):
+            is_preauth_login = True
+        elif auth_detect.url_looks_like_login(target_url):
+            is_preauth_login = True
+        if is_preauth_login:
+            # ログイン画面検査中であっても 403/429/5xx は blocked として扱う（SQL エラーなし時）
+            if status == 403:
+                return ("blocked", "403")
+            if status == 429:
+                return ("blocked", "429")
+            if status is not None and 500 <= status <= 599:
+                return ("blocked", str(status) if status in (500, 502, 503, 504) else "5xx")
+            return None
+
+    # 3. session_guard によるセッション失効判定
+    try:
+        if session_guard.looks_logged_out(
+            status=status,
+            final_url=final_url,
+            body=body,
+            login_url=login_url,
+            logged_in_marker=logged_in_marker,
+        ):
+            if status in getattr(session_guard, "_UNAUTHORIZED_STATUSES", {401}):
+                return ("session_lost", "401")
+            if auth_detect.has_login_form(body) and (
+                (login_url and auth_detect.on_login_page(final_url, login_url))
+                or auth_detect.url_looks_like_login(final_url)
+            ):
+                return ("session_lost", "login_redirect")
+            if logged_in_marker and (logged_in_marker not in (body or "")) and auth_detect.has_login_form(body):
+                return ("session_lost", "login_marker_lost")
+            return ("session_lost", "logged_out")
+    except Exception:
+        pass
+
+    # 4. ログイン画面への着地（target_url と異なる URL かつログイン画面）
+    if final_url:
+        is_login = False
+        if login_url and auth_detect.on_login_page(final_url, login_url):
+            is_login = True
+        elif auth_detect.url_looks_like_login(final_url):
+            is_login = True
+        if is_login and (not target_url or final_url != target_url):
+            return ("session_lost", "login_redirect")
+
+    # 5. ステータスコード判定
+    if status == 401:
+        return ("session_lost", "401")
+    if status == 403:
+        return ("blocked", "403")
+    if status == 429:
+        return ("blocked", "429")
+    if status is not None and 500 <= status <= 599:
+        return ("blocked", str(status) if status in (500, 502, 503, 504) else "5xx")
+
+    return None
+
+
 # ── Auth bypass detection ──────────────────────────────────────────────────
 
 # Payloads that are specifically useful for SQL injection authentication bypass.
@@ -428,6 +512,25 @@ class SQLiScanner(BaseScanner):
 
         return True, post_url
 
+    def _current_page_url(self, default: str = "") -> str:
+        browser = getattr(self, "browser", None)
+        page = getattr(browser, "page", None) if browser else None
+        return getattr(page, "url", "") or default
+
+    def _get_engine_auth_markers(self) -> tuple[str, str]:
+        engine = getattr(self, "engine", None)
+        login_url = getattr(engine, "login_url", "") if engine else ""
+        logged_in_marker = getattr(engine, "logged_in_marker", "") if engine else ""
+        return login_url, logged_in_marker
+
+    def _mark_api_auth_failed(self, value: bool) -> None:
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            try:
+                engine._api_auth_failed = value
+            except Exception:
+                pass
+
     async def scan_injection_point(
         self,
         ip: InjectionPoint,
@@ -444,14 +547,68 @@ class SQLiScanner(BaseScanner):
                 f"SQLi testing: {field_name} on {ip.url}"
             )
 
+        evaluable_probes = [0]
+        blocked_probes = [0]
+
         # Get baseline response for comparison (content + timing)
         baseline_source, baseline_pair = await self._get_baseline(ip)
         baseline_len = len(baseline_source)
         baseline_lower = (baseline_source or "").lower()
 
+        login_url, logged_in_marker = self._get_engine_auth_markers()
+        current_url = self._current_page_url(ip.url)
+
+        # baseline の失効/遮断判定（401/403/429/5xx/ログイン画面リダイレクト）
+        base_status = _pair_status(baseline_pair)
+        base_has_sql = bool(self.check_response_for_patterns(baseline_source, SQL_ERROR_PATTERNS))
+        base_cls = classify_sqli_response(
+            status=base_status,
+            final_url=current_url,
+            body=baseline_source,
+            target_url=ip.url,
+            login_url=login_url,
+            logged_in_marker=logged_in_marker,
+            has_sql_error=base_has_sql,
+        )
+        if base_cls:
+            b_kind, b_reason = base_cls
+            if b_kind == "session_lost":
+                self._record_scan_note(f"auth_lost:{self.CHECK_TYPE}:{b_reason}")
+                self._mark_api_auth_failed(True)
+                return []
+            else:
+                self._record_scan_note(f"response_blocked:{self.CHECK_TYPE}:{b_reason}")
+                blocked_probes[0] += 1
+        else:
+            evaluable_probes[0] += 1
+
         # Second baseline to measure natural response length variance
         # (dynamic content like ads/timestamps can shift length by hundreds of bytes)
         baseline_source2, baseline_pair2 = await self._get_baseline(ip)
+        current_url2 = self._current_page_url(ip.url)
+        base_status2 = _pair_status(baseline_pair2)
+        base_has_sql2 = bool(self.check_response_for_patterns(baseline_source2, SQL_ERROR_PATTERNS))
+        base_cls2 = classify_sqli_response(
+            status=base_status2,
+            final_url=current_url2,
+            body=baseline_source2,
+            target_url=ip.url,
+            login_url=login_url,
+            logged_in_marker=logged_in_marker,
+            has_sql_error=base_has_sql2,
+        )
+        if base_cls2:
+            b_kind2, b_reason2 = base_cls2
+            if b_kind2 == "session_lost":
+                self._record_scan_note(f"auth_lost:{self.CHECK_TYPE}:{b_reason2}")
+                self._mark_api_auth_failed(True)
+                return []
+            else:
+                self._record_scan_note(f"response_blocked:{self.CHECK_TYPE}:{b_reason2}")
+                blocked_probes[0] += 1
+        else:
+            evaluable_probes[0] += 1
+
         baseline_ids = tuple(self._probe_id(p) for p in (baseline_pair, baseline_pair2))
         baseline_variance = abs(len(baseline_source) - len(baseline_source2))
 
@@ -468,6 +625,8 @@ class SQLiScanner(BaseScanner):
         # Threshold = baseline + 2.5 s (the injected sleep) with 0.5 s margin
         time_threshold = max(2.5, baseline_time + 2.5)
 
+        auth_lost = [False]
+
         async def _test_payload(payload: str, check_label: str = "sqli") -> bool:
             await self.log_payload_test(field_name, payload, check_label, ip.url)
 
@@ -477,13 +636,52 @@ class SQLiScanner(BaseScanner):
                 ip, payload, baseline_attempt_ids=baseline_ids, probe_wave=wave)
             control_ids = ()
 
+            # 攻撃応答の失効・遮断を判定（401/403/429/5xx/ログイン画面リダイレクト）
+            current_url = self._current_page_url(ip.url)
+            resp_status = _pair_status(pair)
+            match = self.check_response_for_patterns(source, SQL_ERROR_PATTERNS)
+            if match and match.lower() in baseline_lower:
+                match = None
+
+            cls = classify_sqli_response(
+                status=resp_status,
+                final_url=current_url,
+                body=source,
+                target_url=ip.url,
+                login_url=login_url,
+                logged_in_marker=logged_in_marker,
+                has_sql_error=bool(match),
+            )
+            if cls:
+                kind, reason = cls
+                if kind == "session_lost":
+                    self._record_scan_note(f"auth_lost:{self.CHECK_TYPE}:{reason}")
+                    self._mark_api_auth_failed(True)
+                    self._probe_decision(
+                        pair, False, "sqli_payload_oracle",
+                        baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
+                        outcome="indeterminate",
+                        rationale=f"session lost ({reason})",
+                    )
+                    auth_lost[0] = True
+                    return False
+                else:
+                    self._record_scan_note(f"response_blocked:{self.CHECK_TYPE}:{reason}")
+                    self._probe_decision(
+                        pair, False, "sqli_payload_oracle",
+                        baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
+                        outcome="indeterminate",
+                        rationale=f"response blocked ({reason})",
+                    )
+                    blocked_probes[0] += 1
+                    return False
+
+            evaluable_probes[0] += 1
+
             # --- Check 1: Error-based SQLi ---
             # baseline に既に同じエラー文字列が出ているなら、それはページ本来の
             # 文言（"database error" 等の通常コピー）であって注入結果ではない。
             # ペイロード投入で「新たに」現れたエラーだけを陽性とする（誤検知抑制）。
-            match = self.check_response_for_patterns(source, SQL_ERROR_PATTERNS)
-            if match and match.lower() in baseline_lower:
-                match = None
             if match:
                 self._probe_decision(pair, True, "sqli_payload_oracle",
                                      baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
@@ -535,9 +733,30 @@ class SQLiScanner(BaseScanner):
                 # どちらかが空なら比較不能としてこの pair をスキップする。
                 if not true_src or not false_src:
                     continue
-                # transport 失敗（json_body の timeout/TLS/DNS/proxy 等）は空応答("")を返す。
-                # 空を「false 条件の相違」と誤認して高 severity の偽陽性を出さないよう、
-                # どちらかが空なら比較不能としてこの pair をスキップする。
+                partner_url = self._current_page_url(ip.url)
+                partner_status = _pair_status(partner_pair)
+                partner_has_sql = bool(self.check_response_for_patterns(partner_source, SQL_ERROR_PATTERNS))
+                partner_cls = classify_sqli_response(
+                    status=partner_status,
+                    final_url=partner_url,
+                    body=partner_source,
+                    target_url=ip.url,
+                    login_url=login_url,
+                    logged_in_marker=logged_in_marker,
+                    has_sql_error=partner_has_sql,
+                )
+                if partner_cls:
+                    p_kind, p_reason = partner_cls
+                    if p_kind == "session_lost":
+                        self._record_scan_note(f"auth_lost:{self.CHECK_TYPE}:{p_reason}")
+                        self._mark_api_auth_failed(True)
+                        auth_lost[0] = True
+                        return False
+                    else:
+                        self._record_scan_note(f"response_blocked:{self.CHECK_TYPE}:{p_reason}")
+                        blocked_probes[0] += 1
+                        continue
+                evaluable_probes[0] += 1
                 sim_true_base = self._body_similarity(true_src, baseline_source)
                 sim_false_base = self._body_similarity(false_src, baseline_source)
                 # 判定は純粋関数 `_boolean_blind_divergence` に集約（ブラウザ非依存でテスト可能）。
@@ -682,11 +901,13 @@ class SQLiScanner(BaseScanner):
             return False
 
         for payload in payloads:
+            if auth_lost[0]:
+                break
             if await _test_payload(payload):
                 break  # Found vulnerability, move to next field
 
         # evolution wave は legacy browser transport 専用なので JSON/XML では実行しない。
-        if not findings and ip.location not in ("json_body", "xml_body"):
+        if not findings and not auth_lost[0] and ip.location not in ("json_body", "xml_body"):
             extra_payloads = await self.evolved_payloads(
                 ip.url,
                 ip.form_index,
@@ -695,13 +916,17 @@ class SQLiScanner(BaseScanner):
                 dom_index=ip.submit_index,
             )
             for payload in extra_payloads:
+                if auth_lost[0]:
+                    break
                 if await _test_payload(payload, "sqli_evolved"):
                     break
 
-        # --- Mutation wave: bypass変種 + キャップで漏れた blind(boolean/time) を確実に投入 ---
-        if not findings:
+        # --- Mutation wave: bypass変種 + ギャップで漏れた blind(boolean/time) を確実に投入 ---
+        if not findings and not auth_lost[0]:
             mutated = await self.mutated_payloads(field_name, ip.url, payloads, ip=ip)
             for payload in mutated:
+                if auth_lost[0]:
+                    break
                 if await _test_payload(payload, "sqli_mutation"):
                     break
 
@@ -709,9 +934,9 @@ class SQLiScanner(BaseScanner):
         # When the error/boolean/time checks find nothing, fall back to the
         # filter- and error-independent concatenation-equivalence probe
         # (e.g. AA' 'BB collapsing to AABB), which confirms the quote was
-        # interpreted as SQL syntax rather than reflected as data.
+        # interpreted as SQL syntax rather than reflected as data。
         # 等価性 probe も legacy browser transport 専用なので JSON/XML では実行しない。
-        if not findings and ip.location not in ("json_body", "xml_body"):
+        if not findings and not auth_lost[0] and ip.location not in ("json_body", "xml_body"):
             probe = await self.run_equivalence_probe(
                 ip.url,
                 ip.form_index,
@@ -751,6 +976,9 @@ class SQLiScanner(BaseScanner):
                 )
                 if finding:
                     findings.append(finding)
+
+        if not findings and evaluable_probes[0] == 0 and blocked_probes[0] > 0:
+            self._record_scan_note(f"all_probes_blocked:{self.CHECK_TYPE}")
 
         return findings
 
@@ -854,17 +1082,33 @@ class SQLiScanner(BaseScanner):
         await self.log_payload_test(
             finding.field_name, finding.payload, "sqli_verify", finding.url
         )
-        # verify 中に session 失効(401)すると、transport(_apply_json_payload)が
-        # _api_auth_failed を立てる。401/login 本文を脆弱性応答として評価し real finding を
-        # unreproduced に誤格下げしないよう、失効を検知したら indeterminate(None)を返す。
-        # json_body 限定（httpx replay 経路のみ flag を立てる）。
-        if ip.location == "json_body":
-            try:
-                self.engine._api_auth_failed = False
-            except Exception:
-                pass
+        # verify 中に session 失効(401/login リダイレクト等)すると、401/login 本文を
+        # 脆弱性応答として評価し real finding を unreproduced に誤格下げしてしまう。
+        # 失効・遮断を検知したら indeterminate(None)を返す（ブラウザ form/URL-param および json_body 共通）。
+        self._mark_api_auth_failed(False)
         source, pair = await self._apply_ip(ip, finding.payload)
-        if ip.location == "json_body" and getattr(self.engine, "_api_auth_failed", False):
+        current_url = self._current_page_url(finding.url)
+        login_url, logged_in_marker = self._get_engine_auth_markers()
+        match_err = bool(self.check_response_for_patterns(source, SQL_ERROR_PATTERNS))
+        verify_cls = classify_sqli_response(
+            status=_pair_status(pair),
+            final_url=current_url,
+            body=source,
+            target_url=finding.url,
+            login_url=login_url,
+            logged_in_marker=logged_in_marker,
+            has_sql_error=match_err,
+        )
+        if verify_cls:
+            v_kind, v_reason = verify_cls
+            if v_kind == "session_lost":
+                self._record_scan_note(f"auth_lost:{self.CHECK_TYPE}:{v_reason}")
+                self._mark_api_auth_failed(True)
+            else:
+                self._record_scan_note(f"response_blocked:{self.CHECK_TYPE}:{v_reason}")
+            return None
+        engine = getattr(self, "engine", None)
+        if getattr(engine, "_api_auth_failed", False):
             return None
         body = pair.get("response", {}).get("body", "") or source or ""
         etype = getattr(finding, "evidence_type", "")
@@ -881,19 +1125,19 @@ class SQLiScanner(BaseScanner):
             # ことを要求する。恒常的に遅いだけのエンドポイント（対照との差が小さい）を
             # time-based 陽性と誤判定しないため（注入 SLEEP は約3秒なので 2 秒の差を要求）。
             await self.log_payload_test(finding.field_name, "1", "sqli_verify_control", finding.url)
-            if ip.location == "json_body":
+            self._mark_api_auth_failed(False)
+            if engine is not None:
                 try:
-                    self.engine._api_auth_failed = False
-                    self.engine._json_probe_failed = False
+                    engine._json_probe_failed = False
                 except Exception:
                     pass
             _, control_pair = await self._apply_ip(ip, "1")
             # 対照リクエストが transport 失敗/失効したら、有効な対照を測れない。恒常的に
             # 遅いだけの endpoint を「対照が無いから」reproduced と誤確認しないよう、
             # indeterminate(None)を返す（_verify_one が terminal な assumed にする。）。
-            if ip.location == "json_body" and (
-                getattr(self.engine, "_api_auth_failed", False)
-                or getattr(self.engine, "_json_probe_failed", False)
+            if (
+                getattr(engine, "_api_auth_failed", False)
+                or getattr(engine, "_json_probe_failed", False)
             ):
                 return None
             control_elapsed = self.response_elapsed(control_pair)
@@ -917,20 +1161,64 @@ class SQLiScanner(BaseScanner):
             false_payload = details.get("false_payload")
             if not true_payload or not false_payload:
                 return None
-            if ip.location == "json_body":
-                try:
-                    self.engine._api_auth_failed = False
-                except Exception:
-                    pass
+            self._mark_api_auth_failed(False)
             baseline_source, baseline_pair = await self._get_baseline(ip)
+            base_url = self._current_page_url(finding.url)
+            base_has_sql = bool(self.check_response_for_patterns(baseline_source, SQL_ERROR_PATTERNS))
+            base_cls = classify_sqli_response(
+                status=_pair_status(baseline_pair),
+                final_url=base_url,
+                body=baseline_source,
+                target_url=finding.url,
+                login_url=login_url,
+                logged_in_marker=logged_in_marker,
+                has_sql_error=base_has_sql,
+            )
+            if base_cls:
+                if base_cls[0] == "session_lost":
+                    self._mark_api_auth_failed(True)
+                return None
+
             await self.log_payload_test(finding.field_name, true_payload, "sqli_verify_boolean", finding.url)
             true_src, true_pair = await self._apply_ip(ip, true_payload)
+            true_url = self._current_page_url(finding.url)
+            true_has_sql = bool(self.check_response_for_patterns(true_src, SQL_ERROR_PATTERNS))
+            true_cls = classify_sqli_response(
+                status=_pair_status(true_pair),
+                final_url=true_url,
+                body=true_src,
+                target_url=finding.url,
+                login_url=login_url,
+                logged_in_marker=logged_in_marker,
+                has_sql_error=true_has_sql,
+            )
+            if true_cls:
+                if true_cls[0] == "session_lost":
+                    self._mark_api_auth_failed(True)
+                return None
+
             await self.log_payload_test(finding.field_name, false_payload, "sqli_verify_boolean", finding.url)
             false_src, false_pair = await self._apply_ip(ip, false_payload)
+            false_url = self._current_page_url(finding.url)
+            false_has_sql = bool(self.check_response_for_patterns(false_src, SQL_ERROR_PATTERNS))
+            false_cls = classify_sqli_response(
+                status=_pair_status(false_pair),
+                final_url=false_url,
+                body=false_src,
+                target_url=finding.url,
+                login_url=login_url,
+                logged_in_marker=logged_in_marker,
+                has_sql_error=false_has_sql,
+            )
+            if false_cls:
+                if false_cls[0] == "session_lost":
+                    self._mark_api_auth_failed(True)
+                return None
+
             # boolean verify は初回 replay 後に baseline/true/false と複数回 replay する。
             # その途中で session 失効(401)しても _api_auth_failed が立つので、いずれかで
             # 失効したら login/401 本文を SQL 応答と比較せず indeterminate(None)を返す。
-            if ip.location == "json_body" and getattr(self.engine, "_api_auth_failed", False):
+            if getattr(engine, "_api_auth_failed", False):
                 return None
             baseline_len = len(baseline_source)
             baseline_variance = float(details.get("baseline_variance", 0) or 0)
