@@ -147,7 +147,11 @@ def classify_sqli_response(
     """
     from wscan import auth_detect, session_guard
 
-    # 1. 検査対象自身がログイン画面なら pre-auth 検査として評価（401 拒絶やログインフォーム表示は失効ではない）
+    # 1. 真正の SQL エラーがある場合は脆弱性応答（ログイン画面含む、500 エラーでも検出優先）
+    if has_sql_error:
+        return None
+
+    # 2. 検査対象自身がログイン画面なら pre-auth 検査として評価（401 拒絶やログインフォーム表示は失効ではない）
     if target_url:
         is_preauth_login = False
         if login_url and auth_detect.on_login_page(target_url, login_url):
@@ -155,7 +159,7 @@ def classify_sqli_response(
         elif auth_detect.url_looks_like_login(target_url):
             is_preauth_login = True
         if is_preauth_login:
-            # ログイン画面検査中であっても 403/429/5xx は blocked として扱う
+            # ログイン画面検査中であっても 403/429/5xx は blocked として扱う（SQL エラーなし時）
             if status == 403:
                 return ("blocked", "403")
             if status == 429:
@@ -163,10 +167,6 @@ def classify_sqli_response(
             if status is not None and 500 <= status <= 599:
                 return ("blocked", str(status) if status in (500, 502, 503, 504) else "5xx")
             return None
-
-    # 2. 真正の SQL エラーがある場合は脆弱性応答（500 エラーでも検出優先）
-    if has_sql_error:
-        return None
 
     # 3. session_guard によるセッション失効判定
     try:
@@ -735,6 +735,7 @@ class SQLiScanner(BaseScanner):
                     continue
                 partner_url = self._current_page_url(ip.url)
                 partner_status = _pair_status(partner_pair)
+                partner_has_sql = bool(self.check_response_for_patterns(partner_source, SQL_ERROR_PATTERNS))
                 partner_cls = classify_sqli_response(
                     status=partner_status,
                     final_url=partner_url,
@@ -742,6 +743,7 @@ class SQLiScanner(BaseScanner):
                     target_url=ip.url,
                     login_url=login_url,
                     logged_in_marker=logged_in_marker,
+                    has_sql_error=partner_has_sql,
                 )
                 if partner_cls:
                     p_kind, p_reason = partner_cls
@@ -1162,6 +1164,7 @@ class SQLiScanner(BaseScanner):
             self._mark_api_auth_failed(False)
             baseline_source, baseline_pair = await self._get_baseline(ip)
             base_url = self._current_page_url(finding.url)
+            base_has_sql = bool(self.check_response_for_patterns(baseline_source, SQL_ERROR_PATTERNS))
             base_cls = classify_sqli_response(
                 status=_pair_status(baseline_pair),
                 final_url=base_url,
@@ -1169,6 +1172,7 @@ class SQLiScanner(BaseScanner):
                 target_url=finding.url,
                 login_url=login_url,
                 logged_in_marker=logged_in_marker,
+                has_sql_error=base_has_sql,
             )
             if base_cls:
                 if base_cls[0] == "session_lost":
@@ -1178,6 +1182,7 @@ class SQLiScanner(BaseScanner):
             await self.log_payload_test(finding.field_name, true_payload, "sqli_verify_boolean", finding.url)
             true_src, true_pair = await self._apply_ip(ip, true_payload)
             true_url = self._current_page_url(finding.url)
+            true_has_sql = bool(self.check_response_for_patterns(true_src, SQL_ERROR_PATTERNS))
             true_cls = classify_sqli_response(
                 status=_pair_status(true_pair),
                 final_url=true_url,
@@ -1185,6 +1190,7 @@ class SQLiScanner(BaseScanner):
                 target_url=finding.url,
                 login_url=login_url,
                 logged_in_marker=logged_in_marker,
+                has_sql_error=true_has_sql,
             )
             if true_cls:
                 if true_cls[0] == "session_lost":
@@ -1194,6 +1200,7 @@ class SQLiScanner(BaseScanner):
             await self.log_payload_test(finding.field_name, false_payload, "sqli_verify_boolean", finding.url)
             false_src, false_pair = await self._apply_ip(ip, false_payload)
             false_url = self._current_page_url(finding.url)
+            false_has_sql = bool(self.check_response_for_patterns(false_src, SQL_ERROR_PATTERNS))
             false_cls = classify_sqli_response(
                 status=_pair_status(false_pair),
                 final_url=false_url,
@@ -1201,6 +1208,7 @@ class SQLiScanner(BaseScanner):
                 target_url=finding.url,
                 login_url=login_url,
                 logged_in_marker=logged_in_marker,
+                has_sql_error=false_has_sql,
             )
             if false_cls:
                 if false_cls[0] == "session_lost":

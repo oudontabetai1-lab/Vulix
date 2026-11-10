@@ -114,16 +114,29 @@ class ClassifySqliResponseTests(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    def test_preauth_login_form_403_is_classified_as_blocked(self):
-        """On a login page, WAF 403 is still classified as blocked."""
+    def test_preauth_login_form_500_with_sql_error_preserves_finding(self):
+        """On a pre-auth login page, HTTP 500 with a real SQL error must return None (not blocked)."""
         result = classify_sqli_response(
-            status=403,
+            status=500,
             final_url="http://example.com/login",
-            body="<html><body>Access Denied</body></html>",
+            body="<html><body>sqlite3.OperationalError: near syntax error</body></html>",
             target_url="http://example.com/login",
             login_url="http://example.com/login",
+            has_sql_error=True,
         )
-        self.assertEqual(result, ("blocked", "403"))
+        self.assertIsNone(result)
+
+    def test_preauth_login_form_500_without_sql_error_is_classified_as_blocked(self):
+        """On a pre-auth login page, HTTP 500 without SQL error is classified as blocked."""
+        result = classify_sqli_response(
+            status=500,
+            final_url="http://example.com/login",
+            body="<html><body>Internal Server Error</body></html>",
+            target_url="http://example.com/login",
+            login_url="http://example.com/login",
+            has_sql_error=False,
+        )
+        self.assertEqual(result, ("blocked", "500"))
 
     def test_normal_authenticated_response_returns_none(self):
         """Normal HTTP 200 response on authenticated page returns None."""
@@ -226,6 +239,45 @@ class SQLiScannerAttackStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("response_blocked:sqli:500" in n for n in scanner.engine.wave_errors))
         self.assertTrue(any("response_blocked:sqli:403" in n for n in scanner.engine.wave_errors))
         # auth_lost was NOT set!
+        self.assertFalse(scanner.engine._api_auth_failed)
+
+    async def test_preauth_login_form_500_with_sql_error_produces_finding(self):
+        """Pre-auth login form returning HTTP 500 with a DB error string is detected as finding."""
+        browser = MockTestBrowser(current_url="http://example.com/login")
+        scanner = self._make_scanner(browser, login_url="http://example.com/login")
+
+        async def fake_get_baseline(ip):
+            return "<html><body><form action='/login'><input name='u'></form></body></html>", {
+                "response": {"status": 200, "url": "http://example.com/login"}
+            }
+
+        async def fake_apply_ip(ip, payload, **kwargs):
+            if "'" in payload:
+                # Triggers unhandled DB error with HTTP 500 on login form
+                return "<html><body>sqlite3.OperationalError: near syntax error</body></html>", {
+                    "response": {"status": 500, "url": "http://example.com/login"}
+                }
+            return "<html><body><form action='/login'><input name='u'></form></body></html>", {
+                "response": {"status": 200, "url": "http://example.com/login"}
+            }
+
+        scanner._get_baseline = fake_get_baseline
+        scanner._apply_ip = fake_apply_ip
+        ip_url = "http://example.com/login"
+        scanner.record_finding = AsyncMock(return_value=SimpleNamespace(
+            url=ip_url,
+            field_name="username",
+            check_type="sqli",
+            evidence_type="sqli_error",
+        ))
+
+        ip = InjectionPoint.for_form("http://example.com/login", "username", 0)
+        findings = await scanner.scan_injection_point(ip, {"name": "username"})
+
+        # Finding MUST be produced on pre-auth login form with 500 DB error!
+        self.assertEqual(len(findings), 1)
+        # Must not be marked as blocked
+        self.assertFalse(any("response_blocked:sqli" in n for n in scanner.engine.wave_errors))
         self.assertFalse(scanner.engine._api_auth_failed)
 
     async def test_safe_twin_all_403_records_all_blocked_and_incomplete(self):
