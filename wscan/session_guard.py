@@ -14,12 +14,13 @@
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from . import auth_detect
+from .url_scope import same_origin
 
 # 認証切れを示す HTTP ステータス。403 は正規の認可拒否（権限不足）でも返るため
-# 単独では失効とみなさない（誤再ログイン抑止）。401 のみ強シグナルとして扱う。
+# 単独では失効とみなさない（誤再ログイン抑制）。401 のみ強シグナルとして扱う。
 _UNAUTHORIZED_STATUSES = {401}
 
 
@@ -59,8 +60,6 @@ def looks_logged_out(
     return False
 
 
-from .url_scope import same_origin
-
 _RECOGNIZED_AUTH_HEADERS = ("authorization", "x-api-key", "x-auth-token", "x-access-token")
 _CANONICAL_AUTH_HEADER_NAMES = {
     "authorization": "Authorization",
@@ -87,11 +86,22 @@ def _normalize_auth_header(name: str, value: str) -> tuple[str, str] | None:
 
 
 def extract_latest_auth_header(
-    pairs: list[dict] | None,
+    source: Any,
     target_url: str,
     user_headers: dict | None = None,
 ) -> dict[str, str]:
-    """捕捉レコードから target_url と同一 origin 宛に送られた最新の認証ヘッダを抽出する（純粋）。
+    """捕捉元から target_url と同一 origin 宛の最新認証ヘッダを抽出する（純粋）。
+
+    ``source`` には :class:`wscan.browser.NetworkCapture` か、従来どおり
+    request/response ペアの list を渡せる。NetworkCapture の場合は次の 2 系統を読む:
+
+      1. ``_observed_auth_headers`` … on_request が redaction **前**に退避した
+         origin ごとの最新認証ヘッダ（ログインフロー中でもこのスロットにだけ残る）。
+      2. ``pairs`` … ログインフロー外（通常の SPA fetch 等）の捕捉ペア。
+
+    スロットは「認証ヘッダ付きリクエストのたびに上書きされる最新値」なので pairs より
+    新しく、こちらを優先する（latest wins）。どちらもメモリ内の読み取りのみで、状態を
+    変更しない。
 
     対象:
       - Authorization（スキーム Bearer または Token）
@@ -99,29 +109,54 @@ def extract_latest_auth_header(
 
     規則:
       - target_url と同一 origin 宛のリクエストのみ対象（cross-origin は一切含めない）。
-      - 直近に送信されたヘッダを優先採用（latest wins）。
       - user_headers に同名ヘッダが既に存在する場合、そのヘッダは採用しない（ユーザー設定優先）。
     """
-    if not pairs or not target_url:
+    if not target_url:
         return {}
     user_keys = {str(k).lower() for k in (user_headers or {})}
-    for pair in reversed(pairs):
-        req = pair.get("request") if isinstance(pair, dict) and "request" in pair else pair
-        if not isinstance(req, dict):
-            continue
-        req_url = req.get("url") or ""
-        if not req_url or not same_origin(req_url, target_url):
-            continue
-        headers = req.get("headers")
-        if not isinstance(headers, dict) or not headers:
-            continue
-        for cand in _RECOGNIZED_AUTH_HEADERS:
-            if cand in user_keys:
-                continue
-            for k, v in headers.items():
-                if str(k).lower() == cand:
-                    normalized = _normalize_auth_header(str(k), str(v))
-                    if normalized:
-                        return {normalized[0]: normalized[1]}
+    for record in _auth_records_latest_first(source):
+        matched = _match_auth_record(record, target_url, user_keys)
+        if matched:
+            return matched
     return {}
 
+
+def _auth_records_latest_first(source: Any):
+    """認証ヘッダ候補レコードを「新しい順」に列挙する（読み取り専用）。
+
+    まず NetworkCapture の非永続スロット（redaction 前の最新観測値）、次に pairs。
+    """
+    slot = getattr(source, "_observed_auth_headers", None)
+    if isinstance(slot, dict):
+        for record in reversed(list(slot.values())):
+            yield record
+    pairs = getattr(source, "pairs", None)
+    if pairs is None and isinstance(source, (list, tuple)):
+        pairs = source
+    if isinstance(pairs, (list, tuple)):
+        for record in reversed(pairs):
+            yield record
+
+
+def _match_auth_record(record: Any, target_url: str, user_keys: set[str]) -> dict[str, str] | None:
+    """1 レコードから同一 origin の認識済み認証ヘッダを 1 つ返す（純粋）。"""
+    if not isinstance(record, dict):
+        return None
+    req = record.get("request") if "request" in record else record
+    if not isinstance(req, dict):
+        return None
+    req_url = req.get("url") or ""
+    if not req_url or not same_origin(req_url, target_url):
+        return None
+    headers = req.get("headers")
+    if not isinstance(headers, dict) or not headers:
+        return None
+    for cand in _RECOGNIZED_AUTH_HEADERS:
+        if cand in user_keys:
+            continue
+        for k, v in headers.items():
+            if str(k).lower() == cand:
+                normalized = _normalize_auth_header(str(k), str(v))
+                if normalized:
+                    return {normalized[0]: normalized[1]}
+    return None

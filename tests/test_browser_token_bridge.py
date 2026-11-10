@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import socket
 import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI, Request
@@ -171,6 +175,207 @@ class PureTokenBridgeHelperTests(unittest.TestCase):
         self.assertEqual(session_guard.extract_latest_auth_header([], "http://target.test/"), {})
         self.assertEqual(session_guard.extract_latest_auth_header(None, "http://target.test/"), {})
         self.assertEqual(session_guard.extract_latest_auth_header([{}], ""), {})
+
+    def test_capture_slot_user_header_precedence(self):
+        capture = _bare_capture()
+        capture.authentication_active = True
+        _send(capture, _request("http://target.test/api/mfa",
+                                headers={"Authorization": "Bearer slot-token"}))
+        self.assertEqual(
+            session_guard.extract_latest_auth_header(capture, "http://target.test/"),
+            {"Authorization": "Bearer slot-token"},
+        )
+        self.assertEqual(
+            session_guard.extract_latest_auth_header(
+                capture, "http://target.test/", {"Authorization": "Bearer user-token"}
+            ),
+            {},
+        )
+        # Cross-origin targets never receive the slot value.
+        self.assertEqual(
+            session_guard.extract_latest_auth_header(capture, "http://other.test/"), {}
+        )
+
+    def test_slot_wins_over_older_pairs(self):
+        capture = _bare_capture()
+        # Normal (post-login) SPA fetch: captured in pairs with headers.
+        _send(capture, _request("http://target.test/api/search",
+                                headers={"Authorization": "Bearer older-pair-token"}))
+        # Login-flow submission later: redacted from pairs, kept in the slot.
+        capture.authentication_active = True
+        _send(capture, _request("http://target.test/api/mfa", method="POST",
+                                headers={"Authorization": "Bearer newer-slot-token"},
+                                post_data='{"otp":"123456"}'))
+        self.assertEqual(
+            session_guard.extract_latest_auth_header(capture, "http://target.test/"),
+            {"Authorization": "Bearer newer-slot-token"},
+        )
+        # Page clears keep the in-memory slot (bridge survives page transitions).
+        capture.clear()
+        self.assertEqual(
+            session_guard.extract_latest_auth_header(capture, "http://target.test/"),
+            {"Authorization": "Bearer newer-slot-token"},
+        )
+
+
+# =============================================================================
+# 1b. Secret-protection boundary: login-flow redaction is preserved
+# =============================================================================
+
+LOGIN_TOKEN = "jwt-login-flow-secret-7f3c9a2b"
+LOGIN_PASSWORD = "hunter2-login-password"
+MFA_CODE = "123456"
+
+
+def _bare_capture():
+    from wscan.browser import NetworkCapture
+
+    return NetworkCapture()
+
+
+def _request(url, method="GET", headers=None, post_data=None):
+    return SimpleNamespace(
+        url=url,
+        method=method,
+        headers=dict(headers or {}),
+        post_data=post_data,
+        resource_type="fetch",
+        redirected_from=None,
+    )
+
+
+def _response(request, status=200, headers=None, body=""):
+    return SimpleNamespace(
+        request=request,
+        url=request.url,
+        status=status,
+        headers=dict(headers or {}),
+        text=AsyncMock(return_value=body),
+    )
+
+
+def _send(capture, request, status=200, headers=None, body=""):
+    capture.on_request(request)
+    capture.on_response(_response(request, status=status, headers=headers, body=body))
+
+
+def _persisted_text(output_dir) -> str:
+    chunks = []
+    for path in sorted(Path(output_dir).rglob("*")):
+        if path.is_file():
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(chunks)
+
+
+class LoginFlowRedactionBoundaryTests(unittest.TestCase):
+    """While authentication_active, every captured request stays fully redacted.
+
+    The login token may still be bridged to httpx ``auth_headers`` through the
+    private, in-memory slot, and must never reach any persisted artefact.
+    """
+
+    def test_token_response_then_mfa_post_stays_redacted_and_bridges(self):
+        from wscan.request_logger import RequestLogger
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            capture = _bare_capture()
+            capture.logger = RequestLogger(tmp_dir)
+            capture.authentication_active = True
+
+            login = _request(
+                "http://target.test/api/login",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                post_data=json.dumps({"username": "admin", "password": LOGIN_PASSWORD}),
+            )
+            _send(capture, login, body=json.dumps({"token": LOGIN_TOKEN}))
+
+            # A token in the login response does NOT end the redaction window:
+            # the following MFA submission is still the login flow.
+            mfa = _request(
+                "http://target.test/api/mfa",
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {LOGIN_TOKEN}",
+                },
+                post_data=json.dumps({"otp": MFA_CODE}),
+            )
+            _send(capture, mfa)
+
+            self.assertEqual(len(capture.pairs), 2)
+            for pair in capture.pairs:
+                self.assertEqual(pair["request"]["url"], "[authentication]")
+                self.assertEqual(pair["request"]["headers"], {})
+                self.assertEqual(pair["request"]["post_data"], "[REDACTED]")
+                self.assertEqual(pair["response"]["url"], "[authentication]")
+                self.assertEqual(pair["response"]["headers"], {})
+
+            # Token is still bridged for same-origin httpx probes.
+            self.assertEqual(
+                session_guard.extract_latest_auth_header(capture, "http://target.test/"),
+                {"Authorization": f"Bearer {LOGIN_TOKEN}"},
+            )
+            # ...but only in memory: captured pairs carry none of the secrets.
+            self.assertNotIn(LOGIN_TOKEN, json.dumps(capture.pairs))
+            self.assertNotIn(LOGIN_PASSWORD, json.dumps(capture.pairs))
+            self.assertNotIn(MFA_CODE, json.dumps(capture.pairs))
+
+            # Force the payload artefact to exist as well, then scan every file
+            # the logger/evidence writer produced for the secret value.
+            capture.logger.log_payload(
+                field="otp", payload=MFA_CODE, check_type="sqli",
+                url="http://target.test/api/mfa",
+            )
+            persisted = _persisted_text(tmp_dir)
+            self.assertTrue((Path(tmp_dir) / "http_requests.jsonl").is_file())
+            self.assertTrue((Path(tmp_dir) / "payloads.jsonl").is_file())
+            self.assertNotIn(LOGIN_TOKEN, persisted)
+            self.assertNotIn(LOGIN_PASSWORD, persisted)
+
+    def test_normal_spa_fetch_is_captured_and_logger_redacts_authorization(self):
+        from wscan.request_logger import RequestLogger
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            capture = _bare_capture()
+            capture.logger = RequestLogger(tmp_dir)
+            # Outside the login flow: headers are captured as before.
+            _send(capture, _request(
+                "http://target.test/api/search",
+                method="POST",
+                headers={"Authorization": f"Bearer {LOGIN_TOKEN}",
+                         "Content-Type": "application/json"},
+                post_data=json.dumps({"query": "apple"}),
+            ))
+
+            pair = capture.pairs[0]
+            self.assertEqual(pair["request"]["url"], "http://target.test/api/search")
+            self.assertEqual(
+                pair["request"]["headers"]["Authorization"], f"Bearer {LOGIN_TOKEN}"
+            )
+            self.assertEqual(
+                session_guard.extract_latest_auth_header(capture, "http://target.test/"),
+                {"Authorization": f"Bearer {LOGIN_TOKEN}"},
+            )
+            # Request logger still masks Authorization, and the raw token is absent.
+            logged = (Path(tmp_dir) / "http_requests.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"Authorization": "<redacted>"', logged)
+            self.assertNotIn(LOGIN_TOKEN, logged)
+
+    def test_slot_holds_only_recognized_normalized_headers(self):
+        capture = _bare_capture()
+        capture.authentication_active = True
+        _send(capture, _request(
+            "http://target.test/api/items",
+            headers={
+                "Authorization": "Basic dXNlcjpwYXNz",   # not a recognized scheme
+                "X-Custom-Secret": "raw-custom-value",    # unknown header name
+            },
+        ))
+        self.assertEqual(capture._observed_auth_headers, {})
+        self.assertEqual(
+            session_guard.extract_latest_auth_header(capture, "http://target.test/"), {}
+        )
 
 
 # =============================================================================

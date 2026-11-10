@@ -22,9 +22,11 @@ from urllib.parse import urljoin, urlparse, urlsplit
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Request, Response
 from rich.console import Console
 
+from . import session_guard
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
 from .url_normalize import normalize_proxy_server, split_proxy_credentials
+from .url_scope import origin_string
 
 
 def _playwright_proxy_options(proxy: str) -> dict[str, str] | None:
@@ -362,6 +364,9 @@ class _RoutedCDPSession:
 class NetworkCapture:
     """Captures HTTP request/response pairs."""
 
+    # 認証ヘッダ退避スロットの origin 数上限（メモリ内のみ・scan 中ずっと保持）。
+    _AUTH_HEADER_ORIGIN_LIMIT = 32
+
     def __init__(self, logger=None):
         self.pairs: list[dict] = []
         self.status_counts = collections.Counter()
@@ -382,6 +387,36 @@ class NetworkCapture:
         self.logger = logger
         self.authentication_active = False
         self._probe_pending = {}
+        # ログインフロー中は pairs の request を丸ごと伏せる（url/headers/post_data）。
+        # ただし橋渡し用に「認識済みの認証ヘッダ」だけは伏せる前に origin 単位の最新値として
+        # この private スロットへ退避する。ここはイミュータブルな監査対象ではなく、シリアライズ
+        # 経路（request log / payloads.jsonl / probe ledger / HAR / evidence）からは参照しない。
+        self._observed_auth_headers: dict[str, dict] = {}
+
+    def _remember_auth_header(self, request: Request) -> None:
+        """認識済みの認証ヘッダだけを origin 単位の最新値としてメモリへ退避する。
+
+        ``authentication_active`` 中は pairs の request を url/headers/post_data ごと伏せる。
+        そのためログインフローのトークンはこのスロットからしか橋渡しできない。値は
+        ``session_guard`` の正規化を通ったもの（Bearer/Token と既知 API-key）だけを保持し、
+        JSONL / probe ledger / HAR / evidence など永続化経路からは参照しない。
+        """
+        origin = origin_string(getattr(request, "url", "") or "")
+        if not origin:
+            return
+        for name, value in (getattr(request, "headers", None) or {}).items():
+            normalized = session_guard._normalize_auth_header(str(name), str(value))
+            if not normalized:
+                continue
+            # 更新時は末尾へ移し、上限超過は最も古い origin から落とす（LRU・無限増加を防ぐ）。
+            self._observed_auth_headers.pop(origin, None)
+            if len(self._observed_auth_headers) >= self._AUTH_HEADER_ORIGIN_LIMIT:
+                self._observed_auth_headers.pop(next(iter(self._observed_auth_headers)), None)
+            self._observed_auth_headers[origin] = {
+                "url": str(request.url),
+                "headers": {normalized[0]: normalized[1]},
+            }
+            return
 
     def on_request(self, request: Request):
         key = (request.url, id(request))
@@ -403,10 +438,10 @@ class NetworkCapture:
                 if getattr(request, "redirected_from", None) is not None else None
             ),
         }
-        if self.authentication_active and not any(
-            str(k).lower() in ("authorization", "x-api-key", "x-auth-token", "x-access-token")
-            for k in getattr(request, "headers", {})
-        ):
+        # 認証ヘッダは redaction より前に、非永続のメモリ内スロットへ退避する。
+        # ログインフロー中でも橋渡しできる唯一の経路（pairs は伏字のまま）。
+        self._remember_auth_header(request)
+        if self.authentication_active:
             # 認証欄の名前に依存せず、秘密値を捕捉・永続化しない。
             self._pending[key].update(url="[authentication]", headers={}, post_data="[REDACTED]",
                                       _authentication=True)
@@ -581,6 +616,8 @@ class NetworkCapture:
         self.pairs.clear()
         self._pending.clear()
         self._requests_since_clear = 0
+        # _observed_auth_headers はページ遷移をまたいで保持する（ログインフローの
+        # トークンを後続ページの httpx 検査へ橋渡しするため）。永続化はしない。
 
     def request_count(self) -> int:
         """clear() 以降に *送信* されたリクエスト数（on_request 発火回数）。
@@ -2858,8 +2895,6 @@ class BrowserManager:
                     data = await response.json()
                     observation["token"] = isinstance(data, dict) and any(
                         data.get(k) for k in ("token", "access_token", "session"))
-                    if observation["token"]:
-                        self.network.authentication_active = False
                 except Exception:
                     pass
 

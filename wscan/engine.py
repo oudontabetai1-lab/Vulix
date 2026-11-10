@@ -3206,11 +3206,12 @@ class ScanEngine:
 
         # Token bridge: 観測された in-scope な Authorization/token ヘッダを抽出して同期する。
         # SPA が localStorage/sessionStorage 等に JWT を持ち、fetch/XHR で送っている場合、
-        # cookie jar は空でも auth_headers が当該ヘッダを担げるようにする。
+        # cookie jar は空でも auth_headers が当該ヘッダを担げるようにする。ログインフロー中の
+        # 送信は pairs では伏字になるため、capture の非永続スロット（redaction 前の最新値）も読む。
         target = for_url or getattr(self, "target_url", "")
-        pairs = getattr(getattr(browser, "network", None), "pairs", None) or []
+        capture = getattr(browser, "network", None)
         from wscan import session_guard
-        token_hdr = session_guard.extract_latest_auth_header(pairs, target)
+        token_hdr = session_guard.extract_latest_auth_header(capture, target)
         if token_hdr:
             _store_synced_token(self, target, token_hdr)
 
