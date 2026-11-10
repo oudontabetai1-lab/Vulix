@@ -62,6 +62,18 @@ def test_observability_summary_groups_categories_and_other():
     assert engine.observability_summary()["llm_calls"] == 7
 
 
+def test_observability_summary_groups_attributable_transport_errors():
+    engine = ScanEngine.__new__(ScanEngine)
+    engine.wave_errors = [
+        "transport_error:xss:probe_not_delivered:/linkcheck|dest|form",
+        "transport_error:sqli:probe_not_delivered:/portal|id",
+        "transport_error:os:probe_not_delivered",
+    ]
+    summary = engine.observability_summary()
+    assert summary["total"] == 3
+    assert summary["by_category"] == {"transport_error": 3}
+
+
 @pytest.mark.asyncio
 async def test_form_transport_exception_propagates_for_baseline_guards():
     # form/url transport の例外は `_apply_ip` で握りつぶさず**伝播**させる（挙動不変）。

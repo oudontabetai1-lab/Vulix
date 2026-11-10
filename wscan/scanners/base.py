@@ -951,6 +951,21 @@ class BaseScanner(ABC):
         except Exception:
             return base
 
+    def _probe_delivery_note(self, ip, reason: str = "probe_not_delivered") -> str:
+        """Build transport error note with injection point identity when available."""
+        base = f"transport_error:{self.CHECK_TYPE}:{reason}"
+        if ip is None:
+            return base
+        try:
+            from urllib.parse import urlparse
+            path = urlparse(getattr(ip, "url", "") or "").path or getattr(ip, "url", "") or ""
+            loc = getattr(ip, "location", "") or ""
+            param = getattr(ip, "parameter_id", "") or ""
+            note = f"{base}:{path}|{param}"
+            return f"{note}|{loc}" if loc else note
+        except Exception:
+            return base
+
     async def _apply_ip(
         self, ip: InjectionPoint, payload, *, probe_role="attack", probe_wave="standard",
         baseline_attempt_ids=(), control_attempt_ids=(), parent_attempt_id="",
@@ -1934,7 +1949,7 @@ class BaseScanner(ABC):
 
                 if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
                     self._record_scan_note(
-                        f"transport_error:{self.CHECK_TYPE}:probe_not_delivered"
+                        self._probe_delivery_note(ip, "probe_not_delivered")
                     )
             else:
                 # Always ensure pair is defined (covers the case when PLAYWRIGHT manager is OFF)
@@ -1950,7 +1965,7 @@ class BaseScanner(ABC):
                     )
                     if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
                         self._record_scan_note(
-                            f"transport_error:{self.CHECK_TYPE}:probe_not_delivered"
+                            self._probe_delivery_note(ip, "probe_not_delivered")
                         )
 
             self._observe_token_lifecycle(ip, payload, pair)
