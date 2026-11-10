@@ -233,6 +233,7 @@ async def test_unavailable_capture_leaves_engine_page_checkpoint_incomplete(chec
     engine._checkpoint_is_done = Mock(return_value=False)
     engine._checkpoint_mark_done = Mock()
     engine._record_scan_matrix = Mock()
+    engine._record_external_script_scan_matrix = Mock()
     engine._record_finding = Mock()
     engine._save_checkpoint = Mock()
     engine._dialog_wedged_since = Mock(return_value=False)

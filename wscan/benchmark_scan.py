@@ -43,15 +43,42 @@ _DEGRADATION_PREFIXES = (
 _FIELD_BUDGET_PREFIX = "field_budget_exceeded:"
 
 
+def _extract_ip_from_degraded_note(note: str) -> tuple[str, str, str, str] | None:
+    """If note identifies an injection point, return (check, path, field, loc), else None."""
+    if not isinstance(note, str):
+        return None
+    for prefix in (_FIELD_BUDGET_PREFIX, *_DEGRADATION_PREFIXES):
+        if note.startswith(prefix):
+            remainder = note[len(prefix):]
+            parts = remainder.split(":")
+            if len(parts) < 2:
+                return None
+            check = parts[0].strip()
+            for seg in parts[1:]:
+                if "|" in seg:
+                    path, _, rest = seg.partition("|")
+                    field, sep, loc = rest.rpartition("|")
+                    loc = _normalize_location(loc)
+                    if not sep or loc not in _KNOWN_LOCATIONS:
+                        field, loc = rest, ""
+                    path = urlparse(path).path if path.startswith("http") else path
+                    path = "/" + path.lstrip("/") if path and not path.startswith("/") else path
+                    return (check, path.strip(), field.strip(), loc)
+            return None
+    return None
+
+
 def _degraded_checks(wave_errors) -> frozenset:
     """wave_errors から check 全体が劣化した note の check 名集合を作る（純粋）。
 
-    transport_error/unexecutable_template（どの field か不明）と、IP 情報を持たない旧形式の
-    field_budget_exceeded だけを check 単位で拾う。IP 情報付きの field_budget は
-    ``_field_budget_degraded_ips`` で per-IP に扱う。"""
+    IP 情報を特定できない（unattributable）transport_error / unexecutable_template /
+    field_budget_exceeded のみを check 単位で拾い、check 全体を劣化扱いとする。
+    IP 情報を特定できる（attributable）note は injection point 単位で絞るためここでは拾わない。"""
     degraded = set()
     for note in (wave_errors or []):
         if not isinstance(note, str):
+            continue
+        if _extract_ip_from_degraded_note(note) is not None:
             continue
         for prefix in _DEGRADATION_PREFIXES:
             if note.startswith(prefix):
@@ -69,24 +96,16 @@ def _degraded_checks(wave_errors) -> frozenset:
 
 
 def _field_budget_degraded_ips(wave_errors) -> frozenset:
-    """IP 情報付き field_budget note から (check, path, field, location) 集合を作る（純粋）。
+    """IP 情報付き note（field_budget または attributable transport_error）から
+    (check, path, field, location) 集合を作る（純粋）。
 
-    時間ボックスで打ち切った当該 injection point の tested 行だけを NOT_REACHED にし、同 check の
+    当該 injection point の tested 行だけを NOT_REACHED にし、同 check の
     別 field の完全実行行を巻き込まないためのキー。"""
     ips = set()
     for note in (wave_errors or []):
-        if not isinstance(note, str) or not note.startswith(_FIELD_BUDGET_PREFIX):
-            continue
-        check, sep, ipinfo = note[len(_FIELD_BUDGET_PREFIX):].partition(":")
-        if not (sep and "|" in ipinfo):
-            continue
-        path, _, rest = ipinfo.partition("|")
-        # 末尾 |<location> があれば carrier 込みのキー、無ければ location "" （全 carrier 対象＝旧形式）。
-        field, sep, loc = rest.rpartition("|")
-        loc = _normalize_location(loc)
-        if not sep or loc not in _KNOWN_LOCATIONS:
-            field, loc = rest, ""
-        ips.add((check.strip(), path, field, loc))
+        ip_tuple = _extract_ip_from_degraded_note(note)
+        if ip_tuple is not None:
+            ips.add(ip_tuple)
     return frozenset(ips)
 
 

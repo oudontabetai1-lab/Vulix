@@ -505,6 +505,64 @@ def test_degraded_passive_page_row_excluded():
     )
 
 
+def test_transport_error_attributable_note_scopes_degradation_to_injection_point():
+    """Attributable transport_error note (e.g. probe_not_delivered with IP) degrades only that IP."""
+    from wscan.benchmark_scan import (
+        _exercised_from_scan_matrix,
+        _degraded_checks,
+        _field_budget_degraded_ips,
+    )
+    wave = ["transport_error:xss:probe_not_delivered:/linkcheck|dest|form"]
+    # Check itself is not globally degraded
+    assert _degraded_checks(wave) == frozenset()
+    # IP is extracted
+    assert _field_budget_degraded_ips(wave) == frozenset({("xss", "/linkcheck", "dest", "form")})
+
+    rows = [
+        # Undelivered IP tested row -> disqualified (not exercised)
+        {"check": "xss", "url": "http://h/linkcheck", "field_name": "dest",
+         "location": "form field", "status": "tested"},
+        # Unrelated safe tested row on same check -> remains exercised
+        {"check": "xss", "url": "http://h/help?q=test", "field_name": "q",
+         "location": "URL param", "status": "tested"},
+    ]
+    ex = _exercised_from_scan_matrix(
+        rows,
+        degraded_checks=_degraded_checks(wave),
+        field_budget_ips=_field_budget_degraded_ips(wave),
+    )
+    assert ("xss", "/help", "q", "url_param") in ex
+    assert ("xss", "/linkcheck", "dest", "form") not in ex
+
+
+def test_transport_error_unattributable_note_degrades_whole_check():
+    """Unattributable transport_error note degrades the entire check family (existing behavior)."""
+    from wscan.benchmark_scan import (
+        _exercised_from_scan_matrix,
+        _degraded_checks,
+        _field_budget_degraded_ips,
+    )
+    wave = ["transport_error:xss:probe_not_delivered"]
+    # Whole check degraded
+    assert _degraded_checks(wave) == frozenset({"xss"})
+    assert _field_budget_degraded_ips(wave) == frozenset()
+
+    rows = [
+        {"check": "xss", "url": "http://h/linkcheck", "field_name": "dest",
+         "location": "form field", "status": "tested"},
+        {"check": "xss", "url": "http://h/help?q=test", "field_name": "q",
+         "location": "URL param", "status": "tested"},
+    ]
+    ex = _exercised_from_scan_matrix(
+        rows,
+        degraded_checks=_degraded_checks(wave),
+        field_budget_ips=_field_budget_degraded_ips(wave),
+    )
+    # Both disqualified because check is degraded
+    assert ("xss", "/help", "q", "url_param") not in ex
+    assert ("xss", "/linkcheck", "dest", "form") not in ex
+
+
 def test_canonical_xss_coverage_and_ground_truth(suite):
     from tests.fixtures.realistic_site import EXPECTED_FINDINGS, SAFE_ENDPOINTS
     assert checks_covered_by_suites([suite]) == ({"xss"}, {"xss"})

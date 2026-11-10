@@ -177,6 +177,27 @@ def _top_severity(findings) -> str:
     return best or ""
 
 
+_SCRIPT_SUBRESOURCE_PAGE_CHECKS = frozenset({"secret_leak", "sri", "js_static"})
+
+
+def _finding_matches_script(finding, script_url: str) -> bool:
+    """Return True if finding belongs to the script subresource."""
+    if getattr(finding, "url", None) == script_url:
+        return True
+    ed = getattr(finding, "evidence_details", None)
+    if ed is not None:
+        if isinstance(ed, dict):
+            if ed.get("resource_url") == script_url or ed.get("src") == script_url:
+                return True
+        else:
+            if getattr(ed, "script", None) == script_url:
+                return True
+    field_name = getattr(finding, "field_name", "") or ""
+    if script_url in field_name:
+        return True
+    return False
+
+
 def _coverage_summary_text(coverage: dict) -> str:
     """到達性カバレッジの console 1行要約を組み立てる純粋関数。"""
     text = (
@@ -2073,6 +2094,60 @@ class ScanEngine:
             "finding_count": finding_count,
             "note": note,
         })
+
+    def _record_external_script_scan_matrix(
+        self,
+        page,
+        check_name: str,
+        page_findings: list,
+        page_wedged: bool = False,
+        error_note: Optional[str] = None,
+    ) -> None:
+        """Record scan_matrix rows for external scripts scanned by page-level checks."""
+        if check_name not in _SCRIPT_SUBRESOURCE_PAGE_CHECKS:
+            return
+        scripts = getattr(page, "external_scripts", None) or {}
+        if not isinstance(scripts, dict) or not scripts:
+            return
+        matrix = getattr(self, "scan_matrix", None) or []
+        recorded_urls = {
+            r.get("url")
+            for r in matrix
+            if r.get("check") == check_name
+        }
+        for script_url, script_body in scripts.items():
+            if not (isinstance(script_body, str) and script_body.strip()):
+                continue
+            if script_url in recorded_urls:
+                continue
+            recorded_urls.add(script_url)
+            if error_note:
+                self._record_scan_matrix(
+                    url=script_url,
+                    field_name="(page)",
+                    check_name=check_name,
+                    status="error",
+                    location="page-level",
+                    note=error_note,
+                )
+            else:
+                script_findings = [
+                    f for f in (page_findings or [])
+                    if _finding_matches_script(f, script_url)
+                ]
+                self._record_scan_matrix(
+                    url=script_url,
+                    field_name="(page)",
+                    check_name=check_name,
+                    status=(
+                        "finding" if script_findings
+                        else "error" if page_wedged else "tested"
+                    ),
+                    location="page-level",
+                    severity=_top_severity(script_findings),
+                    finding_count=len(script_findings),
+                    note="page-level scan ran on a dialog-wedged page" if page_wedged else "",
+                )
 
     def _navigation_failure_note(self) -> str:
         """Return the most recent browser navigation failure in report-friendly form."""
@@ -4126,11 +4201,21 @@ class ScanEngine:
                             for entry in link_entries:
                                 link = entry["url"]
                                 clean = link.split("#")[0]
+                                if self._is_script_subresource(clean):
+                                    if (
+                                        pages
+                                        and self._is_access_allowed_url(clean)
+                                        and not self._is_url_excluded(clean)
+                                        and clean not in pages[-1].external_scripts
+                                    ):
+                                        body = await self._fetch_script_subresource(clean)
+                                        if body:
+                                            pages[-1].external_scripts[clean] = body
+                                    continue
                                 if (
                                     clean not in self.visited_urls
                                     and self._is_access_allowed_url(clean)
                                     and not self._is_url_excluded(clean)
-                                    and not self._is_script_subresource(clean)
                                 ):
                                     self.visited_urls.add(clean)
                                     self._transition_via.setdefault(clean, {
@@ -4533,10 +4618,20 @@ class ScanEngine:
                             )
                             _cap_warned = True
                         break
-                    if (clean not in self.visited_urls
+                    if self._is_script_subresource(clean):
+                        if (
+                            pages
                             and self._is_access_allowed_url(clean)
                             and not self._is_url_excluded(clean)
-                            and not self._is_script_subresource(clean)):
+                            and clean not in pages[-1].external_scripts
+                        ):
+                            body = await self._fetch_script_subresource(clean)
+                            if body:
+                                pages[-1].external_scripts[clean] = body
+                        continue
+                    if (clean not in self.visited_urls
+                            and self._is_access_allowed_url(clean)
+                            and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
                         self._transition_via.setdefault(clean, {
                             "text": entry.get("text", ""),
@@ -5663,10 +5758,19 @@ class ScanEngine:
                     clean_key = clean.rstrip("/")
                     if len(auth_visited) >= url_cap:
                         break
+                    if self._is_script_subresource(clean):
+                        if (
+                            pages
+                            and not self._is_url_excluded(clean)
+                            and clean not in pages[-1].external_scripts
+                        ):
+                            body = await self._fetch_script_subresource(clean)
+                            if body:
+                                pages[-1].external_scripts[clean] = body
+                        continue
                     if (
                         clean_key not in auth_visited
                         and not self._is_url_excluded(clean)
-                        and not self._is_script_subresource(clean)
                     ):
                         auth_visited.add(clean_key)  # dedup はキー、queue は元 URL（slash 保持）
                         # queued post-auth URL を scan-level state にも残し、abort 時に
@@ -6308,6 +6412,9 @@ class ScanEngine:
                     finding_count=len(page_findings),
                     note="page-level scan ran on a dialog-wedged page" if page_wedged else "",
                 )
+                self._record_external_script_scan_matrix(
+                    page, check_name, page_findings, page_wedged=page_wedged,
+                )
             except Exception as e:
                 page_errored = True
                 page_wedged = self._dialog_wedged_since(_dlg_scanner)
@@ -6326,6 +6433,10 @@ class ScanEngine:
                     status="error",
                     location="page-level",
                     note=f"page-level scan raised: {type(e).__name__}: {e}",
+                )
+                self._record_external_script_scan_matrix(
+                    page, check_name, [], page_wedged=page_wedged,
+                    error_note=f"page-level scan raised: {type(e).__name__}: {e}",
                 )
             if not page_errored and not page_wedged:
                 self._checkpoint_mark_done(cp_url, "(page)", 0, check_name)
@@ -7725,6 +7836,31 @@ class ScanEngine:
         """URL が JavaScript スクリプトサブリソース（.js/.mjs/.cjs）かを判定する。"""
         from .url_extraction import is_script_subresource_url
         return is_script_subresource_url(url)
+
+    async def _fetch_script_subresource(self, url: str) -> Optional[str]:
+        """Fetch an external script subresource via direct GET.
+        Returns the text body if 2xx, otherwise None."""
+        if not self._is_access_allowed_url(url) or self._is_url_excluded(url):
+            return None
+        cache = getattr(self, "_script_subresource_cache", None)
+        if cache is None:
+            cache = {}
+            self._script_subresource_cache = cache
+        if url in cache:
+            return cache[url]
+        kwargs = self.httpx_client_kwargs(timeout=min(self.timeout, 10.0), follow_redirects=True)
+        headers = self.auth_headers(url=url) if hasattr(self, "auth_headers") else {}
+        body = None
+        try:
+            import httpx
+            async with httpx.AsyncClient(**kwargs) as client:
+                resp = await client.get(url, headers=headers)
+                if 200 <= resp.status_code < 300 and resp.text:
+                    body = resp.text
+        except Exception:
+            body = None
+        cache[url] = body
+        return body
 
     def _is_url_excluded(self, url: str) -> bool:
         """Return True if *url* matches any entry in the exclude_urls set.
