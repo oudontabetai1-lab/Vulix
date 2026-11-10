@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import time
 
 import pytest
 
@@ -958,9 +959,16 @@ def test_setup_credentials_e2e_websocket_payload():
             page.locator("#cfgLoginPassField").fill("passwd_custom")
             page.locator("#cfgLoginSuccess").fill("Welcome Dashboard")
 
+            def wait_for_start_scan_frames(expected: int, timeout_s: float = 5.0) -> None:
+                deadline = time.monotonic() + timeout_s
+                while len(messages) < expected and time.monotonic() < deadline:
+                    page.wait_for_timeout(50)
+                assert len(messages) >= expected, f"Expected at least {expected} start_scan messages, got {len(messages)}"
+
             # 1. Normal mode submission
             page.locator("#setupStartScanBtn").click()
             page.wait_for_function("() => location.hash.includes('/monitor')")
+            wait_for_start_scan_frames(1)
 
             # Return to setup
             page.locator('[data-route="setup"]').click()
@@ -970,6 +978,7 @@ def test_setup_credentials_e2e_websocket_payload():
             page.locator('.setup-mode-btn[data-mode="agent"]').click()
             page.locator("#setupStartScanBtn").click()
             page.wait_for_function("() => location.hash.includes('/monitor')")
+            wait_for_start_scan_frames(2)
 
             # Return to setup
             page.locator('[data-route="setup"]').click()
@@ -979,6 +988,7 @@ def test_setup_credentials_e2e_websocket_payload():
             page.locator('.setup-mode-btn[data-mode="hybrid"]').click()
             page.locator("#setupStartScanBtn").click()
             page.wait_for_function("() => location.hash.includes('/monitor')")
+            wait_for_start_scan_frames(3)
 
             assert len(messages) >= 3, f"Expected at least 3 start_scan messages, got {len(messages)}"
 
