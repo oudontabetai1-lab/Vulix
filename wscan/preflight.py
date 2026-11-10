@@ -219,7 +219,7 @@ def evaluate_auth_readiness(
         f"Authentication configuration is complete and login page is reachable{form_note}. "
         "Preflight does not verify credentials or login success (no credentials submitted)."
     )
-    return _check("authentication", "pass", "configured", detail)
+    return _check("authentication", "warning", "login_not_verified", detail)
 
 
 def evaluate_live_channel_readiness(*, monitor_enabled: bool = True) -> dict:
