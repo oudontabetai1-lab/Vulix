@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +24,20 @@ UI_ASSETS = [
     "/ui/tokens.css",
     "/ui/components.css",
 ]
+
+
+def wait_for_websocket_count(page, sockets: list[str], expected: int, timeout_s: float = 5.0) -> None:
+    """Wait for Playwright to deliver the "websocket" events counted in ``sockets``.
+
+    A page-side wait (e.g. ``#monitorModule`` mounted, or the event stream reporting
+    ``connected``) only proves the browser opened the socket: the ``websocket`` event
+    is delivered to the test out of band and on loaded hosts can land after that
+    in-page condition resolves. Bounding the wait here keeps the exact count
+    assertions below meaningful instead of racing them.
+    """
+    deadline = time.monotonic() + timeout_s
+    while len(sockets) < expected and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
 
 
 @pytest.mark.parametrize("auth_token", [""])
@@ -101,6 +116,9 @@ def test_app_shell_navigation_preserves_legacy_surfaces_and_one_socket(ui_harnes
     for route in ["setup", "monitor", "portal", "settings", "monitor", "setup"]:
         page.locator(f'[data-route="{route}"]').click()
         page.wait_for_timeout(80)
+    # The dashboard socket is opened by the portal surface; its Playwright event can
+    # trail the in-page navigation, so bound the wait instead of assuming delivery.
+    wait_for_websocket_count(page, sockets, 1)
     assert len(sockets) == 1, f"expected one persistent dashboard socket, saw {len(sockets)}"
     assert page.locator("#portalFrame").is_hidden()
     page.go_back()
@@ -480,6 +498,7 @@ def test_hidden_monitor_4401_keeps_app_route_and_shows_auth_required(ui_harness:
     assert page.locator("#message a[href='/login']").count() == 1
     page.wait_for_function("() => document.querySelector('#monitorFrame').contentWindow._eventStream._stopped")
     page.wait_for_timeout(3200)
+    wait_for_websocket_count(page, sockets, 1)
     assert len(sockets) == 1
     assert post_requests == []
     assert page.locator("#scanContext").inner_text() == ""
@@ -668,6 +687,7 @@ def test_app_monitor_pane_layout_adjustable_accessible_and_persisted(ui_harness:
 
     # 5. Persisted preferences in localStorage under versioned key
     # Assert single persistent websocket throughout all resizing/preset/collapse operations
+    wait_for_websocket_count(page, sockets, 1)
     assert len(sockets) == 1, f"expected 1 persistent websocket before reload, found {len(sockets)}"
 
     stored_str = page.evaluate("() => localStorage.getItem('vulix:monitor-layout:v1')")
@@ -706,7 +726,10 @@ def test_app_monitor_pane_layout_adjustable_accessible_and_persisted(ui_harness:
         "() => window.getComputedStyle(document.querySelector('#monitorModule').shadowRoot.querySelector('#sepRight')).display !== 'none'"
     )
 
-    # After reload, exactly 2 sockets observed across the test lifetime (1 initial, 1 after page reload)
+    # After reload, exactly 2 sockets observed across the test lifetime (1 initial, 1 after page reload).
+    # The reconnected socket's Playwright event can arrive after the in-page mount/size
+    # checks above, so wait bounded for it to be reported before counting.
+    wait_for_websocket_count(page, sockets, 2)
     assert len(sockets) == 2, f"expected 2 websockets total after full reload, found {len(sockets)}"
 
     # 7. Capture updated screenshot
