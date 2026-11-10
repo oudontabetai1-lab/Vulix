@@ -341,7 +341,7 @@ def test_auth_readiness_partial_probe_failure():
     assert res_http["reason_code"] == "login_page_http_error"
 
 
-def test_auth_readiness_configured_pass_and_explicit_non_verification():
+def test_auth_readiness_configured_warning_and_explicit_non_verification():
     res = evaluate_auth_readiness(
         "https://target.example",
         login_url="/login",
@@ -351,9 +351,9 @@ def test_auth_readiness_configured_pass_and_explicit_non_verification():
         probe_html="<form action='/login' method='post'><input name='username'/><input type='password' name='password'/><button type='submit'>Login</button></form>",
     )
     assert res["id"] == "authentication"
-    assert res["status"] == "pass"
-    assert res["reason_code"] == "configured"
-    # Status is pass for configuration completeness, but explicitly does NOT claim login succeeded
+    assert res["status"] == "warning"
+    assert res["reason_code"] == "login_not_verified"
+    # Status is warning because preflight does NOT verify credentials or login success
     assert "Preflight does not verify credentials or login success" in res["detail"]
     assert "no credentials submitted" in res["detail"]
     assert "login form detected" in res["detail"]
@@ -555,8 +555,8 @@ def test_run_preflight_auth_and_websocket_integration(monkeypatch, tmp_path):
         monitor_enabled=True,
     ))
     checks_by_id = {row["id"]: row for row in report["checks"]}
-    assert checks_by_id["authentication"]["status"] == "pass"
-    assert checks_by_id["authentication"]["reason_code"] == "configured"
+    assert checks_by_id["authentication"]["status"] == "warning"
+    assert checks_by_id["authentication"]["reason_code"] == "login_not_verified"
     assert checks_by_id["websocket"]["status"] == "pass"
     assert checks_by_id["websocket"]["reason_code"] == "available"
 

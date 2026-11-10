@@ -121,8 +121,8 @@ def test_preflight_api_auth_and_live_channel_checks(monkeypatch):
     assert res_auth.status_code == 200
     data_auth = res_auth.json()
     checks_auth = {c["id"]: c for c in data_auth["checks"]}
-    assert checks_auth["authentication"]["status"] == "pass"
-    assert checks_auth["authentication"]["reason_code"] == "configured"
+    assert checks_auth["authentication"]["status"] == "warning"
+    assert checks_auth["authentication"]["reason_code"] == "login_not_verified"
     assert "Preflight does not verify credentials or login success" in checks_auth["authentication"]["detail"]
     # Secret sentinel must not leak
     assert sentinel not in json.dumps(data_auth)
