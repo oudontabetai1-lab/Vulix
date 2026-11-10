@@ -25,6 +25,7 @@ from wscan.auth_detect import (
     AGENT_AUTH_UNVERIFIED,
     AGENT_AUTH_VERIFIED,
     AgentAuthVerification,
+    _detect_token_diff,
     verify_agent_auth_claim,
 )
 from wscan.llm_agent_browser import AgentBrowserScanner, AgentRole
@@ -73,6 +74,81 @@ class TestVerifyAgentAuthClaimPure:
         assert result.is_verified is True
         assert result.reasons == []
         assert result.coverage_gap == ""
+        assert result.cookie_or_token_gained is True
+
+    def test_regression_stale_unchanged_token_left_page_no_form_is_unverified(self):
+        # Regression test for Gate 2(a):
+        # Pre-existing/stale token unchanged during login must NOT be treated as gained.
+        # Even if page navigated away and no login form remains, status must be unverified_auth_claim.
+        stale = [{"storage": "local", "key": "access_token", "value": "stale_unchanged_jwt_value_123"}]
+        result = verify_agent_auth_claim(
+            claimed_success=True,
+            before_cookies=[],
+            after_cookies=[],
+            before_tokens=stale,
+            after_tokens=stale,
+            current_url="http://target.test/app/home",
+            login_url="http://target.test/login",
+            body="<html><body><div id='app'>App view</div></body></html>",
+        )
+        assert result.status == AGENT_AUTH_UNVERIFIED
+        assert result.is_verified is False
+        assert "missing_session_artifact" in result.reasons
+        assert result.coverage_gap == AGENT_AUTH_COVERAGE_GAP
+        assert result.cookie_or_token_gained is False
+        assert result.left_login_page is True
+        assert result.login_form_absent is True
+
+    def test_unverified_when_no_before_token_snapshot_exists(self):
+        # When no 'before' snapshot exists (before_tokens=None), treat as not gained (unverified)
+        # rather than guessing that everything after is new.
+        tokens = [{"storage": "local", "key": "session_token", "value": "some_valid_looking_token_123"}]
+        result = verify_agent_auth_claim(
+            claimed_success=True,
+            before_cookies=[],
+            after_cookies=[],
+            before_tokens=None,
+            after_tokens=tokens,
+            current_url="http://target.test/app/home",
+            login_url="http://target.test/login",
+            body="<html><body><div id='app'>App view</div></body></html>",
+        )
+        assert result.status == AGENT_AUTH_UNVERIFIED
+        assert result.is_verified is False
+        assert "missing_session_artifact" in result.reasons
+        assert result.cookie_or_token_gained is False
+
+    def test_verified_when_token_value_modified(self):
+        before = [{"storage": "local", "key": "auth_token", "value": "guest_anon_token_123"}]
+        after = [{"storage": "local", "key": "auth_token", "value": "logged_in_member_token_456"}]
+        result = verify_agent_auth_claim(
+            claimed_success=True,
+            before_cookies=[],
+            after_cookies=[],
+            before_tokens=before,
+            after_tokens=after,
+            current_url="http://target.test/app/home",
+            login_url="http://target.test/login",
+            body="<html><body><div id='app'>App view</div></body></html>",
+        )
+        assert result.status == AGENT_AUTH_VERIFIED
+        assert result.is_verified is True
+        assert result.reasons == []
+        assert result.cookie_or_token_gained is True
+
+    def test_detect_token_diff_pure_unit(self):
+        stale = [{"storage": "local", "key": "auth_token", "value": "stale_token_123"}]
+        # No before snapshot -> False
+        assert _detect_token_diff(None, stale) is False
+        # Stale unchanged -> False
+        assert _detect_token_diff(stale, stale) is False
+        # New key -> True
+        assert _detect_token_diff([], stale) is True
+        # Changed value -> True
+        modified = [{"storage": "local", "key": "auth_token", "value": "new_token_456"}]
+        assert _detect_token_diff(stale, modified) is True
+        # Empty after -> False
+        assert _detect_token_diff(stale, []) is False
 
     def test_unverified_when_no_session_artifact_gained(self):
         result = verify_agent_auth_claim(

@@ -16,7 +16,9 @@ MFA も無い」場合に成功とみなす。URL が変わっただけでは成
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import re
+from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urlparse
 
 
@@ -225,10 +227,6 @@ AGENT_AUTH_UNVERIFIED = "unverified_auth_claim"
 AGENT_AUTH_COVERAGE_GAP = "auth:login_not_verified"
 
 
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Optional
-
-
 @dataclass
 class AgentAuthVerification:
     status: str
@@ -258,8 +256,12 @@ def _detect_token_diff(
     before_tokens: Optional[Iterable[Mapping[str, Any]]] = None,
     after_tokens: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> bool:
-    """localStorage/sessionStorage トークンの新規獲得または変更を検出する（純粋関数）。"""
-    if not after_tokens:
+    """localStorage/sessionStorage トークンの新規獲得または変更を検出する（純粋関数）。
+
+    事前スナップショットが存在しない（None）場合は推測せず未獲得（False）として扱い、
+    前後で新規追加または値が変更されたエントリのみを獲得と判定する。
+    """
+    if before_tokens is None or not after_tokens:
         return False
 
     def _normalize(items: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str], str]:
@@ -274,21 +276,14 @@ def _detect_token_diff(
                 normalized[(storage, key)] = val
         return normalized
 
-    before_map = _normalize(before_tokens or [])
+    before_map = _normalize(before_tokens)
     after_map = _normalize(after_tokens)
 
-    # 1. 新規または変更されたストレージ項目が存在するか
+    # 新規または変更されたストレージ項目が存在するか
     for key_tuple, val in after_map.items():
         if key_tuple not in before_map:
             return True
         if before_map[key_tuple] != val:
-            return True
-
-    # 2. 認証トークンらしいキー（token/session/jwt/auth/bearer/access_token/id_token等）が存在するか
-    token_keys = ("token", "session", "jwt", "auth", "bearer", "access_token", "id_token")
-    for (_storage, key), val in after_map.items():
-        low_key = key.lower()
-        if any(tk in low_key for tk in token_keys) and len(val) >= 8:
             return True
 
     return False
