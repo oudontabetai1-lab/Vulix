@@ -3288,11 +3288,17 @@ async def run_serve(args):
                     auth_user=cfg.get("auth_user", "") or "",
                     auth_pass=cfg.get("auth_pass", "") or "",
                     login_url=cfg.get("login_url", "") or "",
+                    target_urls=cfg.get("target_urls", []) or [],
+                    access_urls=cfg.get("access_urls", []) or [],
+                    exclude_urls=cfg.get("exclude_urls", []) or [],
+                    exclude_fields=cfg.get("exclude_fields", []) or [],
                     max_steps=_serve_ints["agent_max_steps"],
                     open_report=bool(cfg.get("open_report", True)),
                     monitor=monitor,
                     port=port,
                     extra_headers=_hdrs,
+                    totp_secret=cfg.get("mfa_totp_secret", "") or cfg.get("totp_secret", "") or "",
+                    storage_state=cfg.get("storage_state", "") or "",
                     proxy=cfg.get("proxy", "") or "",
                 )
                 _agent_result, agent_interrupted = (
@@ -3353,6 +3359,8 @@ async def run_serve(args):
                     monitor=monitor,
                     port=port,
                     extra_headers=_hdrs,
+                    totp_secret=cfg.get("mfa_totp_secret", "") or cfg.get("totp_secret", "") or "",
+                    storage_state=cfg.get("storage_state", "") or "",
                     proxy=cfg.get("proxy", "") or "",
                 )
                 handoff, continue_to_phase2 = (
