@@ -192,11 +192,17 @@
               bridge.startScan(config);
             } else if (monitor.contentWindow && monitor.contentWindow.state && monitor.contentWindow.state.ws) {
               const ws = monitor.contentWindow.state.ws;
+              if (typeof monitor.contentWindow._markOwnScan === 'function') {
+                monitor.contentWindow._markOwnScan(config);
+              }
               if (ws.readyState === 1) {
-                if (typeof monitor.contentWindow._markOwnScan === 'function') {
-                  monitor.contentWindow._markOwnScan(config);
-                }
                 ws.send(JSON.stringify({ action: 'start_scan', config }));
+              } else if (ws.readyState === 0) {
+                ws.addEventListener('open', () => {
+                  try {
+                    ws.send(JSON.stringify({ action: 'start_scan', config }));
+                  } catch (_) {}
+                }, { once: true });
               }
             }
             global.location.hash = '#/monitor';

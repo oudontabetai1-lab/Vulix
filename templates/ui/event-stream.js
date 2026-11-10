@@ -308,6 +308,7 @@
       this._generation = 0;
       this._reconnectTimer = null;
       this._msgQueue = [];
+      this._pendingOutgoing = [];
       this._rafId = null;
       this._rafPending = false;
       this._stopped = false;
@@ -356,6 +357,17 @@
         if (state) state.connected = true;
         if (this.onStatusChange) {
           this.onStatusChange({ connected: true });
+        }
+        if (this._pendingOutgoing && this._pendingOutgoing.length > 0) {
+          const pending = this._pendingOutgoing.splice(0);
+          for (let i = 0; i < pending.length; i++) {
+            try {
+              ws.send(pending[i].wire);
+              if (typeof pending[i].onSent === 'function') {
+                pending[i].onSent();
+              }
+            } catch (_) {}
+          }
         }
       };
 
@@ -544,6 +556,47 @@
       }
     }
 
+    /**
+     * Send payload immediately if WebSocket is OPEN, or buffer and send as soon as it opens.
+     * Guarantees buffered start_scan actions are sent at most once (no duplicates on reconnect).
+     * @param {Object|string} payload
+     * @param {Function} [onSent]
+     * @returns {boolean}
+     */
+    sendWhenConnected(payload, onSent) {
+      if (this._disposed) return false;
+      const wire = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      const action = (payload && typeof payload === 'object') ? payload.action : null;
+
+      if (this.ws && this.ws.readyState === 1) {
+        try {
+          this.ws.send(wire);
+          if (typeof onSent === 'function') onSent();
+          return true;
+        } catch (_) {
+          // fall through to queue
+        }
+      }
+
+      // If action is start_scan, deduplicate: replace any existing pending start_scan in queue
+      if (action === 'start_scan') {
+        const existingIdx = this._pendingOutgoing.findIndex(item => item.action === 'start_scan');
+        if (existingIdx >= 0) {
+          this._pendingOutgoing[existingIdx] = { wire, onSent, action };
+          if (!this.ws || this.ws.readyState > 1) {
+            this.connect();
+          }
+          return true;
+        }
+      }
+
+      this._pendingOutgoing.push({ wire, onSent, action });
+      if (!this.ws || this.ws.readyState > 1) {
+        this.connect();
+      }
+      return true;
+    }
+
     _scheduleReconnect() {
       this._clearReconnectTimer();
       if (this._stopped || this._disposed) return;
@@ -590,6 +643,9 @@
       this._clearReconnectTimer();
       this._clearRaf();
       this._msgQueue.length = 0;
+      if (this._pendingOutgoing) {
+        this._pendingOutgoing.length = 0;
+      }
       const state = this.stateAccessor();
       const ownedSocket = this.ws;
       if (ownedSocket) {

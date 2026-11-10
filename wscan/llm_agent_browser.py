@@ -730,6 +730,8 @@ class AgentBrowserScanner:
             self.request_logger = RequestLogger(self.harness_output_dir)
         else:
             self.request_logger = None
+        self.captured_cookies: list[dict] = []
+        self.captured_storage_state: dict = {}
         self._header_origins = allowed_header_origins(
             self.target_url,
             self.target_urls,
@@ -1253,6 +1255,66 @@ class AgentBrowserScanner:
         except Exception:
             # バージョン差異や起動失敗時も秘匿値を出さず Agent を継続する。
             await self._warn_header_application_failed()
+
+    async def _capture_auth_state(self, browser) -> None:
+        """Capture browser context cookies and storage_state before session close."""
+        import inspect
+        cookies: list[dict] = []
+        storage: dict = {}
+        # 1. Try browser.cookies() (BrowserSession / Browser)
+        try:
+            if hasattr(browser, "cookies") and callable(browser.cookies):
+                res = browser.cookies()
+                raw = await res if inspect.isawaitable(res) else res
+                for c in (raw or []):
+                    if isinstance(c, dict):
+                        cookies.append(dict(c))
+                    elif hasattr(c, "model_dump"):
+                        cookies.append(c.model_dump())
+                    elif hasattr(c, "__dict__"):
+                        cookies.append(dict(c.__dict__))
+        except Exception:
+            pass
+
+        # 2. Try page.context.cookies()
+        if not cookies:
+            try:
+                page = getattr(browser, "page", None)
+                if page is not None and hasattr(page, "context") and hasattr(page.context, "cookies"):
+                    res = page.context.cookies()
+                    cookies = list(await res if inspect.isawaitable(res) else res)
+                elif hasattr(browser, "get_current_page") and callable(browser.get_current_page):
+                    pg = await browser.get_current_page()
+                    if pg is not None and hasattr(pg, "context") and hasattr(pg.context, "cookies"):
+                        res = pg.context.cookies()
+                        cookies = list(await res if inspect.isawaitable(res) else res)
+            except Exception:
+                pass
+
+        # 3. Try storage_state
+        try:
+            if hasattr(browser, "export_storage_state") and callable(browser.export_storage_state):
+                res = browser.export_storage_state()
+                raw_st = await res if inspect.isawaitable(res) else res
+                if isinstance(raw_st, dict):
+                    storage = dict(raw_st)
+            elif hasattr(browser, "page") and getattr(browser.page, "context", None) and hasattr(browser.page.context, "storage_state"):
+                res = browser.page.context.storage_state()
+                raw_st = await res if inspect.isawaitable(res) else res
+                if isinstance(raw_st, dict):
+                    storage = dict(raw_st)
+            elif hasattr(browser, "get_current_page") and callable(browser.get_current_page):
+                pg = await browser.get_current_page()
+                if pg is not None and getattr(pg, "context", None) and hasattr(pg.context, "storage_state"):
+                    res = pg.context.storage_state()
+                    raw_st = await res if inspect.isawaitable(res) else res
+                    if isinstance(raw_st, dict):
+                        storage = dict(raw_st)
+        except Exception:
+            pass
+
+        self.captured_cookies = cookies
+        self.captured_storage_state = storage
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -2040,11 +2102,19 @@ class AgentBrowserScanner:
         finally:
             if browser is not None:
                 try:
+                    await self._capture_auth_state(browser)
+                except Exception:
+                    pass
+                try:
                     # BrowserSession は close() を持たない — stop() が正しい。
                     # Agent task の cancel 時もここを通し、プローブを確実に止める。
                     await browser.stop()
                 except Exception as exc:
                     console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
+
+        if hasattr(result, "__dict__"):
+            result.cookies = self.captured_cookies
+            result.storage_state = self.captured_storage_state
 
         # 実行失敗（例外）または history 上の非成功で 0 findings なら、「成功・0 findings」と
         # 誤表示しない。findings があれば不完全でも検出結果は有効なので表示する。

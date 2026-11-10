@@ -71,6 +71,8 @@ class AgentHandoffData:
     summary: str = ""
     # 既存の位置引数との互換性を保つため、新規フィールドは末尾に置く。
     findings: list = field(default_factory=list)
+    cookies: list = field(default_factory=list)
+    storage_state: dict = field(default_factory=dict)
 
 # Base output directory (same convention as ScanEngine)
 OUTPUT_BASE = Path.cwd() / "output"
@@ -503,4 +505,6 @@ class AgentEngine:
             auth_pass=self.auth_pass,
             login_url=self.login_url,
             summary=result.final_summary,
+            cookies=list(getattr(scanner, "captured_cookies", []) or getattr(result, "cookies", []) or []),
+            storage_state=dict(getattr(scanner, "captured_storage_state", {}) or getattr(result, "storage_state", {}) or {}),
         )

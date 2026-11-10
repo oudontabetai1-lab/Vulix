@@ -3288,11 +3288,17 @@ async def run_serve(args):
                     auth_user=cfg.get("auth_user", "") or "",
                     auth_pass=cfg.get("auth_pass", "") or "",
                     login_url=cfg.get("login_url", "") or "",
+                    target_urls=cfg.get("target_urls", []) or [],
+                    access_urls=cfg.get("access_urls", []) or [],
+                    exclude_urls=cfg.get("exclude_urls", []) or [],
+                    exclude_fields=cfg.get("exclude_fields", []) or [],
                     max_steps=_serve_ints["agent_max_steps"],
                     open_report=bool(cfg.get("open_report", True)),
                     monitor=monitor,
                     port=port,
                     extra_headers=_hdrs,
+                    totp_secret=cfg.get("mfa_totp_secret", "") or cfg.get("totp_secret", "") or "",
+                    storage_state=cfg.get("storage_state", "") or "",
                     proxy=cfg.get("proxy", "") or "",
                 )
                 _agent_result, agent_interrupted = (
@@ -3318,6 +3324,7 @@ async def run_serve(args):
         # ── Hybrid Mode: Agent偵察 (Phase 1) → 通常スキャン (Phase 2) ────
         seed_urls: list = []
         agent_findings: list = []
+        handoff = None
         if cfg.get("hybrid_mode"):
             from wscan.agent_engine import AgentEngine
             # 偵察側の base URL は、偵察(hybrid_llm)が openai_compatible のときだけ渡す。
@@ -3353,6 +3360,8 @@ async def run_serve(args):
                     monitor=monitor,
                     port=port,
                     extra_headers=_hdrs,
+                    totp_secret=cfg.get("mfa_totp_secret", "") or cfg.get("totp_secret", "") or "",
+                    storage_state=cfg.get("storage_state", "") or "",
                     proxy=cfg.get("proxy", "") or "",
                 )
                 handoff, continue_to_phase2 = (
@@ -3518,6 +3527,7 @@ async def run_serve(args):
                 ),
                 llm_concurrency=int(cfg.get("llm_concurrency", _CFG.get("llm_concurrency", 0)) or 0),
                 seed_urls=seed_urls or None,
+                handoff_cookies=(handoff.cookies if handoff is not None else None) or [],
                 additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
                 headers=_hdrs,

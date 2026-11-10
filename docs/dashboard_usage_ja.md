@@ -253,16 +253,19 @@ Bearer/カスタムヘッダは「認証・Cookie」の設定を引き継ぎま�
 
 ### Hybrid
 
-「ハイブリッド」タブでは、偵察用 provider、モデル、最大ステップ数（既定 `30`）、Ollama URL を設定します。ログイン情報、Bearer/カスタムヘッダとチェック種別は「認証・Cookie」「検査項目」の設定を引き継ぎます。
+「ハイブリッド」タブでは、偵察用 provider、モデル、最大ステップ数（既定 `30`）、Ollama URL を設定します。ログイン情報、TOTP シークレット、保存済みストレージ状態（storage_state）、Bearer/カスタムヘッダとチェック種別は「認証・Cookie」「検査項目」の設定を引き継ぎます。
 
 Hybrid の処理:
 
 ```text
 Phase 1: Agent が探索
   ├─ 発見した URL
-  └─ Agent Finding（脆弱性仮説）
+  ├─ Agent Finding（脆弱性仮説）
+  └─ ブラウザセッション Cookie（メモリ内ハンドオフ）
               ↓
 Phase 2: 発見 URL をシードに通常スキャン
+  ├─ ログイン認証情報がある場合は決定論的自動ログインを優先
+  └─ 認証情報がなく Phase 1 Cookie がある場合はスコープ限定でシードし保護リソース判定で検証
               ↓
 最終レポート: 決定論 Finding + Agent Finding をラベル付きで併記
 ```

@@ -274,11 +274,17 @@ class EventStreamNodeUnitTests(unittest.TestCase):
 
         const stateAfterStart = { ...state };
 
+        // 4. Another new run with scan_started having sequence > 1 (e.g. sequence 4)
+        // Reconnect on gap ensures client replays from beginning if it missed start of run
+        const startedEvtSeq4 = { type: 'scan_started', server_id: 'srv-1', run_id: 'run-3', sequence: 4 };
+        const evalStartedSeq4 = proj.evaluate(startedEvtSeq4);
+
         console.log(JSON.stringify({
             evalMismatch: evalMismatch,
             evalStaleNew: evalStaleNew,
             evalStarted: evalStarted,
             stateAfterStart: stateAfterStart,
+            evalStartedSeq4: evalStartedSeq4,
         }));
         """
         data = _run_node_script(script)
@@ -289,6 +295,100 @@ class EventStreamNodeUnitTests(unittest.TestCase):
         self.assertEqual(data["evalStarted"]["action"], "reset_and_process")
         self.assertEqual(data["stateAfterStart"]["scanRunId"], "run-2")
         self.assertEqual(data["stateAfterStart"]["lastEventSequence"], 1)
+        self.assertEqual(data["evalStartedSeq4"]["action"], "reconnect_on_gap")
+        self.assertEqual(data["evalStartedSeq4"]["expected"], 1)
+        self.assertEqual(data["evalStartedSeq4"]["actual"], 4)
+
+    def test_event_stream_send_when_connected_buffering(self):
+        """Verify sendWhenConnected buffers messages when CONNECTING, flushes upon OPEN,
+        and guarantees buffered start_scan is sent at most once (no duplicate on reconnect)."""
+        script = """
+        class MockWebSocket {
+            constructor(url) {
+                this.url = url;
+                this.readyState = 0; // CONNECTING
+                this.sent = [];
+            }
+            openSocket() {
+                this.readyState = 1; // OPEN
+                if (this.onopen) this.onopen();
+            }
+            send(data) {
+                this.sent.push(data);
+            }
+            close() {
+                this.readyState = 3;
+            }
+        }
+
+        const state = { serverInstanceId: 'srv-1', scanRunId: '', lastEventSequence: 0 };
+        const client = new EventStreamClient({
+            WebSocket: MockWebSocket,
+            host: 'test.local',
+            stateAccessor: () => state,
+        });
+
+        client.connect();
+        const ws1 = client.ws;
+
+        // Socket is CONNECTING (readyState === 0)
+        // 1. Buffer first start_scan, then buffer another start_scan (deduplicates in queue)
+        let callback1Fired = false;
+        let callback2Fired = false;
+        client.sendWhenConnected({ action: 'start_scan', config: { mode: 'agent_old' } }, () => {
+            callback1Fired = true;
+        });
+        client.sendWhenConnected({ action: 'start_scan', config: { mode: 'agent' } }, () => {
+            callback2Fired = true;
+        });
+
+        const sentBeforeOpen = [...ws1.sent];
+
+        // 2. First socket opens: drains queue and sends buffered start_scan once
+        ws1.openSocket();
+
+        const sentAfterOpen = [...ws1.sent];
+
+        // 3. Reconnection occurs (e.g. sequence gap or server close)
+        client.reconnect();
+        const ws2 = client.ws;
+
+        // Open the second socket: should NOT re-send the previously buffered start_scan
+        ws2.openSocket();
+        const sentOnReconnect = [...ws2.sent];
+
+        // 4. Socket is now OPEN (readyState === 1): immediate send
+        let immediateFired = false;
+        const immediateOk = client.sendWhenConnected({ action: 'start_scan', config: { mode: 'hybrid' } }, () => {
+            immediateFired = true;
+        });
+
+        const sentAfterImmediate = [...ws2.sent];
+
+        client.dispose();
+
+        console.log(JSON.stringify({
+            sentBeforeOpen,
+            sentAfterOpen,
+            sentOnReconnect,
+            callback1Fired,
+            callback2Fired,
+            immediateOk,
+            immediateFired,
+            sentAfterImmediate,
+        }));
+        """
+        data = _run_node_script(script)
+        self.assertEqual(data["sentBeforeOpen"], [])
+        self.assertEqual(len(data["sentAfterOpen"]), 1)
+        self.assertIn('"mode":"agent"', data["sentAfterOpen"][0])
+        self.assertTrue(data["callback2Fired"])
+        # Verify no duplicate scan start after reconnect
+        self.assertEqual(data["sentOnReconnect"], [])
+        self.assertTrue(data["immediateOk"])
+        self.assertTrue(data["immediateFired"])
+        self.assertEqual(len(data["sentAfterImmediate"]), 1)
+        self.assertIn('"mode":"hybrid"', data["sentAfterImmediate"][0])
 
     def test_event_stream_mock_websocket_lifecycle_and_batching(self):
         """Verify mock WebSocket message queueing, RAF batching, and send."""
@@ -935,5 +1035,46 @@ class EventStreamChromiumIntegrationTests(unittest.TestCase):
             # Send pause intervention command via existing _wsSend
             ok = page.evaluate("() => _wsSend({ action: 'intervention', command: 'pause' })")
             self.assertTrue(ok)
+
+            browser.close()
+
+    def test_browser_dashboard_start_scan_no_socket_side_effects(self):
+        """Verify VulixAppBridge.startScan does not perform side effects when returning false."""
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+            page.wait_for_function("() => Boolean(window.VulixAppBridge)")
+
+            result = page.evaluate("""
+                () => {
+                    // Force disconnected state with no event stream
+                    state.ws = null;
+                    window._eventStream = null;
+                    state.myScanNonce = null;
+                    state.pendingScanConfig = null;
+
+                    const overlay = document.getElementById('scanConfigOverlay');
+                    overlay.classList.add('active');
+
+                    const ok = window.VulixAppBridge.startScan({ url: 'http://test.local' });
+
+                    return {
+                        ok: ok,
+                        overlayStillActive: overlay.classList.contains('active'),
+                        nonceSet: Boolean(state.myScanNonce),
+                        pendingSet: Boolean(state.pendingScanConfig),
+                        statusText: document.getElementById('statusText')?.textContent || '',
+                    };
+                }
+            """)
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["overlayStillActive"])
+            self.assertFalse(result["nonceSet"])
+            self.assertFalse(result["pendingSet"])
+            self.assertIn("WebSocket未接続", result["statusText"])
 
             browser.close()

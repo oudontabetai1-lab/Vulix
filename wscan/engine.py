@@ -965,6 +965,7 @@ class ScanEngine:
         auto_spa_crawl: bool = True,
         # ハイブリッドモード: Agent偵察で発見したURLをクロールのシードに使う
         seed_urls: Optional[list] = None,
+        handoff_cookies: Optional[list] = None,
         # Scope: URLs that are attacked vs. URLs that may be visited only
         target_urls: Optional[list] = None,
         access_urls: Optional[list] = None,
@@ -1085,6 +1086,7 @@ class ScanEngine:
         self.xml_injection_points: list[InjectionPoint] = []
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
+        self.handoff_cookies: list = list(handoff_cookies or [])
         self.additional_report_findings: list[Finding] = list(
             additional_report_findings or []
         )
@@ -3087,7 +3089,7 @@ class ScanEngine:
         from .state_profile import looks_destructive, may_submit
 
         for url in [getattr(self, "target_url", ""), *getattr(self, "additional_target_urls", []),
-                    *getattr(self, "access_urls", [])]:
+                    *getattr(self, "access_urls", []), *getattr(self, "seed_urls", [])]:
             parsed = urlparse(url)
             if (parsed.scheme not in {"http", "https"} or not parsed.netloc
                     or parsed.username or parsed.password or parsed.fragment
@@ -3171,6 +3173,118 @@ class ScanEngine:
         if proof != "verified":
             self.wave_errors.append("authentication_unverified:" + reason)
         return bool(success)
+
+    def _filter_handoff_cookies(self, cookies: list) -> list:
+        """Scope-filter Phase 1 handoff cookies to in-scope origins/hosts only."""
+        from urllib.parse import urlsplit
+        from . import url_scope
+        allowed_hosts = set()
+        for u in [getattr(self, "target_url", ""), *getattr(self, "target_urls", []), *getattr(self, "access_urls", [])]:
+            h = urlsplit(u).hostname
+            if h:
+                allowed_hosts.add(url_scope.idna_host(h))
+
+        in_scope = []
+        for c in (cookies or []):
+            if not isinstance(c, dict):
+                continue
+            name = c.get("name")
+            value = c.get("value")
+            if not name or value is None:
+                continue
+            raw_dom = str(c.get("domain", "") or "").strip()
+            if raw_dom:
+                is_domain_cookie = raw_dom.startswith(".")
+                dom_host = url_scope.idna_host(raw_dom.lstrip("."))
+                if not any(url_scope.host_matches(ah, dom_host, allow_subdomain=is_domain_cookie) for ah in allowed_hosts if ah):
+                    continue
+            in_scope.append(dict(c))
+        return in_scope
+
+    async def _seed_and_verify_handoff_cookies(self, browser) -> bool:
+        """Seed Phase 1 handoff cookies into engine/browser and run protected-resource proof.
+
+        Deterministic protected-resource proof gates authenticated coverage.
+        """
+        from . import login_surface as ls
+        in_scope = self._filter_handoff_cookies(getattr(self, "handoff_cookies", []))
+        if not in_scope:
+            self.authentication_state = {
+                "state": "incomplete",
+                "protected_access": "unknown",
+                "evidence": [],
+                "reasons": ["no_in_scope_handoff_cookies"],
+                "configured": True,
+            }
+            if not any(e.startswith("authentication_unverified:") for e in self.wave_errors):
+                self.wave_errors.append("authentication_unverified:no_in_scope_handoff_cookies")
+            return False
+
+        candidate = self._protected_access_candidate()
+        before = await self._protected_resource_response(candidate) if candidate else (None, "", False)
+
+        if browser is not None and hasattr(browser, "set_cookies_from_list"):
+            await browser.set_cookies_from_list(in_scope, self.target_url)
+            await self._sync_cookies_from_browser(browser, for_url=candidate or self.target_url)
+        else:
+            _store_synced_cookies(self, _scoped_cookie_header(in_scope, candidate or self.target_url))
+
+        added_cookies = []
+        for c in in_scope:
+            if c not in self.cookie_list:
+                self.cookie_list.append(c)
+                added_cookies.append(c)
+
+        after = await self._protected_resource_response(candidate, browser=browser) if candidate else (None, "", False)
+
+        proof, reason = "unknown", "protected_candidate_unavailable" if not candidate else "protected_response_unconfirmed"
+        if candidate:
+            proof, reason = ls.assess_protected_access(
+                before_status=before[0], before_body=before[1],
+                before_login_redirect=before[2],
+                after_status=after[0], after_body=after[1],
+                after_login_redirect=after[2],
+            )
+
+        success = (proof == "verified")
+        self.authentication_state = {
+            "state": "success" if success else "incomplete",
+            "protected_access": proof,
+            "evidence": ["auth_cookie_set", "handoff_cookies_seeded"] if success else [],
+            "reasons": [reason],
+            "configured": True,
+        }
+
+        if success:
+            self.auth_landing_url = (
+                getattr(browser, "last_login_url", "")
+                or (getattr(browser, "page", None) and browser.page.url)
+                or candidate
+                or self.target_url
+            )
+            console.print("  [green][Auth] Protected access verified via handoff session.[/green]")
+        else:
+            # 検証失敗時はシードした Cookie を巻き戻し、未認証スキャンが不正な資格情報を送信し続けないようにする
+            for c in added_cookies:
+                if c in self.cookie_list:
+                    self.cookie_list.remove(c)
+            _store_synced_cookies(self, "")
+            if browser is not None:
+                try:
+                    page = getattr(browser, "page", None)
+                    ctx = getattr(page, "context", None) or getattr(browser, "_context", None)
+                    if ctx is not None and hasattr(ctx, "clear_cookies"):
+                        import inspect
+                        res = ctx.clear_cookies()
+                        if inspect.isawaitable(res):
+                            await res
+                except Exception:
+                    pass
+            console.print("  [yellow][Auth] Handoff cookies seeded, but protected access unverified — continuing unauthenticated discovery; authenticated coverage is incomplete.[/yellow]")
+            if not any(e.startswith("authentication_unverified:") for e in self.wave_errors):
+                self.wave_errors.append("authentication_unverified:" + reason)
+
+        return success
 
     async def _relogin_if_needed(
         self, browser, *, status=None, final_url: str = "", body: str = "", for_url: str = ""
@@ -3521,7 +3635,10 @@ class ScanEngine:
                     else:
                         console.print("  [yellow][Auth] Authentication unconfirmed — continuing unauthenticated discovery; authenticated coverage is incomplete.[/yellow]")
 
-                if ((self.login_url or self.cookies or self.cookie_list)
+                elif getattr(self, "handoff_cookies", None):
+                    await self._seed_and_verify_handoff_cookies(self._browser)
+
+                if ((self.login_url or self.cookies or self.cookie_list or getattr(self, "handoff_cookies", None))
                         and getattr(self, "authentication_state", {}).get("protected_access") != "verified"
                         and not any(e.startswith("authentication_unverified:") for e in self.wave_errors)):
                     self.wave_errors.append("authentication_unverified:protected_access_unknown")
