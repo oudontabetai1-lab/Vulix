@@ -857,21 +857,20 @@ Agent モードで認証ステップ（`AgentRole.AUTHENTICATOR`）を実行し�
 ```text
 Phase 1: Agent recon
   ├─ discovered_urls
-  └─ Agent Finding (source=agent)
+  ├─ Agent Finding (source=agent)
+  └─ browser session cookies (in-memory handoff)
              │ handoff
              ▼
 Phase 2: deterministic scan
-  ├─ 発見 URL を seed_urls として巡回・攻撃
-  └─ scanner Finding (source=scanner)
-             │ merge
-             ▼
-最終 HTML / JSON / SARIF
-  └─ Agent Finding と scanner Finding をラベル付きで併記
+  ├─ crawl (Phase 1 の発見 URL を seed_urls に追加、セッション Cookie を継承・検証)
+  ├─ plan
+  ├─ attack
+  └─ report (通常 Finding + Agent Finding)
 ```
 
 1. Agent Browser が対象を探索し、ターゲット URL を先頭に訪問 URL の重複を除いて収集します。
 2. 探索中に Agent が脆弱性仮説を申告した場合、標準 `Finding` へ変換して URL と一緒に引き渡します。
-3. 通常エンジンは発見 URL を巡回シードとして、選択された決定論スキャナを実行します。
+3. 通常エンジンは発見 URL を巡回シードとして、選択された決定論スキャナを実行します。Phase 2 にログイン情報がある場合は決定論的自動ログインの成功確認を優先します。Phase 2 に直接の認証情報がなく Phase 1 のセッション Cookie が引き継がれた場合は、同一オリジン・スコープ限定で Cookie をシードし、保護リソースの決定論的検証に合格した場合のみ認証済みカバレッジを記録します（検証できない場合は未確証として扱います）。
 4. レポート生成前に Agent Finding を通常 Finding へ追加し、出自ラベル付きで併記します。
 
 Phase 1 が失敗した場合、ダッシュボードは警告を出し、URL シードと Agent Finding なしで通常スキャンを続行します。Hybrid は「Agent は偵察のみ」ではありませんが、Agent Finding 自体が自動的に決定論的確証へ変わるわけでもありません。
@@ -1059,7 +1058,7 @@ python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
 
 > ⚠️ serve の保護トークン `WSCAN_AUTH_TOKEN` は**ダッシュボード/API を守る control-plane 用**で、スキャン対象へ送る Bearer とは別物です。`--bearer` はこれを参照しません（管理トークンが検査対象へ漏れるのを防ぐため）。対象用トークンは必ず `WSCAN_BEARER` か `--bearer` で渡してください。
 
-> ℹ️ **Hybrid/Agent モードの Bearer/カスタムヘッダ**: 対応済みです。CLI の `agent` は `--bearer`、`-H/--header`、`--header-file` を Agent ブラウザへ渡し、ダッシュボードの Agent と Hybrid Phase 1 は「認証・Cookie」の Bearer/カスタムヘッダを引き継ぎます。Hybrid Phase 2 も同じ実効ヘッダを通常スキャンへ適用します。明示した `Authorization` は Bearer 欄より優先されます。動的な `--header-refresh-cmd` は通常ツール層専用です。
+> ℹ️ **Hybrid/Agent モードの認証連携・Bearer/カスタムヘッダ**: 対応済みです。CLI の `agent` は `--bearer`、`-H/--header`、`--header-file` を Agent ブラウザへ渡し、ダッシュボードの Agent と Hybrid Phase 1 は「認証・Cookie」の Bearer/カスタムヘッダ、TOTP シークレット、保存済みストレージ状態（storage_state）、およびスコープリストを引き継ぎます。Hybrid Phase 2 も同じ実効ヘッダを通常スキャンへ適用し、Phase 1 偵察で確立されたセッション Cookie はスコープ検証と保護リソース判定を経て Phase 2 に安全にハンドオフされます。明示した `Authorization` は Bearer 欄より優先されます。動的な `--header-refresh-cmd` は通常ツール層専用です。
 
 既定のスコープ制御が有効な通常ツール層で `--header-refresh-cmd` を使うスキャンは、後から届く認証ヘッダが Service Worker 経由のリクエストから抜けるのを防ぐため、初期ヘッダが空でも Service Worker を無効化します。
 

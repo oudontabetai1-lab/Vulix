@@ -3526,6 +3526,7 @@ async def run_serve(args):
                 ),
                 llm_concurrency=int(cfg.get("llm_concurrency", _CFG.get("llm_concurrency", 0)) or 0),
                 seed_urls=seed_urls or None,
+                handoff_cookies=(handoff.cookies if handoff is not None else None) or [],
                 additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
                 headers=_hdrs,
