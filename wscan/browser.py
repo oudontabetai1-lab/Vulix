@@ -2866,6 +2866,7 @@ class BrowserManager:
         self.page.on("response", observe_response)
         self.page.on("requestfailed", observe_failure)
         self.network.authentication_active = True
+        before_cookie_snapshot: Optional[dict] = None
         try:
             if not await self.navigate(login_url):
                 self.last_login_assessment = ls.assess_login_state(ls.LoginObservation(
@@ -2921,6 +2922,16 @@ class BrowserManager:
                     solver = getattr(self, "mfa_solver", None)
                     if solver is not None and solver.enabled:
                         await solver.prime()
+                # 送信直前にブラウザコンテキストの Cookie をスナップショット（値自体は保持しない）
+                if before_cookie_snapshot is None:
+                    ctx = getattr(self.page, "context", None) or self._context
+                    if ctx is not None:
+                        try:
+                            before_cookie_snapshot = ls.snapshot_cookie_state(
+                                await ctx.cookies(), target_url=login_url
+                            )
+                        except Exception:
+                            before_cookie_snapshot = {}
                 if plan.submit:
                     await self.page.locator(plan.submit).click(timeout=5000, no_wait_after=True)
                 else:
@@ -2946,15 +2957,36 @@ class BrowserManager:
                 if mfa_status == "failed":
                     self.last_login_assessment = ls.LoginAssessment(ls.CHALLENGE, reasons=["mfa_unsolved"])
                     return False
+            if before_cookie_snapshot is None:
+                ctx = getattr(self.page, "context", None) or self._context
+                if ctx is not None:
+                    try:
+                        before_cookie_snapshot = ls.snapshot_cookie_state(
+                            await ctx.cookies(), target_url=login_url
+                        )
+                    except Exception:
+                        before_cookie_snapshot = {}
+            auth_cookie_observed = False
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 body = await self.get_page_source()
+                if not auth_cookie_observed and before_cookie_snapshot is not None:
+                    ctx = getattr(self.page, "context", None) or self._context
+                    if ctx is not None:
+                        try:
+                            curr_cookies = await ctx.cookies()
+                            if ls.detect_cookie_diff(before_cookie_snapshot, curr_cookies, target_url=login_url):
+                                auth_cookie_observed = True
+                        except Exception:
+                            pass
                 obs = ls.LoginObservation(
                     post_url=self.page.url, login_url=login_url, body=body,
                     success_indicator=success_indicator, logged_in_marker=logged_in_marker,
                     status=observation["status"], api_token_issued=observation["token"],
                     transport_error=observation["error"] or ("ReadError" if not body else ""),
-                    protected_access="unknown", protected_access_reason="protected_access_unknown",
+                    auth_cookie_set=True if auth_cookie_observed else (False if observation["submitted"] else None),
+                    protected_access="unknown" if protected_access_check is not None else None,
+                    protected_access_reason="protected_access_unknown" if protected_access_check is not None else "",
                     submitted=observation["submitted"],
                 )
                 surface = ls.classify_surface(body, visible_only=True)

@@ -20,9 +20,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from html.parser import HTMLParser
 import re
-from typing import Optional
+from typing import Any, Iterable, Mapping, Optional, Union
 from urllib.parse import parse_qsl, urlparse
 
 from . import auth_detect
@@ -613,6 +614,66 @@ def assess_protected_access(*, before_status=None, before_body="", after_status=
     if before_login_redirect or before_status in (401, 403) or (before_status == 200 and before_barrier == "login"):
         return "verified", "protected_access_verified"
     return "unknown", "anonymous_access_not_denied"
+
+
+def snapshot_cookie_state(
+    cookies: Optional[Iterable[Mapping[str, Any]]],
+    target_url: str = "",
+) -> dict[tuple[str, str, str], str]:
+    """対象サイト宛 Cookie の (name, domain, path) と値ハッシュのスナップショットを作成する。
+
+    生の値は一切保持せず、SHA-256 ハッシュのみをメモリ上で保持する。
+    """
+    if not cookies:
+        return {}
+    target_host = (urlparse(target_url).hostname or "").strip().lower() if target_url else ""
+    snapshot: dict[tuple[str, str, str], str] = {}
+    for c in cookies:
+        if not isinstance(c, (dict, Mapping)):
+            continue
+        name = str(c.get("name") or "").strip()
+        if not name:
+            continue
+        domain = str(c.get("domain") or "").strip().lower().lstrip(".")
+        # 対象サイトとのドメイン適合性判定（外部トラッカー等の無関係 Cookie を除外）
+        if target_host and domain:
+            if domain != target_host and not target_host.endswith("." + domain) and not domain.endswith("." + target_host):
+                continue
+        path = str(c.get("path") or "/").strip()
+        raw_val = str(c.get("value") or "")
+        val_hash = hashlib.sha256(raw_val.encode("utf-8", errors="replace")).hexdigest()
+        snapshot[(name, domain, path)] = val_hash
+    return snapshot
+
+
+def detect_cookie_diff(
+    before: Union[Mapping[tuple[str, str, str], str], Iterable[Mapping[str, Any]], None],
+    after: Union[Mapping[tuple[str, str, str], str], Iterable[Mapping[str, Any]], None],
+    target_url: str = "",
+) -> bool:
+    """送信前後で対象サイト宛の新規 Cookie または値が変更された Cookie が存在するか判定する（純粋関数）。
+
+    値の比較はメモリ上のハッシュ比較のみで行い、秘密値のログ出力や外部保持は行わない。
+    """
+    if after is None:
+        return False
+    # pre-computed snapshot か生 Cookie リストかを透過的に扱う
+    if isinstance(before, Mapping) and (not before or isinstance(next(iter(before.keys()), None), tuple)):
+        before_snap = before
+    else:
+        before_snap = snapshot_cookie_state(before, target_url=target_url)
+
+    if isinstance(after, Mapping) and (not after or isinstance(next(iter(after.keys()), None), tuple)):
+        after_snap = after
+    else:
+        after_snap = snapshot_cookie_state(after, target_url=target_url)
+
+    for key, after_hash in after_snap.items():
+        if key not in before_snap:
+            return True
+        if before_snap[key] != after_hash:
+            return True
+    return False
 
 
 @dataclass

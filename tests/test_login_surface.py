@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 import httpx
 import pytest
@@ -443,6 +444,160 @@ def test_identifier_without_login_context_is_not_selected(context):
     html = f'<h1>{context}</h1><input name="identifier"><button>Next</button>'
     assert ls.classify_surface(html).kind != ls.LOGIN
     assert ls.locate_auth_fields(html).incomplete_reason
+
+
+def test_snapshot_cookie_state_and_detect_cookie_diff():
+    # 1. 空のクッキーリスト
+    assert ls.snapshot_cookie_state([]) == {}
+    assert ls.snapshot_cookie_state(None) == {}
+    assert not ls.detect_cookie_diff([], [])
+    assert not ls.detect_cookie_diff(None, None)
+
+    # 2. 新規 Cookie の追加検知
+    before = [{"name": "csrf", "value": "token1", "domain": "example.com", "path": "/"}]
+    after = [
+        {"name": "csrf", "value": "token1", "domain": "example.com", "path": "/"},
+        {"name": "session", "value": "secret123", "domain": "example.com", "path": "/"},
+    ]
+    assert ls.detect_cookie_diff(before, after, target_url="https://example.com/login")
+
+    # 3. 既存 Cookie の値変更検知
+    after_changed = [
+        {"name": "csrf", "value": "token2", "domain": "example.com", "path": "/"},
+    ]
+    assert ls.detect_cookie_diff(before, after_changed, target_url="https://example.com/login")
+
+    # 4. Cookie 不変の場合は False
+    assert not ls.detect_cookie_diff(before, before, target_url="https://example.com/login")
+
+    # 5. 無関係な外部ドメイン（トラッカー等）の Cookie は除外
+    external = [
+        {"name": "csrf", "value": "token1", "domain": "example.com", "path": "/"},
+        {"name": "tracker", "value": "trk1", "domain": "tracker.com", "path": "/"},
+    ]
+    assert not ls.detect_cookie_diff(before, external, target_url="https://example.com/login")
+
+    # 6. サブドメイン・親ドメインの適合
+    subdomain_cookie = [{"name": "session", "value": "abc", "domain": ".example.com", "path": "/"}]
+    assert ls.detect_cookie_diff([], subdomain_cookie, target_url="https://sub.example.com/login")
+
+    # 7. スナップショットが平文の値を保持していないことの検証
+    snap = ls.snapshot_cookie_state([{"name": "session", "value": "super-secret-password-val", "domain": "example.com"}])
+    assert "super-secret-password-val" not in str(snap)
+
+
+def test_cookie_evidence_alone_without_departure_or_with_form_is_not_success():
+    # フォーム残存時は Cookie が付与されても INCOMPLETE
+    body_with_form = '<form><input name="username"><input type="password" name="password"></form>'
+    res_form = ls.assess_login_state(ls.LoginObservation(
+        login_url="http://t/login", post_url="http://t/home", body=body_with_form, auth_cookie_set=True
+    ))
+    assert res_form.state == ls.INCOMPLETE
+    assert "login_form_still_present" in res_form.reasons
+
+    # ログインページ留まり（離脱なし）で Cookie のみの場合、単一証拠では INCOMPLETE
+    res_stay = ls.assess_login_state(ls.LoginObservation(
+        login_url="http://t/login", post_url="http://t/login", body="<p>Welcome</p>", auth_cookie_set=True
+    ))
+    assert res_stay.state == ls.INCOMPLETE
+    assert "insufficient_success_evidence" in res_stay.reasons
+
+    # 離脱 + Cookie 付与の2つの独立証拠で SUCCESS（明示マーカー・ログアウト文字なしでも成功）
+    res_success = ls.assess_login_state(ls.LoginObservation(
+        login_url="http://t/login", post_url="http://t/home", body="<p>Welcome</p>", auth_cookie_set=True
+    ))
+    assert res_success.state == ls.SUCCESS
+    assert "auth_cookie_set" in res_success.evidence
+    assert "left_login_page" in res_success.evidence
+
+    # Cookie なし（auth_cookie_set=False）は否定シグナル（auth_cookie_absent）
+    res_no_cookie = ls.assess_login_state(ls.LoginObservation(
+        login_url="http://t/login", post_url="http://t/home", body="<p>Welcome</p>", auth_cookie_set=False
+    ))
+    assert res_no_cookie.state == ls.INCOMPLETE
+    assert "auth_cookie_absent" in res_no_cookie.reasons
+
+    # 失敗文言がある場合は Cookie が付与されていても FAILURE
+    res_fail = ls.assess_login_state(ls.LoginObservation(
+        login_url="http://t/login", post_url="http://t/home", body="<p>Invalid credentials</p>", auth_cookie_set=True
+    ))
+    assert res_fail.state == ls.FAILURE
+    assert "failure_text" in res_fail.reasons
+
+
+@pytest.mark.skipif(os.getenv("WSCAN_E2E") != "1", reason="WSCAN_E2E=1 for real Chromium")
+def test_loopback_auto_login_cookie_issuance_success_and_safe_control():
+    from fastapi import FastAPI, Form
+    from fastapi.responses import HTMLResponse, RedirectResponse
+    from tests.test_totp_login_e2e import serving
+    from wscan.browser import BrowserManager
+
+    app = FastAPI()
+
+    @app.get("/login")
+    def login_page():
+        return HTMLResponse(
+            '<html><body><form method="POST" action="/login">'
+            '<input name="username"><input type="password" name="password"><button>Login</button>'
+            '</form></body></html>'
+        )
+
+    @app.post("/login")
+    def login_post(username: str = Form(""), password: str = Form("")):
+        resp = RedirectResponse(url="/home", status_code=302)
+        resp.set_cookie(key="session_id", value="secret_sess_123", path="/")
+        return resp
+
+    @app.get("/home")
+    def home_page():
+        return HTMLResponse('<html><body><h1>Dashboard News</h1><p>General announcements</p></body></html>')
+
+    @app.get("/safe-login")
+    def safe_page():
+        return HTMLResponse(
+            '<html><body><form method="POST" action="/safe-login">'
+            '<input name="username"><input type="password" name="password"><button>Login</button>'
+            '</form></body></html>'
+        )
+
+    @app.post("/safe-login")
+    def safe_post(username: str = Form(""), password: str = Form("")):
+        resp = HTMLResponse(
+            '<html><body><h1>Login</h1><p>Invalid credentials</p>'
+            '<form method="POST" action="/safe-login">'
+            '<input name="username"><input type="password" name="password"><button>Login</button>'
+            '</form></body></html>',
+            status_code=200,
+        )
+        resp.set_cookie(key="trk_id", value="tracking999", path="/")
+        return resp
+
+    with serving(app) as base_url:
+        async def exercise():
+            bm = BrowserManager(headless=True, auth_user="admin", auth_pass="pass123")
+            await bm.init()
+            try:
+                # 1. 正常系: Cookie 付与と 302 離脱で SUCCESS
+                ok = await bm.auto_login(f"{base_url}/login")
+                assert ok is True
+                assert bm.last_login_assessment.state == "success"
+                assert "auth_cookie_set" in bm.last_login_assessment.evidence
+                assert "left_login_page" in bm.last_login_assessment.evidence
+
+                # 2. 安全制御: 失敗時にトラッキング Cookie が付いても SUCCESS にならない
+                bm_safe = BrowserManager(headless=True, auth_user="admin", auth_pass="wrong")
+                await bm_safe.init()
+                try:
+                    safe_ok = await bm_safe.auto_login(f"{base_url}/safe-login")
+                    assert safe_ok is False
+                    assert bm_safe.last_login_assessment.state != "success"
+                finally:
+                    await bm_safe.close()
+            finally:
+                await bm.close()
+
+        asyncio.run(exercise())
+
 
 
 def test_unnamed_submit_keeps_selected_login_control():
