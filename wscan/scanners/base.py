@@ -10,7 +10,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 import httpx
 
@@ -432,6 +432,7 @@ class Finding:
     injection_template_id: str = ""    # 秘匿値を持たないテンプレート識別子
     injection_form_index: int = 0       # form 注入点の index（段階5b で記録）
     injection_dom_index: int = -1       # DOM 上の実 form 位置。verify 再送の submit_index 復元用。-1=未指定→form_index にフォールバック
+    injection_source: str = ""          # SPA XHR/fetch 由来 ("spa") 等の注入点出所
     # reproduced | assumed | unreproduced | skipped。既定は None sentinel で、__post_init__ が
     # 「新規 finding は必ず非空 state」を保証する（空文字は from_dict の旧 Finding 専用に予約）。
     verification_state: str = None
@@ -514,6 +515,7 @@ class Finding:
             injection_template_id=data.get("injection_template_id", ""),
             injection_form_index=int(data.get("injection_form_index", 0) or 0),
             injection_dom_index=int(data.get("injection_dom_index", -1)),
+            injection_source=data.get("injection_source", ""),
         )
         if not verification_state:
             finding_data["_legacy_verified"] = bool(data.get("verified", True))
@@ -570,6 +572,7 @@ class Finding:
             "injection_template_id": self.injection_template_id,
             "injection_form_index": self.injection_form_index,
             "injection_dom_index": self.injection_dom_index,
+            "injection_source": self.injection_source,
             "compliance_refs": get_refs(self.check_type),
         }
 
@@ -591,7 +594,11 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
             dom_index=getattr(finding, "injection_dom_index", -1),
         )
     if location == "url_param":
-        return InjectionPoint.for_url_param(finding.url, finding.field_name)
+        return InjectionPoint.for_url_param(
+            finding.url,
+            finding.field_name,
+            source=getattr(finding, "injection_source", "") or "crawl",
+        )
     if location == "json_body":
         # 空文字は RFC 6901 の**ルート pointer**（ドキュメント全体への注入）で valid。
         # `parse_pointer("")` は [] を返し `pointer_set_copy(doc, "", payload)` は
@@ -1002,7 +1009,7 @@ class BaseScanner(ABC):
                     and (pair.get("response") or {}).get("status") is not None):
                 evidence_pair = {"request": req.get("_probe_request", req), "response": pair["response"]}
                 observed = logger.observe_request(context, attempt, evidence_pair,
-                    Transport.HTTPX if ip.location == "json_body" else Transport.PLAYWRIGHT)
+                    Transport.HTTPX if (ip.location == "json_body" or self._should_route_to_api_get(ip)) else Transport.PLAYWRIGHT)
                 pair["_probe_evidence"] = (context, attempt, observed)
             else:
                 logger.scoped_probe(context, record_kind="decision",
@@ -1682,6 +1689,8 @@ class BaseScanner(ABC):
             if not self.SUPPORTS_XML_BODY:
                 return "", {}
             source, pair = await self._apply_xml_payload(ip, payload)
+        elif self._should_route_to_api_get(ip):
+            source, pair = await self._apply_api_get_payload(ip, payload)
         else:
             from wscan.token_lifecycle import is_token_field_name
             from wscan.scanner_contract import Carrier
@@ -2393,6 +2402,104 @@ class BaseScanner(ABC):
             return resp_ts - req_ts
         return None
 
+    def _should_route_to_api_get(self, ip: Optional[InjectionPoint]) -> bool:
+        """SPA 由来の same-origin API GET 注入点を HTTP 経路へルーティングすべきか判定する。"""
+        if ip is None:
+            return False
+        engine = getattr(self, "engine", None)
+        if engine is None:
+            return False
+        from wscan import session_guard
+        from wscan.engine import _effective_synced_token
+        synced_token = _effective_synced_token(engine)
+        return session_guard.should_route_to_api_get(
+            ip,
+            synced_token=synced_token,
+            engine=engine,
+        )
+
+    async def _apply_api_get_payload(
+        self,
+        ip: InjectionPoint,
+        payload: Any,
+    ) -> tuple[str, dict]:
+        """SPA 由来の same-origin API GET 注入点へトークン認証ヘッダ付き HTTP リクエストを送信する。"""
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+        import httpx
+        from wscan import session_guard
+
+        try:
+            parsed = urlparse(ip.url)
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            params[ip.parameter_id] = [str(payload) if payload is not None else ""]
+            new_query = urlencode({k: v[0] for k, v in params.items()})
+            probe_url = urlunparse(parsed._replace(query=new_query))
+
+            headers = self.auth_headers_for_url(probe_url)
+            kwargs = {
+                "timeout": getattr(self.engine, "timeout", 15),
+                "follow_redirects": True,
+                "headers": headers,
+            }
+            if hasattr(self.engine, "httpx_client_kwargs"):
+                kwargs = self.engine.httpx_client_kwargs(**kwargs)
+            elif getattr(self.engine, "proxy", ""):
+                kwargs["proxy"] = self.engine.proxy
+
+            request_timestamp = time.time()
+            async with httpx.AsyncClient(**kwargs) as client:
+                response = await client.request("GET", probe_url, headers=headers)
+                self._record_probe_status(response)
+            response_timestamp = time.time()
+
+            safe_headers = _mask_credential_headers(headers)
+            resp_headers = _mask_credential_headers(dict(response.headers))
+            pair = {
+                "request": {
+                    "url": probe_url,
+                    "method": "GET",
+                    "headers": safe_headers,
+                    "timestamp": request_timestamp,
+                },
+                "response": {
+                    "url": str(response.url),
+                    "status": response.status_code,
+                    "headers": resp_headers,
+                    "body": response.text,
+                    "timestamp": response_timestamp,
+                },
+            }
+            owner, attempt = response.request.extensions.get("vulix_probe_submission", (None, None))
+            bound = response.request.extensions.get("vulix_probe_context")
+            if owner is getattr(self.engine, "request_logger", None) and bound is not None:
+                pair["request"].update(
+                    _probe_attempt_id=attempt,
+                    _probe_context=bound[0],
+                    _probe_request=bound[1],
+                )
+            if response.history:
+                pair["response"]["redirect_status"] = response.history[0].status_code
+
+            if session_guard.looks_logged_out(
+                status=response.status_code,
+                final_url=str(response.url),
+                body=response.text,
+                login_url=getattr(self.engine, "login_url", ""),
+                logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
+            ):
+                if hasattr(self.engine, "_api_auth_failed"):
+                    self.engine._api_auth_failed = True
+                if hasattr(self.engine, "clear_synced_token"):
+                    self.engine.clear_synced_token()
+
+            return response.text, pair
+        except Exception as exc:
+            self._probe_failure(self._probe_exception_outcome(exc))
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
+            return "", {}
+
     async def _apply_json_payload(
         self,
         ip: InjectionPoint,
@@ -2687,9 +2794,13 @@ class BaseScanner(ABC):
                 field_name, probe.value, f"{self.CHECK_TYPE}_equiv", url
             )
             try:
-                source, pair = await self._apply_payload(
-                    url, dom, field_name, probe.value, is_url_param
-                )
+                ip_equiv = InjectionPoint.for_url_param(url, field_name) if is_url_param else None
+                if is_url_param and self._should_route_to_api_get(ip_equiv):
+                    source, pair = await self._apply_api_get_payload(ip_equiv, probe.value)
+                else:
+                    source, pair = await self._apply_payload(
+                        url, dom, field_name, probe.value, is_url_param
+                    )
             except Exception:
                 continue
             # `_apply_ip` を通らない直送のため、ここで試行台帳へ記録する。
@@ -2743,7 +2854,11 @@ class BaseScanner(ABC):
             probe_check = f"{self.CHECK_TYPE}_evolution_probe"
             if is_url_param:
                 await self.log_payload_test(field_name, probe, probe_check, url)
-                source, pair = await self.browser.test_url_param(url, field_name, probe)
+                ip = InjectionPoint.for_url_param(url, field_name)
+                if self._should_route_to_api_get(ip):
+                    source, pair = await self._apply_api_get_payload(ip, probe)
+                else:
+                    source, pair = await self.browser.test_url_param(url, field_name, probe)
             else:
                 # navigate 失敗（timeout/HTTP エラー）時に前 scanner の残存ページへ
                 # probe を送ると別フォーム/別 action へ注入し、観測を誤ったフィールドに
@@ -3491,8 +3606,10 @@ class BaseScanner(ABC):
         # json_body 注入点の証跡は、永続/配信の**この境界**で伏せる（transport は検出用に
         # 生 pair を返す）。テンプレの兄弟秘匿(body・エコー応答)と認証ヘッダ値を to_dict へ
         # 流す前にマスクする。検出は record_finding 呼び出し前に生 pair で済んでいる。
-        if injection_point is not None and injection_point.location == "json_body":
-            pair = _redact_json_evidence_pair(pair, injection_point.parameter_id)
+        if injection_point is not None and (
+            injection_point.location == "json_body" or self._should_route_to_api_get(injection_point)
+        ):
+            pair = _redact_json_evidence_pair(pair, injection_point.parameter_id if injection_point.location == "json_body" else "")
 
         finding = Finding(
             check_type=self.CHECK_TYPE,
@@ -3540,6 +3657,7 @@ class BaseScanner(ABC):
                 if injection_point and injection_point.location == "form"
                 else -1
             ),
+            injection_source=(injection_point.source if injection_point else ""),
         )
         self.findings.append(finding)
         self.engine.all_findings.append(finding)

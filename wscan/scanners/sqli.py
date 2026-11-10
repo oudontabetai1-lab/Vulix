@@ -6,7 +6,7 @@ import asyncio
 import re
 import time
 from difflib import SequenceMatcher
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 from urllib.parse import urlparse
 
 from wscan.injection_point import InjectionPoint
@@ -512,7 +512,11 @@ class SQLiScanner(BaseScanner):
 
         return True, post_url
 
-    def _current_page_url(self, default: str = "") -> str:
+    def _current_page_url(self, default: str = "", pair: Optional[dict] = None) -> str:
+        if isinstance(pair, dict):
+            resp_url = (pair.get("response") or {}).get("url")
+            if resp_url:
+                return resp_url
         browser = getattr(self, "browser", None)
         page = getattr(browser, "page", None) if browser else None
         return getattr(page, "url", "") or default
@@ -556,7 +560,7 @@ class SQLiScanner(BaseScanner):
         baseline_lower = (baseline_source or "").lower()
 
         login_url, logged_in_marker = self._get_engine_auth_markers()
-        current_url = self._current_page_url(ip.url)
+        current_url = self._current_page_url(ip.url, baseline_pair)
 
         # baseline の失効/遮断判定（401/403/429/5xx/ログイン画面リダイレクト）
         base_status = _pair_status(baseline_pair)
@@ -575,6 +579,8 @@ class SQLiScanner(BaseScanner):
             if b_kind == "session_lost":
                 self._record_scan_note(f"auth_lost:{self.CHECK_TYPE}:{b_reason}")
                 self._mark_api_auth_failed(True)
+                if hasattr(self.engine, "clear_synced_token"):
+                    self.engine.clear_synced_token()
                 return []
             else:
                 self._record_scan_note(f"response_blocked:{self.CHECK_TYPE}:{b_reason}")
@@ -585,7 +591,7 @@ class SQLiScanner(BaseScanner):
         # Second baseline to measure natural response length variance
         # (dynamic content like ads/timestamps can shift length by hundreds of bytes)
         baseline_source2, baseline_pair2 = await self._get_baseline(ip)
-        current_url2 = self._current_page_url(ip.url)
+        current_url2 = self._current_page_url(ip.url, baseline_pair2)
         base_status2 = _pair_status(baseline_pair2)
         base_has_sql2 = bool(self.check_response_for_patterns(baseline_source2, SQL_ERROR_PATTERNS))
         base_cls2 = classify_sqli_response(
@@ -637,7 +643,7 @@ class SQLiScanner(BaseScanner):
             control_ids = ()
 
             # 攻撃応答の失効・遮断を判定（401/403/429/5xx/ログイン画面リダイレクト）
-            current_url = self._current_page_url(ip.url)
+            current_url = self._current_page_url(ip.url, pair)
             resp_status = _pair_status(pair)
             match = self.check_response_for_patterns(source, SQL_ERROR_PATTERNS)
             if match and match.lower() in baseline_lower:
@@ -657,6 +663,8 @@ class SQLiScanner(BaseScanner):
                 if kind == "session_lost":
                     self._record_scan_note(f"auth_lost:{self.CHECK_TYPE}:{reason}")
                     self._mark_api_auth_failed(True)
+                    if hasattr(self.engine, "clear_synced_token"):
+                        self.engine.clear_synced_token()
                     self._probe_decision(
                         pair, False, "sqli_payload_oracle",
                         baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
@@ -1046,7 +1054,7 @@ class SQLiScanner(BaseScanner):
         通常 payload の ``_apply_payload`` は navigate を行うため、baseline だけその差を
         明示して回帰を防ぐ。JSON は常に base の共有 transport を使う。
         """
-        if baseline and ip.location != "json_body":
+        if baseline and ip.location != "json_body" and not self._should_route_to_api_get(ip):
             if not self.may_scan_injection_point(ip):
                 return "", {}
             # baseline は base._apply_ip を経由せず browser を直叩きするため、時間ボックス
@@ -1087,7 +1095,7 @@ class SQLiScanner(BaseScanner):
         # 失効・遮断を検知したら indeterminate(None)を返す（ブラウザ form/URL-param および json_body 共通）。
         self._mark_api_auth_failed(False)
         source, pair = await self._apply_ip(ip, finding.payload)
-        current_url = self._current_page_url(finding.url)
+        current_url = self._current_page_url(finding.url, pair)
         login_url, logged_in_marker = self._get_engine_auth_markers()
         match_err = bool(self.check_response_for_patterns(source, SQL_ERROR_PATTERNS))
         verify_cls = classify_sqli_response(
@@ -1104,6 +1112,8 @@ class SQLiScanner(BaseScanner):
             if v_kind == "session_lost":
                 self._record_scan_note(f"auth_lost:{self.CHECK_TYPE}:{v_reason}")
                 self._mark_api_auth_failed(True)
+                if hasattr(self.engine, "clear_synced_token"):
+                    self.engine.clear_synced_token()
             else:
                 self._record_scan_note(f"response_blocked:{self.CHECK_TYPE}:{v_reason}")
             return None
@@ -1163,7 +1173,7 @@ class SQLiScanner(BaseScanner):
                 return None
             self._mark_api_auth_failed(False)
             baseline_source, baseline_pair = await self._get_baseline(ip)
-            base_url = self._current_page_url(finding.url)
+            base_url = self._current_page_url(finding.url, baseline_pair)
             base_has_sql = bool(self.check_response_for_patterns(baseline_source, SQL_ERROR_PATTERNS))
             base_cls = classify_sqli_response(
                 status=_pair_status(baseline_pair),
@@ -1177,11 +1187,13 @@ class SQLiScanner(BaseScanner):
             if base_cls:
                 if base_cls[0] == "session_lost":
                     self._mark_api_auth_failed(True)
+                    if hasattr(self.engine, "clear_synced_token"):
+                        self.engine.clear_synced_token()
                 return None
 
             await self.log_payload_test(finding.field_name, true_payload, "sqli_verify_boolean", finding.url)
             true_src, true_pair = await self._apply_ip(ip, true_payload)
-            true_url = self._current_page_url(finding.url)
+            true_url = self._current_page_url(finding.url, true_pair)
             true_has_sql = bool(self.check_response_for_patterns(true_src, SQL_ERROR_PATTERNS))
             true_cls = classify_sqli_response(
                 status=_pair_status(true_pair),
@@ -1195,11 +1207,13 @@ class SQLiScanner(BaseScanner):
             if true_cls:
                 if true_cls[0] == "session_lost":
                     self._mark_api_auth_failed(True)
+                    if hasattr(self.engine, "clear_synced_token"):
+                        self.engine.clear_synced_token()
                 return None
 
             await self.log_payload_test(finding.field_name, false_payload, "sqli_verify_boolean", finding.url)
             false_src, false_pair = await self._apply_ip(ip, false_payload)
-            false_url = self._current_page_url(finding.url)
+            false_url = self._current_page_url(finding.url, false_pair)
             false_has_sql = bool(self.check_response_for_patterns(false_src, SQL_ERROR_PATTERNS))
             false_cls = classify_sqli_response(
                 status=_pair_status(false_pair),
@@ -1213,6 +1227,8 @@ class SQLiScanner(BaseScanner):
             if false_cls:
                 if false_cls[0] == "session_lost":
                     self._mark_api_auth_failed(True)
+                    if hasattr(self.engine, "clear_synced_token"):
+                        self.engine.clear_synced_token()
                 return None
 
             # boolean verify は初回 replay 後に baseline/true/false と複数回 replay する。
@@ -1296,6 +1312,9 @@ class SQLiScanner(BaseScanner):
         """Apply a payload to the target field."""
         try:
             if is_url_param:
+                ip = InjectionPoint.for_url_param(url, field_name)
+                if self._should_route_to_api_get(ip):
+                    return await self._apply_api_get_payload(ip, payload)
                 return await self.browser.test_url_param(url, field_name, payload)
             else:
                 # Re-navigate to the page before each test

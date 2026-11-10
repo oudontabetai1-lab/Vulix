@@ -128,6 +128,33 @@ def _effective_synced_token(engine) -> dict:
     return getattr(engine, "_synced_token", {}) if override is _AUTH_TOKEN_UNSET else override
 
 
+def _clear_synced_token(engine, origin: str = "") -> None:
+    """同期済み認証トークン（worker-local ContextVar および shared）をクリアする。"""
+    if _WORKER_AUTH_TOKEN.get(_AUTH_TOKEN_UNSET) is not _AUTH_TOKEN_UNSET:
+        if origin:
+            curr = _WORKER_AUTH_TOKEN.get()
+            if isinstance(curr, dict) and curr.get("origin") == origin:
+                _WORKER_AUTH_TOKEN.set({})
+        else:
+            _WORKER_AUTH_TOKEN.set({})
+    if origin:
+        curr = getattr(engine, "_synced_token", {})
+        if isinstance(curr, dict) and curr.get("origin") == origin:
+            engine._synced_token = {}
+    else:
+        engine._synced_token = {}
+
+    browser = getattr(engine, "browser", None)
+    capture = getattr(browser, "network", None)
+    slot = getattr(capture, "_observed_auth_headers", None)
+    if isinstance(slot, dict):
+        if origin:
+            slot.pop(origin, None)
+        else:
+            slot.clear()
+
+
+
 
 class _FlowGate:
     """pre-attack flow 付きページを排他実行する読み書きゲート。
@@ -781,6 +808,8 @@ class CrawledPage:
     # スナップショットしておくと js_static が別ページに遷移後でも外部 JS を
     # 正しく解析できる。
     external_scripts: dict = dc_field(default_factory=dict)
+    source: str = "crawl"
+
 
 
 def _crawl_review_wants_recrawl(command: str) -> bool:
@@ -1009,6 +1038,7 @@ class ScanEngine:
         self.scan_aborted: bool = False
         self._cookies: str = cookies
         self._synced_token: dict = {}
+        self._spa_harvested_urls: set[str] = set()
         self.cookie_list: list = list(cookie_list or [])
         # Normalise low-privilege cookies: prefer list form when both are given
         self.low_priv_cookies: str = low_priv_cookies
@@ -2306,6 +2336,14 @@ class ScanEngine:
                 headers[k] = v
         return headers
 
+    def clear_synced_token(self, origin: str = "") -> None:
+        """同期済み認証トークン（worker-local および shared）をクリアする。"""
+        _clear_synced_token(self, origin)
+
+    def _clear_synced_token(self, origin: str = "") -> None:
+        """同期済み認証トークンをクリアする内部 alias。"""
+        _clear_synced_token(self, origin)
+
     @property
     def browser(self):
         """
@@ -2969,7 +3007,14 @@ class ScanEngine:
     ):
         """従来 form/URL parameter から InjectionPoint を一意に生成する。"""
         if is_url_param:
-            return InjectionPoint.for_url_param(url, field_name)
+            source = (field or {}).get("_source", "crawl") if isinstance(field, dict) else "crawl"
+            if source == "crawl":
+                from urllib.parse import urlsplit
+                p = urlsplit(url)
+                clean = f"{p.scheme}://{p.netloc}{p.path}" if p.scheme and p.netloc else url
+                if url in getattr(self, "_spa_harvested_urls", ()) or clean in getattr(self, "_spa_harvested_urls", ()):
+                    source = "spa"
+            return InjectionPoint.for_url_param(url, field_name, source=source)
         form_meta = field or {}
         return InjectionPoint.for_form(
             url,
@@ -3088,6 +3133,8 @@ class ScanEngine:
     async def _auto_login(self, browser) -> bool:
         """Normal login uses one scoped resource and the scanner's HTTP session."""
         from . import login_surface as ls
+        # 再ログイン前に古いトークンをクリア（stale なトークンの再利用を防ぐ）
+        self.clear_synced_token()
         self.authentication_state = {"state": "incomplete", "protected_access": "unknown", "configured": True}
         candidate = self._protected_access_candidate()
         before = await self._protected_resource_response(candidate) if candidate else (None, "", False)
@@ -3156,6 +3203,9 @@ class ScanEngine:
         ):
             return False
 
+        # セッション失効を検知 — 再ログイン前に古いトークンをクリア
+        self.clear_synced_token()
+
         self._relogin_count += 1
         console.print(
             f"  [bold yellow][Auth] セッション失効を検知 — 自動再ログインを試みます "
@@ -3214,6 +3264,8 @@ class ScanEngine:
         token_hdr = session_guard.extract_latest_auth_header(capture, target)
         if token_hdr:
             _store_synced_token(self, target, token_hdr)
+        elif not cookies:
+            _clear_synced_token(self)
 
         if not cookies:
             # jar が空（ログアウトで消去 / Bearer・localStorage 認証など）。stale な
@@ -4503,6 +4555,8 @@ class ScanEngine:
                                     _spa_cap_warned = True
                                 break
                             self._spa_harvest_seen.add(endpoint_key)
+                            self._spa_harvested_urls.add(target["url"])
+                            self._spa_harvested_urls.add(clean)
                             self.visited_urls.add(clean)
                             # harvest した GET endpoint は observed かつ以降 attack 対象＝到達済み。
                             # reached にも入れ、not-attempted 誤分類を防ぐ。
@@ -4513,6 +4567,7 @@ class ScanEngine:
                                 forms=[],
                                 url_params=target["params"],
                                 depth=depth + 1,
+                                source="spa",
                             ))
                             harvested_count += 1
                     if harvested_count:
@@ -6559,14 +6614,31 @@ class ScanEngine:
         else:
             # ── Re-authenticate if session expired ───────────────────────
             await self._ensure_authenticated(page.url)
-            # Navigate back to page for form interaction
-            success = await self.browser.navigate(page.url, retries=self.navigation_retries)
-            if not success:
-                self._record_unscannable_url(
-                    page.url,
-                    note="Attack phase could not load page: " + self._navigation_failure_note(),
+            # Navigate back to page for form interaction (skip for SPA API GET endpoints with synced token)
+            is_spa_api = (
+                getattr(page, "source", "") == "spa"
+                or page.url in getattr(self, "_spa_harvested_urls", ())
+            )
+            synced_token = _effective_synced_token(self)
+            from . import session_guard
+            should_skip_nav = (
+                is_spa_api
+                and not page.forms
+                and session_guard.should_route_to_api_get(
+                    url=page.url,
+                    source=getattr(page, "source", ""),
+                    synced_token=synced_token,
+                    engine=self,
                 )
-                return
+            )
+            if not should_skip_nav:
+                success = await self.browser.navigate(page.url, retries=self.navigation_retries)
+                if not success:
+                    self._record_unscannable_url(
+                        page.url,
+                        note="Attack phase could not load page: " + self._navigation_failure_note(),
+                    )
+                    return
 
         await self._recover_if_dialog_flood(_dlg_entry)
         if not await self._recovered_page_healthy(page):
@@ -6663,8 +6735,9 @@ class ScanEngine:
                     for item in form.get("inputs", []) if item.get("name")
                 )
                 field_queue.append((fi, dom_idx, field, False))
+        page_source = getattr(page, "source", "crawl")
         for param in page.url_params:
-            field_queue.append((0, 0, {"name": param, "type": "text"}, True))
+            field_queue.append((0, 0, {"name": param, "type": "text", "_source": page_source}, True))
 
         # Sort by risk score from the plan
         if plan:

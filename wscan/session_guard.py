@@ -160,3 +160,62 @@ def _match_auth_record(record: Any, target_url: str, user_keys: set[str]) -> dic
                 if normalized:
                     return {normalized[0]: normalized[1]}
     return None
+
+
+def should_route_to_api_get(
+    injection_point: Any = None,
+    *,
+    url: str = "",
+    source: str = "",
+    is_url_param: bool = True,
+    synced_token: dict | None = None,
+    engine: Any = None,
+) -> bool:
+    """SPA XHR/fetch 由来の same-origin API GET 注入点を HTTP 経路へルーティングすべきか判定する純粋関数。
+
+    条件:
+      1. location が url_param / is_url_param が True（GET URL パラメータであること）
+      2. source が 'spa'、または engine の _spa_harvested_urls に登録された API であること
+         （top-level document は除外）
+      3. synced_token に有効なトークンヘッダが存在すること
+      4. url が synced_token の origin と same-origin であること
+
+    いずれかを満たさない場合（トップレベル文書の URL パラメータ、トークン未同期、別オリジン、
+    form 注入など）は False（ブラウザナビゲーションを維持）。
+    """
+    if injection_point is not None:
+        loc = getattr(injection_point, "location", "")
+        if loc and loc != "url_param":
+            return False
+        if not url:
+            url = getattr(injection_point, "url", "")
+        if not source:
+            source = getattr(injection_point, "source", "") or getattr(injection_point, "template_source", "")
+    elif not is_url_param:
+        return False
+
+    if not url:
+        return False
+
+    is_spa_source = str(source or "").lower() == "spa"
+    if not is_spa_source and engine is not None:
+        spa_urls = getattr(engine, "_spa_harvested_urls", ()) or ()
+        from urllib.parse import urlsplit
+        p = urlsplit(url)
+        clean_endpoint = f"{p.scheme}://{p.netloc}{p.path}" if p.scheme and p.netloc else url
+        if url in spa_urls or clean_endpoint in spa_urls:
+            is_spa_source = True
+
+    if not is_spa_source:
+        return False
+
+    if not isinstance(synced_token, dict):
+        return False
+
+    token_origin = synced_token.get("origin", "")
+    token_headers = synced_token.get("headers", {})
+    if not token_origin or not token_headers:
+        return False
+
+    return same_origin(url, token_origin)
+
