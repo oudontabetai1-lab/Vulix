@@ -2976,27 +2976,36 @@ window.VulixAppBridge = Object.freeze({
     return true;
   },
   startScan(config) {
-    _markOwnScan(config);
-    saveConfigToStorage();
-    document.getElementById('scanConfigOverlay')?.classList.remove('active');
-    setStatus('スキャン開始リクエスト送信中...', 'running');
+    function applySuccess() {
+      _markOwnScan(config);
+      saveConfigToStorage();
+      document.getElementById('scanConfigOverlay')?.classList.remove('active');
+      setStatus('スキャン開始リクエスト送信中...', 'running');
+    }
 
     if (window._eventStream && typeof window._eventStream.sendWhenConnected === 'function') {
-      return window._eventStream.sendWhenConnected({ action: 'start_scan', config });
-    }
-    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-      state.ws.send(JSON.stringify({ action: 'start_scan', config }));
-      return true;
-    }
-    if (state.ws && state.ws.readyState === WebSocket.CONNECTING) {
+      const ok = window._eventStream.sendWhenConnected({ action: 'start_scan', config });
+      if (ok) {
+        applySuccess();
+        return true;
+      }
+    } else if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+      try {
+        state.ws.send(JSON.stringify({ action: 'start_scan', config }));
+        applySuccess();
+        return true;
+      } catch (_) {}
+    } else if (state.ws && state.ws.readyState === WebSocket.CONNECTING) {
       const ws = state.ws;
       ws.addEventListener('open', () => {
         try {
           ws.send(JSON.stringify({ action: 'start_scan', config }));
         } catch (_) {}
       }, { once: true });
+      applySuccess();
       return true;
     }
+    setStatus('WebSocket未接続。スキャンを開始できませんでした。', 'error');
     return false;
   },
 });

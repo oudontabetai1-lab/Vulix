@@ -218,6 +218,13 @@
           if (event.sequence <= 0) {
             return { action: 'drop', reason: 'duplicate', sequence: event.sequence, lastSeq: 0 };
           }
+          if (event.sequence !== 1) {
+            return {
+              action: 'reconnect_on_gap',
+              expected: 1,
+              actual: event.sequence,
+            };
+          }
           return { action: 'reset_and_process', incomingRunId: incomingRunId, advanceCursor: true };
         }
 
@@ -551,6 +558,7 @@
 
     /**
      * Send payload immediately if WebSocket is OPEN, or buffer and send as soon as it opens.
+     * Guarantees buffered start_scan actions are sent at most once (no duplicates on reconnect).
      * @param {Object|string} payload
      * @param {Function} [onSent]
      * @returns {boolean}
@@ -558,6 +566,8 @@
     sendWhenConnected(payload, onSent) {
       if (this._disposed) return false;
       const wire = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      const action = (payload && typeof payload === 'object') ? payload.action : null;
+
       if (this.ws && this.ws.readyState === 1) {
         try {
           this.ws.send(wire);
@@ -567,7 +577,20 @@
           // fall through to queue
         }
       }
-      this._pendingOutgoing.push({ wire, onSent });
+
+      // If action is start_scan, deduplicate: replace any existing pending start_scan in queue
+      if (action === 'start_scan') {
+        const existingIdx = this._pendingOutgoing.findIndex(item => item.action === 'start_scan');
+        if (existingIdx >= 0) {
+          this._pendingOutgoing[existingIdx] = { wire, onSent, action };
+          if (!this.ws || this.ws.readyState > 1) {
+            this.connect();
+          }
+          return true;
+        }
+      }
+
+      this._pendingOutgoing.push({ wire, onSent, action });
       if (!this.ws || this.ws.readyState > 1) {
         this.connect();
       }
