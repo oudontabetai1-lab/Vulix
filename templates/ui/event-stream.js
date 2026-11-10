@@ -218,13 +218,6 @@
           if (event.sequence <= 0) {
             return { action: 'drop', reason: 'duplicate', sequence: event.sequence, lastSeq: 0 };
           }
-          if (event.sequence !== 1) {
-            return {
-              action: 'reconnect_on_gap',
-              expected: 1,
-              actual: event.sequence,
-            };
-          }
           return { action: 'reset_and_process', incomingRunId: incomingRunId, advanceCursor: true };
         }
 
@@ -308,6 +301,7 @@
       this._generation = 0;
       this._reconnectTimer = null;
       this._msgQueue = [];
+      this._pendingOutgoing = [];
       this._rafId = null;
       this._rafPending = false;
       this._stopped = false;
@@ -356,6 +350,17 @@
         if (state) state.connected = true;
         if (this.onStatusChange) {
           this.onStatusChange({ connected: true });
+        }
+        if (this._pendingOutgoing && this._pendingOutgoing.length > 0) {
+          const pending = this._pendingOutgoing.splice(0);
+          for (let i = 0; i < pending.length; i++) {
+            try {
+              ws.send(pending[i].wire);
+              if (typeof pending[i].onSent === 'function') {
+                pending[i].onSent();
+              }
+            } catch (_) {}
+          }
         }
       };
 
@@ -544,6 +549,31 @@
       }
     }
 
+    /**
+     * Send payload immediately if WebSocket is OPEN, or buffer and send as soon as it opens.
+     * @param {Object|string} payload
+     * @param {Function} [onSent]
+     * @returns {boolean}
+     */
+    sendWhenConnected(payload, onSent) {
+      if (this._disposed) return false;
+      const wire = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      if (this.ws && this.ws.readyState === 1) {
+        try {
+          this.ws.send(wire);
+          if (typeof onSent === 'function') onSent();
+          return true;
+        } catch (_) {
+          // fall through to queue
+        }
+      }
+      this._pendingOutgoing.push({ wire, onSent });
+      if (!this.ws || this.ws.readyState > 1) {
+        this.connect();
+      }
+      return true;
+    }
+
     _scheduleReconnect() {
       this._clearReconnectTimer();
       if (this._stopped || this._disposed) return;
@@ -590,6 +620,9 @@
       this._clearReconnectTimer();
       this._clearRaf();
       this._msgQueue.length = 0;
+      if (this._pendingOutgoing) {
+        this._pendingOutgoing.length = 0;
+      }
       const state = this.stateAccessor();
       const ownedSocket = this.ws;
       if (ownedSocket) {

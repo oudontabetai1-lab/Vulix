@@ -274,11 +274,20 @@ class EventStreamNodeUnitTests(unittest.TestCase):
 
         const stateAfterStart = { ...state };
 
+        // 4. Another new run with scan_started having sequence > 1 (e.g. sequence 4)
+        const startedEvtSeq4 = { type: 'scan_started', server_id: 'srv-1', run_id: 'run-3', sequence: 4 };
+        const evalStartedSeq4 = proj.evaluate(startedEvtSeq4);
+        proj.applyCursor(startedEvtSeq4, evalStartedSeq4);
+
+        const stateAfterStartSeq4 = { ...state };
+
         console.log(JSON.stringify({
             evalMismatch: evalMismatch,
             evalStaleNew: evalStaleNew,
             evalStarted: evalStarted,
             stateAfterStart: stateAfterStart,
+            evalStartedSeq4: evalStartedSeq4,
+            stateAfterStartSeq4: stateAfterStartSeq4,
         }));
         """
         data = _run_node_script(script)
@@ -289,6 +298,84 @@ class EventStreamNodeUnitTests(unittest.TestCase):
         self.assertEqual(data["evalStarted"]["action"], "reset_and_process")
         self.assertEqual(data["stateAfterStart"]["scanRunId"], "run-2")
         self.assertEqual(data["stateAfterStart"]["lastEventSequence"], 1)
+        self.assertEqual(data["evalStartedSeq4"]["action"], "reset_and_process")
+        self.assertEqual(data["stateAfterStartSeq4"]["scanRunId"], "run-3")
+        self.assertEqual(data["stateAfterStartSeq4"]["lastEventSequence"], 4)
+
+    def test_event_stream_send_when_connected_buffering(self):
+        """Verify sendWhenConnected buffers messages when CONNECTING and flushes upon OPEN."""
+        script = """
+        class MockWebSocket {
+            constructor(url) {
+                this.url = url;
+                this.readyState = 0; // CONNECTING
+                this.sent = [];
+            }
+            openSocket() {
+                this.readyState = 1; // OPEN
+                if (this.onopen) this.onopen();
+            }
+            send(data) {
+                this.sent.push(data);
+            }
+            close() {
+                this.readyState = 3;
+            }
+        }
+
+        const state = { serverInstanceId: 'srv-1', scanRunId: '', lastEventSequence: 0 };
+        const client = new EventStreamClient({
+            WebSocket: MockWebSocket,
+            host: 'test.local',
+            stateAccessor: () => state,
+        });
+
+        client.connect();
+        const ws = client.ws;
+
+        // Socket is CONNECTING (readyState === 0)
+        let callbackFired = false;
+        const bufferedOk = client.sendWhenConnected({ action: 'start_scan', config: { mode: 'agent' } }, () => {
+            callbackFired = true;
+        });
+
+        const sentBeforeOpen = [...ws.sent];
+
+        // Now socket opens
+        ws.openSocket();
+
+        const sentAfterOpen = [...ws.sent];
+
+        // Socket is now OPEN (readyState === 1)
+        let immediateFired = false;
+        const immediateOk = client.sendWhenConnected({ action: 'start_scan', config: { mode: 'hybrid' } }, () => {
+            immediateFired = true;
+        });
+
+        const sentAfterImmediate = [...ws.sent];
+
+        client.dispose();
+
+        console.log(JSON.stringify({
+            bufferedOk,
+            sentBeforeOpen,
+            sentAfterOpen,
+            callbackFired,
+            immediateOk,
+            immediateFired,
+            sentAfterImmediate,
+        }));
+        """
+        data = _run_node_script(script)
+        self.assertTrue(data["bufferedOk"])
+        self.assertEqual(data["sentBeforeOpen"], [])
+        self.assertEqual(len(data["sentAfterOpen"]), 1)
+        self.assertIn('"mode":"agent"', data["sentAfterOpen"][0])
+        self.assertTrue(data["callbackFired"])
+        self.assertTrue(data["immediateOk"])
+        self.assertTrue(data["immediateFired"])
+        self.assertEqual(len(data["sentAfterImmediate"]), 2)
+        self.assertIn('"mode":"hybrid"', data["sentAfterImmediate"][1])
 
     def test_event_stream_mock_websocket_lifecycle_and_batching(self):
         """Verify mock WebSocket message queueing, RAF batching, and send."""
