@@ -838,6 +838,18 @@ Agent Finding は変換時に `source=agent`、`verified=false` となります�
 
 SARIF の `result.properties` にも `source`、`agent_verified`、`verified`、`confidence` を保存し、fingerprint に `source` を含めます。
 
+### Agent 認証主張の検証ラベル (Ground-Truth Auth Verification)
+
+Agent モードで認証ステップ（`AgentRole.AUTHENTICATOR`）を実行した場合、LLM の自己申告（`AUTH COMPLETE` 等）のみを信頼せず、決定論的グラウンドトゥルースを検証します。
+
+1. **セッション成果物の新規獲得**: ログイン前後に認証 Cookie または トークン（localStorage/sessionStorage）が獲得されたか
+2. **ログインページ離脱**: 現在 URL がログインページから遷移したか
+3. **ログインフォーム非残存**: ログインフォームや認証失敗文言が本文に残っていないか
+
+- 3条件を全て満たす場合: `auth_verification_status: verified` として記録します。
+- 1つでも欠ける場合: `auth_verification_status: unverified_auth_claim`（カバレッジ注記 `auth:login_not_verified`）としてレポートやコンソールへ誠実に記録・表示します。
+- Agent が自律的に発見した脆弱性 Finding やその severity は消去・降格せず、ありのまま保持します。
+
 ## 10. Hybrid フロー
 
 ![Hybrid モード設定](docs/images/dashboard-hybrid.png)

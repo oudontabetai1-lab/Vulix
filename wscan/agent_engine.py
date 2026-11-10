@@ -304,6 +304,8 @@ class AgentEngine:
                 "final_summary": safe_summary,
                 "harness_status": getattr(result, "harness_status", ""),
                 "coverage_gaps": getattr(result, "coverage_gaps", []),
+                "auth_verification_status": getattr(result, "auth_verification_status", None),
+                "auth_verification_reasons": getattr(result, "auth_verification_reasons", []),
                 "findings": [f.to_dict() for f in findings],
             },
             artifact_secrets,
@@ -355,11 +357,17 @@ class AgentEngine:
 
         # Generate HTML report
         gen = ReportGenerator(self.output_dir, lang=self.report_lang)
+        report_coverage = {
+            "auth_verification_status": getattr(result, "auth_verification_status", None),
+            "auth_verification_reasons": getattr(result, "auth_verification_reasons", []),
+            "coverage_gaps": getattr(result, "coverage_gaps", []),
+        }
         report_path = gen.generate(
             target=self.url,
             findings=findings,
             visited_urls=[self.url],
             checks=self.checks,
+            coverage=report_coverage,
         )
 
         complete = getattr(result, "harness_status", "") in ("", "complete") and result.success
@@ -370,6 +378,12 @@ class AgentEngine:
             f"[cyan]{len(findings)}[/cyan] finding(s)  "
             f"Report: [cyan]{report_path}[/cyan]"
         )
+        auth_status = getattr(result, "auth_verification_status", None)
+        if auth_status:
+            auth_style = "green" if auth_status == "verified" else "yellow"
+            reasons = getattr(result, "auth_verification_reasons", [])
+            reason_str = f" [dim]({', '.join(reasons)})[/dim]" if (reasons and auth_status != "verified") else ""
+            console.print(f"  Auth verification: [{auth_style}]{auth_status}[/{auth_style}]{reason_str}")
 
         if self.open_report and report_path.exists():
             webbrowser.open(str(report_path))

@@ -444,6 +444,8 @@ class AgentScanResult:
     memory: AgentMemory = field(default_factory=AgentMemory)
     harness_status: str = ""
     coverage_gaps: list[str] = field(default_factory=list)
+    auth_verification_status: Optional[str] = None
+    auth_verification_reasons: list[str] = field(default_factory=list)
     preserve_existing_artifacts: bool = False
 
 
@@ -757,6 +759,7 @@ class AgentBrowserScanner:
         self._runtime_work_targets: dict[str, str] = {}
         self._runtime_observed_urls: list[str] = []
         self._runtime_hypotheses: dict[str, dict] = {}
+        self._auth_verification = None
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
 
@@ -1286,6 +1289,129 @@ class AgentBrowserScanner:
                 ) from exc
         return profile_type(**options)
 
+    async def _capture_cookies(self, browser) -> list[dict]:
+        """ブラウザから現在の Cookie リストを安全に取得する（純粋抽出 helper）。"""
+        if browser is None:
+            return []
+        try:
+            if hasattr(browser, "cookies") and callable(browser.cookies):
+                res = browser.cookies()
+                if asyncio.iscoroutine(res):
+                    res = await res
+                return list(res or [])
+            if hasattr(browser, "_cdp_get_cookies") and callable(browser._cdp_get_cookies):
+                res = browser._cdp_get_cookies()
+                if asyncio.iscoroutine(res):
+                    res = await res
+                return list(res or [])
+            if hasattr(browser, "context") and hasattr(browser.context, "cookies"):
+                res = browser.context.cookies()
+                if asyncio.iscoroutine(res):
+                    res = await res
+                return list(res or [])
+            page = None
+            if hasattr(browser, "get_current_page") and callable(browser.get_current_page):
+                res = browser.get_current_page()
+                page = await res if asyncio.iscoroutine(res) else res
+            elif hasattr(browser, "page"):
+                page = browser.page
+            if page and hasattr(page, "context") and hasattr(page.context, "cookies"):
+                res = page.context.cookies()
+                if asyncio.iscoroutine(res):
+                    res = await res
+                return list(res or [])
+            if hasattr(browser, "cookies") and isinstance(browser.cookies, (list, tuple)):
+                return list(browser.cookies)
+        except Exception:
+            pass
+        return []
+
+    async def _capture_tokens(self, browser) -> list[dict]:
+        """ブラウザストレージから現在の token / session 情報を安全に取得する。"""
+        if browser is None:
+            return []
+        try:
+            page = None
+            if hasattr(browser, "get_current_page") and callable(browser.get_current_page):
+                res = browser.get_current_page()
+                page = await res if asyncio.iscoroutine(res) else res
+            elif hasattr(browser, "page"):
+                page = browser.page
+            if page and hasattr(page, "evaluate") and callable(page.evaluate):
+                js_code = """() => {
+                    const items = [];
+                    try {
+                        for (let i = 0; i < localStorage.length; i++) {
+                            const k = localStorage.key(i);
+                            items.push({storage: 'local', key: k, value: localStorage.getItem(k)});
+                        }
+                    } catch(e) {}
+                    try {
+                        for (let i = 0; i < sessionStorage.length; i++) {
+                            const k = sessionStorage.key(i);
+                            items.push({storage: 'session', key: k, value: sessionStorage.getItem(k)});
+                        }
+                    } catch(e) {}
+                    return items;
+                }"""
+                res = page.evaluate(js_code)
+                if asyncio.iscoroutine(res):
+                    res = await res
+                return list(res or [])
+            if hasattr(browser, "tokens") and isinstance(browser.tokens, (list, tuple)):
+                return list(browser.tokens)
+            if hasattr(browser, "storage_state") and callable(browser.storage_state):
+                res = browser.storage_state()
+                if asyncio.iscoroutine(res):
+                    res = await res
+                if isinstance(res, dict):
+                    origins = res.get("origins") or []
+                    items = []
+                    for orig in origins:
+                        for entry in orig.get("localStorage") or []:
+                            items.append({"storage": "local", "key": entry.get("name"), "value": entry.get("value")})
+                    return items
+        except Exception:
+            pass
+        return []
+
+    async def _capture_url_and_body(self, browser) -> tuple[str, str]:
+        """ブラウザから現在 URL と HTML 本文を安全に取得する。"""
+        current_url = ""
+        body = ""
+        if browser is None:
+            return current_url, body
+        try:
+            page = None
+            if hasattr(browser, "get_current_page") and callable(browser.get_current_page):
+                res = browser.get_current_page()
+                page = await res if asyncio.iscoroutine(res) else res
+            elif hasattr(browser, "page"):
+                page = browser.page
+
+            if hasattr(browser, "get_current_page_url") and callable(browser.get_current_page_url):
+                res = browser.get_current_page_url()
+                current_url = await res if asyncio.iscoroutine(res) else res
+            elif page and hasattr(page, "url"):
+                current_url = str(page.url or "")
+            elif hasattr(browser, "url"):
+                current_url = str(browser.url or "")
+
+            if page:
+                if hasattr(page, "content") and callable(page.content):
+                    res = page.content()
+                    body = await res if asyncio.iscoroutine(res) else res
+                elif hasattr(page, "body"):
+                    body = str(page.body or "")
+            elif hasattr(browser, "get_page_source") and callable(browser.get_page_source):
+                res = browser.get_page_source()
+                body = await res if asyncio.iscoroutine(res) else res
+            elif hasattr(browser, "body"):
+                body = str(browser.body or "")
+        except Exception:
+            pass
+        return str(current_url or ""), str(body or "")
+
     async def run(self) -> AgentScanResult:
         """エージェントスキャンを実行して結果を返す。"""
         console.print(Rule("[bold magenta] Agent Browser Scan [/bold magenta]", style="magenta"))
@@ -1620,6 +1746,11 @@ class AgentBrowserScanner:
                     episode_kwargs["initial_actions"] = [
                         {"navigate": {"url": destination, "new_tab": False}}
                     ]
+                    before_auth_cookies = None
+                    before_auth_tokens = None
+                    if work.role == AgentRole.AUTHENTICATOR:
+                        before_auth_cookies = await self._capture_cookies(browser)
+                        before_auth_tokens = await self._capture_tokens(browser)
                     episode_agent = Agent(**{agent_browser_arg: browser}, **episode_kwargs)
                     run_kwargs = {"max_steps": episode_budget}
                     if on_step_start:
@@ -1678,6 +1809,26 @@ class AgentBrowserScanner:
                         reported, resolved = parse_reviewer_gap_lines(final)
                         self._harness.record_reviewer_gaps(reported)
                         self._harness.resolve_reviewer_gaps(resolved)
+                    if work.role == AgentRole.AUTHENTICATOR:
+                        claimed = self._work_completion_claimed(work, final)
+                        if claimed and history.is_successful():
+                            from wscan.auth_detect import verify_agent_auth_claim
+                            after_auth_cookies = await self._capture_cookies(browser)
+                            after_auth_tokens = await self._capture_tokens(browser)
+                            cur_url, cur_body = await self._capture_url_and_body(browser)
+                            self._auth_verification = verify_agent_auth_claim(
+                                claimed_success=True,
+                                before_cookies=before_auth_cookies,
+                                after_cookies=after_auth_cookies,
+                                before_tokens=before_auth_tokens,
+                                after_tokens=after_auth_tokens,
+                                current_url=cur_url,
+                                login_url=self.login_url,
+                                body=cur_body,
+                            )
+                        elif claimed and not history.is_successful():
+                            from wscan.auth_detect import verify_agent_auth_claim
+                            self._auth_verification = verify_agent_auth_claim(claimed_success=False)
                     terminal = (
                         WorkStatus.COMPLETE
                         if history.is_successful() and self._work_completion_claimed(work, final)
@@ -1742,6 +1893,12 @@ class AgentBrowserScanner:
                     for item in self._harness.state.work_queue
                     if item.status != WorkStatus.COMPLETE
                 ]
+                if self._auth_verification is not None:
+                    result.auth_verification_status = self._auth_verification.status
+                    result.auth_verification_reasons = list(self._auth_verification.reasons)
+                    if self._auth_verification.status == "unverified_auth_claim":
+                        if "auth:login_not_verified" not in gaps:
+                            gaps.append("auth:login_not_verified")
                 self._harness.note_coverage(
                     visited_urls=self._memory.visited_urls,
                     tested_targets=[
@@ -1771,6 +1928,8 @@ class AgentBrowserScanner:
                 run_kwargs = {"max_steps": self.max_steps}
                 if on_step_start:
                     run_kwargs["on_step_start"] = on_step_start
+                before_auth_cookies = await self._capture_cookies(browser) if self.login_url else None
+                before_auth_tokens = await self._capture_tokens(browser) if self.login_url else None
                 history = await agent.run(**run_kwargs)
 
                 result.steps_taken = self._step_count
@@ -1779,6 +1938,27 @@ class AgentBrowserScanner:
             # final_result() が構造化テキストを返す
                 final_text = history.final_result() or ""
                 result.final_summary = final_text
+
+                if self.login_url and "AUTH COMPLETE" in final_text.upper():
+                    from wscan.auth_detect import verify_agent_auth_claim
+                    after_auth_cookies = await self._capture_cookies(browser)
+                    after_auth_tokens = await self._capture_tokens(browser)
+                    cur_url, cur_body = await self._capture_url_and_body(browser)
+                    self._auth_verification = verify_agent_auth_claim(
+                        claimed_success=history.is_successful(),
+                        before_cookies=before_auth_cookies,
+                        after_cookies=after_auth_cookies,
+                        before_tokens=before_auth_tokens,
+                        after_tokens=after_auth_tokens,
+                        current_url=cur_url,
+                        login_url=self.login_url,
+                        body=cur_body,
+                    )
+                    result.auth_verification_status = self._auth_verification.status
+                    result.auth_verification_reasons = list(self._auth_verification.reasons)
+                    if self._auth_verification.status == "unverified_auth_claim":
+                        if "auth:login_not_verified" not in result.coverage_gaps:
+                            result.coverage_gaps.append("auth:login_not_verified")
 
             # 全ステップのテキストを結合してファインディングを解析
                 all_text = "\n".join(
