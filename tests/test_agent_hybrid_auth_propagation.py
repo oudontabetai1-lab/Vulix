@@ -154,3 +154,61 @@ def test_agent_receives_direct_totp_secret_key(tmp_path, monkeypatch):
     assert captured_kwargs[0]["access_urls"] == []
     assert captured_kwargs[0]["exclude_urls"] == []
     assert captured_kwargs[0]["exclude_fields"] == []
+
+
+def test_non_hybrid_serve_submission_constructs_scan_engine(tmp_path, monkeypatch):
+    """Ensure non-hybrid serve scan submissions construct ScanEngine cleanly without UnboundLocalError."""
+    captured_kwargs = []
+    done = asyncio.Event()
+    server_ref = []
+
+    class FakeServer:
+        should_exit = False
+
+        def __init__(self, config):
+            server_ref.append(self)
+
+        async def serve(self):
+            await done.wait()
+            self.should_exit = True
+
+    scan_data = {
+        "url": "http://fixture.test/",
+        "llm": "none",
+        "agent_mode": False,
+        "hybrid_mode": False,
+    }
+
+    submitted = False
+
+    async def awaiting(monitor):
+        nonlocal submitted
+        if not submitted:
+            submitted = True
+            monitor.scan_request_data = scan_data
+            monitor.scan_request_event.set()
+
+    class FakeScanEngine:
+        def __init__(self, **kwargs):
+            captured_kwargs.append(kwargs)
+            self.output_dir = tmp_path
+
+        async def run(self):
+            if server_ref:
+                server_ref[0].should_exit = True
+            done.set()
+
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(MonitorServer, "emit_awaiting_config", awaiting)
+    monkeypatch.setattr(MonitorServer, "prune_old_scans", lambda _: [])
+    monkeypatch.setattr(MonitorServer, "trigger_due_schedules", lambda _: None)
+    monkeypatch.setattr("wscan.engine.ScanEngine", FakeScanEngine)
+    monkeypatch.setattr(main.webbrowser, "open", lambda _: None)
+    monkeypatch.setattr(main, "_CFG", {"report_lang": "ja", "llm_provider": "none"})
+    monkeypatch.setattr(sys, "argv", ["main.py", "serve", "--host", "127.0.0.1", "--port", "19878"])
+
+    asyncio.run(asyncio.wait_for(main.run_serve(main.parse_args()), timeout=5))
+
+    assert len(captured_kwargs) == 1
+    assert captured_kwargs[0]["handoff_cookies"] == []
+    assert captured_kwargs[0]["seed_urls"] is None

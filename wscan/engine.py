@@ -3229,9 +3229,11 @@ class ScanEngine:
         else:
             _store_synced_cookies(self, _scoped_cookie_header(in_scope, candidate or self.target_url))
 
+        added_cookies = []
         for c in in_scope:
             if c not in self.cookie_list:
                 self.cookie_list.append(c)
+                added_cookies.append(c)
 
         after = await self._protected_resource_response(candidate, browser=browser) if candidate else (None, "", False)
 
@@ -3262,6 +3264,22 @@ class ScanEngine:
             )
             console.print("  [green][Auth] Protected access verified via handoff session.[/green]")
         else:
+            # 検証失敗時はシードした Cookie を巻き戻し、未認証スキャンが不正な資格情報を送信し続けないようにする
+            for c in added_cookies:
+                if c in self.cookie_list:
+                    self.cookie_list.remove(c)
+            _store_synced_cookies(self, "")
+            if browser is not None:
+                try:
+                    page = getattr(browser, "page", None)
+                    ctx = getattr(page, "context", None) or getattr(browser, "_context", None)
+                    if ctx is not None and hasattr(ctx, "clear_cookies"):
+                        import inspect
+                        res = ctx.clear_cookies()
+                        if inspect.isawaitable(res):
+                            await res
+                except Exception:
+                    pass
             console.print("  [yellow][Auth] Handoff cookies seeded, but protected access unverified — continuing unauthenticated discovery; authenticated coverage is incomplete.[/yellow]")
             if not any(e.startswith("authentication_unverified:") for e in self.wave_errors):
                 self.wave_errors.append("authentication_unverified:" + reason)

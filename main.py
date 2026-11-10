@@ -3324,6 +3324,7 @@ async def run_serve(args):
         # ── Hybrid Mode: Agent偵察 (Phase 1) → 通常スキャン (Phase 2) ────
         seed_urls: list = []
         agent_findings: list = []
+        handoff = None
         if cfg.get("hybrid_mode"):
             from wscan.agent_engine import AgentEngine
             # 偵察側の base URL は、偵察(hybrid_llm)が openai_compatible のときだけ渡す。

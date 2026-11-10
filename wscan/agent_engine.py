@@ -74,24 +74,6 @@ class AgentHandoffData:
     cookies: list = field(default_factory=list)
     storage_state: dict = field(default_factory=dict)
 
-    def to_dict(self, include_auth_state: bool = False) -> dict:
-        """シリアライズ用 dict を返す。認証セッション情報は除外（永続化・ログ・レポート禁止）。"""
-        data = {
-            "discovered_urls": list(self.discovered_urls),
-            "auth_user": self.auth_user,
-            "auth_pass": self.auth_pass,
-            "login_url": self.login_url,
-            "summary": self.summary,
-            "findings": [
-                f.to_dict() if hasattr(f, "to_dict") else f
-                for f in self.findings
-            ],
-        }
-        if include_auth_state:
-            data["cookies"] = list(self.cookies)
-            data["storage_state"] = dict(self.storage_state)
-        return data
-
 # Base output directory (same convention as ScanEngine)
 OUTPUT_BASE = Path.cwd() / "output"
 

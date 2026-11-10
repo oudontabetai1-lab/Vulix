@@ -23,8 +23,8 @@ class DummyBrowser:
         self.set_calls.append((list(cookie_list), url))
 
 
-def test_handoff_data_fields_populated_and_not_persisted():
-    """Handoff cookies and storage_state are populated in memory, but excluded from serialization."""
+def test_handoff_data_fields_populated_in_memory_only():
+    """Handoff cookies and storage_state are populated in memory and to_dict does not exist."""
     raw_cookies = [{"name": "session", "value": "secret123", "domain": "fixture.test"}]
     raw_storage = {"cookies": raw_cookies, "origins": []}
 
@@ -43,17 +43,8 @@ def test_handoff_data_fields_populated_and_not_persisted():
     assert handoff.cookies == raw_cookies
     assert handoff.storage_state == raw_storage
 
-    # Serialized: to_dict excludes cookies and storage_state by default
-    serialized = handoff.to_dict()
-    assert "cookies" not in serialized
-    assert "storage_state" not in serialized
-    dumped = json.dumps(serialized)
-    assert "secret123" not in dumped
-
-    # Explicit override only if requested
-    explicit = handoff.to_dict(include_auth_state=True)
-    assert explicit["cookies"] == raw_cookies
-    assert explicit["storage_state"] == raw_storage
+    # No to_dict serializer exists (prevents accidental password or token serialization)
+    assert not hasattr(handoff, "to_dict")
 
 
 @pytest.mark.asyncio
@@ -202,6 +193,10 @@ async def test_hybrid_phase2_proof_gating_denied_does_not_claim_coverage(tmp_pat
     assert engine.authentication_state["protected_access"] == "denied"
     assert engine.authentication_state["state"] == "incomplete"
     assert any("authentication_unverified:" in err for err in engine.wave_errors)
+
+    # Rollback verification: seeded handoff cookies must be removed from cookie_list and cookies reset
+    assert not any(c.get("name") == "session" for c in engine.cookie_list)
+    assert engine.cookies == ""
 
     # Prerequisite coverage must NOT include auth_session
     prereqs = set()
