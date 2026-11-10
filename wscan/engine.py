@@ -7133,7 +7133,12 @@ class ScanEngine:
                         for note in self.wave_errors[_scan_note_start:]
                     )
                 )
-                if _ssti_control_unavailable or _sqli_auth_lost:
+                _sqli_all_blocked = any(
+                    note.startswith("all_probes_blocked:sqli")
+                    for note in self.wave_errors[_scan_note_start:]
+                )
+                _sqli_indeterminate = _sqli_auth_lost or _sqli_all_blocked
+                if _ssti_control_unavailable or _sqli_indeterminate:
                     check_errored = True
                 for f in (findings or []):
                     if f is None:
@@ -7152,7 +7157,7 @@ class ScanEngine:
                     # （finding は陽性証拠なので残す）。
                     status=(
                         "finding" if new_findings
-                        else "error" if check_wedged or _ssti_control_unavailable or _sqli_auth_lost else "tested"
+                        else "error" if check_wedged or _ssti_control_unavailable or _sqli_indeterminate else "tested"
                     ),
                     location=location,
                     severity=_top_severity(new_findings),
@@ -7160,7 +7165,8 @@ class ScanEngine:
                     note=(
                         "field scan ran on a dialog-wedged page" if check_wedged
                         else "SSTI control response unavailable" if _ssti_control_unavailable
-                        else "SQLi attack indeterminate: session lost or response blocked" if _sqli_auth_lost
+                        else "SQLi attack indeterminate: session lost" if _sqli_auth_lost
+                        else "SQLi attack indeterminate: all probes blocked or unavailable" if _sqli_all_blocked
                         else ""
                     ),
                 )
@@ -8233,9 +8239,9 @@ class ScanEngine:
                     return "assumed"
             if scanner_key in {"graphql", "websocket"} and scanner_result is None:
                 return "assumed"
-            # SSTI needs a retrieved control. An indeterminate scanner result must
-            # not become confirmed through the generic expected-string fallback.
-            if f.check_type == "ssti" and scanner_result is None:
+            # SSTI/SQLi needs a retrieved control or valid probe. An indeterminate scanner result must
+            # not become confirmed or refuted through the generic expected-string fallback.
+            if f.check_type in {"sqli", "ssti"} and scanner_result is None:
                 return "assumed"
             if scanner_result is not None:
                 # SSTI has an HTTP-level fallback below for URL parameters. Use
@@ -8320,9 +8326,11 @@ class ScanEngine:
             source, pair = await scanner._apply_ip(ip, f.payload)
             await asyncio.sleep(self._effective_delay)
 
-            # 汎用フォールバックの再送でも失効/transport 失敗を拾い、401/空応答を
+            # 汎用フォールバックの json 再送でも失効/transport 失敗を拾い、401/空応答を
             # 脆弱性応答として評価せず terminal な "assumed" へ倒す。
-            if self._api_auth_failed or self._json_probe_failed:
+            if ip.location == "json_body" and (
+                self._api_auth_failed or self._json_probe_failed
+            ):
                 return "assumed"
 
             if f.check_type == "xss":
