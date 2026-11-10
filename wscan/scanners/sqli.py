@@ -7,6 +7,7 @@ import re
 import time
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from wscan.injection_point import InjectionPoint
 
@@ -192,6 +193,34 @@ _AUTH_PAGE_KEYWORDS = (
     "/error", "/403", "/401", "/access-denied",
 )
 
+# Route markers that indicate an authenticated / protected area.
+_AUTH_ROUTE_MARKERS = (
+    "/admin", "/dashboard", "/account", "/profile", "/console",
+    "/portal", "/member", "/settings", "/mypage", "/internal", "/private",
+)
+
+# Visible / DOM text indicators that suggest an authenticated session.
+_AUTH_CONTENT_INDICATORS = (
+    "logout", "sign out", "log out", "ログアウト", "マイページ",
+    "dashboard", "admin panel", "welcome,", "welcome back",
+    "user-menu", "account-settings", "secret account data",
+)
+
+# Route markers that explicitly indicate an unauthenticated / public area.
+_UNAUTH_ROUTE_MARKERS = (
+    "/public", "/guest", "/unauthenticated", "/anonymous",
+)
+
+# Text patterns indicating explicit unauthenticated / public landing.
+_UNAUTH_CONTENT_PATTERNS = [
+    r"welcome\s+to\s+our\s+public\s+page",
+    r"nothing\s+secret\s+here",
+    r"general\s+information\s+for\s+all\s+visitors",
+    r"public\s+information",
+    r"guest\s+user",
+    r"not\s+logged\s+in",
+]
+
 
 class SQLiScanner(BaseScanner):
     """SQL Injection vulnerability scanner."""
@@ -286,7 +315,12 @@ class SQLiScanner(BaseScanner):
         cap = getattr(self.engine, "max_payloads", 0)
         return merged[:cap] if cap and cap > 0 else merged
 
-    def _detect_auth_bypass(self, original_url: str, source: str) -> tuple[bool, str]:
+    def _detect_auth_bypass(
+        self,
+        original_url: str,
+        source: str,
+        pair: dict | None = None,
+    ) -> tuple[bool, str]:
         """
         Check whether the browser was redirected to an authenticated area after
         the payload was submitted.
@@ -298,7 +332,40 @@ class SQLiScanner(BaseScanner):
         except Exception:
             return False, ""
 
-        # URL must differ from where the form was submitted
+        # 1. Probe delivery truth: if probe was explicitly not delivered, reject
+        if getattr(self.browser, "last_probe_delivered", True) is False:
+            return False, post_url
+
+        # 2. HTTP status truth: inspect pair or browser.last_pair / network.latest()
+        effective_pair = pair if pair is not None else getattr(self.browser, "last_pair", None)
+        if effective_pair is None and hasattr(getattr(self, "browser", None), "network"):
+            network = getattr(self.browser, "network", None)
+            if hasattr(network, "latest"):
+                try:
+                    effective_pair = network.latest()
+                except Exception:
+                    pass
+
+        status = None
+        if effective_pair is not None:
+            status = _pair_status(effective_pair)
+            if status is None and isinstance(effective_pair, dict):
+                resp = effective_pair.get("response", {})
+                if isinstance(resp, dict):
+                    status = resp.get("status")
+                if status is None:
+                    status = effective_pair.get("status_code") or effective_pair.get("status")
+
+        status_int = None
+        if status is not None:
+            try:
+                status_int = int(status)
+                if status_int < 200 or status_int >= 400:
+                    return False, post_url
+            except (ValueError, TypeError):
+                pass
+
+        # 3. URL must differ from where the form was submitted
         if post_url.rstrip("/") == original_url.rstrip("/"):
             return False, post_url
 
@@ -313,6 +380,50 @@ class SQLiScanner(BaseScanner):
 
         # Minimal content check — blank pages are not a successful bypass
         if len(source.strip()) < 50:
+            return False, post_url
+
+        # 4. Positive authenticated landing evidence
+        parsed_path = urlparse(post_url).path.lower()
+
+        # Explicit unauthenticated route segment rejection
+        if any(
+            marker == parsed_path or parsed_path.startswith(f"{marker}/") or f"/{marker.strip('/')}/" in f"/{parsed_path.strip('/')}/"
+            for marker in _UNAUTH_ROUTE_MARKERS
+        ):
+            return False, post_url
+
+        # Explicit unauthenticated content pattern rejection
+        if self.check_response_for_patterns(source, _UNAUTH_CONTENT_PATTERNS):
+            return False, post_url
+
+        # Positive route indicators
+        has_auth_route = any(marker in parsed_path for marker in _AUTH_ROUTE_MARKERS)
+
+        # Positive content / DOM indicators
+        source_lower = source.lower()
+        has_auth_content = any(ind in source_lower for ind in _AUTH_CONTENT_INDICATORS)
+
+        # Configured login success indicator / login assessment check
+        has_assess_success = False
+        login_indicator = getattr(getattr(self, "engine", None), "login_success_indicator", "") or ""
+        if login_indicator and (login_indicator in post_url or login_indicator in source):
+            has_assess_success = True
+        else:
+            try:
+                from wscan.login_surface import assess_login_state, LoginObservation, SUCCESS
+                obs = LoginObservation(
+                    post_url=post_url,
+                    body=source,
+                    status=status_int if status_int is not None else 200,
+                    success_indicator=login_indicator,
+                )
+                assessment = assess_login_state(obs)
+                if assessment.state == SUCCESS:
+                    has_assess_success = True
+            except Exception:
+                pass
+
+        if not (has_auth_route or has_auth_content or has_assess_success):
             return False, post_url
 
         return True, post_url
@@ -526,7 +637,10 @@ class SQLiScanner(BaseScanner):
                 and self._is_login_field(field_name)
                 and payload in AUTH_BYPASS_PAYLOAD_SET
             ):
-                bypassed, post_url = self._detect_auth_bypass(ip.url, source)
+                try:
+                    bypassed, post_url = self._detect_auth_bypass(ip.url, source, pair)
+                except TypeError:
+                    bypassed, post_url = self._detect_auth_bypass(ip.url, source)
                 if bypassed:
                     self._probe_decision(pair, True, "sqli_payload_oracle",
                                          baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
@@ -792,7 +906,10 @@ class SQLiScanner(BaseScanner):
             fresh_result = await self._verify_auth_bypass_fresh_context(finding, ip)
             if fresh_result is not None:
                 return fresh_result
-            bypassed, _ = self._detect_auth_bypass(finding.url, source)
+            try:
+                bypassed, _ = self._detect_auth_bypass(finding.url, source, pair)
+            except TypeError:
+                bypassed, _ = self._detect_auth_bypass(finding.url, source)
             return bypassed
         if etype == "sqli_boolean":
             details = finding.evidence_details or {}
@@ -868,8 +985,11 @@ class SQLiScanner(BaseScanner):
                 verify_ip = ip or InjectionPoint.for_form(
                     finding.url, finding.field_name, 0
                 )
-                source, _ = await self._apply_ip(verify_ip, finding.payload)
-                bypassed, _ = self._detect_auth_bypass(finding.url, source)
+                source, pair = await self._apply_ip(verify_ip, finding.payload)
+                try:
+                    bypassed, _ = self._detect_auth_bypass(finding.url, source, pair)
+                except TypeError:
+                    bypassed, _ = self._detect_auth_bypass(finding.url, source)
                 return bypassed
             finally:
                 self.browser = previous_browser
