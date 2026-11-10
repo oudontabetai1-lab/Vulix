@@ -7101,6 +7101,7 @@ class ScanEngine:
 
             check_errored = False
             check_wedged = False
+            self._api_auth_failed = False
             scan_row = None
             _scan_note_start = len(self.wave_errors)
             checks_executed += 1
@@ -7125,7 +7126,14 @@ class ScanEngine:
                     note.startswith("baseline_unavailable:ssti")
                     for note in self.wave_errors[_scan_note_start:]
                 )
-                if _ssti_control_unavailable:
+                _sqli_auth_lost = (
+                    getattr(self, "_api_auth_failed", False)
+                    or any(
+                        note.startswith("auth_lost:sqli")
+                        for note in self.wave_errors[_scan_note_start:]
+                    )
+                )
+                if _ssti_control_unavailable or _sqli_auth_lost:
                     check_errored = True
                 for f in (findings or []):
                     if f is None:
@@ -7144,7 +7152,7 @@ class ScanEngine:
                     # （finding は陽性証拠なので残す）。
                     status=(
                         "finding" if new_findings
-                        else "error" if check_wedged or _ssti_control_unavailable else "tested"
+                        else "error" if check_wedged or _ssti_control_unavailable or _sqli_auth_lost else "tested"
                     ),
                     location=location,
                     severity=_top_severity(new_findings),
@@ -7152,6 +7160,7 @@ class ScanEngine:
                     note=(
                         "field scan ran on a dialog-wedged page" if check_wedged
                         else "SSTI control response unavailable" if _ssti_control_unavailable
+                        else "SQLi attack indeterminate: session lost or response blocked" if _sqli_auth_lost
                         else ""
                     ),
                 )
@@ -8311,11 +8320,9 @@ class ScanEngine:
             source, pair = await scanner._apply_ip(ip, f.payload)
             await asyncio.sleep(self._effective_delay)
 
-            # 汎用フォールバックの json 再送でも失効/transport 失敗を拾い、401/空応答を
+            # 汎用フォールバックの再送でも失効/transport 失敗を拾い、401/空応答を
             # 脆弱性応答として評価せず terminal な "assumed" へ倒す。
-            if ip.location == "json_body" and (
-                self._api_auth_failed or self._json_probe_failed
-            ):
+            if self._api_auth_failed or self._json_probe_failed:
                 return "assumed"
 
             if f.check_type == "xss":
