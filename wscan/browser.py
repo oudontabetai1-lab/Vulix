@@ -23,6 +23,7 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from rich.console import Console
 
 from . import session_guard
+from .form_validation import is_blocked_by_constraint_validation
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
 from .url_normalize import normalize_proxy_server, split_proxy_credentials
@@ -2121,17 +2122,16 @@ class BrowserManager:
         except Exception:
             return False
 
-    @_bind_probe_capture
-    async def fill_and_submit_form(
+    async def _fill_and_submit_form_once(
         self,
         form_index: int,
         field_name: str,
         payload: str,
         safe_values: Optional[dict] = None,
-    ) -> tuple[str, dict]:
-        """Fill a form field with payload and submit. Returns (page_source, network_pair)."""
+        bypass_validation: bool = False,
+    ) -> tuple[str, dict, dict]:
+        """Fill a form field with payload and submit once. Returns (page_source, network_pair, submission_meta)."""
         self.reset_dialog()
-        self.network.clear()
         # submit 直前の送信済みリクエスト数。None は submit 前の失敗を表す。
         self.last_probe_delivery_reason = "not_submitted"
         net_before_submit = None
@@ -2139,10 +2139,14 @@ class BrowserManager:
         try:
             result = await self.page.evaluate(
                 """
-                async ([formIndex, fieldName, payload, safeValues, authUser, authPass]) => {
+                async ([formIndex, fieldName, payload, safeValues, authUser, authPass, bypassValidation]) => {
                     const forms = document.querySelectorAll('form');
                     const form = forms[formIndex];
                     if (!form) return {success: false, error: 'form not found'};
+
+                    if (bypassValidation) {
+                        form.noValidate = true;
+                    }
 
                     // Infer a safe, type-valid value for a field so HTML5 validation passes.
                     function getSafeValue(el) {
@@ -2216,37 +2220,90 @@ class BrowserManager:
                         dispatchEvents(el);
                     });
 
-                    // Fill target field with payload (overrides safe fill)
-                    const target = Array.from(allInputs).find(
+                    // Target control (form controls including file input for detection)
+                    const formControls = form.querySelectorAll('input, textarea, select');
+                    const target = Array.from(formControls).find(
                         el => (el.name || el.id) === fieldName
                     );
-                    if (target) {
-                        const setter = Object.getOwnPropertyDescriptor(
-                            Object.getPrototypeOf(target), 'value'
-                        )?.set;
-                        if (setter) setter.call(target, payload);
-                        else target.value = payload;
-                        dispatchEvents(target);
-                    }
 
                     if (!target) return {success: false, error: 'target not found'};
+                    const initialType = (target.type || '').toLowerCase();
+                    const isFileInput = initialType === 'file';
+                    if (isFileInput) return {success: false, error: 'target is file', isFileInput: true, targetType: 'file'};
+
+                    const hasMaxLength = target.maxLength >= 0 && target.maxLength < 524288;
+                    const hasPattern = !!target.pattern;
+                    const isRequired = !!target.required;
+
+                    if (bypassValidation) {
+                        // Neutralise per-field blockers: type coercion, length and constraint attributes
+                        if (target.tagName === 'INPUT' && target.type !== 'text') {
+                            try { target.type = 'text'; } catch (_) {}
+                        }
+                        try {
+                            target.removeAttribute('maxlength');
+                            target.removeAttribute('minlength');
+                            target.removeAttribute('pattern');
+                            target.removeAttribute('required');
+                            target.removeAttribute('min');
+                            target.removeAttribute('max');
+                            target.removeAttribute('step');
+                            if (target.maxLength) target.maxLength = 524288;
+                        } catch (_) {}
+                    }
+
+                    // Fill target field with payload
+                    const setter = Object.getOwnPropertyDescriptor(
+                        Object.getPrototypeOf(target), 'value'
+                    )?.set;
+                    if (setter) setter.call(target, payload);
+                    else target.value = payload;
+                    dispatchEvents(target);
+
+                    const targetValidity = target.validity ? {
+                        valid: target.validity.valid,
+                        typeMismatch: target.validity.typeMismatch,
+                        patternMismatch: target.validity.patternMismatch,
+                        valueMissing: target.validity.valueMissing,
+                        tooLong: target.validity.tooLong,
+                        tooShort: target.validity.tooShort,
+                        rangeUnderflow: target.validity.rangeUnderflow,
+                        rangeOverflow: target.validity.rangeOverflow,
+                        stepMismatch: target.validity.stepMismatch,
+                        badInput: target.validity.badInput,
+                        customError: target.validity.customError,
+                    } : null;
+                    const formValid = typeof form.checkValidity === 'function' ? form.checkValidity() : true;
+                    const valueMatches = (target.value === payload);
+
                     // Let controlled inputs apply synchronous/microtask state updates before
                     // checking the successful-control serialization used by native submission.
                     await new Promise(resolve => setTimeout(resolve, 0));
                     const formValues = new FormData(form).getAll(target.name);
-                    if (!target.name || target.disabled || target.value !== payload
-                        || !formValues.includes(payload))
-                        return {success: false, error: 'target value not successful'};
+                    const targetValueSuccessful = Boolean(
+                        target.name && !target.disabled && target.value === payload && formValues.includes(payload)
+                    );
 
                     return {
-                        success: true,
+                        success: targetValueSuccessful,
+                        error: targetValueSuccessful ? null : 'target value not successful',
                         fieldName: target.name,
                         action: form.action || window.location.href,
-                        method: (form.method || 'GET').toUpperCase()
+                        method: (form.method || 'GET').toUpperCase(),
+                        isFileInput: isFileInput,
+                        targetType: initialType,
+                        hasMaxLength: hasMaxLength,
+                        hasPattern: hasPattern,
+                        isRequired: isRequired,
+                        targetValid: targetValidity ? targetValidity.valid : true,
+                        targetValidity: targetValidity,
+                        formValid: formValid,
+                        valueMatches: valueMatches,
+                        bypassValidation: bypassValidation,
                     };
                 }
                 """,
-                [form_index, field_name, payload, safe_values or {}, self.auth_user, self.auth_pass],
+                [form_index, field_name, payload, safe_values or {}, self.auth_user, self.auth_pass, bypass_validation],
             )
 
             # Never submit an unrelated safe-filled form when the selected field is absent
@@ -2257,9 +2314,10 @@ class BrowserManager:
                 self.last_probe_delivery_reason = {
                     "form not found": "form_not_found",
                     "target not found": "target_not_found",
+                    "target is file": "target_is_file",
                 }.get(error, "target_value_not_successful")
                 source = await self.get_page_source()
-                return source, {}
+                return source, {}, (result or {})
 
             # Submit the form
             submit_btn = await self.page.query_selector(
@@ -2271,6 +2329,16 @@ class BrowserManager:
             net_before_submit = self.network.request_count()
             self.network.probe_context = getattr(self.network, "pending_probe_context", None)
             if submit_btn:
+                if bypass_validation:
+                    await self.page.evaluate(
+                        f"""() => {{
+                            const form = document.querySelectorAll('form')[{form_index}];
+                            if (form) {{
+                                const btn = form.querySelector('[type=submit], button');
+                                if (btn) btn.formNoValidate = true;
+                            }}
+                        }}"""
+                    )
                 await submit_btn.click()
             else:
                 await self.page.evaluate(
@@ -2292,7 +2360,7 @@ class BrowserManager:
             self.last_probe_delivered = _request_carries_form_value(
                 pair, field, payload, submission=result, since=net_before_submit)
             self.last_probe_delivery_reason = "delivered" if self.last_probe_delivered else "request_value_unverified"
-            return source, pair
+            return source, pair, result
         except Exception as e:
             context = getattr(self.network, "probe_context", None)
             if context is not None:
@@ -2314,7 +2382,41 @@ class BrowserManager:
                     "request_value_unverified" if sent_after_submit else "submit_not_dispatched"
                 )
             source = await self.get_page_source()
-            return source, {}
+            return source, {}, (result or {})
+
+    @_bind_probe_capture
+    async def fill_and_submit_form(
+        self,
+        form_index: int,
+        field_name: str,
+        payload: str,
+        safe_values: Optional[dict] = None,
+    ) -> tuple[str, dict]:
+        """Fill a form field with payload and submit. Returns (page_source, network_pair)."""
+        self.network.clear()
+        runner = getattr(self, "_fill_and_submit_form_once", None)
+        if runner is not None:
+            source, pair, meta = await runner(
+                form_index, field_name, payload, safe_values, bypass_validation=False
+            )
+        else:
+            source, pair, meta = await BrowserManager._fill_and_submit_form_once(
+                self, form_index, field_name, payload, safe_values, bypass_validation=False
+            )
+        if not self.last_probe_delivered and is_blocked_by_constraint_validation(meta):
+            # クライアント側制約検証（HTML5 constraint validation / type / maxlength 等）で
+            # 送達が阻止された場合、同一 probe を validation bypass（form.noValidate = true,
+            # 一時的 type=text 化、maxlength 除去等）で 1 回だけ再試行する。
+            if runner is not None:
+                bypass_source, bypass_pair, _ = await runner(
+                    form_index, field_name, payload, safe_values, bypass_validation=True
+                )
+            else:
+                bypass_source, bypass_pair, _ = await BrowserManager._fill_and_submit_form_once(
+                    self, form_index, field_name, payload, safe_values, bypass_validation=True
+                )
+            return bypass_source, bypass_pair
+        return source, pair
 
     async def fill_and_submit_form_multi(
         self,
