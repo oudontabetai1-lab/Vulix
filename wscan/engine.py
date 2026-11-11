@@ -3044,6 +3044,31 @@ class ScanEngine:
     # Session expiry / auto re-login
     # =========================================================================
 
+    def _skip_signout_in_crawl(self, url: str) -> bool:
+        """認証設定時、クロールがサインアウト系 URL を踏む（自セッションを壊す）のを防ぐ。
+
+        明示指定の target/access/seed URL 自体がサインアウトなら尊重する（opt-out）。
+        スキップは access/error 行（unreached）として1URL1回だけ残す。攻撃フェーズは対象外。
+        """
+        from .browser import is_signout_url
+
+        if not is_signout_url(url):
+            return False
+        if not (self.login_url or self.cookies or getattr(self, "cookie_list", None)
+                or self.header_manager.current()):
+            return False
+        key = url.rstrip("/")
+        explicit = [getattr(self, "target_url", ""), *getattr(self, "additional_target_urls", []),
+                    *getattr(self, "access_urls", []), *getattr(self, "seed_urls", [])]
+        if any(key == str(u).strip().rstrip("/") for u in explicit):
+            return False
+        noted = self.__dict__.setdefault("_signout_skipped", set())
+        if key not in noted:
+            noted.add(key)
+            self._record_unscannable_url(url, note="sign-out link skipped while authenticated")
+            console.print(f"  [dim yellow]Skip (sign-out link):[/dim yellow] {url}")
+        return True
+
     def _is_destructive_candidate(self, url: str) -> bool:
         """選択肢URLの生URL・デコード後URLでの破壊判定。
         raw URL の urlparse tokenization で /%6cogout /logout に偽装して scope を通過するのを防ぐ。
@@ -4241,6 +4266,8 @@ class ScanEngine:
             # Skip excluded URLs (exact match or prefix match)
             if self._is_url_excluded(url):
                 console.print(f"  [dim yellow]Skip (excluded URL):[/dim yellow] {url}")
+                continue
+            if self._skip_signout_in_crawl(url):
                 continue
             if not self._is_access_allowed_url(url):
                 console.print(f"  [dim yellow]Skip (out of scope):[/dim yellow] {url}")
@@ -5875,7 +5902,7 @@ class ScanEngine:
 
             url, depth, parent_url = queue.popleft()
 
-            if self._is_url_excluded(url):
+            if self._is_url_excluded(url) or self._skip_signout_in_crawl(url):
                 continue
 
             console.print(

@@ -15,7 +15,7 @@ from email.parser import BytesParser
 from functools import wraps
 import urllib.request
 from collections.abc import Mapping
-from urllib.parse import parse_qs, urlparse as _urlparse
+from urllib.parse import parse_qs, unquote, urlparse as _urlparse
 from typing import Optional, Callable, Any
 from urllib.parse import urljoin, urlparse, urlsplit
 
@@ -209,6 +209,21 @@ def is_session_ending_link(href: str, text: str) -> bool:
     if text and _SESSION_ENDING_TEXT_RE.search(text):
         return True
     return False
+
+
+def is_signout_url(url: str) -> bool:
+    """URL の path がサインアウト系エンドポイントか（純粋関数）。
+
+    path をデコード（二重エンコード含む）し大小無視で、logout/signout/signoff 系を
+    トークン境界つきで判定する（"/blogout-news" のような長い語は対象外）。
+    query / host は見ない。
+    """
+    if not url:
+        return False
+    path = unquote(urlsplit(url).path)
+    if "%" in path:
+        path = unquote(path)
+    return bool(_SESSION_ENDING_HREF_RE.search(path))
 
 
 def canonical_host(url_or_netloc) -> str:
