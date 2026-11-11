@@ -179,11 +179,15 @@ class _NullNetwork:
 
 
 class _FakeSubmitBtn:
-    def __init__(self, network, *, sends=True, raises=False, value="payload"):
+    def __init__(self, network, *, sends=True, raises=False, value="payload", visible=True):
         self._network = network
         self._sends = sends
         self._raises = raises
         self._value = value
+        self._visible = visible
+
+    async def is_visible(self):
+        return self._visible
 
     async def click(self):
         if self._sends:
@@ -201,23 +205,31 @@ class _FakeFormPage:
     """実 fill_and_submit_form を駆動する fake page。evaluate 結果と各種例外を制御。"""
 
     def __init__(self, *, network, result, wait_raises=False, click_raises=False,
-                 submit_sends=True, request_value="payload"):
+                 submit_sends=True, request_value="payload", submit_visible=True):
         self._network = network
         self._result = result
         self._wait_raises = wait_raises
         self._click_raises = click_raises
         self._submit_sends = submit_sends
         self._request_value = request_value
+        self._submit_visible = submit_visible
 
-    async def evaluate(self, *a, **k):
-        # 1 回目=fill JS（result を返す）。submit 経路（btn 無し）では 2 回目に submit JS が
-        # 呼ばれるが、テストは submit_btn を返すので基本 1 回。
+    async def evaluate(self, script="", *a, **k):
+        # 1 回目=fill JS（result を返す）。submit 経路（btn 無し、または非可視時の requestSubmit）では
+        # 2 回目に submit JS が呼ばれる。
+        if "requestSubmit" in str(script) or "].submit()" in str(script):
+            if self._submit_sends:
+                self._network.count += 1
+                self._network.pair = {"request": {
+                    "url": f"http://x/?q={self._request_value}", "_capture_sequence": self._network.count
+                }}
+            return None
         return self._result
 
     async def query_selector(self, *a, **k):
         return _FakeSubmitBtn(
             self._network, sends=self._submit_sends, raises=self._click_raises,
-            value=self._request_value,
+            value=self._request_value, visible=self._submit_visible,
         )
 
     async def wait_for_load_state(self, *a, **k):
@@ -233,12 +245,12 @@ class _FakeFormBrowser(BrowserManager):
 
     def __init__(self, *, result, nav_status=200, wait_raises=False, click_raises=False,
                  submit_sends=True, net_base=0, prior_delivered=None,
-                 request_value="payload"):
+                 request_value="payload", submit_visible=True):
         self.network = _NullNetwork(base_count=net_base)
         self.page = _FakeFormPage(
             network=self.network, result=result, wait_raises=wait_raises,
             click_raises=click_raises, submit_sends=submit_sends,
-            request_value=request_value,
+            request_value=request_value, submit_visible=submit_visible,
         )
         self.timeout = 5
         self.sleep_factor = 0.0
@@ -344,6 +356,17 @@ class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(delivered)
         self.assertEqual(reason, "request_value_unverified")
+
+    async def test_hidden_submit_button_falls_back_to_request_submit_and_delivers(self):
+        # モーダル内などで submit_btn が非可視 (is_visible() == False) の場合でも
+        # requestSubmit() へフォールバックしてリクエストが送達され delivered となることを検証。
+        delivered, reason = await self._run(
+            result={"success": True, "action": "http://x/", "fieldName": "q"},
+            submit_sends=True,
+            submit_visible=False,
+        )
+        self.assertTrue(delivered)
+        self.assertEqual(reason, "delivered")
 
     def test_multipart_payload_with_sql_comment_suffix_is_matched_exactly(self):
         from wscan.browser import _request_carries_form_value
