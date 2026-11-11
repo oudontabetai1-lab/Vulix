@@ -1,0 +1,7 @@
+# Hosts skipped during automated documentation link validation.
+# Empty lines and lines starting with '#' are ignored.
+example.com
+example.invalid
+localhost
+127.0.0.1
+hooks.slack.com

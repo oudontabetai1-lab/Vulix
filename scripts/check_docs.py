@@ -1,21 +1,29 @@
-"""Validate local Markdown references and documented Vulix CLI options offline."""
+"""Validate local Markdown references, documented CLI options, and configuration examples offline."""
 from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+import difflib
 import html
 import io
+import json
 from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
+import time
 from urllib.parse import unquote, urlsplit
+
+import httpx
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; VulixDocsLinkChecker/1.0)"
+DEFAULT_SKIP_FILE = ROOT / "config" / "docs_link_skip.txt"
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _REFERENCE = re.compile(r"^ {0,3}\[([^]]+)\]:\s*(?:<([^>]+)>|(\S+))", re.M)
 _INLINE = re.compile(r"(!?)\[([^]\n]+)\]\(\s*(<[^>\n]*>|(?:\\.|[^()\s]|\([^()\n]*\))*)(?:\s+['\"][^\n]*?['\"])?\s*\)")
@@ -23,6 +31,36 @@ _REF_USE = re.compile(r"(!?)\[([^]\n]+)\](?:\[([^]\n]*)\])?")
 _ANCHOR = re.compile(r"<a\s+[^>]*(?:id|name)\s*=\s*(['\"])(.*?)\1", re.I)
 _OPTION_TOKEN = re.compile(r"^--?[A-Za-z][A-Za-z0-9-]*(?:=.*)?$")
 _CLI_COMMAND = re.compile(r"^(?:python(?:3(?:\.\d+)?)?\s+(?:main\.py|-m\s+vulix)|vulix)\b")
+
+KNOWN_CONFIG_SECTIONS = {
+    "accounts",
+    "auth",
+    "browser",
+    "component_intel",
+    "ctf",
+    "features",
+    "learning",
+    "llm",
+    "monitor",
+    "notifications",
+    "output",
+    "planner",
+    "scan",
+}
+
+OPTIONAL_CONFIG_KEYS: dict[str, str] = {
+    "scan.allow_state_changing_probes": "commented safety toggle in config/wscan.yaml",
+    "features.tls_scan": "engine-supported optional TLS scan feature flag",
+    "features.token_lifecycle_manager": "engine-supported optional token lifecycle manager flag",
+    "llm.models.planner": "documented planner role model override subkey under llm.models",
+    "llm.models.payload": "documented payload role model override subkey under llm.models",
+    "llm.models.adaptive": "documented adaptive role model override subkey under llm.models",
+    "llm.models.triage": "documented triage role model override subkey under llm.models",
+    "llm.models.report": "documented report role model override subkey under llm.models",
+    "accounts.list.username": "documented account item field in config/wscan.yaml",
+    "accounts.list.password": "documented account item field in config/wscan.yaml",
+    "accounts.list.role": "documented account item field in config/wscan.yaml",
+}
 
 
 @dataclass(frozen=True)
@@ -174,10 +212,22 @@ def _check_target(root: Path, source: Path, target: str, line: int,
 
 
 def _markdown_files(root: Path) -> list[Path]:
-    result = subprocess.run(["git", "ls-files", "-z", "--", "README.md", "docs"],
-                            cwd=root, capture_output=True, check=True)
-    return [root / name for name in result.stdout.decode("utf-8").split("\0")
-            if name and Path(name).suffix.lower() in {".md", ".markdown"}]
+    try:
+        result = subprocess.run(["git", "ls-files", "-z", "--", "README.md", "docs"],
+                                cwd=root, capture_output=True, check=True)
+        return [root / name for name in result.stdout.decode("utf-8").split("\0")
+                if name and Path(name).suffix.lower() in {".md", ".markdown"}]
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        candidates = []
+        readme = root / "README.md"
+        if readme.is_file():
+            candidates.append(readme)
+        docs_dir = root / "docs"
+        if docs_dir.is_dir():
+            for p in sorted(docs_dir.rglob("*")):
+                if p.is_file() and p.suffix.lower() in {".md", ".markdown"}:
+                    candidates.append(p)
+        return candidates
 
 
 def _parser_options(parser) -> set[str]:
@@ -262,13 +312,414 @@ def _check_cli(root: Path, path: Path, text: str, parser, findings: list[Finding
                                         "arguments are rejected by the Vulix CLI parser"))
 
 
-def validate(root: Path = ROOT, documents: list[Path] | None = None) -> list[Finding]:
+def collect_config_key_paths(config_data: dict | None = None, config_path: Path | None = None) -> set[str]:
+    """Recursively collect all valid dot-delimited key paths from config data or file."""
+    if config_data is None:
+        if config_path and config_path.is_file():
+            try:
+                config_data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                config_data = {}
+        else:
+            config_data = {}
+
+    paths: set[str] = set()
+
+    def _walk(node, prefix: str = "") -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                path = f"{prefix}.{k}" if prefix else str(k)
+                paths.add(path)
+                _walk(v, path)
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, dict):
+                    _walk(item, prefix)
+
+    _walk(config_data)
+    return paths
+
+
+def extract_yaml_blocks(text: str) -> list[tuple[int, str, str]]:
+    """Extract fenced ```yaml or ```yml code blocks as (start_line, info, content)."""
+    lines = text.splitlines(keepends=True)
+    i = 0
+    fence = None
+    fence_info = ""
+    start_line = 0
+    block_lines: list[str] = []
+    blocks: list[tuple[int, str, str]] = []
+    while i < len(lines):
+        line = lines[i]
+        marker = _FENCE.match(line)
+        if fence is None and marker:
+            info = line[marker.end():].strip()
+            first_word = info.split()[0].lower() if info.split() else ""
+            if first_word in ("yaml", "yml") or "wscan.yaml" in info.lower() or "vulix-config" in info.lower():
+                fence = marker.group(1)
+                fence_info = info
+                start_line = i + 2  # 1-indexed first line inside block
+                block_lines = []
+            i += 1
+            continue
+        if fence is not None and marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+            blocks.append((start_line, fence_info, "".join(block_lines)))
+            fence = None
+            fence_info = ""
+            block_lines = []
+            i += 1
+            continue
+        if fence is not None:
+            block_lines.append(line)
+        i += 1
+    return blocks
+
+
+def is_vulix_config_example(content: str, info: str = "", known_sections: set[str] | None = None) -> bool:
+    """Decide if a YAML block represents a Vulix configuration example."""
+    marker_patterns = ("config/wscan.yaml", "wscan.yaml", "vulix-config")
+    combined_header = f"{info}\n{content[:200]}".lower()
+    if any(marker in combined_header for marker in marker_patterns):
+        return True
+
+    sections = known_sections if known_sections is not None else KNOWN_CONFIG_SECTIONS
+    try:
+        data = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return any(marker in content.lower() for marker in marker_patterns)
+
+    if isinstance(data, dict):
+        return bool(set(data.keys()) & sections)
+    return False
+
+
+def find_nearest_key(unknown_path: str, valid_paths: set[str]) -> str:
+    """Find the closest valid key path using prefix locality and string similarity."""
+    if not valid_paths:
+        return ""
+    if "." in unknown_path:
+        prefix = unknown_path.rsplit(".", 1)[0]
+        same_prefix = [p for p in valid_paths if p.startswith(prefix + ".") or p == prefix]
+        matches = difflib.get_close_matches(unknown_path, same_prefix, n=1, cutoff=0.1)
+        if matches:
+            return matches[0]
+    matches = difflib.get_close_matches(unknown_path, list(valid_paths), n=1, cutoff=0.1)
+    if matches:
+        return matches[0]
+    return min(valid_paths, key=lambda p: difflib.SequenceMatcher(None, unknown_path, p).ratio())
+
+
+def compare_config_example_keys(block_text: str, start_line: int, file_path: str,
+                                valid_paths: set[str]) -> list[Finding]:
+    """Verify that every key path in a configuration block exists in valid_paths."""
+    findings: list[Finding] = []
+    try:
+        nodes = list(yaml.compose_all(block_text))
+    except yaml.YAMLError as exc:
+        return [Finding(file_path, start_line, "YAML syntax",
+                        f"malformed YAML configuration example: {exc}")]
+
+    def _check_node(node, prefix: str = "") -> None:
+        if isinstance(node, yaml.MappingNode):
+            for k_node, v_node in node.value:
+                key = str(k_node.value)
+                path = f"{prefix}.{key}" if prefix else key
+                line = start_line + k_node.start_mark.line
+                if path not in valid_paths:
+                    nearest = find_nearest_key(path, valid_paths)
+                    findings.append(Finding(
+                        file_path, line, path,
+                        f"unknown configuration key path (nearest valid key: '{nearest}')"
+                    ))
+                _check_node(v_node, path)
+        elif isinstance(node, yaml.SequenceNode):
+            for item in node.value:
+                if isinstance(item, yaml.MappingNode):
+                    _check_node(item, prefix)
+
+    for doc in nodes:
+        if doc is not None:
+            _check_node(doc)
+
+    return findings
+
+
+def check_config_examples(root: Path, path: Path, text: str, valid_paths: set[str],
+                          findings: list[Finding]) -> None:
+    """Find and validate all Vulix configuration examples within a Markdown document."""
+    rel_path = path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)
+    for start_line, info, content in extract_yaml_blocks(text):
+        if is_vulix_config_example(content, info):
+            findings.extend(compare_config_example_keys(content, start_line, rel_path, valid_paths))
+
+
+def load_skip_hosts(skip_file: Path | None = None) -> set[str]:
+    """Load hostnames that should be skipped during external link validation."""
+    target = skip_file or DEFAULT_SKIP_FILE
+    if not target.is_file():
+        return set()
+    hosts = set()
+    for line in target.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        hosts.add(line.lower())
+    return hosts
+
+
+def is_host_skipped(host: str, skip_hosts: set[str]) -> bool:
+    """Check if host matches the skip list directly or as a subdomain."""
+    host = host.lower()
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    for pattern in skip_hosts:
+        if host == pattern or host.endswith("." + pattern):
+            return True
+    return False
+
+
+def classify_http_status(status_code: int | None, exc: Exception | None = None) -> str:
+    """Classify external check result into 'ok', 'broken', or 'inconclusive'."""
+    if status_code in (404, 410):
+        return "broken"
+    if status_code is not None and 200 <= status_code < 400:
+        return "ok"
+    # 401, 403, 429, 5xx, or network/DNS/timeout errors are inconclusive
+    return "inconclusive"
+
+
+def check_url(url: str, client: httpx.Client, max_retries: int = 2,
+              backoff_factor: float = 0.5) -> tuple[int | None, str]:
+    """Check an external URL using HEAD with GET fallback, retries, and backoff."""
+    status_code: int | None = None
+    exc: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        if attempt > 0 and backoff_factor > 0:
+            time.sleep(backoff_factor * (2 ** (attempt - 1)))
+
+        status_code = None
+        exc = None
+
+        # 1. Try HEAD first
+        try:
+            resp = client.head(url)
+            status_code = resp.status_code
+            if 200 <= status_code < 400:
+                return status_code, "ok"
+            # Fallback to GET on non-2xx/3xx
+            try:
+                get_resp = client.get(url)
+                status_code = get_resp.status_code
+                if 200 <= status_code < 400:
+                    return status_code, "ok"
+                if status_code in (404, 410):
+                    if attempt == max_retries:
+                        return status_code, "broken"
+                    continue
+                if attempt == max_retries:
+                    return status_code, "inconclusive"
+                continue
+            except httpx.RequestError as get_exc:
+                exc = get_exc
+                if attempt == max_retries:
+                    return None, "inconclusive"
+                continue
+        except httpx.RequestError as head_exc:
+            # HEAD failed; try GET fallback
+            try:
+                get_resp = client.get(url)
+                status_code = get_resp.status_code
+                if 200 <= status_code < 400:
+                    return status_code, "ok"
+                if status_code in (404, 410):
+                    if attempt == max_retries:
+                        return status_code, "broken"
+                    continue
+                if attempt == max_retries:
+                    return status_code, "inconclusive"
+                continue
+            except httpx.RequestError as get_exc:
+                exc = get_exc
+                if attempt == max_retries:
+                    return None, "inconclusive"
+                continue
+
+    return status_code, classify_http_status(status_code, exc)
+
+
+def extract_external_links(documents: list[Path], root: Path = ROOT) -> list[tuple[str, int, str]]:
+    """Extract all (file_rel_path, line, url) external http(s) references from documents."""
+    links: list[tuple[str, int, str]] = []
+    for path in documents:
+        path = path if path.is_absolute() else root / path
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        rel_path = path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)
+        for line, target in _markdown_targets(text, rel_path, []):
+            try:
+                parsed = urlsplit(target)
+            except ValueError:
+                continue
+            if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+                links.append((rel_path, line, target))
+    return links
+
+
+def check_external_links(
+    links: list[tuple[str, int, str]],
+    *,
+    client: httpx.Client | None = None,
+    skip_hosts: set[str] | None = None,
+    host_delay: float = 0.5,
+    timeout: float = 10.0,
+    max_retries: int = 2,
+    backoff_factor: float = 0.5,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> list[dict]:
+    """Validate external links honoring host delays, skip lists, and retries."""
+    if skip_hosts is None:
+        skip_hosts = load_skip_hosts()
+
+    close_client = False
+    if client is None:
+        client = httpx.Client(
+            timeout=timeout,
+            follow_redirects=True,
+            headers={"User-Agent": user_agent},
+        )
+        close_client = True
+
+    results: list[dict] = []
+    cache: dict[str, tuple[int | None, str]] = {}
+    last_host_time: dict[str, float] = {}
+
+    try:
+        for rel_path, line, url in links:
+            source = f"{rel_path}:{line}"
+            parsed = urlsplit(url)
+            host = parsed.netloc.lower()
+
+            if is_host_skipped(host, skip_hosts):
+                results.append({
+                    "url": url,
+                    "source": source,
+                    "status": None,
+                    "classification": "inconclusive",
+                })
+                continue
+
+            # Strip fragment for network request
+            request_url = parsed._replace(fragment="").geturl()
+
+            if request_url in cache:
+                status, classification = cache[request_url]
+            else:
+                # Per-host delay
+                if host_delay > 0:
+                    now = time.time()
+                    elapsed = now - last_host_time.get(host, 0.0)
+                    if elapsed < host_delay:
+                        time.sleep(host_delay - elapsed)
+
+                status, classification = check_url(
+                    request_url, client,
+                    max_retries=max_retries,
+                    backoff_factor=backoff_factor,
+                )
+                last_host_time[host] = time.time()
+                cache[request_url] = (status, classification)
+
+            results.append({
+                "url": url,
+                "source": source,
+                "status": status,
+                "classification": classification,
+            })
+    finally:
+        if close_client:
+            client.close()
+
+    return results
+
+
+def validate_external_links(
+    root: Path = ROOT,
+    documents: list[Path] | None = None,
+    report_path: Path | None = None,
+    skip_file: Path | None = None,
+    client: httpx.Client | None = None,
+    host_delay: float = 0.5,
+    timeout: float = 10.0,
+    max_retries: int = 2,
+    backoff_factor: float = 0.5,
+) -> tuple[list[dict], list[Finding]]:
+    """Validate external links in documents, returning (results, broken_findings)."""
+    root = root.resolve()
+    documents = _markdown_files(root) if documents is None else documents
+    links = extract_external_links(documents, root)
+    skip_hosts = load_skip_hosts(skip_file)
+
+    results = check_external_links(
+        links,
+        client=client,
+        skip_hosts=skip_hosts,
+        host_delay=host_delay,
+        timeout=timeout,
+        max_retries=max_retries,
+        backoff_factor=backoff_factor,
+    )
+
+    findings: list[Finding] = []
+    for item in results:
+        if item["classification"] == "broken":
+            source_parts = item["source"].rsplit(":", 1)
+            path_str = source_parts[0]
+            line_num = int(source_parts[1]) if len(source_parts) > 1 else 1
+            findings.append(Finding(
+                path_str,
+                line_num,
+                item["url"],
+                f"broken external link (HTTP {item['status']})",
+            ))
+
+    if report_path:
+        report_path = report_path if report_path.is_absolute() else root / report_path
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    return results, findings
+
+
+def validate(
+    root: Path = ROOT,
+    documents: list[Path] | None = None,
+    *,
+    external: bool = False,
+    external_report: Path | None = None,
+    skip_file: Path | None = None,
+) -> list[Finding]:
+    if external:
+        _, findings = validate_external_links(
+            root=root,
+            documents=documents,
+            report_path=external_report,
+            skip_file=skip_file,
+        )
+        return findings
+
     root = root.resolve()
     documents = _markdown_files(root) if documents is None else documents
     findings: list[Finding] = []
     contents = {}
     anchors = {}
     parser = None
+    config_file = root / "config" / "wscan.yaml"
+    if not config_file.is_file() and (ROOT / "config" / "wscan.yaml").is_file():
+        config_file = ROOT / "config" / "wscan.yaml"
+    valid_config_keys = collect_config_key_paths(config_path=config_file) | set(OPTIONAL_CONFIG_KEYS.keys())
     for path in documents:
         path = path if path.is_absolute() else root / path
         try:
@@ -291,6 +742,7 @@ def validate(root: Path = ROOT, documents: list[Path] | None = None) -> list[Fin
             problem = _check_target(root, source, target, line, anchors)
             if problem:
                 findings.append(problem)
+        check_config_examples(root, source, text, valid_config_keys, findings)
         if source.name == "README.md" or "docs" in source.relative_to(root).parts:
             if parser is None:
                 import main
@@ -302,14 +754,40 @@ def validate(root: Path = ROOT, documents: list[Path] | None = None) -> list[Fin
 def main(argv: list[str] | None = None) -> int:
     arg_parser = argparse.ArgumentParser(description=__doc__)
     arg_parser.add_argument("--root", type=Path, default=ROOT)
+    arg_parser.add_argument("--external", action="store_true",
+                            help="Check external http(s) links instead of offline validation")
+    arg_parser.add_argument("--external-report", type=Path, default=None,
+                            help="Path to write external link validation JSON artifact")
+    arg_parser.add_argument("--skip-file", type=Path, default=None,
+                            help="Path to custom skip list for external link checking")
     args = arg_parser.parse_args(argv)
+
+    if args.external:
+        results, findings = validate_external_links(
+            root=args.root,
+            report_path=args.external_report,
+            skip_file=args.skip_file,
+        )
+        for finding in findings:
+            print(finding, file=sys.stderr)
+        summary_counts: dict[str, int] = {}
+        for r in results:
+            cls = r["classification"]
+            summary_counts[cls] = summary_counts.get(cls, 0) + 1
+        summary_str = ", ".join(f"{count} {cls}" for cls, count in sorted(summary_counts.items()))
+        if findings:
+            print(f"external link validation: {len(findings)} broken link(s) found ({summary_str})", file=sys.stderr)
+            return 1
+        print(f"external link validation: 0 broken links ({summary_str or '0 links checked'})")
+        return 0
+
     findings = validate(args.root)
     for finding in findings:
         print(finding, file=sys.stderr)
     if findings:
         print(f"documentation validation: {len(findings)} finding(s)", file=sys.stderr)
         return 1
-    print("documentation validation: local Markdown references and CLI examples are valid")
+    print("documentation validation: local Markdown references, CLI examples, and configuration examples are valid")
     return 0
 
 
