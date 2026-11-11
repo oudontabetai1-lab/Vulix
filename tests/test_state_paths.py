@@ -44,6 +44,19 @@ def test_learning_and_community_round_trip_via_state(tmp_path, monkeypatch):
     assert readable_state_file("community_payloads.yaml").read_text().count("xss") == 1
 
 
+def test_absent_learning_file_loads_empty_and_is_created_on_first_save(tmp_path, monkeypatch):
+    # 学習ファイルは Git 管理しないため、無い状態が正常。読込は空状態、保存で初めて作成する。
+    state = tmp_path / "missing" / "state"
+    monkeypatch.setenv("WSCAN_STATE_DIR", str(state))
+    pl = PayloadLearner()
+    assert pl._data == {"global": {}, "domains": {}}
+    assert not (state / "payload_learning.json").exists()
+    pl.record("xss", "<p>", True)
+    pl.save()
+    assert (state / "payload_learning.json").exists()
+    assert PayloadLearner()._data["global"]["xss"]["<p>"]["hits"] == 1
+
+
 def test_learning_unwritable_raises_for_caller_to_degrade(tmp_path, monkeypatch):
     # 書込不可なら save() は OSError（engine 側が捕捉し警告＋scan 継続）。load は無害。
     ro = tmp_path / "ro"; ro.mkdir(); ro.chmod(0o500)

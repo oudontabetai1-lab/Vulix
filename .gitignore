@@ -10,3 +10,6 @@ output/
 dist/
 build/
 .env
+
+# 実行時の学習データ（ソース checkout では config/ に書かれる。Git 管理しない）
+config/payload_learning.json
