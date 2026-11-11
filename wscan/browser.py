@@ -855,6 +855,7 @@ class BrowserManager:
         # 送達失敗（form 送信の沈黙 swallow・navigate 失敗）を observability へ表面化させる観測用
         # フラグで、判定には関与しない（scanner が _apply_ip 後に読んで transport_error を記録）。
         self.last_probe_delivered: bool = True
+        self.last_probe_delivery_reason: str = "not_submitted"
 
     def _context_options(self) -> dict[str, Any]:
         """BrowserContext 生成用のオプション dict を構築する。"""
@@ -2438,9 +2439,16 @@ class BrowserManager:
         field_payloads: {field_name: payload_string, ...}
         All non-specified fields receive safe/auth values (same as fill_and_submit_form).
         Returns (page_source, network_pair).
+
+        送達の真偽は単一フィールド経路と同じ（``last_probe_delivered`` / ``_request_carries_form_value``）
+        で判定する: 結合送信で送られたリクエストが全フィールドの payload を運んでいるときだけ
+        delivered=True。呼び出し側は False のとき判定を行わない。
         """
         self.reset_dialog()
         self.network.clear()
+        self.last_probe_delivered = False
+        self.last_probe_delivery_reason = "not_submitted"
+        net_before_submit = None
         try:
             result = await self.page.evaluate(
                 """
@@ -2523,6 +2531,10 @@ class BrowserManager:
             )
 
             if not result or not result.get("success"):
+                self.last_probe_delivery_reason = (
+                    "form_not_found" if result and result.get("error") == "form not found"
+                    else "target_value_not_successful"
+                )
                 source = await self.get_page_source()
                 return source, {}
 
@@ -2530,6 +2542,9 @@ class BrowserManager:
                 f"form:nth-of-type({form_index + 1}) [type=submit], "
                 f"form:nth-of-type({form_index + 1}) button"
             )
+            # submit 直前の送信数。送達は「submit 後に送られたリクエストが payload を運んだか」で
+            # 判定する（fill script の XHR や背景 polling を結合送信と取り違えない）。
+            net_before_submit = self.network.request_count()
             if submit_btn:
                 await submit_btn.click()
             else:
@@ -2544,11 +2559,32 @@ class BrowserManager:
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
-            # アナリティクス等の別 URL ビーコンを掴まないよう、対象ページを最も
-            # よく表すペアを選ぶ（同一オリジンの文書本体を優先）。
-            pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
+            # 結合送信の全 payload を運んだリクエストを送達証拠として選ぶ。1 リクエストに
+            # 全フィールドが載っていない（JS が別 API へ送る等）場合は未達として扱い、
+            # 「ページの内容」だけを根拠に判定させない。
+            pair = next((captured for captured in reversed(self.network.pairs)
+                         if all(_request_carries_form_value(
+                             captured, fname, payload, submission=result,
+                             since=net_before_submit)
+                             for fname, payload in field_payloads.items())), None)
+            requests_sent_after_submit = max(
+                0, self.network.request_count() - net_before_submit
+            )
+            if pair is not None:
+                self.last_probe_delivered = True
+                self.last_probe_delivery_reason = "delivered"
+            else:
+                self.last_probe_delivered = False
+                self.last_probe_delivery_reason = (
+                    "request_value_unverified" if requests_sent_after_submit > 0
+                    else "submit_not_dispatched"
+                )
+                # 証跡用のペアは従来どおり対象ページを最もよく表すものを残す。
+                pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             return source, pair
         except Exception:
+            self.last_probe_delivered = False
+            self.last_probe_delivery_reason = "submit_exception"
             source = await self.get_page_source()
             return source, {}
 
@@ -3845,6 +3881,7 @@ class WorkerBrowser(BrowserManager):
         self.last_navigation_error: str = ""
         self.last_navigation_status: Optional[int] = None
         self.last_probe_delivered: bool = True
+        self.last_probe_delivery_reason: str = "not_submitted"
 
     async def close(self):
         """Close this worker's page and context (not the whole browser)."""
