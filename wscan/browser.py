@@ -2330,7 +2330,7 @@ class BrowserManager:
             # 見る。fill script の validation XHR や背景 polling を submit のリクエストと取り違えない。
             net_before_submit = self.network.request_count()
             self.network.probe_context = getattr(self.network, "pending_probe_context", None)
-            if submit_btn:
+            if submit_btn and await submit_btn.is_visible():
                 if bypass_validation:
                     await self.page.evaluate(
                         f"""() => {{
