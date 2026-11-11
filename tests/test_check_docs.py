@@ -345,11 +345,120 @@ def test_external_link_skip_list_and_subdomains(tmp_path):
         return httpx.Response(200)
 
     client = httpx.Client(transport=httpx.MockTransport(fail_transport))
-    links = [("README.md", 10, "https://example.com/test"), ("README.md", 20, "https://app.example.com/path")]
+    links = [("README.md:10", "https://example.com/test"), ("README.md:20", "https://app.example.com/path")]
     results = check_external_links(links, client=client, skip_hosts=skip_hosts, host_delay=0.0)
     assert len(results) == 2
     assert all(r["classification"] == "inconclusive" for r in results)
     assert call_log == []  # No requests made
+
+
+def test_autolinks_and_fenced_blocks_in_external_collection(tmp_path):
+    from scripts.check_docs import collect_external_links
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "docs").mkdir()
+    (root / "docs" / "guide.md").write_text(
+        "Prose autolink <https://docs.test/autolink> is collected.\n"
+        "[markdown link](https://docs.test/inline) stays collected.\n"
+        "`<https://docs.test/in-inline-code>` is masked.\n"
+        "    <https://docs.test/indented-code> is masked.\n"
+        "```\n"
+        "<https://docs.test/in-fence> must be ignored.\n"
+        "```\n"
+        "[label](<https://docs.test/angle-dest>) counts once.\n",
+        encoding="utf-8")
+
+    pairs = collect_external_links([root / "docs" / "guide.md"], root)
+    collected = {(source, url) for source, url in pairs}
+    assert ("docs/guide.md:1", "https://docs.test/autolink") in collected
+    assert ("docs/guide.md:2", "https://docs.test/inline") in collected
+    assert ("docs/guide.md:8", "https://docs.test/angle-dest") in collected
+    for masked in ("in-inline-code", "indented-code", "in-fence"):
+        assert not any(url.endswith(masked) for _, url in pairs)
+
+
+def test_catalog_reference_urls_are_collected(tmp_path):
+    from scripts.check_docs import collect_catalog_reference_urls, collect_external_links
+
+    root = tmp_path / "repo"
+    (root / "wscan").mkdir(parents=True)
+    (root / "README.md").write_text("[cwe](https://cwe.mitre.org/data/definitions/89.html)\n", encoding="utf-8")
+    (root / "wscan" / "check_catalog.json").write_text(json.dumps({
+        "schema_version": "1.0.0",
+        "checks": {
+            "sqli": {"references": [
+                {"kind": "CWE", "id": "89.html",
+                 "url": "https://cwe.mitre.org/data/definitions/89.html"},
+                {"kind": "OWASP", "id": "wstg", "url": "https://example.com/ref"}]},
+        },
+    }), encoding="utf-8")
+
+    refs = collect_catalog_reference_urls(root)
+    assert refs == [
+        ("wscan/check_catalog.json#sqli", "https://cwe.mitre.org/data/definitions/89.html"),
+        ("wscan/check_catalog.json#sqli", "https://example.com/ref"),
+    ]
+
+    # The catalog URL also linked from README.md has both source locations and
+    # is requested only once; same-source duplicates collapse.
+    pairs = collect_external_links([root / "README.md"], root)
+    assert len(pairs) == 3
+    cwe_sources = [source for source, url in pairs if "89.html" in url]
+    assert sorted(cwe_sources) == [
+        "README.md:1",
+        "wscan/check_catalog.json#sqli",
+    ]
+    assert len({url for _, url in pairs if "89.html" in url}) == 1
+
+
+def test_check_external_links_checks_each_url_once_per_source(tmp_path):
+    from scripts.check_docs import check_external_links
+
+    call_log = []
+
+    def handler(request: httpx.Request):
+        call_log.append(str(request.url))
+        return httpx.Response(200)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    links = [
+        ("README.md:1", "https://multi.test/page"),
+        ("README.md:5", "https://multi.test/page"),
+        ("docs/guide.md:2", "https://multi.test/page"),
+        ("wscan/check_catalog.json#sqli", "https://multi.test/page"),
+    ]
+    results = check_external_links(links, client=client, host_delay=0.0)
+    assert len(results) == 4
+    assert {r["source"] for r in results} == {s for s, _ in links}
+    assert all(r["classification"] == "ok" for r in results)
+    # One URL, one network visit even with several source locations.
+    assert call_log == ["https://multi.test/page"]
+
+
+def test_skip_list_supports_wildcard_prefix_entries(tmp_path):
+    from scripts.check_docs import check_external_links, is_host_skipped, load_skip_hosts
+
+    skip_file = tmp_path / "skip.txt"
+    skip_file.write_text("*.example.org\n", encoding="utf-8")
+    skip_hosts = load_skip_hosts(skip_file)
+    assert is_host_skipped("example.org", skip_hosts)
+    assert is_host_skipped("app.example.org", skip_hosts)
+    assert not is_host_skipped("example.com", skip_hosts)
+
+    call_log = []
+
+    def handler(request: httpx.Request):
+        call_log.append(str(request.url))
+        return httpx.Response(200)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    results = check_external_links(
+        [("README.md:1", "https://sub.example.org/page")],
+        client=client, skip_hosts=skip_hosts, host_delay=0.0)
+    assert len(results) == 1
+    assert results[0]["classification"] == "inconclusive"
+    assert call_log == []
 
 
 def test_external_link_validation_artifact_and_failure_reporting(tmp_path):

@@ -1,5 +1,6 @@
 # Hosts skipped during automated documentation link validation.
-# Empty lines and lines starting with '#' are ignored.
+# An entry covers the host itself and all of its subdomains; an optional "*."
+# prefix is accepted for clarity. Empty lines and lines starting with '#' are ignored.
 example.com
 example.invalid
 localhost
