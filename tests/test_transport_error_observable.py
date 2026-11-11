@@ -225,7 +225,10 @@ class _FakeFormPage:
             raise RuntimeError("post-submit wait boom (slow/streaming)")
 
 
-class _FakeFormBrowser:
+from wscan.browser import BrowserManager
+
+
+class _FakeFormBrowser(BrowserManager):
     """実 BrowserManager.fill_and_submit_form を駆動する最小 fake。"""
 
     def __init__(self, *, result, nav_status=200, wait_raises=False, click_raises=False,

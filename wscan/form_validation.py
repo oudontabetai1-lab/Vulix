@@ -85,3 +85,56 @@ def classify_constraint_block_reason(meta: Mapping[str, Any] | None) -> str | No
     if (meta or {}).get("formValid") is False:
         return "form_invalid"
     return "constraint_validation_blocked"
+
+
+def should_retry_with_validation_bypass(
+    requests_sent_after_submit: int,
+    meta: Mapping[str, Any] | None,
+    reason: str | None,
+) -> bool:
+    """Determine whether to retry form submission with validation bypass.
+
+    A retry is executed ONLY when:
+    1. Zero requests were dispatched after submit (requests_sent_after_submit == 0).
+    2. The failure reason is an undispatched constraint blockage ("submit_not_dispatched"
+       or "target_value_not_successful").
+    3. The in-page meta shows a constraint-validation failure (form or target invalid).
+    4. No requests were dispatched, no navigation/other exceptions occurred, the form
+       and target were found, and the target is not a file input.
+    """
+    if type(requests_sent_after_submit) is not int or requests_sent_after_submit != 0:
+        return False
+
+    if not reason:
+        return False
+
+    if reason in (
+        "delivered",
+        "request_value_unverified",
+        "form_not_found",
+        "target_not_found",
+        "target_is_file",
+        "timeout",
+        "submit_exception",
+        "navigation_error",
+        "exception",
+    ):
+        return False
+
+    if reason not in ("submit_not_dispatched", "target_value_not_successful"):
+        return False
+
+    if not meta or not isinstance(meta, (dict, Mapping)):
+        return False
+
+    if meta.get("isFileInput") or (meta.get("targetType") or "").lower() == "file":
+        return False
+
+    if meta.get("exception"):
+        return False
+
+    if meta.get("error") in ("form not found", "target not found", "target is file"):
+        return False
+
+    return is_blocked_by_constraint_validation(meta)
+

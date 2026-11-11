@@ -23,7 +23,10 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from rich.console import Console
 
 from . import session_guard
-from .form_validation import is_blocked_by_constraint_validation
+from .form_validation import (
+    is_blocked_by_constraint_validation,
+    should_retry_with_validation_bypass,
+)
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
 from .url_normalize import normalize_proxy_server, split_proxy_credentials
@@ -2299,7 +2302,6 @@ class BrowserManager:
                         targetValidity: targetValidity,
                         formValid: formValid,
                         valueMatches: valueMatches,
-                        bypassValidation: bypassValidation,
                     };
                 }
                 """,
@@ -2317,7 +2319,7 @@ class BrowserManager:
                     "target is file": "target_is_file",
                 }.get(error, "target_value_not_successful")
                 source = await self.get_page_source()
-                return source, {}, (result or {})
+                return source, {}, (result or {}), 0
 
             # Submit the form
             submit_btn = await self.page.query_selector(
@@ -2356,33 +2358,46 @@ class BrowserManager:
             pair = next((captured for captured in reversed(self.network.pairs)
                          if _request_carries_form_value(
                              captured, field, payload, submission=result, since=net_before_submit)), None)
-            pair = pair or self.network.best_pair_for_page(action_url) or self.network.latest() or {}
+            requests_sent_after_submit = max(0, self.network.request_count() - net_before_submit)
+            if requests_sent_after_submit > 0 and pair is None:
+                pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
+            elif pair is None:
+                pair = {}
             self.last_probe_delivered = _request_carries_form_value(
                 pair, field, payload, submission=result, since=net_before_submit)
-            self.last_probe_delivery_reason = "delivered" if self.last_probe_delivered else "request_value_unverified"
-            return source, pair, result
+            if self.last_probe_delivered:
+                self.last_probe_delivery_reason = "delivered"
+            elif requests_sent_after_submit > 0:
+                self.last_probe_delivery_reason = "request_value_unverified"
+            else:
+                self.last_probe_delivery_reason = "submit_not_dispatched"
+            return source, pair, result, requests_sent_after_submit
         except Exception as e:
             context = getattr(self.network, "probe_context", None)
             if context is not None:
                 context["failure"] = "timeout" if isinstance(e, (asyncio.TimeoutError,)) or type(e).__name__ == "TimeoutError" else "transport_error"
             # 例外を握りつぶして空 pair を返すが、送達は相関済みrequest本文でのみ確定する。
             pair = self.network.latest() or {}
-            request = (pair.get("request") or {})
             self.last_probe_delivered = bool(result and _request_carries_form_value(
                 pair, result.get("fieldName") or field_name, payload,
                 submission=result, since=net_before_submit))
+            requests_sent = max(0, self.network.request_count() - net_before_submit) if net_before_submit is not None else 0
             if self.last_probe_delivered:
                 self.last_probe_delivery_reason = "delivered"
+            elif requests_sent > 0:
+                self.last_probe_delivery_reason = "request_value_unverified"
+            else:
+                if isinstance(e, asyncio.TimeoutError) or type(e).__name__ == "TimeoutError":
+                    self.last_probe_delivery_reason = "timeout"
+                else:
+                    self.last_probe_delivery_reason = "submit_exception"
             if not self.last_probe_delivered:
-                sent_after_submit = bool(
-                    net_before_submit is not None
-                    and request.get("_capture_sequence", 0) > net_before_submit
-                )
-                self.last_probe_delivery_reason = (
-                    "request_value_unverified" if sent_after_submit else "submit_not_dispatched"
-                )
+                pair = {}
+            meta_res = dict(result or {})
+            meta_res["exception"] = type(e).__name__
+            meta_res["error"] = str(e) or type(e).__name__
             source = await self.get_page_source()
-            return source, {}, (result or {})
+            return source, pair, meta_res, requests_sent
 
     @_bind_probe_capture
     async def fill_and_submit_form(
@@ -2393,28 +2408,22 @@ class BrowserManager:
         safe_values: Optional[dict] = None,
     ) -> tuple[str, dict]:
         """Fill a form field with payload and submit. Returns (page_source, network_pair)."""
+        self.reset_dialog()
         self.network.clear()
-        runner = getattr(self, "_fill_and_submit_form_once", None)
-        if runner is not None:
-            source, pair, meta = await runner(
-                form_index, field_name, payload, safe_values, bypass_validation=False
+        source, pair, meta, reqs_sent = await self._fill_and_submit_form_once(
+            form_index, field_name, payload, safe_values, bypass_validation=False
+        )
+        if not self.last_probe_delivered and should_retry_with_validation_bypass(
+            reqs_sent, meta, self.last_probe_delivery_reason
+        ):
+            # Evidence isolation: clear network captures and reset dialog between attempts
+            # so attempt 1 state never leaks into attempt 2 evidence.
+            self.reset_dialog()
+            self.network.clear()
+            self.network.probe_context = None
+            bypass_source, bypass_pair, _, _ = await self._fill_and_submit_form_once(
+                form_index, field_name, payload, safe_values, bypass_validation=True
             )
-        else:
-            source, pair, meta = await BrowserManager._fill_and_submit_form_once(
-                self, form_index, field_name, payload, safe_values, bypass_validation=False
-            )
-        if not self.last_probe_delivered and is_blocked_by_constraint_validation(meta):
-            # クライアント側制約検証（HTML5 constraint validation / type / maxlength 等）で
-            # 送達が阻止された場合、同一 probe を validation bypass（form.noValidate = true,
-            # 一時的 type=text 化、maxlength 除去等）で 1 回だけ再試行する。
-            if runner is not None:
-                bypass_source, bypass_pair, _ = await runner(
-                    form_index, field_name, payload, safe_values, bypass_validation=True
-                )
-            else:
-                bypass_source, bypass_pair, _ = await BrowserManager._fill_and_submit_form_once(
-                    self, form_index, field_name, payload, safe_values, bypass_validation=True
-                )
             return bypass_source, bypass_pair
         return source, pair
 

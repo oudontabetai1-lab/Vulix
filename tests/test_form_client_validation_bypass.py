@@ -244,6 +244,130 @@ async def test_js_validated_form_behavior():
             assert len(received) == 0
             # 2. 送達フラグが False であり、理由が記録されていること
             assert not b.last_probe_delivered
-            assert b.last_probe_delivery_reason in ("request_value_unverified", "submit_not_dispatched")
+            assert b.last_probe_delivery_reason == "submit_not_dispatched"
         finally:
             await b.close()
+
+
+@pytest.mark.asyncio
+async def test_counting_endpoint_at_most_one_request_per_probe():
+    """State-changing counting endpoint proves at most one request is sent per probe."""
+    app = FastAPI()
+    call_counts = {"novalidate": 0, "constrained": 0, "unverified": 0}
+
+    @app.get("/count/novalidate", response_class=HTMLResponse)
+    async def page_novalidate():
+        return HTMLResponse(
+            '<form action="/count/submit_novalidate" method="post" novalidate>'
+            '<input type="url" name="dest" required>'
+            '<button type="submit">Submit</button>'
+            '</form>'
+        )
+
+    @app.post("/count/submit_novalidate", response_class=HTMLResponse)
+    async def submit_novalidate():
+        call_counts["novalidate"] += 1
+        return HTMLResponse("ok")
+
+    @app.get("/count/constrained", response_class=HTMLResponse)
+    async def page_constrained():
+        return HTMLResponse(
+            '<form action="/count/submit_constrained" method="post">'
+            '<input type="url" name="dest" required>'
+            '<button type="submit">Submit</button>'
+            '</form>'
+        )
+
+    @app.post("/count/submit_constrained", response_class=HTMLResponse)
+    async def submit_constrained():
+        call_counts["constrained"] += 1
+        return HTMLResponse("ok")
+
+    @app.get("/count/unverified", response_class=HTMLResponse)
+    async def page_unverified():
+        # Dispatches a request without payload value upon submit
+        return HTMLResponse(
+            '<form action="/count/submit_unverified" method="post">'
+            '<input type="text" name="other" value="fixed">'
+            '<button type="submit">Submit</button>'
+            '</form>'
+        )
+
+    @app.post("/count/submit_unverified", response_class=HTMLResponse)
+    async def submit_unverified():
+        call_counts["unverified"] += 1
+        return HTMLResponse("ok")
+
+    with serving(app) as url:
+        b = BrowserManager(headless=True, timeout=5)
+        await b.init()
+        try:
+            # 1. Novalidate form: Dispatches request on attempt 1.
+            # Must NOT retry; server receives at most 1 request.
+            assert await b.navigate(url + "/count/novalidate")
+            source, pair = await b.fill_and_submit_form(0, "dest", "payload_str")
+            assert call_counts["novalidate"] == 1, "Novalidate form must receive at most 1 request"
+
+            # 2. Constrained form: Blocked by browser validation on attempt 1 (0 requests),
+            # retried with bypass on attempt 2 (1 request). Server receives at most 1 request.
+            assert await b.navigate(url + "/count/constrained")
+            source, pair = await b.fill_and_submit_form(0, "dest", "payload_str")
+            assert call_counts["constrained"] == 1, "Constrained form retry must result in at most 1 request"
+            assert b.last_probe_delivered
+
+            # 3. Request dispatched but value unverified: Must NOT retry; at most 1 request.
+            assert await b.navigate(url + "/count/unverified")
+            source, pair = await b.fill_and_submit_form(0, "dest", "payload_str")
+            assert call_counts["unverified"] <= 1, "Unverified dispatch must never retry"
+        finally:
+            await b.close()
+
+
+@pytest.mark.asyncio
+async def test_evidence_isolation_between_attempts():
+    """Attempt 1 network capture and probe context must not leak into attempt 2 evidence."""
+    app = FastAPI()
+
+    @app.get("/iso_form", response_class=HTMLResponse)
+    async def form_page():
+        return HTMLResponse(
+            '<form action="/iso_submit" method="post">'
+            '<input type="url" name="dest" required>'
+            '<button type="submit">Submit</button>'
+            '</form>'
+        )
+
+    @app.post("/iso_submit", response_class=HTMLResponse)
+    async def submit_page():
+        return HTMLResponse("<html><body>Submitted</body></html>")
+
+    @app.get("/background_noise", response_class=HTMLResponse)
+    async def noise():
+        return HTMLResponse("noise")
+
+    with serving(app) as url:
+        b = BrowserManager(headless=True, timeout=5)
+        await b.init()
+        try:
+            assert await b.navigate(url + "/iso_form")
+
+            # Inject a background request right before fill_and_submit_form
+            await b.page.evaluate(f"fetch('{url}/background_noise')")
+            await asyncio.sleep(0.1)
+
+            source, pair = await b.fill_and_submit_form(0, "dest", "payload_123")
+            assert b.last_probe_delivered
+            # Returned pair must be the form submission carrier, NOT the background noise
+            req_url = (pair.get("request") or {}).get("url", "")
+            assert "/iso_submit" in req_url, f"Evidence pair leaked background request: {req_url}"
+            assert "/background_noise" not in req_url
+
+            # All pairs in b.network.pairs must belong only to the delivered attempt
+            for captured in b.network.pairs:
+                captured_url = (captured.get("request") or {}).get("url", "")
+                assert "/background_noise" not in captured_url, (
+                    f"Attempt 1 background request leaked into attempt 2 pairs: {captured_url}"
+                )
+        finally:
+            await b.close()
+
