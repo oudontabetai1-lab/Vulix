@@ -1,7 +1,9 @@
+import json
 from pathlib import Path
 import shutil
 import subprocess
 
+import httpx
 import pytest
 
 import scripts.check_docs as check_docs
@@ -225,4 +227,205 @@ def test_pure_functions_config_drift_detection():
     assert diff[0].line == 11
     assert diff[0].target == "scan.depht"
     assert "scan.depth" in diff[0].reason
+
+
+def test_external_link_status_classifier():
+    from scripts.check_docs import classify_http_status
+
+    # 2xx / 3xx -> ok
+    assert classify_http_status(200) == "ok"
+    assert classify_http_status(204) == "ok"
+    assert classify_http_status(301) == "ok"
+    assert classify_http_status(302) == "ok"
+
+    # Only 404 / 410 -> broken
+    assert classify_http_status(404) == "broken"
+    assert classify_http_status(410) == "broken"
+
+    # 401, 403, 429, 5xx, or network errors -> inconclusive
+    assert classify_http_status(401) == "inconclusive"
+    assert classify_http_status(403) == "inconclusive"
+    assert classify_http_status(429) == "inconclusive"
+    assert classify_http_status(500) == "inconclusive"
+    assert classify_http_status(502) == "inconclusive"
+    assert classify_http_status(503) == "inconclusive"
+    assert classify_http_status(None, exc=httpx.ConnectTimeout("timeout")) == "inconclusive"
+    assert classify_http_status(None, exc=httpx.ConnectError("dns fail")) == "inconclusive"
+
+
+def test_external_link_head_with_get_fallback():
+    from scripts.check_docs import check_url
+
+    # Case 1: HEAD returns 405 (method not allowed), GET returns 200
+    def handler_405_then_200(request: httpx.Request):
+        if request.method == "HEAD":
+            return httpx.Response(405)
+        return httpx.Response(200, text="OK")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler_405_then_200))
+    status, classification = check_url("https://mock.test/page", client, max_retries=1, backoff_factor=0.0)
+    assert status == 200
+    assert classification == "ok"
+
+    # Case 2: HEAD returns 404, but GET returns 200 (e.g. dynamic page)
+    def handler_head_404_get_200(request: httpx.Request):
+        if request.method == "HEAD":
+            return httpx.Response(404)
+        return httpx.Response(200, text="Found via GET")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler_head_404_get_200))
+    status, classification = check_url("https://mock.test/page2", client, max_retries=1, backoff_factor=0.0)
+    assert status == 200
+    assert classification == "ok"
+
+    # Case 3: HEAD returns 404 and GET returns 404 -> broken
+    def handler_404_all(request: httpx.Request):
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler_404_all))
+    status, classification = check_url("https://mock.test/absent", client, max_retries=2, backoff_factor=0.0)
+    assert status == 404
+    assert classification == "broken"
+
+    # Case 4: HEAD returns 410 and GET returns 410 -> broken
+    def handler_410_all(request: httpx.Request):
+        return httpx.Response(410)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler_410_all))
+    status, classification = check_url("https://mock.test/gone", client, max_retries=2, backoff_factor=0.0)
+    assert status == 410
+    assert classification == "broken"
+
+    # Case 5: 403 / 429 / 500 are inconclusive, never broken
+    for code in (401, 403, 429, 500, 503):
+        client = httpx.Client(transport=httpx.MockTransport(lambda req, c=code: httpx.Response(c)))
+        status, classification = check_url("https://mock.test/gate", client, max_retries=1, backoff_factor=0.0)
+        assert status == code
+        assert classification == "inconclusive"
+
+
+def test_external_link_retry_with_transient_recovery():
+    from scripts.check_docs import check_url
+
+    attempts = {"count": 0}
+
+    def transient_handler(request: httpx.Request):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise httpx.ConnectError("Transient network drop")
+        return httpx.Response(200)
+
+    client = httpx.Client(transport=httpx.MockTransport(transient_handler))
+    status, classification = check_url("https://mock.test/flaky", client, max_retries=2, backoff_factor=0.0)
+    assert status == 200
+    assert classification == "ok"
+    assert attempts["count"] == 3
+
+
+def test_external_link_skip_list_and_subdomains(tmp_path):
+    from scripts.check_docs import is_host_skipped, load_skip_hosts, check_external_links
+
+    skip_file = tmp_path / "skip.txt"
+    skip_file.write_text("# Comment\nexample.com\nlocalhost\n\n", encoding="utf-8")
+    skip_hosts = load_skip_hosts(skip_file)
+    assert "example.com" in skip_hosts
+    assert "localhost" in skip_hosts
+
+    assert is_host_skipped("example.com", skip_hosts)
+    assert is_host_skipped("app.example.com", skip_hosts)
+    assert is_host_skipped("sub.app.example.com", skip_hosts)
+    assert is_host_skipped("localhost", skip_hosts)
+    assert is_host_skipped("localhost:8080", skip_hosts)
+    assert not is_host_skipped("other.org", skip_hosts)
+
+    # Check that skipped hosts never invoke the client
+    call_log = []
+    def fail_transport(request: httpx.Request):
+        call_log.append(request.url)
+        return httpx.Response(200)
+
+    client = httpx.Client(transport=httpx.MockTransport(fail_transport))
+    links = [("README.md", 10, "https://example.com/test"), ("README.md", 20, "https://app.example.com/path")]
+    results = check_external_links(links, client=client, skip_hosts=skip_hosts, host_delay=0.0)
+    assert len(results) == 2
+    assert all(r["classification"] == "inconclusive" for r in results)
+    assert call_log == []  # No requests made
+
+
+def test_external_link_validation_artifact_and_failure_reporting(tmp_path):
+    from scripts.check_docs import validate_external_links
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("""# Docs
+[good link](https://api.test/good)
+[broken link](https://api.test/bad)
+[inconclusive link](https://api.test/protected)
+[skipped link](https://example.com/skip)
+""", encoding="utf-8")
+
+    def mock_server(request: httpx.Request):
+        url = str(request.url)
+        if "/good" in url:
+            return httpx.Response(200)
+        if "/bad" in url:
+            return httpx.Response(404)
+        if "/protected" in url:
+            return httpx.Response(403)
+        return httpx.Response(500)
+
+    report_file = tmp_path / "out" / "links-report.json"
+    client = httpx.Client(transport=httpx.MockTransport(mock_server))
+
+    results, findings = validate_external_links(
+        root=root,
+        report_path=report_file,
+        client=client,
+        host_delay=0.0,
+        max_retries=1,
+        backoff_factor=0.0,
+    )
+
+    # Check report file was written
+    assert report_file.is_file()
+    saved = json.loads(report_file.read_text(encoding="utf-8"))
+    assert len(saved) == 4
+    by_url = {item["url"]: item for item in saved}
+    assert by_url["https://api.test/good"]["classification"] == "ok"
+    assert by_url["https://api.test/good"]["status"] == 200
+    assert by_url["https://api.test/bad"]["classification"] == "broken"
+    assert by_url["https://api.test/bad"]["status"] == 404
+    assert by_url["https://api.test/protected"]["classification"] == "inconclusive"
+    assert by_url["https://api.test/protected"]["status"] == 403
+    assert by_url["https://example.com/skip"]["classification"] == "inconclusive"
+
+    # Only "broken" fails the job
+    assert len(findings) == 1
+    assert findings[0].target == "https://api.test/bad"
+    assert "broken external link (HTTP 404)" in findings[0].reason
+
+
+def test_external_link_cli_main(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("[good](https://api.test/ok)\n[missing](https://api.test/not-found)\n", encoding="utf-8")
+
+    def mock_server(request: httpx.Request):
+        if "not-found" in str(request.url):
+            return httpx.Response(404)
+        return httpx.Response(200)
+
+    # Monkeypatch httpx.Client so no network is accessed
+    real_client_init = httpx.Client
+    monkeypatch.setattr(check_docs.httpx, "Client",
+                        lambda *args, **kwargs: real_client_init(*args, transport=httpx.MockTransport(mock_server), **kwargs))
+
+    report = tmp_path / "report.json"
+    exit_code = check_docs.main(["--root", str(root), "--external", "--external-report", str(report)])
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "broken external link (HTTP 404)" in err
+    assert report.is_file()
+
+
 
