@@ -7181,6 +7181,21 @@ class ScanEngine:
                     continue
                 self.browser.reset_dialog()
 
+                # 結合送信前のフォームページを baseline として控える。単一フィールド経路と同じく、
+                # 「注入前から在る」マーカー（ページ自身の <script> / 自前ハンドラ / SQL エラー風文言）
+                # を payload の証拠としないための比較対象。応答本文が取れるときはそれを優先する
+                # （DOM 直列化は属性値を再エスケープし、反射の有無を歪めるため）。
+                baseline_source = ""
+                try:
+                    baseline_source = await self.browser.get_page_source()
+                    if check_name == "xss" and xss_scanner is not None:
+                        _body_for = getattr(xss_scanner, "_response_body_for", None)
+                        _base_body = _body_for(page.url) if callable(_body_for) else ""
+                        if _base_body:
+                            baseline_source = _base_body
+                except Exception:
+                    baseline_source = ""
+
                 # 結合送信で各フィールドへ投入する payload を、単一パラメータ経路と同じく
                 # BaseScanner.log_payload_test（payloads.jsonl の一元記録）へ送信前に残す。
                 for _fname, _fpayload in field_payloads.items():
@@ -7192,6 +7207,20 @@ class ScanEngine:
                     dom_idx, field_payloads
                 )
                 await asyncio.sleep(self._effective_delay)
+
+                # 送達しなかった結合 probe では判定しない（ページ内容だけを根拠にしない）。
+                # 単一フィールド経路と同じ transport_error ノートを注入点 identity 付きで残す。
+                delivered = getattr(self.browser, "last_probe_delivered", True)
+                if not delivered:
+                    _record_note = getattr(scanner, "_record_scan_note", None)
+                    if callable(_record_note):
+                        _delivery_note = getattr(scanner, "_probe_delivery_note", None)
+                        _note = (
+                            _delivery_note(multi_ip, "probe_not_delivered")
+                            if callable(_delivery_note)
+                            else f"transport_error:{check_name}:probe_not_delivered"
+                        )
+                        _record_note(_note)
 
                 # CTF flag check on combined result
                 if self.flag_finder and source:
@@ -7214,10 +7243,19 @@ class ScanEngine:
                             dialog_message=self.browser.dialog_message,
                         )
                         self._record_finding(f, source="multi-param")
-                    elif source:
+                    elif delivered and source:
+                        # DOM 直列化は属性値を再エスケープするため、捕捉した生応答本文を優先する。
+                        reflect_source = (
+                            (pair.get("response", {}) or {}).get("body") or source
+                        )
                         for fname, p in field_payloads.items():
-                            reflected = xss_scanner._check_reflected(source, p)
-                            if reflected:
+                            reflected = xss_scanner._check_reflected(
+                                reflect_source, p, baseline_source
+                            )
+                            # 結合送信は field 単位の応答相関を持たないため、一般的なマーカー
+                            # （<script> / alert( 等）だけでは帰属できない。payload 自身が
+                            # そのまま反射していることを要求する。
+                            if reflected and p in reflect_source:
                                 f = await xss_scanner.record_finding(
                                     url=page.url,
                                     field_name=f"multi[{','.join(field_payloads)}]",
@@ -7233,7 +7271,7 @@ class ScanEngine:
                                 break
 
                 # ── SQLi detection ─────────────────────────────────────
-                elif check_name == "sqli" and sqli_scanner and source:
+                elif check_name == "sqli" and sqli_scanner and delivered and source:
                     sqli_patterns = [
                         r"SQL syntax.*MySQL", r"Warning.*mysql_",
                         r"PostgreSQL.*ERROR", r"ORA-\d{5}",
@@ -7243,6 +7281,9 @@ class ScanEngine:
                         r"Unclosed quotation mark",
                     ]
                     matched = sqli_scanner.check_response_for_patterns(source, sqli_patterns)
+                    # baseline に既にある文言はページ本来の内容（payload 起因ではない）。
+                    if matched and matched.lower() in (baseline_source or "").lower():
+                        matched = None
                     if matched:
                         f = await sqli_scanner.record_finding(
                             url=page.url,
