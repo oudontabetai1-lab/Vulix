@@ -1,9 +1,10 @@
-"""Validate local Markdown references and documented Vulix CLI options offline."""
+"""Validate local Markdown references, documented CLI options, and configuration examples offline."""
 from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+import difflib
 import html
 import io
 from pathlib import Path
@@ -12,6 +13,8 @@ import shlex
 import subprocess
 import sys
 from urllib.parse import unquote, urlsplit
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -23,6 +26,36 @@ _REF_USE = re.compile(r"(!?)\[([^]\n]+)\](?:\[([^]\n]*)\])?")
 _ANCHOR = re.compile(r"<a\s+[^>]*(?:id|name)\s*=\s*(['\"])(.*?)\1", re.I)
 _OPTION_TOKEN = re.compile(r"^--?[A-Za-z][A-Za-z0-9-]*(?:=.*)?$")
 _CLI_COMMAND = re.compile(r"^(?:python(?:3(?:\.\d+)?)?\s+(?:main\.py|-m\s+vulix)|vulix)\b")
+
+KNOWN_CONFIG_SECTIONS = {
+    "accounts",
+    "auth",
+    "browser",
+    "component_intel",
+    "ctf",
+    "features",
+    "learning",
+    "llm",
+    "monitor",
+    "notifications",
+    "output",
+    "planner",
+    "scan",
+}
+
+OPTIONAL_CONFIG_KEYS: dict[str, str] = {
+    "scan.allow_state_changing_probes": "commented safety toggle in config/wscan.yaml",
+    "features.tls_scan": "engine-supported optional TLS scan feature flag",
+    "features.token_lifecycle_manager": "engine-supported optional token lifecycle manager flag",
+    "llm.models.planner": "documented planner role model override subkey under llm.models",
+    "llm.models.payload": "documented payload role model override subkey under llm.models",
+    "llm.models.adaptive": "documented adaptive role model override subkey under llm.models",
+    "llm.models.triage": "documented triage role model override subkey under llm.models",
+    "llm.models.report": "documented report role model override subkey under llm.models",
+    "accounts.list.username": "documented account item field in config/wscan.yaml",
+    "accounts.list.password": "documented account item field in config/wscan.yaml",
+    "accounts.list.role": "documented account item field in config/wscan.yaml",
+}
 
 
 @dataclass(frozen=True)
@@ -262,6 +295,147 @@ def _check_cli(root: Path, path: Path, text: str, parser, findings: list[Finding
                                         "arguments are rejected by the Vulix CLI parser"))
 
 
+def collect_config_key_paths(config_data: dict | None = None, config_path: Path | None = None) -> set[str]:
+    """Recursively collect all valid dot-delimited key paths from config data or file."""
+    if config_data is None:
+        if config_path and config_path.is_file():
+            try:
+                config_data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                config_data = {}
+        else:
+            config_data = {}
+
+    paths: set[str] = set()
+
+    def _walk(node, prefix: str = "") -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                path = f"{prefix}.{k}" if prefix else str(k)
+                paths.add(path)
+                _walk(v, path)
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, dict):
+                    _walk(item, prefix)
+
+    _walk(config_data)
+    return paths
+
+
+def extract_yaml_blocks(text: str) -> list[tuple[int, str, str]]:
+    """Extract fenced ```yaml or ```yml code blocks as (start_line, info, content)."""
+    lines = text.splitlines(keepends=True)
+    i = 0
+    fence = None
+    fence_info = ""
+    start_line = 0
+    block_lines: list[str] = []
+    blocks: list[tuple[int, str, str]] = []
+    while i < len(lines):
+        line = lines[i]
+        marker = _FENCE.match(line)
+        if fence is None and marker:
+            info = line[marker.end():].strip()
+            first_word = info.split()[0].lower() if info.split() else ""
+            if first_word in ("yaml", "yml") or "wscan.yaml" in info.lower() or "vulix-config" in info.lower():
+                fence = marker.group(1)
+                fence_info = info
+                start_line = i + 2  # 1-indexed first line inside block
+                block_lines = []
+            i += 1
+            continue
+        if fence is not None and marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+            blocks.append((start_line, fence_info, "".join(block_lines)))
+            fence = None
+            fence_info = ""
+            block_lines = []
+            i += 1
+            continue
+        if fence is not None:
+            block_lines.append(line)
+        i += 1
+    return blocks
+
+
+def is_vulix_config_example(content: str, info: str = "", known_sections: set[str] | None = None) -> bool:
+    """Decide if a YAML block represents a Vulix configuration example."""
+    marker_patterns = ("config/wscan.yaml", "wscan.yaml", "vulix-config")
+    combined_header = f"{info}\n{content[:200]}".lower()
+    if any(marker in combined_header for marker in marker_patterns):
+        return True
+
+    sections = known_sections if known_sections is not None else KNOWN_CONFIG_SECTIONS
+    try:
+        data = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return any(marker in content.lower() for marker in marker_patterns)
+
+    if isinstance(data, dict):
+        return bool(set(data.keys()) & sections)
+    return False
+
+
+def find_nearest_key(unknown_path: str, valid_paths: set[str]) -> str:
+    """Find the closest valid key path using prefix locality and string similarity."""
+    if not valid_paths:
+        return ""
+    if "." in unknown_path:
+        prefix = unknown_path.rsplit(".", 1)[0]
+        same_prefix = [p for p in valid_paths if p.startswith(prefix + ".") or p == prefix]
+        matches = difflib.get_close_matches(unknown_path, same_prefix, n=1, cutoff=0.1)
+        if matches:
+            return matches[0]
+    matches = difflib.get_close_matches(unknown_path, list(valid_paths), n=1, cutoff=0.1)
+    if matches:
+        return matches[0]
+    return min(valid_paths, key=lambda p: difflib.SequenceMatcher(None, unknown_path, p).ratio())
+
+
+def compare_config_example_keys(block_text: str, start_line: int, file_path: str,
+                                valid_paths: set[str]) -> list[Finding]:
+    """Verify that every key path in a configuration block exists in valid_paths."""
+    findings: list[Finding] = []
+    try:
+        nodes = list(yaml.compose_all(block_text))
+    except yaml.YAMLError as exc:
+        return [Finding(file_path, start_line, "YAML syntax",
+                        f"malformed YAML configuration example: {exc}")]
+
+    def _check_node(node, prefix: str = "") -> None:
+        if isinstance(node, yaml.MappingNode):
+            for k_node, v_node in node.value:
+                key = str(k_node.value)
+                path = f"{prefix}.{key}" if prefix else key
+                line = start_line + k_node.start_mark.line
+                if path not in valid_paths:
+                    nearest = find_nearest_key(path, valid_paths)
+                    findings.append(Finding(
+                        file_path, line, path,
+                        f"unknown configuration key path (nearest valid key: '{nearest}')"
+                    ))
+                _check_node(v_node, path)
+        elif isinstance(node, yaml.SequenceNode):
+            for item in node.value:
+                if isinstance(item, yaml.MappingNode):
+                    _check_node(item, prefix)
+
+    for doc in nodes:
+        if doc is not None:
+            _check_node(doc)
+
+    return findings
+
+
+def check_config_examples(root: Path, path: Path, text: str, valid_paths: set[str],
+                          findings: list[Finding]) -> None:
+    """Find and validate all Vulix configuration examples within a Markdown document."""
+    rel_path = path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)
+    for start_line, info, content in extract_yaml_blocks(text):
+        if is_vulix_config_example(content, info):
+            findings.extend(compare_config_example_keys(content, start_line, rel_path, valid_paths))
+
+
 def validate(root: Path = ROOT, documents: list[Path] | None = None) -> list[Finding]:
     root = root.resolve()
     documents = _markdown_files(root) if documents is None else documents
@@ -269,6 +443,10 @@ def validate(root: Path = ROOT, documents: list[Path] | None = None) -> list[Fin
     contents = {}
     anchors = {}
     parser = None
+    config_file = root / "config" / "wscan.yaml"
+    if not config_file.is_file() and (ROOT / "config" / "wscan.yaml").is_file():
+        config_file = ROOT / "config" / "wscan.yaml"
+    valid_config_keys = collect_config_key_paths(config_path=config_file) | set(OPTIONAL_CONFIG_KEYS.keys())
     for path in documents:
         path = path if path.is_absolute() else root / path
         try:
@@ -291,6 +469,7 @@ def validate(root: Path = ROOT, documents: list[Path] | None = None) -> list[Fin
             problem = _check_target(root, source, target, line, anchors)
             if problem:
                 findings.append(problem)
+        check_config_examples(root, source, text, valid_config_keys, findings)
         if source.name == "README.md" or "docs" in source.relative_to(root).parts:
             if parser is None:
                 import main
@@ -309,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
     if findings:
         print(f"documentation validation: {len(findings)} finding(s)", file=sys.stderr)
         return 1
-    print("documentation validation: local Markdown references and CLI examples are valid")
+    print("documentation validation: local Markdown references, CLI examples, and configuration examples are valid")
     return 0
 
 

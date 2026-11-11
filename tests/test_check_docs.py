@@ -88,3 +88,141 @@ def test_real_cli_command_returns_nonzero_with_location_for_broken_fixture(tmp_p
     output = capsys.readouterr().err
     assert "README.md:3: absent.md" in output
     assert "--not-a-vulix-option" in output
+
+
+def test_valid_yaml_config_example_passes_cleanly(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("""# Guide
+```yaml
+scan:
+  depth: 2
+  checks:
+    - sqli
+    - xss
+browser:
+  headless: true
+```
+""", encoding="utf-8")
+    findings = validate(root, [Path("README.md")])
+    assert findings == []
+
+
+def test_optional_allowlisted_config_keys_are_permitted(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("""# Advanced Config
+```yaml
+# config/wscan.yaml
+scan:
+  allow_state_changing_probes: true
+features:
+  tls_scan: true
+  token_lifecycle_manager: true
+llm:
+  models:
+    planner: gpt-4o
+    payload: claude-3-haiku
+accounts:
+  list:
+    - username: admin
+      password: secret
+      role: admin
+```
+""", encoding="utf-8")
+    findings = validate(root, [Path("README.md")])
+    assert findings == []
+
+
+def test_non_config_yaml_blocks_are_ignored(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("""# Batch Guide
+```yaml
+global:
+  depth: 2
+  headless: true
+targets:
+  - url: https://app.example.invalid
+```
+""", encoding="utf-8")
+    findings = validate(root, [Path("README.md")])
+    assert findings == []
+
+
+def test_unknown_and_typo_config_key_reports_line_path_and_nearest_key(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("""# Documentation
+Some text before.
+```yaml
+scan:
+  depht: 3
+  request_dlay: 1.0
+  completely_unknown_setting: 42
+browser:
+  headles: true
+```
+""", encoding="utf-8")
+    findings = validate(root, [Path("README.md")])
+    rendered = "\n".join(map(str, findings))
+    assert "README.md:5: scan.depht: unknown configuration key path (nearest valid key: 'scan.depth')" in rendered
+    assert "README.md:6: scan.request_dlay: unknown configuration key path (nearest valid key: 'scan.request_delay')" in rendered
+    assert "README.md:7: scan.completely_unknown_setting: unknown configuration key path" in rendered
+    assert "README.md:9: browser.headles: unknown configuration key path (nearest valid key: 'browser.headless')" in rendered
+
+
+def test_malformed_yaml_config_example_fails_explicitly(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("""# Broken YAML
+```yaml # config/wscan.yaml
+scan:
+  checks: [unclosed list
+```
+""", encoding="utf-8")
+    findings = validate(root, [Path("README.md")])
+    assert len(findings) == 1
+    assert findings[0].line == 3
+    assert "malformed YAML configuration example" in findings[0].reason
+
+
+def test_pure_functions_config_drift_detection():
+    from scripts.check_docs import (
+        collect_config_key_paths,
+        extract_yaml_blocks,
+        find_nearest_key,
+        is_vulix_config_example,
+        compare_config_example_keys,
+    )
+    raw_config = {
+        "scan": {"depth": 2, "checks": ["sqli"]},
+        "browser": {"headless": False},
+    }
+    keys = collect_config_key_paths(raw_config)
+    assert keys == {"scan", "scan.depth", "scan.checks", "browser", "browser.headless"}
+
+    # extract_yaml_blocks
+    blocks = extract_yaml_blocks("prose\n```yaml\nkey: val\n```\n")
+    assert len(blocks) == 1
+    assert blocks[0][0] == 3
+    assert blocks[0][2] == "key: val\n"
+
+    # is_vulix_config_example
+    assert is_vulix_config_example("scan:\n  depth: 2\n")
+    assert is_vulix_config_example("# config/wscan.yaml\ncustom: 1\n")
+    assert not is_vulix_config_example("global:\n  depth: 2\n")
+
+    # find_nearest_key
+    assert find_nearest_key("scan.depht", keys) == "scan.depth"
+    assert find_nearest_key("browser.headles", keys) == "browser.headless"
+
+    # compare_config_example_keys
+    sample = "scan:\n  depht: 2\n"
+    diff = compare_config_example_keys(sample, 10, "doc.md", keys)
+    assert len(diff) == 1
+    assert diff[0].path == "doc.md"
+    assert diff[0].line == 11
+    assert diff[0].target == "scan.depht"
+    assert "scan.depth" in diff[0].reason
+

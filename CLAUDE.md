@@ -122,6 +122,9 @@ diff が大きいほど意図した変更が埋もれる／「ついで修正」
 ```bash
 pip install -r requirements.txt && playwright install chromium
 
+# ドキュメント検証（ローカル参照・CLI例・設定ドリフト検証）
+python scripts/check_docs.py
+
 # テスト（CI と同一。push 前に必ず通す）
 pytest -q --ignore=tests/test_end_to_end_scan.py
 pytest -q tests/test_ui_app_screens_e2e.py            # /app 主要8画面 E2E（要 Chromium）
