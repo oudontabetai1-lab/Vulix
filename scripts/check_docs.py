@@ -27,6 +27,7 @@ DEFAULT_SKIP_FILE = ROOT / "config" / "docs_link_skip.txt"
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _REFERENCE = re.compile(r"^ {0,3}\[([^]]+)\]:\s*(?:<([^>]+)>|(\S+))", re.M)
 _INLINE = re.compile(r"(!?)\[([^]\n]+)\]\(\s*(<[^>\n]*>|(?:\\.|[^()\s]|\([^()\n]*\))*)(?:\s+['\"][^\n]*?['\"])?\s*\)")
+_AUTOLINK = re.compile(r"<(https?://[^<>\s]+)>", re.I)
 _REF_USE = re.compile(r"(!?)\[([^]\n]+)\](?:\[([^]\n]*)\])?")
 _ANCHOR = re.compile(r"<a\s+[^>]*(?:id|name)\s*=\s*(['\"])(.*?)\1", re.I)
 _OPTION_TOKEN = re.compile(r"^--?[A-Za-z][A-Za-z0-9-]*(?:=.*)?$")
@@ -170,6 +171,21 @@ def _markdown_targets(text: str, path: str, findings: list[Finding]):
     for match in re.finditer(r"!\[[^]\n]+\](?![ \t]*[([])", body):
         findings.append(Finding(path, body.count("\n", 0, match.start()) + 1,
                                 match.group(0), "image is missing a Markdown destination"))
+    # Autolinks (<https://…>) outside code and outside consumed link syntax
+    # are external targets too; malformed non-http autolinks are left alone
+    # so offline validation behavior stays unchanged.
+    for match in _AUTOLINK.finditer(body):
+        if any(consumed[match.start():match.end()]):
+            continue
+        url = match.group(1)
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+            targets.append((match.start(), url))
+            for pos in range(match.start(), match.end()):
+                consumed[pos] = True
     return [(body.count("\n", 0, pos) + 1, target) for pos, target in targets]
 
 
@@ -473,7 +489,8 @@ def is_host_skipped(host: str, skip_hosts: set[str]) -> bool:
     if ":" in host:
         host = host.split(":", 1)[0]
     for pattern in skip_hosts:
-        if host == pattern or host.endswith("." + pattern):
+        entry = pattern[2:] if pattern.startswith("*.") else pattern
+        if host == entry or host.endswith("." + entry):
             return True
     return False
 
@@ -568,8 +585,63 @@ def extract_external_links(documents: list[Path], root: Path = ROOT) -> list[tup
     return links
 
 
+_CATALOG_RELPATH = "wscan/check_catalog.json"
+
+
+def collect_catalog_reference_urls(root: Path = ROOT) -> list[tuple[str, str]]:
+    """Collect reference URLs from the check catalog (the source of truth the
+    generated check reference pages render), as (source label, url) pairs."""
+    path = root / _CATALOG_RELPATH
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    checks = data.get("checks") if isinstance(data, dict) else None
+    if not isinstance(checks, dict):
+        return []
+    refs: list[tuple[str, str]] = []
+    for check_id in sorted(checks):
+        entry = checks[check_id]
+        raw_refs = entry.get("references") if isinstance(entry, dict) else None
+        if not isinstance(raw_refs, list):
+            continue
+        for ref in raw_refs:
+            url = ref.get("url") if isinstance(ref, dict) else None
+            if not isinstance(url, str):
+                continue
+            try:
+                parsed = urlsplit(url)
+            except ValueError:
+                continue
+            if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+                refs.append((f"{_CATALOG_RELPATH}#{check_id}", url))
+    return refs
+
+
+def collect_external_links(documents: list[Path], root: Path = ROOT) -> list[tuple[str, str]]:
+    """Collect every external target as (source label, url) pairs.
+
+    Sources are Markdown links and autolinks in the documents plus the check
+    catalog reference URLs. Identical (source, url) occurrences are collapsed,
+    while the same URL found at several source locations stays listed once per
+    location; each URL is still requested at most one time.
+    """
+    pairs: list[tuple[str, str]] = []
+    for rel_path, line, url in extract_external_links(documents, root):
+        pairs.append((f"{rel_path}:{line}", url))
+    pairs.extend(collect_catalog_reference_urls(root))
+    seen: set[tuple[str, str]] = set()
+    deduped: list[tuple[str, str]] = []
+    for source, url in pairs:
+        if (url, source) in seen:
+            continue
+        seen.add((url, source))
+        deduped.append((source, url))
+    return deduped
+
+
 def check_external_links(
-    links: list[tuple[str, int, str]],
+    links: list[tuple[str, str]],
     *,
     client: httpx.Client | None = None,
     skip_hosts: set[str] | None = None,
@@ -579,7 +651,13 @@ def check_external_links(
     backoff_factor: float = 0.5,
     user_agent: str = DEFAULT_USER_AGENT,
 ) -> list[dict]:
-    """Validate external links honoring host delays, skip lists, and retries."""
+    """Validate external links honoring host delays, skip lists, and retries.
+
+    ``links`` holds (source label, url) pairs; the source label is a Markdown
+    location like ``README.md:12`` or a catalog reference like
+    ``wscan/check_catalog.json#sqli``. Each URL is requested at most once and
+    every source location gets its own result row.
+    """
     if skip_hosts is None:
         skip_hosts = load_skip_hosts()
 
@@ -597,8 +675,7 @@ def check_external_links(
     last_host_time: dict[str, float] = {}
 
     try:
-        for rel_path, line, url in links:
-            source = f"{rel_path}:{line}"
+        for source, url in links:
             parsed = urlsplit(url)
             host = parsed.netloc.lower()
 
@@ -659,7 +736,7 @@ def validate_external_links(
     """Validate external links in documents, returning (results, broken_findings)."""
     root = root.resolve()
     documents = _markdown_files(root) if documents is None else documents
-    links = extract_external_links(documents, root)
+    links = collect_external_links(documents, root)
     skip_hosts = load_skip_hosts(skip_file)
 
     results = check_external_links(
@@ -675,9 +752,11 @@ def validate_external_links(
     findings: list[Finding] = []
     for item in results:
         if item["classification"] == "broken":
-            source_parts = item["source"].rsplit(":", 1)
-            path_str = source_parts[0]
-            line_num = int(source_parts[1]) if len(source_parts) > 1 else 1
+            path_str, _, line_str = item["source"].rpartition(":")
+            if path_str and line_str.isdigit():
+                line_num = int(line_str)
+            else:
+                path_str, line_num = item["source"], 1
             findings.append(Finding(
                 path_str,
                 line_num,

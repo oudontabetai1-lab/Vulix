@@ -12,7 +12,10 @@ permissions:
 jobs:
   check-external-links:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Worst case: ~40 unique URLs x (3 attempts x (HEAD+GET) x 10s timeout
+    # + 1.5s backoff + 0.5s per-host delay) ~ 40 min when every request
+    # blackholes; the nominal run is a few minutes.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
