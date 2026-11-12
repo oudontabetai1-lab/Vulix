@@ -6499,8 +6499,8 @@ class ScanEngine:
         """
         if not self.enable_checkpoint or self.checkpoint is None:
             return False
-        from wscan.url_normalize import normalize_url_for_key
-        target = normalize_url_for_key(url or "")
+        from wscan.url_normalize import key_url
+        target = key_url(url)
         for key in self.checkpoint.completed_units:
             parts = key.split("\x1f")
             if len(parts) < 2 or parts[0] != target:
@@ -8740,6 +8740,43 @@ class ScanEngine:
                     eta_total=len(to_verify),
                 )
 
+    @staticmethod
+    def _finding_has_unsendable_redaction(f: Finding) -> bool:
+        """finding の再送元に資格情報の伏せ字マーカーが入っていて、実値として送れないか（純粋）。
+
+        checkpoint は finding の証跡（url のクエリ・request 等）の資格情報値を伏せて保存する。resume で
+        復元した finding の verify では、url（クエリ値）は常に再送元。request/evidence_details は
+        provenance（form/url_param/json_body）を持たない検証（privesc/graphql/websocket 等）だけが
+        再送元で、provenance 付きは証跡としてのみ使う。マーカーは保存時の label に依らず形で判定する。
+        """
+        import json as _j
+        if url_scope.has_secret_marker(f.url):
+            return True
+        if f.injection_location:
+            return False
+        # 再送元は request のほか、検証が読む evidence_details（ws_url 等）にもなりうる
+        return url_scope.has_secret_marker(_j.dumps(
+            [f.request or {}, f.evidence_details or {}], ensure_ascii=False, default=str))
+
+    @staticmethod
+    def _record_verify_skip(engine, f: Finding, scanner) -> None:
+        """verify を再送せず terminal にする場合の probe 台帳記録（graphql/websocket のみ）。
+
+        台帳が検証を「実行 0」の EVIDENCE_INCOMPLETE と誤表示しないよう、skip を明示する。
+        state-profile ゲートと伏せ字ゲートが共有する。"""
+        if scanner is None:
+            return
+        from .checkpoint import unit_key
+        if f.check_type.startswith("graphql_"):
+            check, rules = "graphql", (f.check_type,)
+        elif f.check_type == "websocket":
+            check, rules = "websocket", (f.evidence_type,)
+        else:
+            return
+        with ScanEngine._evidence_scope(engine, unit_key(f.url, f.field_name, 0, check)
+                + "\x1everify:" + f.evidence_type, check, rules=rules, role="verify"):
+            scanner.record_evidence_skip(f.url, rules=rules, role="verify")
+
     async def _verify_one(self, f: Finding) -> str:
         """
         Re-inject f.payload into f.field_name on f.url and check if the
@@ -8765,6 +8802,11 @@ class ScanEngine:
             else "privesc" if f.check_type.startswith("privesc_")
             else f.check_type
         )
+        if ScanEngine._finding_has_unsendable_redaction(f):
+            # 伏せ字を実値として再送すると偽の失敗（ログイン失敗等）で誤判定する → penalize しない terminal
+            ScanEngine._record_verify_skip(self, f, _vscanner)
+            self.wave_errors.append(f"verify_skipped_redacted_request:{f.check_type}")
+            return "assumed"
         _forced_post = bool(getattr(_vscanner, "ALWAYS_STATE_CHANGING", False))
         _req_method = ("POST" if _forced_post else "") or _req.get("method") or f.injection_method or ""
         _req_target = _req.get("url") or f.url
@@ -8777,16 +8819,7 @@ class ScanEngine:
             if errors is None:
                 self.wave_errors = errors = []
             errors.append(f"state_change_skipped:verify:{f.check_type}")
-            if f.check_type.startswith("graphql_") and _vscanner is not None:
-                from .checkpoint import unit_key
-                with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, "graphql")
-                        + "\x1everify:" + f.evidence_type, "graphql", rules=(f.check_type,), role="verify"):
-                    _vscanner.record_evidence_skip(f.url, rules=(f.check_type,), role="verify")
-            if f.check_type == "websocket" and _vscanner is not None:
-                from .checkpoint import unit_key
-                with ScanEngine._evidence_scope(self, unit_key(f.url, f.field_name, 0, "websocket")
-                        + "\x1everify:" + f.evidence_type, "websocket", rules=(f.evidence_type,), role="verify"):
-                    _vscanner.record_evidence_skip(f.url, rules=(f.evidence_type,), role="verify")
+            ScanEngine._record_verify_skip(self, f, _vscanner)
             return "assumed"  # profile がこの再送を許さない → penalize しない terminal state
 
         if f.check_type.startswith("graphql_"):
@@ -9104,6 +9137,9 @@ class ScanEngine:
                 old_findings = load_previous(self.previous_scan_dir)
                 diff_result = _diff(old_findings, findings_dicts)
                 diff_data = diff_result.to_dict()
+                # new/persistent は今回の finding、fixed は前回 evidence 由来（旧版は平文のことがある）
+                for _k in ("new", "persistent", "fixed"):
+                    diff_data[_k] = [url_scope.redact_finding_dict(f) for f in diff_data.get(_k, [])]
                 console.print(f"  [cyan][Diff][/cyan] {diff_result.summary()}")
             except Exception as exc:
                 console.print(f"  [yellow]差分スキャン失敗: {exc}[/yellow]")
@@ -9150,7 +9186,10 @@ class ScanEngine:
             evidence["coverage"]["evidence_completion"] = self.evidence_completion()
         evidence_path = self.output_dir / "evidence.json"
         with open(evidence_path, "w", encoding="utf-8") as fp:
-            json.dump(evidence, fp, ensure_ascii=False, indent=2)
+            safe = url_scope.redact_url_fields({**evidence, "findings": []})  # visited_urls・scan_matrix 等
+            safe["target"] = url_scope.redact_url_values(self.target_url)
+            safe["findings"] = [url_scope.redact_finding_dict(f) for f in evidence["findings"]]
+            json.dump(safe, fp, ensure_ascii=False, indent=2)
         console.print(f"  [dim]Evidence:[/dim] {evidence_path}")
         if llm_summary.get("provider") != "none":
             console.print(

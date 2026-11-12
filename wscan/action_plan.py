@@ -14,8 +14,25 @@ from .scanners.base import Finding
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
+_EVIDENCE_KEYS = ("evidence", "reproduction_steps")
+
+
+def _redact_plan(value, key=""):
+    """出力用に、設定済み資格情報の値を証跡フィールドと URL から伏せた複製を返す（識別子・title は不変）。"""
+    from . import url_scope
+    if key in _EVIDENCE_KEYS:
+        return url_scope.redact_leaves(value, key)
+    if isinstance(value, dict):
+        return {k: _redact_plan(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_plan(v, key) for v in value]
+    if isinstance(value, str) and key.lower().endswith("url"):
+        return url_scope.redact_url_values(value)
+    return value
+
+
 def write_action_plan(findings: list[Finding], output_dir: Path) -> dict:
-    plan = build_action_plan(findings)
+    plan = _redact_plan(build_action_plan(findings))
     tasks = plan["tasks"]
     review_items = plan["review_items"]
 

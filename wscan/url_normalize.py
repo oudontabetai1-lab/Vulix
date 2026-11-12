@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import parse_qsl, unquote, unquote_plus, urlencode, urlsplit, urlunsplit
 
-from wscan.url_scope import is_route_fragment
+from wscan.url_scope import is_route_fragment, redact_url_values
 
 
 # `/` は **含めない**：``?next=/home`` と ``?next=/admin`` のような path/route 値まで空化すると
@@ -347,3 +347,10 @@ def normalize_url_for_key(url: str) -> str:
         return base + q + frag
     except Exception:
         return url
+
+
+def key_url(url: str) -> str:
+    """永続キー用の URL。正規化に加え、設定済み資格情報の値をクエリ等から伏せる（path は不変）。
+
+    保存側・照合側が同じ関数を通るので、資格情報を伏せてもキーは一致する。"""
+    return redact_url_values(normalize_url_for_key(url or ""))
