@@ -237,7 +237,14 @@ def analyze_xss_reflection(
             # surrounding text already appears verbatim in the baseline (a
             # pre-existing page handler, not something the payload introduced).
             if baseline_lower:
-                window = source_lower[max(0, idx - 40):idx + len(marker_lower) + 20]
+                # 窓は同一タグ内に限る。タグ境界をまたぐと、直前に反射した値（エスケープ済み）
+                # で窓の中身が変わり、元からあるハンドラを「新規」と誤認する。
+                lo = max(0, idx - 40, source_lower.rfind("<", 0, idx))
+                hi = idx + len(marker_lower) + 20
+                gt = source_lower.find(">", idx)
+                if gt != -1:
+                    hi = min(hi, gt + 1)
+                window = source_lower[lo:hi]
                 if window and window in baseline_lower:
                     continue
 

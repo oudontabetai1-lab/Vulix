@@ -53,6 +53,9 @@ EXPECTED_FINDINGS = [
     {"check": "xss", "path": "/comment", "field": "text",
      "note": "attribute-breakout with SINGLE quotes stripped; confirmable only if "
              "the firing token is quote-free (numeric alert argument)"},
+    {"check": "xss", "path": "/compare", "field": "a",
+     "note": "two-field GET form, both values echoed raw right before a legit "
+             "onclick=alert(1) button (vulnerable twin of /compare/safe)"},
     {"check": "sqli", "path": "/products", "field": "category",
      "note": "error-based: raw category interpolated into SQL"},
     {"check": "sqli", "path": "/login", "field": "username",
@@ -101,6 +104,12 @@ SAFE_ENDPOINTS = [
      "note": "widget HTML-escaped; a legit onclick=alert(1) button renders before "
              "the reflection, so reflection analysis must not attribute the first "
              "(pre-existing) alert( occurrence to the payload"},
+    {"path": "/compare/safe", "field": "a",
+     "note": "a/b HTML-escaped; the reflections sit directly before a legit "
+             "onclick=alert(1) button, so multi-parameter reflection analysis must "
+             "not attribute that pre-existing handler to the payload"},
+    {"path": "/compare/safe", "field": "b",
+     "note": "second field of the same two-field form (multi-parameter submission)"},
     {"path": "/files/manual", "field": "name",
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
@@ -129,6 +138,8 @@ _NAV = [
     ('/support', 'Support'),
     ('/linkcheck', 'Link checker'),
     ('/dashboard?widget=clock', 'Dashboard'),
+    ('/compare?a=1&b=2', 'Compare'),
+    ('/compare/safe?a=1&b=2', 'Compare (safe)'),
     ('/files/download?doc=catalog.pdf', 'Brochure'),
     ('/files/manual?name=sizing', 'Size guide'),
     ('/redirect?url=/products', 'Partner link'),
@@ -409,6 +420,34 @@ def create_app() -> FastAPI:
             <p>Active widget: {safe}</p>
             """,
         )
+
+    # ── Two-field form: safe page + vulnerable twin ───────────────────────
+    # Both pages echo `a` and `b` directly before a legit `onclick="alert(1)"`
+    # button. The escaped version must stay clean even under simultaneous
+    # (multi-parameter) injection: the handler is unchanged from the baseline, but
+    # the changed reflection right before it must not make it look "new".
+    # The twin echoes raw, so the XSS must still be reported.
+    def _compare_page(action: str, a: str, b: str) -> str:
+        return _layout(
+            "Compare",
+            f"""
+            <form method="get" action="{action}">
+              <input name="a" value="">
+              <input name="b" value="">
+              <button type="submit">Compare</button>
+            </form>
+            <p>A: {a}</p><p>B: {b}</p><button type="button" onclick="alert(1)">legit</button>
+            """,
+        )
+
+    @app.get("/compare", response_class=HTMLResponse)
+    async def compare(a: str = Query("1"), b: str = Query("2")):
+        # VULNERABLE: a/b reflected without escaping.
+        return _compare_page("/compare", a, b)
+
+    @app.get("/compare/safe", response_class=HTMLResponse)
+    async def compare_safe(a: str = Query("1"), b: str = Query("2")):
+        return _compare_page("/compare/safe", html.escape(a), html.escape(b))
 
     # ── Safe type=url form that submits back to the SAME path ─────────────
     # `dest` is type="url" and the form action is /linkcheck itself: the form
