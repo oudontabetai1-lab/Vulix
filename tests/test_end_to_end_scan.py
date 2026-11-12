@@ -433,11 +433,13 @@ class FormPayloadDeliveryBrowserTests(unittest.TestCase):
                 "normal": True,
                 "missing": False,
                 "rewritten": False,
-                "invalid": False,
+                # 型/必須制約で素の送信が止まるフォームは、検証回避の再送で値が届いた場合のみ送達扱い。
+                "invalid": True,
                 "invalid_index": False,
             })
             self.assertEqual(received, {
                 "normal": {"field_names": ["username"], "candidate_present": True},
+                "invalid": {"field_names": ["username"], "candidate_present": True},
             }, f"server did not observe form submission (responses={responses})")
         finally:
             server.should_exit = True
