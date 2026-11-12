@@ -191,3 +191,15 @@ def test_report_write_is_atomic_on_failure(monkeypatch):
         with pytest.raises(OSError):
             gen.generate(**kw)
         assert report_path.read_text(encoding="utf-8") == original
+
+
+def test_observability_caveat_matches_finding_count():
+    from wscan.i18n import observability_caveat
+
+    summary = {"total": 1, "by_category": {"probe_error": 1}}
+    zero = _observability_warning_text(summary, 0)
+    some = _observability_warning_text(summary, 1)
+    assert "0 findings" in zero
+    assert "0 findings" not in some and "不完全" in some
+    assert "0 findings" not in observability_caveat(3, "en")
+    assert "0 findings" in observability_caveat(0, "en")

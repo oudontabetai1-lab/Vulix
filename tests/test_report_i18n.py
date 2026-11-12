@@ -39,7 +39,7 @@ def test_templates_default_and_both_languages(tmp_path, template):
                   checks=["sqli"], template=template, observability={"total": 1})
     english = ReportGenerator(tmp_path, lang="en").generate(**kwargs).read_text()
     assert '<html lang="en">' in english
-    assert "0 findings does not necessarily mean" in english
+    assert "Some probes failed or were dropped" in english
     assert "未確証" not in english
     if template != "executive":
         assert "証拠 &lt;script&gt;" in english
