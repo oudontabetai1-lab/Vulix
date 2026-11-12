@@ -372,8 +372,14 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
 
 - retry 対象＝`{408,429,500,502,503,504,529}`＋httpx 接続/読み書き例外＋Anthropic `APIConnectionError/APITimeoutError`
   ＋応答形式破損。バックオフは指数（cap 8s）、`429` の `Retry-After`（秒）優先。
-- **可用性フリップ/resume**: `engine._adaptive_llm_available` を scan 中1度だけ probe。`permanent`/`unavailable`
-  で倒す（以降 LLM を呼ばず checkpoint 完了で収束）、`empty`/`transient` は倒さない（`--resume` で回収）。
+- **可用性フリップ/resume**: 使えない provider への実試行は scan 中 1 回まで。`PayloadGenerator._llm_available`
+  （`_check_llm_available` の probe 結果キャッシュ）が全 role 共通の可用性フラグで、`complete_text` 入口の
+  short-circuit と各 gate（planner/baseline/adaptive/mutate）の両方がこれを見る。`permanent`/`unavailable`
+  （4xx≠429・キー/クライアント不在・provider 不達）で倒すのは `PayloadGenerator.mark_llm_unavailable`
+  （1 度だけ・wave_errors に `llm_unavailable:<status>` を 1 行記録）。自前 streaming 経路（planner/mutate）
+  は非 200 を `llm_client.is_permanent_status` で分類して同じフラグを倒す。`engine._adaptive_llm_available`
+  は adaptive 経路の収束（checkpoint 完了）用の mirror。`empty`/`transient`/`blocked` は倒さない
+  （`--resume` で回収・LLM 全体生存）。
 - **プロンプトインジェクション防御**: `adaptive_payload._sanitize_untrusted_html`。
 
 ### 拡張チェックリスト（新しく LLM を挟むとき）

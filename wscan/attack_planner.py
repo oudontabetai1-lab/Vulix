@@ -26,6 +26,8 @@ from typing import Optional, TYPE_CHECKING
 from rich.console import Console
 from rich.rule import Rule
 
+from . import llm_client
+
 if TYPE_CHECKING:
     from wscan.payload_gen import PayloadGenerator
 
@@ -425,6 +427,8 @@ Consider stored / second-order attacks carefully:
         # Inherited from payload_gen so both stay in sync
         self.enable_web_browsing: bool = getattr(payload_gen, "enable_web_browsing", False)
         self._last_call_timeout: bool = False
+        # 非 200 で終わった直近の HTTP status（4xx≠429 → 恒久失敗として可用性を倒す）。
+        self._last_call_bad_status: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -566,6 +570,7 @@ Consider stored / second-order attacks carefully:
         _t0 = _time.monotonic()
         _resolved_model = ""
         self._last_call_timeout = False
+        self._last_call_bad_status = None
         with self.payload_gen.use_role("planner"):
             # role モデルは context 内でのみ解決される（claude_model 等は _active_role 依存の
             # property）。監査に「実際に使ったモデル」を残すため context 内で捕捉する。context を
@@ -588,7 +593,14 @@ Consider stored / second-order attacks carefully:
             _planner_timeout = 90.0
 
         is_timeout = getattr(self, "_last_call_timeout", False)
-        status = "timeout" if is_timeout else ("ok" if raw else "empty")
+        # 自前 streaming は complete_text 非経由のため失敗種別をここで分類する。
+        # 4xx≠429 は恒久失敗＝complete_text と同じ基準で可用性を倒す（ページ単位の
+        # planner 呼び出しが失敗を繰り返さない）。429/5xx/接続系は一時＝倒さない。
+        _bad = getattr(self, "_last_call_bad_status", None)
+        _perm = llm_client.is_permanent_status(_bad)
+        status = "timeout" if is_timeout else (
+            "ok" if raw else ("permanent" if _perm else "empty")
+        )
         exc_type = "TimeoutError" if is_timeout else None
         record_llm_call(
             self.payload_gen, provider=provider, role="planner",
@@ -607,6 +619,12 @@ Consider stored / second-order attacks carefully:
             wave_errors = getattr(self.payload_gen, "wave_errors", None)
             if wave_errors is not None:
                 wave_errors.append(f"llm_timeout:planner:{url}")
+        if _perm:
+            # 恒久失敗（モデル不在 404 等）を pg の共有可用性へ反映。以降の page や
+            # 他 role（baseline/adaptive/triage/report）は probe 無しで打ち切られる。
+            mark = getattr(self.payload_gen, "mark_llm_unavailable", None)
+            if callable(mark):
+                mark("permanent", caller="attack_planner._llm_plan")
 
         if not raw:
             return None
@@ -649,6 +667,10 @@ Consider stored / second-order attacks carefully:
             return None
         except Exception as e:
             _thinking_footer()
+            # APIStatusError 等は HTTP status を持つ（4xx≠429 → 恒久失敗分類に使う）。
+            _sc = getattr(e, "status_code", None)
+            if isinstance(_sc, int):
+                self._last_call_bad_status = _sc
             console.print(f"[yellow][AttackPlanner] Claude error: {e}[/yellow]")
             return None
 
@@ -696,6 +718,7 @@ Consider stored / second-order attacks carefully:
             await asyncio.wait_for(_run(), timeout=self.payload_gen.llm_stream_timeout_seconds)
             _thinking_footer()
             if status_holder["bad"] is not None:
+                self._last_call_bad_status = status_holder["bad"]
                 console.print(f"[yellow][AttackPlanner] Ollama error {status_holder['bad']}[/yellow]")
                 return None
             return full if full else None
@@ -759,6 +782,7 @@ Consider stored / second-order attacks carefully:
             await asyncio.wait_for(_run(), timeout=self.payload_gen.llm_stream_timeout_seconds)
             _thinking_footer()
             if status_holder["bad"] is not None:
+                self._last_call_bad_status = status_holder["bad"]
                 console.print(f"[yellow][AttackPlanner] OpenAI error {status_holder['bad']}[/yellow]")
                 return None
             return full if full else None
@@ -797,6 +821,7 @@ Consider stored / second-order attacks carefully:
                     sys.stdout.flush()
                     _thinking_footer()
                     return text
+                self._last_call_bad_status = resp.status_code
                 console.print(f"[yellow][AttackPlanner] Gemini error {resp.status_code}[/yellow]")
         except httpx.TimeoutException:
             console.print("[yellow][AttackPlanner] Gemini timeout[/yellow]")

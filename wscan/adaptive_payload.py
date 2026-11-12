@@ -439,6 +439,8 @@ class AdaptivePayloadEngine:
     def __init__(self, payload_gen: "PayloadGenerator"):
         self.pg = payload_gen
         self._last_call_timeout: bool = False
+        # 非 200 で終わった直近の HTTP status（mutate_payload の恒久失敗分類用）。
+        self._last_call_bad_status: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -577,6 +579,7 @@ class AdaptivePayloadEngine:
         _t0 = _time.monotonic()
         _resolved_model = ""
         self._last_call_timeout = False
+        self._last_call_bad_status = None
         with self.pg.use_role("adaptive"):
             # role モデルは context 内でのみ解決される（*_model は _active_role 依存の property）。
             # 監査に実際に使ったモデルを残すため context 内で捕捉する。
@@ -598,7 +601,14 @@ class AdaptivePayloadEngine:
             _adaptive_timeout = 90.0
 
         is_timeout = getattr(self, "_last_call_timeout", False)
-        status = "timeout" if is_timeout else ("ok" if raw else "empty")
+        # 自前 streaming は complete_text 非経由のため失敗種別をここで分類する。
+        # 4xx≠429 は恒久失敗＝complete_text と同じ基準で pg の共有可用性を倒す
+        # （wave 毎の mutate 呼び出しが失敗を繰り返さない）。一時失敗は倒さない。
+        _bad = getattr(self, "_last_call_bad_status", None)
+        _perm = llm_client.is_permanent_status(_bad)
+        status = "timeout" if is_timeout else (
+            "ok" if raw else ("permanent" if _perm else "empty")
+        )
         exc_type = "TimeoutError" if is_timeout else None
         record_llm_call(
             self.pg, provider=provider, role="adaptive",
@@ -617,6 +627,10 @@ class AdaptivePayloadEngine:
             wave_errors = getattr(self.pg, "wave_errors", None)
             if wave_errors is not None:
                 wave_errors.append(f"llm_timeout:adaptive_mutate:{check_type}")
+        if _perm:
+            mark = getattr(self.pg, "mark_llm_unavailable", None)
+            if callable(mark):
+                mark("permanent", caller="adaptive_payload.mutate_payload")
 
         if not raw:
             return []
@@ -645,6 +659,7 @@ class AdaptivePayloadEngine:
                     },
                 ) as resp:
                     if resp.status_code != 200:
+                        self._last_call_bad_status = resp.status_code
                         return
                     async for line in resp.aiter_lines():
                         if not line:
@@ -727,6 +742,7 @@ class AdaptivePayloadEngine:
             # （llm_stream_timeout_seconds を1応答の上限として効かせる）。
             await asyncio.wait_for(_run(), timeout=self.pg.llm_stream_timeout_seconds)
             if status_holder["bad"] is not None:
+                self._last_call_bad_status = status_holder["bad"]
                 console.print(f"[yellow][AdaptiveAI] OpenAI error {status_holder['bad']}[/yellow]")
                 return None
             return full or None
@@ -770,6 +786,10 @@ class AdaptivePayloadEngine:
             self._last_call_timeout = True
             return None
         except Exception as e:
+            # APIStatusError 等は HTTP status を持つ（4xx≠429 → 恒久失敗分類に使う）。
+            _sc = getattr(e, "status_code", None)
+            if isinstance(_sc, int):
+                self._last_call_bad_status = _sc
             console.print(f"[yellow][AdaptiveAI] Claude error: {e}[/yellow]")
             return None
 
@@ -798,6 +818,7 @@ class AdaptivePayloadEngine:
                     sys.stdout.write(text)
                     sys.stdout.flush()
                     return text
+                self._last_call_bad_status = resp.status_code
                 console.print(f"[yellow][AdaptiveAI] Gemini error {resp.status_code}[/yellow]")
         except httpx.TimeoutException:
             console.print("[yellow][AdaptiveAI] Gemini timeout[/yellow]")

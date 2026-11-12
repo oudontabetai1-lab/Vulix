@@ -263,6 +263,28 @@ class PayloadGenerator:
             console.print("[yellow]LLM not available, using default payloads[/yellow]")
         return self._llm_available
 
+    def mark_llm_unavailable(self, status: str, caller: str = "") -> None:
+        """恒久失敗（unavailable/permanent）で LLM 可用性を scan 内で一度だけ倒す。
+
+        ``complete_text`` と自前 streaming 経路（planner/mutate）の共通の帰結先。
+        一度倒したら ``_check_llm_available``/``complete_text`` の両方が以降の呼び出しを
+        プローブ無しで打ち切る（＝使えない provider への実試行は scan 中 1 回まで）。
+        一時失敗（transient/empty/blocked）では呼ばないこと — resume 回収を壊す。
+        """
+        if self._llm_available is False:
+            return
+        self._llm_available = False
+        console.print(
+            f"[yellow]LLM unavailable ({status}) — using default payloads / "
+            f"heuristic fallbacks for the rest of this scan[/yellow]"
+        )
+        # 観測性：恒久不達を 1 行だけ残す（observability_summary の by_category に出る）。
+        wave_errors = getattr(self, "wave_errors", None)
+        if wave_errors is not None:
+            note = f"llm_unavailable:{status}"
+            if note not in wave_errors:
+                wave_errors.append(note)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
