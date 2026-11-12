@@ -305,11 +305,24 @@ def redact_leaves(value, key=""):
     return value
 
 
+# ダッシュボードが識別子として engine へ返す/照合に使うキー。値は伏せない（伏せると返送時に引けない）。
+_EVENT_IDENTIFIER_KEYS = frozenset(
+    ("name", "field", "field_name", "type", "check_type", "method", "selector", "id"))
+
+
+def _looks_like_url(text: str) -> bool:
+    """値の形で URL を判定する（キー名に依らない）。絶対 URL、または空白の無い ``/`` 始まり 1 トークン。"""
+    return bool(_RE_URL_SCHEME.match(text)) or (text.startswith("/") and len(text.split()) == 1)
+
+
 def redact_event_data(value, key=""):
     """ダッシュボードのライブイベント用。文字列葉だけ伏せた複製を返す（構造・キー・非文字列は不変）。
 
-    画像（``image`` / ``*_b64``）は走査せず素通しにする（巨大で、値ベース置換のコストと破損リスクだけ増えるため）。
-    資格情報が未登録なら元の値をそのまま返す（コピーしない）。"""
+    - 値が URL の形（または ``*url`` キー）なら userinfo・query・fragment だけ伏せ、path は不変
+      （サイトマップの親子・plan 編集の戻りなど URL を照合キーに使うため）。
+    - 識別子キー（name/field/type/check_type/method/selector/id 等）の文字列は伏せない。
+    - それ以外（status・メッセージ・request/response 断片・payload 等の自由文）は値ベースで全文置換。
+    画像（``image`` / ``*_b64``）は走査せず素通し。資格情報が未登録なら元の値をそのまま返す。"""
     if not _SECRET_VALUES:
         return value
     low = str(key).lower()
@@ -319,7 +332,11 @@ def redact_event_data(value, key=""):
         return {k: redact_event_data(v, str(k)) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact_event_data(v, key) for v in value]
-    return redact_leaves(value, key)
+    if not isinstance(value, str) or low in _EVENT_IDENTIFIER_KEYS:
+        return value
+    if low.endswith("url") or _looks_like_url(value):
+        return redact_url_values(value)
+    return redact_secret_values(value)
 
 
 def redact_url_fields(value, key=""):

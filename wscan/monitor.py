@@ -1144,7 +1144,7 @@ class MonitorServer:
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
-            self.api_target = config.get("url", "") or ""
+            self.api_target = redact_event_data(config.get("url", "") or "")
             self.api_phase = ""
             self.api_progress = {"current": 0, "total": 0, "percent": 0}
             self._audit("scan_start", self._client_ip(request), config.get("url", ""))
@@ -2057,7 +2057,7 @@ class MonitorServer:
                 "ts": datetime.datetime.now().isoformat(timespec="seconds"),
                 "ip": ip or "",
                 "action": action,
-                "detail": str(detail)[:300],
+                "detail": redact_event_data(str(detail))[:300],
             }
             with open(self._audit_path(), "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -2220,7 +2220,7 @@ class MonitorServer:
         self.api_scan_status = "scanning"
         self.api_findings = []
         self.api_report_path = None
-        self.api_target = (config or {}).get("url", "") or ""
+        self.api_target = redact_event_data((config or {}).get("url", "") or "")
         self.api_phase = ""
         self.api_progress = {"current": 0, "total": 0, "percent": 0}
         self.scan_request_event.set()
@@ -2470,7 +2470,7 @@ class MonitorServer:
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
-            self.api_target = cfg.get("url", "") or ""
+            self.api_target = redact_event_data(cfg.get("url", "") or "")
             self.api_phase = ""
             self.api_progress = {"current": 0, "total": 0, "percent": 0}
             self._audit("scan_start", client_ip, cfg.get("url", ""))
@@ -2510,7 +2510,7 @@ class MonitorServer:
         self.pending_interactive = {
             "type": event_type,
             "timestamp": time.time(),
-            "data": data or {},
+            "data": redact_event_data(data or {}),
         }
 
     def _clear_pending_interactive(self, *types: str) -> None:
@@ -2792,7 +2792,7 @@ class MonitorServer:
         fast_mode: bool = False,
     ):
         """Send scan configuration to the dashboard so it can render dynamic badges."""
-        self.api_target = url or self.api_target
+        self.api_target = redact_event_data(url) or self.api_target
         await self.emit("scan_config", {
             "url": url,
             "checks": checks,
