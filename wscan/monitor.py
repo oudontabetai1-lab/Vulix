@@ -1896,6 +1896,53 @@ class MonitorServer:
                 pass
         return data
 
+    # checkpoint.json の途中経過を読む上限（超えたら件数不明のまま＝履歴一覧を重くしない）。
+    _PARTIAL_MAX_BYTES = 8 * 1024 * 1024
+
+    def _partial_counts(self, d: Path) -> Optional[dict]:
+        """evidence.json が無い履歴の件数を補完する（未確証の途中経過）。
+
+        - batch_summary.json（batch_*）: total_findings を採用。完了済みバッチ扱い。
+        - checkpoint.json: これまでに記録した findings 数。partial=True で
+          「完了」と誤認させない（UI は「件（途中）」表示）。
+        どちらも無い／読めない場合は None（件数不明のまま）。
+        """
+        def _load(name: str) -> Optional[dict]:
+            f = d / name
+            try:
+                if not f.is_file() or f.stat().st_size > self._PARTIAL_MAX_BYTES:
+                    return None
+                data = json.loads(f.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else None
+            except Exception:
+                return None
+
+        summary = _load("batch_summary.json") if d.name.startswith("batch_") else None
+        if summary is not None:
+            total = summary.get("total_findings")
+            if isinstance(total, int) and not isinstance(total, bool):
+                return {
+                    "findings_count": total,
+                    "status": "done",
+                    "batch": True,
+                    "severity": {
+                        "critical": int(summary.get("total_critical") or 0),
+                        "high": int(summary.get("total_high") or 0),
+                        "medium": 0, "low": 0, "info": 0,
+                    },
+                }
+        cp = _load("checkpoint.json")
+        findings = cp.get("findings") if cp else None
+        if isinstance(findings, list):
+            sev = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+            for f in findings:
+                if isinstance(f, dict):
+                    k = str(f.get("severity") or "info").lower()
+                    if k in sev:
+                        sev[k] += 1
+            return {"findings_count": len(findings), "severity": sev, "partial": True}
+        return None
+
     def _list_scans(self) -> list[dict]:
         """Index the output directory into a list of scan summaries."""
         scans: list[dict] = []
@@ -1918,6 +1965,9 @@ class MonitorServer:
                 "sarif_available": (d / "report.sarif").is_file(),
                 "json_available": (d / "evidence.json").is_file(),
                 "status": "incomplete",
+                # True = 途中経過（checkpoint）の件数。確定値ではない。
+                "partial": False,
+                "batch": False,
                 "size_bytes": 0,
             }
             # Prefer evidence.json (authoritative result), fall back to config.
@@ -1962,6 +2012,9 @@ class MonitorServer:
                 info["status"] = "error"
             else:
                 # evidence が無い場合は対象/日時だけ config から補完し、完了や0件は主張しない。
+                partial = self._partial_counts(d)
+                if partial is not None:
+                    info.update(partial)
                 try:
                     if cfg.is_file():
                         cfg_data = json.loads(cfg.read_text(encoding="utf-8"))
@@ -1970,7 +2023,8 @@ class MonitorServer:
                             info["started_at"] = cfg_data.get("submitted_at", "") or ""
                 except Exception:
                     pass
-                info["status"] = "incomplete"
+                if info["status"] == "incomplete" and info.get("partial"):
+                    info["status"] = "interrupted"
             if not info["started_at"]:
                 try:
                     info["started_at"] = datetime.datetime.fromtimestamp(

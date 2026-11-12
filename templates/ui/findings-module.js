@@ -1272,7 +1272,11 @@
           const opt = document.createElement('option');
           opt.value = s.id;
           const target = s.target ? ` (${redactDisplayUrl(s.target)})` : '';
-          const cnt = s.findings_count != null ? ` — ${s.findings_count}件` : ' — 件数不明';
+          const cnt = s.findings_count != null
+            ? (s.partial && s.status === 'scanning'
+                ? ` — 実行中（途中 ${s.findings_count} 件）`
+                : ` — ${s.findings_count}件${s.partial ? '（途中・中断）' : ''}`)
+            : ' — 件数不明';
           opt.textContent = `${s.id}${target}${cnt}`;
           dom.scanSelect.appendChild(opt);
         });
