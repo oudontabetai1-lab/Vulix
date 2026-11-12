@@ -17,6 +17,8 @@ from orchestration.merge_gate import REQUIRED_EVIDENCE, evaluate, main
 
 HEAD = "a" * 40
 OLD = "b" * 40
+REVIEWER = "orca_session_id:reviewer-1"
+AUTHOR = "orca_session_id:author-1"
 MODULE = Path(__file__).resolve().parents[1] / "orchestration" / "merge_gate.py"
 
 
@@ -36,7 +38,7 @@ def payload(**overrides):
         ],
         "reviews": [{"author": {"login": "alice"}, "state": "APPROVED", "submittedAt": "2026-01-02"}],
         "reviewThreads": [{"path": "a.py", "isResolved": True}],
-        "evidence": {k: {"verdict": "PASS", "head_sha": HEAD} for k in REQUIRED_EVIDENCE},
+        "evidence": evidence_with_sessions(),
     }
     base.update(overrides)
     return {k: v for k, v in base.items() if v is not ...}
@@ -47,6 +49,14 @@ def blocked(**overrides) -> list[str]:
     result = evaluate(payload(**overrides))
     assert result["ready"] is False, f"expected not ready, got {result}"
     return result["reasons"]
+
+
+def evidence_with_sessions(reviewer: str = REVIEWER, author: str = AUTHOR) -> dict:
+    """実パケットと同じ配置（reviewer/author セッション ID 含む）の完全な evidence。"""
+    ev = {k: {"verdict": "PASS", "head_sha": HEAD} for k in REQUIRED_EVIDENCE}
+    ev["independent_review"]["reviewer_worker_session_id"] = reviewer
+    ev["security_review"]["author_worker_session_id"] = author
+    return ev
 
 
 def test_all_conditions_met_is_ready():
@@ -169,11 +179,50 @@ def test_evidence_missing_stale_or_unpinned_blocks(key):
         ({"verdict": "PASS"}, "no head_sha"),                 # pin なし
         ({"verdict": "PASS", "head_sha": OLD}, "not current head"),  # 別 commit の流用
     ]:
-        evidence = {k: {"verdict": "PASS", "head_sha": HEAD} for k in REQUIRED_EVIDENCE}
+        evidence = evidence_with_sessions()
         evidence[key] = broken
         assert any(f"'{key}'" in r and fragment in r for r in blocked(evidence=evidence)), (key, fragment)
 
     assert len(blocked(evidence=None)) >= len(REQUIRED_EVIDENCE)
+
+
+def test_distinct_reviewer_and_author_sessions_accepted():
+    """別セッションなら ready を維持し、通した根拠も残す。"""
+    result = evaluate(payload())
+    assert result["ready"] is True, result["reasons"]
+    assert any("distinct" in r for r in result["reasons"])
+
+
+@pytest.mark.parametrize("reviewer, author", [
+    (REVIEWER, REVIEWER),                              # 完全一致
+    ("reviewer-1", "orca_session_id:reviewer-1"),      # 接頭辞の有無だけが違う
+    ("orca_session_id:REVIEWER-1", "reviewer-1"),      # 接頭辞＋大小違い
+])
+def test_identical_reviewer_and_author_session_blocks(reviewer, author):
+    assert any("equals the author session" in r for r in
+               blocked(evidence=evidence_with_sessions(reviewer=reviewer, author=author)))
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_missing_reviewer_session_blocks(value):
+    """reviewer セッションが無い（null/空含む）と fail closed。"""
+    ev = evidence_with_sessions()
+    if value is None:
+        ev["independent_review"].pop("reviewer_worker_session_id")
+    else:
+        ev["independent_review"]["reviewer_worker_session_id"] = value
+    assert any("no reviewer session" in r for r in blocked(evidence=ev))
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_missing_author_session_blocks(value):
+    """author セッションが無い（null/空含む）と fail closed。"""
+    ev = evidence_with_sessions()
+    if value is None:
+        ev["security_review"].pop("author_worker_session_id")
+    else:
+        ev["security_review"]["author_worker_session_id"] = value
+    assert any("no author session" in r for r in blocked(evidence=ev))
 
 
 @pytest.mark.parametrize("bad", [None, [], "nope", 42, {}])

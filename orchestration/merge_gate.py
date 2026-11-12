@@ -7,6 +7,8 @@ GitHub API は叩かず merge もコメントもしない（subprocess/network �
 ``isDraft``/``mergeStateStatus``/``reviews``/``reviewThreads`` はキー欠落・null で失格。CI は現
 head SHA へ厳密 pin された単一エントリの SUCCESS のみ合格（SHA 欠落・stale・同名重複は失格）。
 independent/security/acceptance は ``{"verdict":"PASS","head_sha":<現 head>}`` のみ有効。
+変更作者（``security_review`` の author セッション）と独立レビュアー（``independent_review``
+の reviewer セッション）は、欠落・同一のいずれでも失格（同一性は接頭辞と大小を吸収して比較）。
 """
 from __future__ import annotations
 
@@ -47,6 +49,11 @@ def _upper(src: Any, *names: str) -> str:
 
 def _sha(src: Any, *names: str) -> str:
     return _text(_pick(src, *names, default="")).lower()
+
+
+def _session(v: Any) -> str:
+    """セッション ID の正規化（接頭辞の有無と大小を吸収して比較可能にする）。"""
+    return _text(v).lower().removeprefix("orca_session_id:")
 
 
 def _as_list(v: Any) -> list:
@@ -179,6 +186,21 @@ def _check_evidence(p: Mapping[str, Any], head: str, out: list[str]) -> None:
             out.append(f"evidence: '{key}' recorded for {_short(sha)}, not current head {_short(head)}")
 
 
+def _check_sessions(p: Mapping[str, Any], out: list[str]) -> None:
+    """変更作者と独立レビュアーが別セッションか（欠落・同一のいずれも fail closed）。"""
+    ev = _pick(p, "evidence", default=None)
+    rev = ev.get("independent_review") if isinstance(ev, Mapping) else None
+    sec = ev.get("security_review") if isinstance(ev, Mapping) else None
+    reviewer = _session(_pick(rev, "reviewer_worker_session_id", default=""))
+    author = _session(_pick(sec, "author_worker_session_id", default=""))
+    if not reviewer:
+        out.append("evidence: independent_review has no reviewer session (fail closed)")
+    if not author:
+        out.append("evidence: security_review has no author session (fail closed)")
+    if reviewer and author and reviewer == author:
+        out.append("evidence: reviewer session equals the author session (fail closed)")
+
+
 def evaluate(payload: Any) -> dict:
     """マージ可否を判定する純粋関数（I/O なし・例外を投げず安全側に倒す）。"""
     if not isinstance(payload, Mapping):
@@ -189,11 +211,13 @@ def evaluate(payload: Any) -> dict:
     _check_reviews(payload, found)
     _check_threads(payload, found)
     _check_evidence(payload, head, found)
+    _check_sessions(payload, found)
     reasons = list(dict.fromkeys(found))  # 出現順を保った重複排除（決定論的出力）
     if not reasons:  # 通した根拠も残す（証跡を空にしない）
         reasons = ["pr: open, non-draft, mergeable", f"ci: all required checks succeeded on head {_short(head)}",
                    "review: no changes-requested reviews", "threads: no unresolved review threads",
-                   f"evidence: independent-review, security-review, acceptance all PASS on head {_short(head)}"]
+                   f"evidence: independent-review, security-review, acceptance all PASS on head {_short(head)}",
+                   "evidence: reviewer and author are distinct sessions"]
     n = _pick(payload, "number", "pr", default=None)
     return {"ready": not found, "reasons": reasons, "pr": n if isinstance(n, int) else (_text(n) or None), "head_sha": head}
 
