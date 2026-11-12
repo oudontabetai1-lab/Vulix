@@ -2954,10 +2954,11 @@ class MonitorServer:
         """
         Block until the operator clicks 'Start Attack' in the web UI.
         If *timeout* elapses without confirmation, a warning is emitted and
-        the method returns without auto-starting the scan (callers should
-        treat an empty dict with plan_confirm_event not set as "not confirmed").
-        Returns the edits dict (may be empty if no changes were made or
-        if the operator did not confirm within the timeout).
+        the method returns the (unedited) plan so the scan continues with it;
+        the pending review is cleared so a reconnecting client does not
+        re-open a stale modal.
+        Returns the edits dict (empty if no changes were made or if the
+        operator did not confirm within the timeout).
         """
         try:
             await asyncio.wait_for(
@@ -2967,7 +2968,8 @@ class MonitorServer:
         except asyncio.TimeoutError:
             await self.emit_status(
                 f"[warn] Plan confirm timed out after {timeout:.0f}s — "
-                "operator confirmation required to start the scan.",
+                "continuing the scan with the generated plan (no edits applied).",
                 "warning",
             )
+            self._clear_pending_interactive("plan_review")
         return self.confirmed_plan_edits

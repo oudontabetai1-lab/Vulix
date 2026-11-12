@@ -5221,7 +5221,16 @@ class ScanEngine:
         # the operator to click "Start Attack" (edits are applied below).
         # Without a dashboard, fall back to the terminal interactive editor.
         if self.monitor:
-            if plans:
+            if plans and not self.interactive_plan:
+                # 手動レビュー無効（既定）: モーダルを出さず待たない。件数だけ通知して続行する。
+                n_fields = sum(len(getattr(pl, "fields", []) or []) for pl in plans.values())
+                note = (
+                    f"攻撃プランを {len(plans)} ページ / {n_fields} フィールド分生成しました。"
+                    "手動レビューは無効のため自動で攻撃を開始します。"
+                )
+                await self.monitor.emit_status(note)
+                console.print(f"  [dim]{note}[/dim]")
+            elif plans:
                 console.print(
                     "\n  [bold cyan][Web Dashboard][/bold cyan] "
                     "プラン確認モーダルが開きます。ダッシュボードで確認・修正後に攻撃を開始してください。"
