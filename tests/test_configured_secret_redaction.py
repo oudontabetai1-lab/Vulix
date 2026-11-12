@@ -42,3 +42,11 @@ def test_encoded_forms_and_short_values(engine):
     assert "[REDACTED:auth_user]" in redact_url(f"http://t.test/u/{USER}/profile")
     assert redact_text('{"n": "ab", "v": "x"}') == '{"n": "ab", "v": "x"}'  # 4 文字未満は対象外
     assert any("redaction_skipped_short_secret" in e for e in engine.wave_errors)
+
+
+def test_html_escaped_and_shell_quoted_forms(engine):
+    import html, shlex
+    tricky = "a&b<c>'d\"e-pass"
+    url_scope.register_secret_values([("t", tricky)])
+    out = url_scope.redact_secret_values(f"{html.escape(tricky)} {html.escape(tricky, quote=False)} {shlex.quote(tricky)}")
+    assert "a&amp;b" not in out and "a&b" not in out and "d" not in out.replace("[REDACTED:t]", "")

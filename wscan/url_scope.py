@@ -251,10 +251,12 @@ def redact_secret_values(text):
     if not isinstance(text, str) or not text or not _SECRET_VALUES:
         return text
     from urllib.parse import quote, quote_plus
-    import json as _json
+    import html as _html, json as _json, shlex
     for value in sorted(_SECRET_VALUES, key=len, reverse=True):
         marker = f"[REDACTED:{_SECRET_VALUES[value]}]"
-        for form in {value, quote(value, safe=""), quote_plus(value), _json.dumps(value)[1:-1]}:
+        for form in {value, quote(value, safe=""), quote_plus(value), _json.dumps(value)[1:-1],
+                     _html.escape(value), _html.escape(value, quote=False), shlex.quote(value)[1:-1]
+                     if shlex.quote(value).startswith("'") else shlex.quote(value)}:
             if form in text:
                 text = text.replace(form, marker)
     return text
