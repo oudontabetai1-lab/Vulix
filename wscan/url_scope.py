@@ -305,6 +305,23 @@ def redact_leaves(value, key=""):
     return value
 
 
+def redact_event_data(value, key=""):
+    """ダッシュボードのライブイベント用。文字列葉だけ伏せた複製を返す（構造・キー・非文字列は不変）。
+
+    画像（``image`` / ``*_b64``）は走査せず素通しにする（巨大で、値ベース置換のコストと破損リスクだけ増えるため）。
+    資格情報が未登録なら元の値をそのまま返す（コピーしない）。"""
+    if not _SECRET_VALUES:
+        return value
+    low = str(key).lower()
+    if low == "image" or low.endswith("b64"):
+        return value
+    if isinstance(value, dict):
+        return {k: redact_event_data(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_event_data(v, key) for v in value]
+    return redact_leaves(value, key)
+
+
 def redact_url_fields(value, key=""):
     """``*url`` / ``*urls`` キーの URL だけ伏せた複製を返す（他の文字列・キー・構造は不変）。
 

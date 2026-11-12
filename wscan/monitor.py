@@ -32,6 +32,8 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
+from wscan.url_scope import redact_event_data
+
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 # Where ScanEngine writes each scan's artifacts (output/<timestamp>/...).
@@ -2584,7 +2586,9 @@ class MonitorServer:
 
     async def emit(self, event_type: str, data: Any = None):
         """Send an event to all connected monitoring clients."""
-        event_data = data or {}
+        # 全イベントの単一の入口。履歴・WS 配信・派生状態（scan_gaps 等）に入る前に、設定済み資格情報の
+        # 値を伏せる（ディスク出力と同じ値ベース redaction。画像は素通し）。
+        event_data = redact_event_data(data or {})
         # スキャンが完了したら未解決のレビュー待ちは無効化する。
         # （非serve単発や異常終了で pending が残ったまま再接続→亡霊表示を防ぐ）
         if event_type == "scan_complete":
@@ -2744,7 +2748,8 @@ class MonitorServer:
         return base
 
     async def emit_finding(self, finding: dict):
-        # D: CI/CD API — findings を自動蓄積
+        # D: CI/CD API — findings を自動蓄積（API 応答にも載るため emit と同じく伏せてから保持する）
+        finding = redact_event_data(finding)
         self.api_findings.append(finding)
         await self.emit("finding", finding)
 
@@ -2757,6 +2762,7 @@ class MonitorServer:
         初期 assumed のまま見えてしまう。安定キー（verification を含まない）で既存 snapshot を
         差し替え、finding_update を broadcast して最終 scan_complete を待たずに正す。
         """
+        finding = redact_event_data(finding)
         key = self._finding_snapshot_key(finding)
         for i, existing in enumerate(self.api_findings):
             if self._finding_snapshot_key(existing) == key:
