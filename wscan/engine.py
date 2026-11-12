@@ -1340,6 +1340,7 @@ class ScanEngine:
         # require context-local redaction state instead of this simple reset.
         clear_sensitive_headers()
         register_sensitive_headers(self.header_manager.current().keys())
+        self._register_configured_secret_values(auth_user, auth_pass)
         # MFA（2FA）ソルバ: ネイティブ TOTP または外部 MCP からコードを取得。
         # 種別/欄は env（WSCAN_MFA_*）が既定。UI/CLI/config が明示的に値を渡した
         # ときはそれを優先する。mfa_type=None は「未指定→env に委ねる」、空文字 ""
@@ -1553,6 +1554,8 @@ class ScanEngine:
         # State
         self.all_findings: list = []
         self.wave_errors: list = []                  # 検出力低下事象の観測ログ（base から共有）
+        if self._redaction_skipped:  # 4 文字未満の資格情報値は値ベース redaction の対象外（限界の記録）
+            self.wave_errors.append("redaction_skipped_short_secret:" + ",".join(self._redaction_skipped))
         self.payload_gen.wave_errors = self.wave_errors
         # フィールド単位の attack 時間ボックス。stored sink（コメント欄等）で反射
         # スキャナ＋evolution/mutation wave が alert flood を積み、単一フィールドが数千秒を消費して
@@ -9739,6 +9742,27 @@ class ScanEngine:
     # =========================================================================
     # Helpers
     # =========================================================================
+
+    def _register_configured_secret_values(self, auth_user, auth_pass) -> None:
+        """設定済み資格情報の値を値ベース redaction に登録する（キー名に依らず永続化/表示から伏せる）。"""
+        from . import url_scope
+        url_scope.clear_secret_values()
+        items = [("auth_user", auth_user), ("auth_password", auth_pass)]
+        for i, acct in enumerate(self.accounts):
+            if isinstance(acct, dict):
+                items += [(f"account{i}_user", acct.get("username")),
+                          (f"account{i}_password", acct.get("password"))]
+        for name, cookies in (("cookie", self._cookies), ("low_priv_cookie", self.low_priv_cookies)):
+            for part in str(cookies or "").split(";"):
+                items.append((name, part.partition("=")[2].strip()))
+        for c in [*self.cookie_list, *self.low_priv_cookie_list]:
+            if isinstance(c, dict):
+                items.append(("cookie", c.get("value")))
+        for k, v in self.header_manager.current().items():
+            v = str(v or "")
+            items += [(f"header:{k}", v), (f"header:{k}", v.rpartition(" ")[2])]
+        url_scope.register_secret_values(items)
+        self._redaction_skipped = sorted(set(url_scope.skipped_secret_labels))
 
     def _load_yaml(self, path: str) -> dict:
         try:

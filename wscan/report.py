@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
+from . import url_scope
 from .i18n import DEFAULT_LANG, normalize_lang, translator
 from .check_catalog import get_check_description, get_check_references
 from .scanners.base import Finding
@@ -404,7 +405,7 @@ class ReportGenerator:
         # アトミックに置換する。post-analysis の再描画で write_text が既存の有効な report を
         # truncate し、中断/ディスク満杯で空・部分 HTML を残さないようにする。
         tmp = report_path.with_name(report_path.name + ".tmp")
-        tmp.write_text(html, encoding="utf-8")
+        tmp.write_text(url_scope.redact_secret_values(html), encoding="utf-8")
         os.replace(tmp, report_path)
         return report_path
 

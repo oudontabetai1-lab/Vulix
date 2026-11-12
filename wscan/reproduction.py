@@ -10,6 +10,7 @@ import json
 import shlex
 from pathlib import Path
 
+from . import url_scope
 from .request_logger import _is_sensitive_header, _redact_headers
 from .scanners.base import Finding
 
@@ -24,7 +25,7 @@ def write_reproduction_package(
     json_path = output_dir / "reproduction.json"
     shell_path = output_dir / "reproduce.sh"
 
-    json_path.write_text(json.dumps({"findings": items}, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.write_text(url_scope.redact_secret_values(json.dumps({"findings": items}, ensure_ascii=False, indent=2)), encoding="utf-8")
 
     lines = [
         "#!/usr/bin/env bash",
@@ -42,7 +43,7 @@ def write_reproduction_package(
             curl,
             "",
         ])
-    shell_path.write_text("\n".join(lines), encoding="utf-8")
+    shell_path.write_text(url_scope.redact_secret_values("\n".join(lines)), encoding="utf-8")
     try:
         shell_path.chmod(0o755)
     except Exception:

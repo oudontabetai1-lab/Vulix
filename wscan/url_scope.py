@@ -222,10 +222,53 @@ _RE_JSON = re.compile(rf'(?i)("(?:[^"\\]*(?:{KEYS_ALT})[^"\\]*)"\s*:\s*)"(?:\\.|
 _RE_URL_SCHEME = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
 
 
+# 設定済み資格情報の**値**そのもの（キー名に依らず伏せる）。値→label。プロセス全体で 1 スキャン分
+# （serve は同時 1 スキャン前提。engine が scan 境界で clear→register する）。
+MIN_SECRET_LEN = 4  # これ未満は証跡（"a" 等）を壊すため登録しない（skipped_secret_labels に記録）
+_SECRET_VALUES: dict[str, str] = {}
+skipped_secret_labels: list[str] = []
+
+
+def clear_secret_values() -> None:
+    _SECRET_VALUES.clear()
+    skipped_secret_labels.clear()
+
+
+def register_secret_values(items) -> None:
+    """(label, value) を登録する。マーカーは ``[REDACTED:<label>]``。短すぎる値は登録せず記録する。"""
+    for label, value in items:
+        value = str(value or "")
+        if not value:
+            continue
+        if len(value) < MIN_SECRET_LEN:
+            skipped_secret_labels.append(label)
+        else:
+            _SECRET_VALUES[value] = label
+
+
+def redact_secret_values(text):
+    """登録済みの資格情報値（生・URL エンコード・JSON エスケープ形）を固定マーカーへ置換する。"""
+    if not isinstance(text, str) or not text or not _SECRET_VALUES:
+        return text
+    from urllib.parse import quote, quote_plus
+    import html as _html, json as _json, shlex
+    for value in sorted(_SECRET_VALUES, key=len, reverse=True):
+        marker = f"[REDACTED:{_SECRET_VALUES[value]}]"
+        for form in {value, quote(value, safe=""), quote_plus(value), _json.dumps(value)[1:-1],
+                     _html.escape(value), _html.escape(value, quote=False), shlex.quote(value)[1:-1]
+                     if shlex.quote(value).startswith("'") else shlex.quote(value)}:
+            if form in text:
+                text = text.replace(form, marker)
+    return text
+
+
 def redact_kv_values(text):
-    """urlencoded / JSON の機微フィールド値をマスクする（URL query と body で共有）。"""
+    """urlencoded / JSON の機微フィールド値をマスクする（URL query と body で共有）。
+
+    キー名ベースに加え、登録済みの資格情報値はキー名に依らず伏せる。"""
     if not isinstance(text, str) or not text:
         return text
+    text = redact_secret_values(text)
     text = _RE_URLENCODED.sub(lambda m: f"{m.group(1)}={REDACTED}", text)
     text = _RE_JSON.sub(lambda m: f'{m.group(1)}"{REDACTED}"', text)
     return text
@@ -249,7 +292,7 @@ def redact_url(url, *, drop_userinfo: bool = False):
     """
     if not isinstance(url, str) or not url:
         return url
-    result = url
+    result = redact_secret_values(url)  # パス部の値も対象
     # userinfo: scheme://user:pass@host → 資格情報を伏せる
     m = _RE_URL_SCHEME.match(result)
     if m:
