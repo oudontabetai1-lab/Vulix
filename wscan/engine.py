@@ -5322,22 +5322,29 @@ class ScanEngine:
         edits format:
           {url: {field_name: {risk_score, priority_checks, custom_payloads, skip}}}
         """
+        # ダッシュボードへは資格情報値を伏せた URL で渡しているため、戻りの URL を元の URL に引き直す
+        shown: dict[str, list] = {}
+        for u in plans:
+            shown.setdefault(url_scope.redact_url_values(u), []).append(u)
         for url, field_edits in edits.items():
-            plan = plans.get(url)
-            if not plan:
+            for target in ([url] if url in plans else shown.get(url, [])):
+                self._apply_page_edits(plans[target], field_edits)
+
+    @staticmethod
+    def _apply_page_edits(plan, field_edits: dict) -> None:
+        for fp in plan.fields:
+            fe = field_edits.get(fp.name)
+            if not fe:
                 continue
-            for fp in plan.fields:
-                fe = field_edits.get(fp.name)
-                if not fe:
-                    continue
-                if "risk_score" in fe:
-                    fp.risk_score = int(fe["risk_score"])
-                if "priority_checks" in fe:
-                    fp.priority_checks = list(fe["priority_checks"])
-                if "custom_payloads" in fe:
-                    fp.custom_payloads = dict(fe["custom_payloads"])
-                if fe.get("skip"):
-                    fp.risk_score = 0   # score=0 causes field to be skipped
+            if "risk_score" in fe:
+                fp.risk_score = int(fe["risk_score"])
+            if "priority_checks" in fe:
+                fp.priority_checks = list(fe["priority_checks"])
+            # 伏せ字入りで戻った payload は engine の実 payload を壊すので上書きしない
+            if "custom_payloads" in fe and not url_scope.has_secret_marker(json.dumps(fe["custom_payloads"])):
+                fp.custom_payloads = dict(fe["custom_payloads"])
+            if fe.get("skip"):
+                fp.risk_score = 0   # score=0 causes field to be skipped
 
     # =========================================================================
     # Interactive Plan Editor (terminal fallback)

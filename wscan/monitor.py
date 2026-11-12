@@ -32,6 +32,8 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
+from wscan.url_scope import redact_event_data
+
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 # Where ScanEngine writes each scan's artifacts (output/<timestamp>/...).
@@ -1142,7 +1144,7 @@ class MonitorServer:
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
-            self.api_target = config.get("url", "") or ""
+            self.api_target = redact_event_data(config.get("url", "") or "")
             self.api_phase = ""
             self.api_progress = {"current": 0, "total": 0, "percent": 0}
             self._audit("scan_start", self._client_ip(request), config.get("url", ""))
@@ -2055,7 +2057,7 @@ class MonitorServer:
                 "ts": datetime.datetime.now().isoformat(timespec="seconds"),
                 "ip": ip or "",
                 "action": action,
-                "detail": str(detail)[:300],
+                "detail": redact_event_data(str(detail))[:300],
             }
             with open(self._audit_path(), "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -2218,7 +2220,7 @@ class MonitorServer:
         self.api_scan_status = "scanning"
         self.api_findings = []
         self.api_report_path = None
-        self.api_target = (config or {}).get("url", "") or ""
+        self.api_target = redact_event_data((config or {}).get("url", "") or "")
         self.api_phase = ""
         self.api_progress = {"current": 0, "total": 0, "percent": 0}
         self.scan_request_event.set()
@@ -2468,7 +2470,7 @@ class MonitorServer:
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
-            self.api_target = cfg.get("url", "") or ""
+            self.api_target = redact_event_data(cfg.get("url", "") or "")
             self.api_phase = ""
             self.api_progress = {"current": 0, "total": 0, "percent": 0}
             self._audit("scan_start", client_ip, cfg.get("url", ""))
@@ -2508,7 +2510,7 @@ class MonitorServer:
         self.pending_interactive = {
             "type": event_type,
             "timestamp": time.time(),
-            "data": data or {},
+            "data": redact_event_data(data or {}),
         }
 
     def _clear_pending_interactive(self, *types: str) -> None:
@@ -2584,7 +2586,9 @@ class MonitorServer:
 
     async def emit(self, event_type: str, data: Any = None):
         """Send an event to all connected monitoring clients."""
-        event_data = data or {}
+        # 全イベントの単一の入口。履歴・WS 配信・派生状態（scan_gaps 等）に入る前に、設定済み資格情報の
+        # 値を伏せる（ディスク出力と同じ値ベース redaction。画像は素通し）。
+        event_data = redact_event_data(data or {})
         # スキャンが完了したら未解決のレビュー待ちは無効化する。
         # （非serve単発や異常終了で pending が残ったまま再接続→亡霊表示を防ぐ）
         if event_type == "scan_complete":
@@ -2744,7 +2748,8 @@ class MonitorServer:
         return base
 
     async def emit_finding(self, finding: dict):
-        # D: CI/CD API — findings を自動蓄積
+        # D: CI/CD API — findings を自動蓄積（API 応答にも載るため emit と同じく伏せてから保持する）
+        finding = redact_event_data(finding)
         self.api_findings.append(finding)
         await self.emit("finding", finding)
 
@@ -2757,6 +2762,7 @@ class MonitorServer:
         初期 assumed のまま見えてしまう。安定キー（verification を含まない）で既存 snapshot を
         差し替え、finding_update を broadcast して最終 scan_complete を待たずに正す。
         """
+        finding = redact_event_data(finding)
         key = self._finding_snapshot_key(finding)
         for i, existing in enumerate(self.api_findings):
             if self._finding_snapshot_key(existing) == key:
@@ -2786,7 +2792,7 @@ class MonitorServer:
         fast_mode: bool = False,
     ):
         """Send scan configuration to the dashboard so it can render dynamic badges."""
-        self.api_target = url or self.api_target
+        self.api_target = redact_event_data(url) or self.api_target
         await self.emit("scan_config", {
             "url": url,
             "checks": checks,
