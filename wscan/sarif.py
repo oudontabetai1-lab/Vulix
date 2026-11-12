@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from wscan import url_scope
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -331,5 +333,5 @@ def write_sarif(
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(sarif_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    out.write_text(url_scope.redact_secret_values(json.dumps(sarif_doc, ensure_ascii=False, indent=2)), encoding="utf-8")
     return out
