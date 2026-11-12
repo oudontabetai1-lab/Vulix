@@ -2603,6 +2603,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
           <option value="scanning">実行中 (scanning)</option>
           <option value="aborted">中断 (aborted)</option>
           <option value="incomplete">未完了 (incomplete)</option>
+          <option value="interrupted">中断・途中 (interrupted)</option>
           <option value="error">エラー (error)</option>
         </select>
       </div>
@@ -7852,6 +7853,9 @@ function renderHistoryTable() {
     } else if (rawStatus === 'incomplete') {
       statusClass = 'history-status-incomplete';
       statusLabel = '未完了';
+    } else if (rawStatus === 'interrupted') {
+      statusClass = 'history-status-incomplete';
+      statusLabel = '中断（途中）';
     }
     statusSpan.className = `history-status-badge ${statusClass}`;
     statusSpan.textContent = statusLabel;
@@ -7883,6 +7887,16 @@ function renderHistoryTable() {
       countSpan.textContent = String(fCount);
       if (fCount > 0) countSpan.style.color = 'var(--critical)';
       tdFindings.appendChild(countSpan);
+      if (scan.partial) {
+        // checkpoint の途中経過。確定値ではないことを明示する。
+        const partialSpan = document.createElement('span');
+        partialSpan.style.color = 'var(--text-muted)';
+        partialSpan.style.fontSize = '0.72rem';
+        partialSpan.style.marginRight = '8px';
+        partialSpan.textContent = '件（途中）';
+        partialSpan.title = '中断されたスキャンが途中までに記録した件数です。最終結果ではありません';
+        tdFindings.appendChild(partialSpan);
+      }
 
       if (fCount > 0) {
         const sevContainer = document.createElement('span');
