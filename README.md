@@ -55,6 +55,8 @@ Vulix のモジュール入口では `python -m vulix explore URL` を `scan` �
 
 通常層の確実性を保ちながら SPA の非同期 API を取りこぼさないため、Angular / React / Next.js / Vue / Nuxt の固有マーカー（本番ビルドの `self.__next_f`・`__NUXT_DATA__`・React SSR/RSC コメントマーカーや、空のマウント要素＋アプリバンドルの本番シェルを含む）を初回ページで検出すると SPA クロールを自動有効化します（既定 ON）。マウントに内容がある静的サイトや無関係な単発 script（analytics 等）では有効化せず、不要なクリック探索を避けます。フレームワーク固有のマーカーを一切出さない完全クライアント描画ページは自動判定できないため、その場合は `--spa-crawl` を明示してください。自動判定を使わない場合は `--no-auto-spa` を指定します（`batch` では `global.auto_spa_crawl: false`）。 自動有効化時のクリック探索と観測 JSON body（POST/PUT/PATCH）の攻撃再送は状態変更（削除/送信/管理操作）を起こしうるため既定では read-only（settle＋観測 GET/XHR の harvest のみ）で、クリックによるルート探索と非GET body 注入は明示 `--spa-crawl` か `--allow-state-changing-probes` を指定したときだけ行います。
 
+通常層（`scan`）は認証設定時（ログイン・Cookie・ヘッダ等）、クロール中にサインアウト系リンク（path が `logout` / `signout` / `signoff` 系。例 `/logout`、`/sign-out`）を辿りません。自セッションの破棄・再ログイン・アカウントロックを避けるためで、スキップした URL は未到達（unreached）として理由 `sign-out link skipped while authenticated` 付きで1回だけ報告します。サインアウト URL を明示的に対象・シードに指定した場合は従来どおり訪問し、認証未設定のスキャンでも挙動は変わりません。
+
 ### 対応チェック種別
 
 チェック一覧の正本は `wscan.scanners.SCANNERS` です。
