@@ -311,8 +311,10 @@ _EVENT_IDENTIFIER_KEYS = frozenset(
 
 
 def _looks_like_url(text: str) -> bool:
-    """値の形で URL を判定する（キー名に依らない）。絶対 URL、または空白の無い ``/`` 始まり 1 トークン。"""
-    return bool(_RE_URL_SCHEME.match(text)) or (text.startswith("/") and len(text.split()) == 1)
+    """値の形で URL を判定する（キー名に依らない）。空白の無い 1 トークンで、絶対 URL か ``/`` 始まり。
+
+    空白を含む文（``http://x 認証失敗: admin`` 等）は URL 規則だと path/本文が残るため自由文として全文置換する。"""
+    return len(text.split()) == 1 and (bool(_RE_URL_SCHEME.match(text)) or text.startswith("/"))
 
 
 def redact_event_data(value, key=""):

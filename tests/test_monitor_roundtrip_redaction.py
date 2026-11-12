@@ -130,3 +130,9 @@ def test_plan_edits_apply_to_every_url_with_same_shown_form(sec):
     # 伏せ後は別 URL（auth_user / auth_password）だが、伏せ後 URL からの引き直しは各々の元 URL に当たる
     _, _ = _roundtrip(plans)
     assert all(p.fields[0].risk_score == 0 for p in plans.values())
+
+
+def test_url_prefixed_sentence_is_masked_as_free_text(sec):
+    mon = MonitorServer()
+    asyncio.run(mon.emit_status("http://t.test/ login as admin failed"))
+    assert "admin" not in json.dumps(_events(mon, "status")).replace("[REDACTED:auth_user]", "")
