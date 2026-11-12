@@ -294,12 +294,12 @@ _EVIDENCE_FIELDS = ("request", "response", "evidence", "response_body_excerpt", 
                     "reproduction_steps", "verification_note", "dialog_message")
 
 
-def _redact_leaves(value, key=""):
+def redact_leaves(value, key=""):
     """文字列葉だけを置換した複製を返す（構造・キー・非文字列は不変）。``*url`` キーは URL 規則。"""
     if isinstance(value, dict):
-        return {k: _redact_leaves(v, str(k)) for k, v in value.items()}
+        return {k: redact_leaves(v, str(k)) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_redact_leaves(v, key) for v in value]
+        return [redact_leaves(v, key) for v in value]
     if isinstance(value, str):
         return redact_url_values(value) if key.lower().endswith("url") else redact_secret_values(value)
     return value
@@ -329,7 +329,7 @@ def redact_finding_dict(finding: dict) -> dict:
     out = dict(finding)
     for name in _EVIDENCE_FIELDS:
         if name in out:
-            out[name] = _redact_leaves(out[name], name)
+            out[name] = redact_leaves(out[name], name)
     if "url" in out:
         out["url"] = redact_url_values(out["url"])
     return out

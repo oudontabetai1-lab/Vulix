@@ -213,3 +213,42 @@ def test_url_structures_keep_keys_and_hide_configured_value(tmp_path, monkeypatc
         assert ev["visited_urls"] == [state.reached_urls[0]]
     finally:
         url_scope.clear_secret_values()
+
+
+def test_every_persisted_artifact_is_free_of_configured_values(tmp_path, monkeypatch):
+    """全保存経路（checkpoint・evidence・diff・report・SARIF・再現・改善計画）を有効にして全文 grep する。
+
+    構造ごとの個別確認ではなく、出力ディレクトリ全体に設定値が 1 つも残らないことで漏れを塞ぐ。"""
+    user, pw = "scan.user.zz", "Rz7-hunter2-pw"
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    old = _login_finding(
+        payload="' OR 2=2 --", url=f"http://t.test/old?pw={pw}",
+        request={"method": "POST", "url": f"http://t.test/old?pw={pw}", "post_data": f"password={pw}&u={user}"}).to_dict()
+    old["request"]["post_data"] = f"password={pw}&u={user}"  # 旧版 evidence は平文のことがある
+    (prev / "evidence.json").write_text(json.dumps({"findings": [old]}))
+    monkeypatch.setenv("WSCAN_STATE_DIR", str(tmp_path / "state"))
+    eng = ScanEngine("http://127.0.0.1:1", output_dir=str(tmp_path / "out"), auth_user=user, auth_pass=pw,
+                     checks=["sqli"], llm_provider="none", previous_scan_dir=str(prev), sarif=True)
+    try:
+        url = f"http://t.test/login?token={pw}&n=1"
+        eng.all_findings.append(_login_finding(
+            url=url, evidence=f"reflected {user}", reproduction_steps=[f"POST {url} password={pw}"],
+            request={"method": "POST", "url": url, "post_data": f"username={user}&password={pw}"},
+            response={"status": 200, "body": f"hello {user}"}, evidence_details={"ws_url": url}))
+        eng.visited_urls = {url}
+        eng.reached_urls = {url}
+        eng.scan_matrix = [{"url": url, "check": "sqli", "status": "tested"}]
+        eng._init_checkpoint()
+        eng.checkpoint.mark_done(url, "username", 0, "sqli")
+        eng._save_checkpoint()
+        eng._phase_report()
+        for name in ("checkpoint.json", "evidence.json", "reproduction.json", "report.sarif", "remediation_tasks.json"):
+            assert (tmp_path / "out" / name).exists(), name
+        leaked = [(str(p.relative_to(tmp_path / "out")), s) for p in (tmp_path / "out").rglob("*") if p.is_file()
+                  for s in (user, pw) if s.encode() in p.read_bytes()]
+        assert leaked == []
+        ev = json.loads((tmp_path / "out" / "evidence.json").read_text())
+        assert ev["diff"]["fixed"], "前回 evidence 由来の fixed を検査対象に含める"
+    finally:
+        url_scope.clear_secret_values()

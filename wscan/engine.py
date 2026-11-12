@@ -9137,6 +9137,9 @@ class ScanEngine:
                 old_findings = load_previous(self.previous_scan_dir)
                 diff_result = _diff(old_findings, findings_dicts)
                 diff_data = diff_result.to_dict()
+                # new/persistent は今回の finding、fixed は前回 evidence 由来（旧版は平文のことがある）
+                for _k in ("new", "persistent", "fixed"):
+                    diff_data[_k] = [url_scope.redact_finding_dict(f) for f in diff_data.get(_k, [])]
                 console.print(f"  [cyan][Diff][/cyan] {diff_result.summary()}")
             except Exception as exc:
                 console.print(f"  [yellow]差分スキャン失敗: {exc}[/yellow]")
