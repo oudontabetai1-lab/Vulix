@@ -123,12 +123,16 @@ class ChainScanner:
         exclude_fields: Optional[set] = None,
         enabled_checks: Optional[list] = None,
         state_profile: str = "unrestricted",
+        js_form_gate: Optional[callable] = None,
     ):
         self.browser = browser
         self.sleep_factor = sleep_factor
         self.exclude_fields = exclude_fields or set()
         self.enabled_checks = set(enabled_checks or ["xss"])
         self.state_profile = state_profile or "unrestricted"
+        # JS 制御フォーム（fetch JSON 送信・検出済み）への格納 probe を短絡する
+        # callable（(page_url, field_name, form_index, dom_index) -> bool）。無ければ従来挙動。
+        self._js_form_gate = js_form_gate
         self.probes: list[ChainProbe] = []
 
     # ------------------------------------------------------------------
@@ -214,6 +218,15 @@ class ChainScanner:
 
                     if not self._is_chain_target(field_name, plan, fi, inp):
                         continue
+
+                    # JS 制御フォーム（検出済み）への格納 probe は空振りするため短絡する。
+                    _gate = self._js_form_gate
+                    if callable(_gate):
+                        try:
+                            if _gate(page.url, field_name, fi, form.get("index", fi)):
+                                continue
+                        except Exception:
+                            pass
 
                     # Determine which probe types to use for this field
                     probe_types = self._select_probe_types(field_name, plan, fi)

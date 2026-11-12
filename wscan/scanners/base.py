@@ -973,6 +973,86 @@ class BaseScanner(ABC):
         except Exception:
             return base
 
+    def _record_delivery_outcome(self, ip, payloads=()) -> None:
+        """非送達 probe の記録を 1 箇所に集約する。
+
+        form carrier で JS 制御フォーム（preventDefault＋fetch JSON 送信）と判定できた場合は
+        payload 毎の ``transport_error:...:probe_not_delivered`` を刻まず、1 form×check で
+        1 回だけ ``js_handled_form:<check>:<path>`` を刻む（数百件のノイズ抑止）。検出は
+        engine.observe_js_form_probe が行い、併せて呼び出し先 JSON エンドポイントが json
+        注入点へ登録される。その際 ``payloads`` を渡し、観測 template body から投入値を
+        除去する（payload 由来の誤検知抑止）。multi-param の結合送信では複数 payload を
+        タプルで渡す。未検出・engine 不在・URL param などは従来どおりの note。
+        観測系の例外は scan を止めない（加算的・安全側）。
+        """
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            observe = getattr(engine, "observe_js_form_probe", None)
+            if callable(observe):
+                if isinstance(payloads, str):
+                    payloads = (payloads,)
+                try:
+                    observe(ip, probe_payloads=tuple(str(p) for p in payloads))
+                except Exception:
+                    pass
+            if callable(getattr(engine, "is_js_handled_form", None)) and engine.is_js_handled_form(ip):
+                noted = getattr(engine, "_js_form_noted", None)
+                note_key = (
+                    self.CHECK_TYPE,
+                    getattr(ip, "url", ""),
+                    getattr(ip, "submit_index", -1),
+                )
+                if noted is not None and note_key not in noted:
+                    noted.add(note_key)
+                    from urllib.parse import urlparse
+                    path = urlparse(note_key[1]).path or note_key[1]
+                    self._record_scan_note(f"js_handled_form:{self.CHECK_TYPE}:{path}")
+                return
+        self._record_scan_note(self._probe_delivery_note(ip, "probe_not_delivered"))
+
+    def _js_handled_form_gate(self, ip) -> bool:
+        """JS 制御フォーム（検出済み）への残り probe を短絡する。
+
+        検出済み (page_url, submit_index) の form carrier probe は送信せず ``("", {})`` を
+        返す（判定ロジックには関与しない＝確実性の基準は変えない。未送達 probe は元々
+        判定に使えない）。検出済みフォームへの初回 gate 該当時に 1 form×check 1 note を
+        刻む。form 以外の location／engine 不在は False（従来どおり送信）。
+        """
+        engine = getattr(self, "engine", None)
+        if engine is None or ip is None or getattr(ip, "location", "") != "form":
+            return False
+        handled = getattr(engine, "_js_form_handled", None)
+        if not handled:
+            return False
+        key = (getattr(ip, "url", ""), getattr(ip, "submit_index", -1))
+        if key not in handled:
+            return False
+        noted = getattr(engine, "_js_form_noted", None)
+        note_key = (self.CHECK_TYPE, key[0], key[1])
+        if noted is not None and note_key not in noted:
+            noted.add(note_key)
+            from urllib.parse import urlparse
+            path = urlparse(key[0]).path or key[0]
+            self._record_scan_note(f"js_handled_form:{self.CHECK_TYPE}:{path}")
+        return True
+
+    def _js_form_gate_for_probe(self, url: str, field_name: str, form_index: int,
+                                is_url_param: bool, dom_index: int | None = None) -> bool:
+        """直送 probe（等価性 / evolution 等）向けの JS 制御フォーム gate。
+
+        これらの投入経路は ``_apply_ip`` を通らず ``_send_probe`` の gate に到達しないため、
+        検出済み JS 制御フォームへの残り送信が続いてしまう（空振り＋safe 値としての
+        認証情報を含む fetch の再送）。同一キー判定は ``_js_handled_form_gate`` に委譲する
+        （note の重複抑止もそちらが持つ）。url_param は対象外（常に送信）。
+        """
+        if is_url_param:
+            return False
+        ip = InjectionPoint.for_form(
+            url, field_name, form_index,
+            dom_index=-1 if dom_index is None else dom_index,
+        )
+        return self._js_handled_form_gate(ip)
+
     async def _apply_ip(
         self, ip: InjectionPoint, payload, *, probe_role="attack", probe_wave="standard",
         baseline_attempt_ids=(), control_attempt_ids=(), parent_attempt_id="",
@@ -985,6 +1065,10 @@ class BaseScanner(ABC):
     async def _send_probe(self, ip, send, *, role="attack", wave="standard",
                           baseline_attempt_ids=(), control_attempt_ids=(), parent_id=""):
         from wscan.probe_ledger import Transport
+        # JS 制御フォーム（検出済み）への残り probe は送信せず短絡する。budget gate と同じく
+        # 判定ではなく送信を止めるだけ（「送れなかった probe」を判定に使わない既存規約）。
+        if self._js_handled_form_gate(ip):
+            return "", {}
         logger = getattr(getattr(self, "engine", None), "request_logger", None)
         if logger is None or not callable(getattr(logger, "probe_scope", None)):
             return await send()
@@ -1957,9 +2041,7 @@ class BaseScanner(ABC):
                         self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
 
                 if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
-                    self._record_scan_note(
-                        self._probe_delivery_note(ip, "probe_not_delivered")
-                    )
+                    self._record_delivery_outcome(ip, payload)
             else:
                 # Always ensure pair is defined (covers the case when PLAYWRIGHT manager is OFF)
                 if refreshed_result is not None:
@@ -1973,9 +2055,7 @@ class BaseScanner(ABC):
                         ip.legacy_is_url_param(),
                     )
                     if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
-                        self._record_scan_note(
-                            self._probe_delivery_note(ip, "probe_not_delivered")
-                        )
+                        self._record_delivery_outcome(ip, payload)
 
             self._observe_token_lifecycle(ip, payload, pair)
         # 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
@@ -2767,6 +2847,10 @@ class BaseScanner(ABC):
         # 完了化を抑止＝resume で再試行させる）。
         if self._field_budget_gate():
             return None
+        # JS 制御フォーム（検出済み）への直送 probe も空振りするため短絡する
+        # （_send_probe の gate に到達しない経路。note は 1 form×check 1 件のまま）。
+        if self._js_form_gate_for_probe(url, field_name, form_index, is_url_param, dom_index):
+            return None
         from wscan import equivalence_probe as eqp
 
         builders = {
@@ -2913,6 +2997,10 @@ class BaseScanner(ABC):
         if found:
             return saved or []
         if not getattr(self.engine, "enable_payload_evolution", True):
+            return []
+        # JS 制御フォーム（検出済み）への evolution probe（生存文字観測）も空振りする
+        # ため短絡する（_send_probe の gate に到達しない直送経路）。
+        if self._js_form_gate_for_probe(url, field_name, form_index, is_url_param, dom_index):
             return []
         try:
             from wscan import context_mutator

@@ -40,6 +40,7 @@ from typing import Optional
 from urllib.parse import urlparse, urljoin, parse_qs, urlsplit, unquote
 
 from wscan import url_scope
+from wscan import js_form_detect
 from wscan.state_profile import VALID_PROFILES
 
 # ---------------------------------------------------------------------------
@@ -1084,6 +1085,15 @@ class ScanEngine:
         self._spa_json_harvest_seen: dict = {}
         self.json_injection_points: list[InjectionPoint] = []
         self.xml_injection_points: list[InjectionPoint] = []
+        # JS 制御フォーム（submit が preventDefault され fetch JSON で送る SPA ログイン等）の
+        # 検出状態。form 送達相関はネイティブ送信を前提とするため JS 制御フォームでは常に
+        # 非送達になり、payload 毎の transport_error が数百件に膨らむ。検出済みフォームは
+        # (1) 残り probe を短絡し (2) 呼び出し先 JSON エンドポイントを json 注入点へ登録する。
+        # key: (page_url, submit_index)／note 済: (check, page_url, submit_index)／
+        # 登録済みエンドポイント: (method, endpoint)。
+        self._js_form_handled: set = set()
+        self._js_form_noted: set = set()
+        self._js_form_json_seen: set = set()
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
         self.handoff_cookies: list = list(handoff_cookies or [])
@@ -1537,6 +1547,7 @@ class ScanEngine:
             exclude_fields=self.exclude_fields,
             enabled_checks=self.checks,
             state_profile=self.state_profile,
+            js_form_gate=self._js_form_gate_for_chain,
         )
 
         # State
@@ -2071,6 +2082,122 @@ class ScanEngine:
             return True
         clean = url_scope.without_query(url)
         return clean != url and self._is_attack_target_url(clean)
+
+    # =========================================================================
+    # JS 制御フォーム（fetch JSON 送信）の検出と JSON 注入点登録
+    # =========================================================================
+
+    def is_js_handled_form(self, ip) -> bool:
+        """注入点の form が JS 制御（fetch JSON 送信）として検出済みか。"""
+        return (getattr(ip, "location", "") == "form" and
+                (getattr(ip, "url", ""), getattr(ip, "submit_index", -1)) in self._js_form_handled)
+
+    def _js_form_gate_for_chain(self, page_url: str, field_name: str, form_index: int,
+                                dom_index: int = -1) -> bool:
+        """ChainScanner（格納 probe・_send_probe を通らない）向けの JS 制御フォーム gate。
+
+        JS 制御フォームは格納もネイティブ遷移も発生しないため、probe 送信自体を
+        短絡する（note は出さない＝js_handled_form note は sqli/xss 検査側が 1 件ずつ持つ）。
+        """
+        try:
+            return self.is_js_handled_form(
+                InjectionPoint.for_form(page_url, field_name, form_index, dom_index=dom_index)
+            )
+        except Exception:
+            return False
+
+    def observe_js_form_probe(self, ip, probe_payloads=()) -> Optional[dict]:
+        """非送達 form probe の直後に JS 制御フォームを観測する（scanner から呼ばれる）。
+
+        判定は純粋関数 :mod:`js_form_detect` へ委譲し、ここでは状態更新（mark・JSON 注入点
+        登録）だけを行う。検出時は観測テンプレートを返す（既知/未検出は None）。
+
+        認証フローで捕捉した request（``authentication_active`` 中の赤字化済み capture）は
+        post_data が parse 不成立のため自然に除外される＝**赤字化済みログイン POST を
+        実認証情報のまま再生することはない**。登録するテンプレートの値は probe で投入した
+        値（payload＋safe 値）で、認証情報と probe で投入した payload に一致する値は
+        :func:`sanitize_credential_values` で空文字へ置換する。
+        """
+        if ip is None or getattr(ip, "location", "") != "form":
+            return None
+        key = (getattr(ip, "url", ""), getattr(ip, "submit_index", -1))
+        if key in self._js_form_handled:
+            return None
+        capture = getattr(getattr(self, "browser", None), "network", None)
+        if capture is None or not hasattr(capture, "probe_window_requests"):
+            return None
+        try:
+            target = js_form_detect.js_form_json_target(
+                capture.probe_window_requests(),
+                key[0],
+                [name for name, _v in (getattr(ip, "form_fields", ()) or ())],
+                target_field=getattr(ip, "parameter_id", ""),
+            )
+        except Exception:
+            return None
+        if target is None:
+            return None
+        self._js_form_handled.add(key)
+        self._register_js_form_json_point(target, extra_blank=probe_payloads)
+        return target
+
+    def _register_js_form_json_point(self, target: dict, extra_blank=()) -> None:
+        """JS 制御フォームの呼び出し先 JSON エンドポイントを json 注入点へ登録する。
+
+        template は観測リクエスト形状（フィールド名＋probe 値）から組み立てる。エンドポイント
+        は同一オリジン（detector 条件）かつ明示 exclusion に掛からないものだけ受け入れる。
+        probe 対象のフォームページは既に攻撃スコープ内（pre-auth ログイン検査／クロール攻撃対象）
+        であり、その送信先も既存の form probe と同等の状態変更（例: ログイン試行）を伴うため、
+        state-changing probe の opt-in 追加は行わない（既存契約の内側）。
+        """
+        method = target.get("method", "POST")
+        endpoint = target.get("endpoint", "")
+        url = target.get("url", "")
+        if not endpoint or not url:
+            return
+        dedup = (method, endpoint)
+        if dedup in self._js_form_json_seen:
+            return
+        if self._is_url_excluded(url):
+            return
+        self._js_form_json_seen.add(dedup)
+        body = js_form_detect.sanitize_credential_values(
+            target.get("json_body"),
+            (
+                getattr(getattr(self, "browser", None), "auth_user", ""),
+                getattr(getattr(self, "browser", None), "auth_pass", ""),
+                *(str(p) for p in (extra_blank or ())),
+            ),
+        )
+        template_id = _stable_json_template_id(dedup + ("js-form", target.get("content_type", "")))
+        self.injection_templates[template_id] = {
+            "method": method,
+            "url": url,
+            "endpoint": endpoint,
+            "json_body": body,
+            "content_type": target.get("content_type") or "application/json",
+            "headers": target.get("headers") or {},
+        }
+        added = 0
+        # 観測 shape の top-level キー毎に注入点を作る（login body 等の小さい shape 前提）。
+        for key_name in (body or {}).keys() if isinstance(body, dict) else []:
+            if added >= 12:
+                break
+            self.json_injection_points.append(
+                InjectionPoint.for_json_body(
+                    method,
+                    url,
+                    f"/{key_name}",
+                    display_name=str(key_name),
+                    template_id=template_id,
+                    source="js-form",
+                )
+            )
+            added += 1
+        console.print(
+            f"  [cyan][js-form][/cyan] JS 制御フォームの送信先 {method} {endpoint} を"
+            f" JSON 注入点へ登録（{added} point）"
+        )
 
     def _is_access_allowed_url(self, url: str) -> bool:
         if self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls):
@@ -7177,6 +7304,17 @@ class ScanEngine:
                 if len(field_payloads) < 2:
                     continue  # skip if only 1 field would be filled — that's already tested
 
+                # JS 制御フォーム（検出済み）への結合送信も単一フィールド経路と同じく
+                # 空振りするため、送信前に短絡する。note は 1 form×check 1 件
+                # （_js_form_noted が単一フィールド経路分と重複を抑止する）。
+                _multi_gate = getattr(scanner, "_js_handled_form_gate", None)
+                if callable(_multi_gate):
+                    try:
+                        if _multi_gate(multi_ip):
+                            continue
+                    except Exception:
+                        pass
+
                 console.print(
                     f"  [dim magenta]  {check_name.upper()} × "
                     f"{len(field_payloads)} fields: "
@@ -7236,18 +7374,25 @@ class ScanEngine:
                 await asyncio.sleep(self._effective_delay)
 
                 # 送達しなかった結合 probe では判定しない（ページ内容だけを根拠にしない）。
-                # 単一フィールド経路と同じ transport_error ノートを注入点 identity 付きで残す。
+                # JS 制御フォームと判定できた場合は 1 form×check 1 件の js_handled_form
+                # note に置き換わり、呼び出し先 JSON エンドポイントが注入点登録される
+                # （単一フィールド経路と同じ記録経路。投入 payload 群も template 値から
+                # 除去される）。判定できなければ従来の transport_error ノート。
                 delivered = getattr(self.browser, "last_probe_delivered", True)
                 if not delivered:
-                    _record_note = getattr(scanner, "_record_scan_note", None)
-                    if callable(_record_note):
-                        _delivery_note = getattr(scanner, "_probe_delivery_note", None)
-                        _note = (
-                            _delivery_note(multi_ip, "probe_not_delivered")
-                            if callable(_delivery_note)
-                            else f"transport_error:{check_name}:probe_not_delivered"
-                        )
-                        _record_note(_note)
+                    _record_outcome = getattr(scanner, "_record_delivery_outcome", None)
+                    if callable(_record_outcome):
+                        _record_outcome(multi_ip, tuple(field_payloads.values()))
+                    else:
+                        _record_note = getattr(scanner, "_record_scan_note", None)
+                        if callable(_record_note):
+                            _delivery_note = getattr(scanner, "_probe_delivery_note", None)
+                            _note = (
+                                _delivery_note(multi_ip, "probe_not_delivered")
+                                if callable(_delivery_note)
+                                else f"transport_error:{check_name}:probe_not_delivered"
+                            )
+                            _record_note(_note)
 
                 # CTF flag check on combined result
                 if self.flag_finder and source:
