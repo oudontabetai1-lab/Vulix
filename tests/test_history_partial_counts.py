@@ -42,3 +42,17 @@ def test_listing_time_1000_dirs(tmp_path, monkeypatch):
     t = time.perf_counter()
     _scans(tmp_path, monkeypatch)
     print("list 1000 dirs: %.2fs" % (time.perf_counter() - t))
+
+
+def test_running_scan_is_scanning_not_interrupted(tmp_path, monkeypatch):
+    """実行中スキャンの checkpoint は途中件数だが『中断』ではなく scanning。"""
+    for n in ("live", "dead"):
+        (tmp_path / n).mkdir()
+        (tmp_path / n / "checkpoint.json").write_text(json.dumps({"findings": [{"severity": "low"}]}))
+    monkeypatch.setattr(monitor, "OUTPUT_BASE", tmp_path)
+    srv = MonitorServer()
+    srv.scan_in_progress = True
+    srv.current_scan_id = "live"
+    s = {x["id"]: x for x in srv._list_scans()}
+    assert (s["live"]["status"], s["live"]["partial"], s["live"]["findings_count"]) == ("scanning", True, 1)
+    assert s["dead"]["status"] == "interrupted"

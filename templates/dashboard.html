@@ -7893,8 +7893,11 @@ function renderHistoryTable() {
         partialSpan.style.color = 'var(--text-muted)';
         partialSpan.style.fontSize = '0.72rem';
         partialSpan.style.marginRight = '8px';
-        partialSpan.textContent = '件（途中）';
-        partialSpan.title = '中断されたスキャンが途中までに記録した件数です。最終結果ではありません';
+        const running = String(scan.status || '').toLowerCase() === 'scanning';
+        partialSpan.textContent = running ? '件（実行中・途中）' : '件（途中）';
+        partialSpan.title = running
+          ? '実行中のスキャンが現時点までに記録した件数です。最終結果ではありません'
+          : '中断されたスキャンが途中までに記録した件数です。最終結果ではありません';
         tdFindings.appendChild(partialSpan);
       }
 
