@@ -7,8 +7,10 @@ GitHub API は叩かず merge もコメントもしない（subprocess/network �
 ``isDraft``/``mergeStateStatus``/``reviews``/``reviewThreads`` はキー欠落・null で失格。CI は現
 head SHA へ厳密 pin された単一エントリの SUCCESS のみ合格（SHA 欠落・stale・同名重複は失格）。
 independent/security/acceptance は ``{"verdict":"PASS","head_sha":<現 head>}`` のみ有効。
-変更作者（``security_review`` の author セッション）と独立レビュアー（``independent_review``
-の reviewer セッション）は、欠落・同一のいずれでも失格（同一性は接頭辞と大小を吸収して比較）。
+変更作者と独立レビュアーは別セッションでなければならない（欠落・同一のいずれも失格）。
+必須フィールド: author は ``security_review.author_worker_session_id``、reviewer は
+``independent_review.reviewer_worker_session_id`` または別名 ``reviewer_session_id``
+（両方あるときは一致しないと失格）。比較は接頭辞・前後空白・大小を吸収する。
 """
 from __future__ import annotations
 
@@ -187,14 +189,21 @@ def _check_evidence(p: Mapping[str, Any], head: str, out: list[str]) -> None:
 
 
 def _check_sessions(p: Mapping[str, Any], out: list[str]) -> None:
-    """変更作者と独立レビュアーが別セッションか（欠落・同一のいずれも fail closed）。"""
+    """変更作者と独立レビュアーが別セッションか（欠落・矛盾・同一のいずれも fail closed）。
+
+    reviewer は別名キー（``reviewer_session_id``）も受ける。両方あるときは一致しないと曖昧＝失格。
+    """
     ev = _pick(p, "evidence", default=None)
     rev = ev.get("independent_review") if isinstance(ev, Mapping) else None
     sec = ev.get("security_review") if isinstance(ev, Mapping) else None
-    reviewer = _session(_pick(rev, "reviewer_worker_session_id", default=""))
-    author = _session(_pick(sec, "author_worker_session_id", default=""))
+    r1 = _session(_pick(rev, "reviewer_worker_session_id", default=""))
+    r2 = _session(_pick(rev, "reviewer_session_id", default=""))
+    if r1 and r2 and r1 != r2:
+        out.append("evidence: independent_review has conflicting reviewer sessions (fail closed)")
+    reviewer = r1 or r2
     if not reviewer:
         out.append("evidence: independent_review has no reviewer session (fail closed)")
+    author = _session(_pick(sec, "author_worker_session_id", default=""))
     if not author:
         out.append("evidence: security_review has no author session (fail closed)")
     if reviewer and author and reviewer == author:

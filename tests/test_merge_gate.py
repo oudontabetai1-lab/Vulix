@@ -197,6 +197,7 @@ def test_distinct_reviewer_and_author_sessions_accepted():
     (REVIEWER, REVIEWER),                              # 完全一致
     ("reviewer-1", "orca_session_id:reviewer-1"),      # 接頭辞の有無だけが違う
     ("orca_session_id:REVIEWER-1", "reviewer-1"),      # 接頭辞＋大小違い
+    (" reviewer-1\t", "  orca_session_id:reviewer-1  "),  # 前後空白だけが違う
 ])
 def test_identical_reviewer_and_author_session_blocks(reviewer, author):
     assert any("equals the author session" in r for r in
@@ -212,6 +213,23 @@ def test_missing_reviewer_session_blocks(value):
     else:
         ev["independent_review"]["reviewer_worker_session_id"] = value
     assert any("no reviewer session" in r for r in blocked(evidence=ev))
+
+
+def test_reviewer_alias_key_accepted():
+    """別名キー（reviewer_session_id）単独でも reviewer として有効。"""
+    ev = evidence_with_sessions()
+    ev["independent_review"]["reviewer_session_id"] = ev["independent_review"].pop("reviewer_worker_session_id")
+    assert evaluate(payload(evidence=ev))["ready"] is True
+
+
+def test_conflicting_reviewer_keys_fail_closed():
+    """両キー併存で値が一致しないときはどちらが真か決められない＝fail closed。"""
+    ev = evidence_with_sessions()
+    ev["independent_review"]["reviewer_session_id"] = "orca_session_id:reviewer-2"
+    assert any("conflicting reviewer sessions" in r for r in blocked(evidence=ev))
+    # 同値なら曖昧ではない（ready を維持）
+    ev["independent_review"]["reviewer_session_id"] = ev["independent_review"]["reviewer_worker_session_id"]
+    assert evaluate(payload(evidence=ev))["ready"] is True
 
 
 @pytest.mark.parametrize("value", [None, ""])
