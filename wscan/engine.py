@@ -2158,7 +2158,8 @@ class ScanEngine:
         dedup = (method, endpoint)
         if dedup in self._js_form_json_seen:
             return
-        if self._is_url_excluded(url):
+        # 他の JSON 注入経路と同じ攻撃スコープ判定（access-only / スコープ外は攻撃しない）。
+        if not self._json_target_in_scope(url):
             return
         self._js_form_json_seen.add(dedup)
         body = js_form_detect.sanitize_credential_values(

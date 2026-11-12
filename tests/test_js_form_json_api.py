@@ -171,6 +171,31 @@ def test_sanitize_replaces_exact_credential_and_payload_values():
     assert body["username"] == "' OR 1=1--"
 
 
+def _bare_engine(target_urls):
+    eng = object.__new__(ScanEngine)
+    eng.target_urls = target_urls
+    eng.exclude_urls = []
+    eng.injection_templates = {}
+    eng.json_injection_points = []
+    eng._js_form_json_seen = set()
+    return eng
+
+
+@pytest.mark.parametrize("endpoint,expect", [
+    ("https://app.test/api/login", 1),        # 攻撃スコープ内: 登録される
+    ("https://app.test/other/login", 0),      # access-only（target_urls 外）
+    ("https://evil.test/api/login", 0),       # スコープ外ホスト
+])
+def test_js_form_json_point_respects_attack_scope(endpoint, expect):
+    eng = _bare_engine(["https://app.test/api"])
+    eng._register_js_form_json_point({
+        "method": "POST", "endpoint": endpoint, "url": endpoint,
+        "json_body": {"username": "u", "password": "p"},
+    })
+    assert len(eng.json_injection_points) == 2 * expect
+    assert bool(eng.injection_templates) == bool(expect)
+
+
 # =============================================================================
 # 2. 実ブラウザ E2E（WSCAN_E2E=1 のみ実行）
 # =============================================================================
