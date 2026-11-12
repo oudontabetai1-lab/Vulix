@@ -372,8 +372,21 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
 
 - retry 対象＝`{408,429,500,502,503,504,529}`＋httpx 接続/読み書き例外＋Anthropic `APIConnectionError/APITimeoutError`
   ＋応答形式破損。バックオフは指数（cap 8s）、`429` の `Retry-After`（秒）優先。
-- **可用性フリップ/resume**: `engine._adaptive_llm_available` を scan 中1度だけ probe。`permanent`/`unavailable`
-  で倒す（以降 LLM を呼ばず checkpoint 完了で収束）、`empty`/`transient` は倒さない（`--resume` で回収）。
+- **可用性フリップ/resume**: 使えない LLM への実試行は鍵ごとに scan 中 1 回まで。
+  鍵＝`(provider, base URL, model)`（`llm_client.availability_key` が単一生成点）。provider 全体の
+  恒久不備（provider none・キー/クライアント不在・不達ホスト＝`unavailable`）は
+  `PayloadGenerator._llm_available`/`_provider_llm_unavailable` で全体を倒し、全 role 共通の gate
+  （`_check_llm_available`）と `complete_text` 入口の short-circuit がこれを見る。モデル固有の
+  恒久失敗（4xx≠429＝`permanent`）は `_llm_unavailable_keys` に鍵単位で倒す — **単一 role のモデル
+  不在で他 role を落とさない**（偽陰性防止。planner モデル 404 でも payload/adaptive/report の LLM
+  呼び出しは減らない）。`PayloadGenerator.mark_llm_unavailable`（1 度だけ・wave_errors に
+  `llm_unavailable:<status>`（provider 全体）／`llm_unavailable:<status>:<model>`（鍵単位）を鍵ごとに
+  1 行記録）が帰結先で、`complete_text` 入口と streaming 経路（planner/mutate）の鍵チェック
+  （`pg.is_llm_unavailable(key)`）がこれを見る。streaming 経路は `use_role` context 抜き後に flip する
+  ため、context 内で捕捉した `_resolved_model` を `availability_key` へ明示的に渡す。
+  自前 streaming 経路は非 200 を `llm_client.is_permanent_status` で分類して同じ鍵を倒す。
+  `engine._adaptive_llm_available` は adaptive 経路の収束（checkpoint 完了）用の mirror。
+  `empty`/`transient`/`blocked` は倒さない（`--resume` で回収・LLM 全体生存）。
 - **プロンプトインジェクション防御**: `adaptive_payload._sanitize_untrusted_html`。
 
 ### 拡張チェックリスト（新しく LLM を挟むとき）

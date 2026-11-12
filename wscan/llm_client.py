@@ -48,6 +48,19 @@ class _RetryableResponseError(Exception):
     """成功ステータスだが応答形式が一時的に壊れていることを表す。"""
 
 
+def is_permanent_status(status: Any) -> bool:
+    """HTTP ステータスが恒久失敗か判定する（純粋）。
+
+    complete_text 非経由の自前 streaming 経路（planner/mutate）が非 200 を
+    分類するために complete_text と同じ基準を共有する。4xx のうち一時失敗の
+    408（timeout）と 429（rate limit）は除外する。
+    """
+    return (
+        isinstance(status, int) and 400 <= status < 500
+        and status not in _RETRYABLE_STATUS_CODES
+    )
+
+
 def is_retryable(status_or_exc: Any) -> bool:
     """HTTP ステータスまたは例外が一時的な失敗を示すか判定する。"""
     if isinstance(status_or_exc, int):
@@ -119,6 +132,48 @@ def record_llm_call(
         pass
 
 
+def availability_key(pg, model=None) -> tuple[str, str, str]:
+    """LLM 可用性の鍵 (provider, base URL, model) を作る（純粋）。
+
+    恒久失敗の影響範囲を区別するための単一の鍵生成点。``model`` を省略した場合は
+    role 解決済みの ``<provider>_model`` property（``_active_role`` 依存）を読む —
+    ``use_role`` コンテキスト内で呼ぶこと。streaming 経路（planner/mutate）は
+    context 抜き後に flip するため、context 内で捕捉した model を明示的に渡す。
+    """
+    provider = getattr(pg, "provider", "none") or "none"
+    if provider == "openai":
+        base = str(getattr(pg, "openai_base_url", "") or "")
+    elif provider == "ollama":
+        base = str(getattr(pg, "ollama_url", "") or "")
+    else:
+        base = ""
+    if model is None:
+        model = str(getattr(pg, f"{provider}_model", "") or "")
+    return (str(provider), base, str(model))
+
+
+def _mark_pg_unavailable(pg, status: CompletionStatus, caller: str = "", key=None) -> None:
+    """恒久失敗を pg の可用性へ反映する（存在すれば。テスト用 pg 等は no-op）。
+
+    ``unavailable``（キー無し）は provider 全体、``permanent`` は鍵 (provider,
+    base, model) 単位。鍵が渡せない古い pg では status のみで倒れる。
+    """
+    if status not in ("permanent", "unavailable"):
+        return
+    mark = getattr(pg, "mark_llm_unavailable", None)
+    if callable(mark):
+        try:
+            mark(status, caller=caller, key=key)
+        except TypeError:
+            # 鍵引数を持たない旧署名の mark 実装への後方互換。
+            try:
+                mark(status, caller=caller)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
 def _completion_result(
     text: str | None,
     status: CompletionStatus,
@@ -144,7 +199,13 @@ async def complete_text(
 ) -> str | None | tuple[str | None, CompletionStatus]:
     """設定済みプロバイダへ問い合わせ、生テキストと任意の失敗種別を返す。"""
     provider = getattr(pg, "provider", "none")
-    if provider == "none":
+    # 恒久不備（provider none・provider 全体の恒久失敗）は即 unavailable。
+    # 以降の呼び出し全て（report/triage 等 gate 無しの caller 含む）がここで打ち切られ、
+    # 使えない provider への実試行は scan 中 1 回までになる。
+    if provider == "none" or getattr(pg, "_llm_available", None) is False:
+        return _completion_result(None, "unavailable", return_status)
+    _is_unavail = getattr(pg, "is_llm_unavailable", None)
+    if callable(_is_unavail) and _is_unavail():
         return _completion_result(None, "unavailable", return_status)
 
     request_timeout = (
@@ -155,6 +216,7 @@ async def complete_text(
         request_timeout = float(request_timeout)
         max_retries = max(0, int(max_retries))
     except (TypeError, ValueError):
+        _mark_pg_unavailable(pg, "unavailable", caller)
         return _completion_result(None, "unavailable", return_status)
 
     api_key = None
@@ -163,26 +225,37 @@ async def complete_text(
         if provider == "claude":
             anthropic_client = pg._get_anthropic_client()
             if not anthropic_client:
+                _mark_pg_unavailable(pg, "unavailable", caller)
                 return _completion_result(None, "unavailable", return_status)
         elif provider == "openai":
             api_key = getattr(pg, "openai_api_key", None)
             if not api_key:
+                _mark_pg_unavailable(pg, "unavailable", caller)
                 return _completion_result(None, "unavailable", return_status)
         elif provider == "gemini":
             api_key = os.environ.get("GEMINI_API_KEY")
             if not api_key:
+                _mark_pg_unavailable(pg, "unavailable", caller)
                 return _completion_result(None, "unavailable", return_status)
         elif provider != "ollama":
+            _mark_pg_unavailable(pg, "unavailable", caller)
             return _completion_result(None, "unavailable", return_status)
     except Exception:
+        _mark_pg_unavailable(pg, "unavailable", caller)
         return _completion_result(None, "unavailable", return_status)
 
     # LLM 呼び出しの観測性：実際に問い合わせる経路の結果を記録する。本文は保存せず
     # 文字数のみ。request_logger 未配線（triage の使い捨て pg 等）や記録失敗では no-op。
     import time as _time
-    _t0 = _time.monotonic()
     _role = pg.current_role() if hasattr(pg, "current_role") else ""
     _model = getattr(pg, f"{provider}_model", "") or ""
+    # 鍵単位の short-circuit：この role が解決した model の鍵が既に恒久不達
+    # （例: モデル不在 404）なら実試行せず打ち切る。鍵単位で倒れるため provider
+    # 全体は生きており、別モデルを使う他 role の LLM 呼び出しは減らない。
+    _key = availability_key(pg, model=_model)
+    if callable(_is_unavail) and _is_unavail(_key):
+        return _completion_result(None, "unavailable", return_status)
+    _t0 = _time.monotonic()
 
     def _finish(text, status, attempt=0, exc=None):
         # 失敗の種別名だけを監査行に残す（str(exc) は URL/APIキーを含み得るので保存しない）。
@@ -205,6 +278,10 @@ async def complete_text(
             response_chars=len(text) if isinstance(text, str) else 0,
             caller=caller, exception_type=exc_type,
         )
+        # 恒久失敗（4xx・キー/クライアント不在）は可用性を倒し、以降の同一鍵（provider
+        # 全体もしくは role 解決済みモデル）の呼び出しが入口で打ち切られる。
+        # empty/transient/blocked は倒さない（resume 回収・LLM 全体生存を壊さない）。
+        _mark_pg_unavailable(pg, status, caller, key=_key)
         if is_timeout:
             wave_errors = getattr(pg, "wave_errors", None)
             if wave_errors is not None:

@@ -113,6 +113,10 @@ class PayloadGenerator:
         self.enable_web_browsing = enable_web_browsing
         self._anthropic_client = None
         self._llm_available: Optional[bool] = None
+        # 鍵単位の恒久不達（モデル固有 4xx 等）。provider 全体の不達は
+        # _provider_llm_unavailable / _llm_available で表す。
+        self._provider_llm_unavailable: bool = False
+        self._llm_unavailable_keys: set = set()
 
     @property
     def claude_model(self) -> str:
@@ -262,6 +266,63 @@ class PayloadGenerator:
         if not self._llm_available:
             console.print("[yellow]LLM not available, using default payloads[/yellow]")
         return self._llm_available
+
+    def mark_llm_unavailable(self, status: str, caller: str = "", key=None) -> None:
+        """恒久失敗で LLM 可用性を scan 内で一度だけ倒す。
+
+        ``complete_text`` と自前 streaming 経路（planner/mutate）の共通の帰結先。
+        ``unavailable``（provider none・キー/クライアント不在・不達ホスト）は
+        provider 全体を倒す。``permanent``（モデル固有 4xx 等）は鍵
+        ``(provider, base URL, model)`` 単位で倒す — 別モデルを使う他 role の
+        LLM は生かす（＝単一 role の不在で攻撃入力が減らない＝偽陰性防止）。
+        鍵が渡せない caller の ``permanent`` は従来どおり provider 全体とする。
+        一度倒した鍵への以降の呼び出しは ``complete_text`` 入口・streaming 経路の
+        鍵チェックで probe 無しに打ち切られる（＝実試行は鍵ごとに 1 回まで）。
+        一時失敗（transient/empty/blocked）では呼ばないこと — resume 回収を壊す。
+        """
+        if key is None or status == "unavailable":
+            # provider 全体の恒久不備。
+            if self._provider_llm_unavailable:
+                return
+            self._provider_llm_unavailable = True
+            self._llm_available = False
+            console.print(
+                f"[yellow]LLM unavailable ({status}) — using default payloads / "
+                f"heuristic fallbacks for the rest of this scan[/yellow]"
+            )
+            # 観測性：恒久不達を 1 行だけ残す（observability_summary の by_category に出る）。
+            wave_errors = getattr(self, "wave_errors", None)
+            if wave_errors is not None:
+                note = f"llm_unavailable:{status}"
+                if note not in wave_errors:
+                    wave_errors.append(note)
+            return
+        # 鍵単位の恒久不備（例: モデル不在 404）。
+        if key in self._llm_unavailable_keys:
+            return
+        self._llm_unavailable_keys.add(key)
+        model = key[2] if isinstance(key, tuple) and len(key) > 2 else ""
+        console.print(
+            f"[yellow]LLM model unavailable ({status}: {model}) — role falls back to "
+            f"default payloads; other roles keep their models[/yellow]"
+        )
+        # 観測性：鍵ごとに 1 行（category は llm_unavailable のまま集計される）。
+        wave_errors = getattr(self, "wave_errors", None)
+        if wave_errors is not None:
+            note = f"llm_unavailable:{status}:{model}"
+            if note not in wave_errors:
+                wave_errors.append(note)
+
+    def is_llm_unavailable(self, key=None) -> bool:
+        """指定鍵（省略時は provider 全体）の恒久不達を判定する。
+
+        ``_check_llm_available``（config probe の provider 全体 gate）と併用され、
+        ``complete_text`` 入口と streaming 経路（planner/mutate）の鍵チェックから
+        呼ばれる。provider 全体の不達は全鍵で True。
+        """
+        if self._provider_llm_unavailable or self._llm_available is False:
+            return True
+        return key is not None and key in self._llm_unavailable_keys
 
     # ------------------------------------------------------------------
     # Helpers
