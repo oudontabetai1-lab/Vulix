@@ -262,10 +262,62 @@ def redact_secret_values(text):
     return text
 
 
+# label は保存時の run が決めるため、再開側の登録状態に依存せず形だけで判定する。
+# token_lifecycle の ``[REDACTED:len=N]`` は別マーカーなので除く。
+_RE_SECRET_MARKER = re.compile(r"\[REDACTED:(?!len=\d+\])[^\]]+\]")
+
+
 def has_secret_marker(text) -> bool:
-    """*text* に登録済み資格情報の伏せ字マーカー（``[REDACTED:<label>]``）が含まれるか。"""
-    return isinstance(text, str) and any(
-        f"[REDACTED:{label}]" in text for label in set(_SECRET_VALUES.values()))
+    """*text* に資格情報の伏せ字マーカー（``[REDACTED:<label>]``）が含まれるか（label 非依存）。"""
+    return isinstance(text, str) and _RE_SECRET_MARKER.search(text) is not None
+
+
+def redact_url_values(url):
+    """URL の userinfo・query・fragment だけ登録済み値を伏せる。path（識別子）は変えない。"""
+    if not isinstance(url, str) or not url or not _SECRET_VALUES:
+        return url
+    head, rest = "", url
+    m = _RE_URL_SCHEME.match(url)
+    if m:
+        after = url[m.end():]
+        cut = min((i for i in (after.find("/"), after.find("?"), after.find("#")) if i != -1),
+                  default=len(after))
+        userinfo, at, host = after[:cut].rpartition("@")
+        head, rest = url[:m.end()] + redact_secret_values(userinfo) + at + host, after[cut:]
+    cut = min((i for i in (rest.find("?"), rest.find("#")) if i != -1), default=len(rest))
+    return head + rest[:cut] + redact_secret_values(rest[cut:])
+
+
+# 証跡として永続化する finding のフィールド。これ以外（check_type/field_name/payload/injection_*/
+# 各種 id 等の識別子）は値ベース置換の対象にしない（resume のキー一致・再検証を壊さないため）。
+_EVIDENCE_FIELDS = ("request", "response", "evidence", "response_body_excerpt", "evidence_details",
+                    "reproduction_steps", "verification_note", "dialog_message")
+
+
+def _redact_leaves(value, key=""):
+    """文字列葉だけを置換した複製を返す（構造・キー・非文字列は不変）。``*url`` キーは URL 規則。"""
+    if isinstance(value, dict):
+        return {k: _redact_leaves(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_leaves(v, key) for v in value]
+    if isinstance(value, str):
+        return redact_url_values(value) if key.lower().endswith("url") else redact_secret_values(value)
+    return value
+
+
+def redact_finding_dict(finding: dict) -> dict:
+    """永続化用に finding dict の証跡フィールドの文字列葉と url のクエリ等だけ伏せた複製を返す。
+
+    JSON 文字列へ直列化した後ではなく、dict に対して適用する（値が ``true`` 等でも JSON を壊さない）。"""
+    if not isinstance(finding, dict) or not _SECRET_VALUES:
+        return finding
+    out = dict(finding)
+    for name in _EVIDENCE_FIELDS:
+        if name in out:
+            out[name] = _redact_leaves(out[name], name)
+    if "url" in out:
+        out["url"] = redact_url_values(out["url"])
+    return out
 
 
 def redact_kv_values(text):

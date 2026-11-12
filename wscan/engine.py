@@ -8744,16 +8744,19 @@ class ScanEngine:
     def _finding_has_unsendable_redaction(f: Finding) -> bool:
         """finding の再送元に資格情報の伏せ字マーカーが入っていて、実値として送れないか（純粋）。
 
-        checkpoint は資格情報の値を伏せて保存する。resume で復元した finding を verify するとき、
-        url は常に再送元。request は provenance（form/url_param/json_body）を持たない検証
-        （privesc/graphql/websocket 等）だけが再送元で、provenance 付きは request を証跡としてのみ使う。
+        checkpoint は finding の証跡（url のクエリ・request 等）の資格情報値を伏せて保存する。resume で
+        復元した finding の verify では、url（クエリ値）は常に再送元。request/evidence_details は
+        provenance（form/url_param/json_body）を持たない検証（privesc/graphql/websocket 等）だけが
+        再送元で、provenance 付きは証跡としてのみ使う。マーカーは保存時の label に依らず形で判定する。
         """
         import json as _j
         if url_scope.has_secret_marker(f.url):
             return True
         if f.injection_location:
             return False
-        return url_scope.has_secret_marker(_j.dumps(f.request or {}, ensure_ascii=False, default=str))
+        # 再送元は request のほか、検証が読む evidence_details（ws_url 等）にもなりうる
+        return url_scope.has_secret_marker(_j.dumps(
+            [f.request or {}, f.evidence_details or {}], ensure_ascii=False, default=str))
 
     async def _verify_one(self, f: Finding) -> str:
         """
@@ -9085,8 +9088,7 @@ class ScanEngine:
             # 一時ファイルへ書き切ってから os.replace で入れ替える（失敗時も元ファイルは無傷）。
             tmp = path.with_name(path.name + ".tmp")
             tmp.write_text(
-                url_scope.redact_secret_values(json.dumps(data, ensure_ascii=False, indent=2)),
-                encoding="utf-8",
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             os.replace(tmp, path)
         except Exception:
@@ -9170,7 +9172,10 @@ class ScanEngine:
             evidence["coverage"]["evidence_completion"] = self.evidence_completion()
         evidence_path = self.output_dir / "evidence.json"
         with open(evidence_path, "w", encoding="utf-8") as fp:
-            fp.write(url_scope.redact_secret_values(json.dumps(evidence, ensure_ascii=False, indent=2)))
+            json.dump(
+                {**evidence, "findings": [url_scope.redact_finding_dict(f) for f in evidence["findings"]]},
+                fp, ensure_ascii=False, indent=2,
+            )
         console.print(f"  [dim]Evidence:[/dim] {evidence_path}")
         if llm_summary.get("provider") != "none":
             console.print(
