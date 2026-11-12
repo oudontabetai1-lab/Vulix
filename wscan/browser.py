@@ -638,9 +638,25 @@ class NetworkCapture:
         # _observed_auth_headers はページ遷移をまたいで保持する（ログインフローの
         # トークンを後続ページの httpx 検査へ橋渡しするため）。永続化はしない。
 
+    def probe_window_requests(self) -> list:
+        """clear() 以降に捕捉した request dict のスナップショット（純粋参照）。
+
+        完了 pair の request と in-flight の pending（応答未着で pairs に載っていない
+        request）を束ねて返す。JS 制御フォーム（fetch JSON 送信）の検出は probe 直後に行
+        われるため、応答未着の fetch request も根拠に含める必要がある（応答は probe 返却後
+        に着信することが実測されている）。赤字化済み（``authentication_active`` 中）の
+        request もそのまま含む（parse で除外される）。
+        """
+        snapshot = [
+            p.get("request") for p in (self.pairs or []) if isinstance(p, dict)
+        ]
+        snapshot.extend(
+            v for v in getattr(self, "_pending", {}).values() if isinstance(v, dict)
+        )
+        return [r for r in snapshot if isinstance(r, dict)]
+
     def request_count(self) -> int:
         """clear() 以降に *送信* されたリクエスト数（on_request 発火回数）。
-
         応答ではなく送信を数えるのが要点:
         - clear() で捨てた in-flight リクエストの後着応答は on_request を発火させないので
           水増ししない（`pairs` を数えると unmatched 応答で誤増加する）。

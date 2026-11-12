@@ -548,4 +548,88 @@ document.getElementById("login-form").addEventListener("submit", async function(
             return _protected_html(7, q=q, safe_q=safe_q)
         return HTMLResponse("<h1>Authentication required</h1>", status_code=401)
 
+    # =========================================================================
+    # JS 制御フォーム（fetch JSON 送信）の脆弱＋安全ツイン。
+    # VARIANTS には入れない（7 形態網羅テスト len==7 を壊さない）。
+    # ネイティブ form 送信が preventDefault され、ページ内 JS が JSON API へ
+    # fetch する形態。/v8/api/login は username の引用符を文字列連結の破壊と
+    # みなして SQL エラーを返す（脆弱）、/v8/api/safe-login はパラメータ化相当
+    # （安全ツイン）。正規認証情報でのログインは両方とも成功する。
+    # =========================================================================
+    V8_TOKEN = "jwt-matrix-token-v8"
+
+    def _v8_login_page(api_path: str) -> str:
+        # ページ構造は v4（SPA fetch login）と同一系。id は v8 接頭辞で分離。
+        return f"""<!doctype html><html><body>
+<div id="login-container">
+  <h1>Sign in</h1>
+  <form id="login-form">
+    <label for="u8">Username</label>
+    <input id="u8" name="username" type="text" autocomplete="username">
+    <label for="p8">Password</label>
+    <input id="p8" name="password" type="password" autocomplete="current-password">
+    <button id="b8" type="submit">Sign in</button>
+  </form>
+  <div id="error"></div>
+</div>
+<div id="app-view"></div>
+<script>
+document.getElementById("login-form").addEventListener("submit", async function(e) {{
+  e.preventDefault();
+  const u = document.getElementById("u8").value;
+  const p = document.getElementById("p8").value;
+  const res = await fetch("{api_path}", {{
+    method: "POST",
+    headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify({{username: u, password: p}})
+  }});
+  if (res.ok) {{
+    const data = await res.json();
+    localStorage.setItem("token", data.token);
+    document.getElementById("login-container").remove();
+    document.getElementById("app-view").innerHTML = '<h1>Dashboard</h1>';
+  }} else {{
+    document.getElementById("error").innerHTML = "<p>Invalid credentials</p>";
+  }}
+}});
+</script>
+</body></html>"""
+
+    @app.get("/v8/login", response_class=HTMLResponse)
+    async def v8_login_get():
+        return HTMLResponse(_v8_login_page("/v8/api/login"))
+
+    @app.get("/v8/safe/login", response_class=HTMLResponse)
+    async def v8_safe_login_get():
+        return HTMLResponse(_v8_login_page("/v8/api/safe-login"))
+
+    def _v8_api_login(vulnerable: bool):
+        async def handler(request: Request):
+            try:
+                data = await request.json()
+            except Exception:
+                return JSONResponse({"error": "invalid payload"}, status_code=400)
+            username = str(data.get("username") or "")
+            password = str(data.get("password") or "")
+            # 決定論的な SQLi シミュレーション: username の引用符が「文字列連結の
+            # 破壊」を起こし、バックエンドが生 SQL エラーをそのまま返す（脆弱側のみ）。
+            # 安全側はパラメータ化相当で引用符も値として扱う（エラーなし 401）。
+            if vulnerable and ("'" in username or '"' in username):
+                return JSONResponse(
+                    {"error": f'SQL syntax error: unrecognized token: "{username}"'},
+                    status_code=500,
+                )
+            if username == USERNAME and password == PASSWORD:
+                return JSONResponse({"token": V8_TOKEN, "access_token": V8_TOKEN})
+            return JSONResponse({"error": "invalid credentials"}, status_code=401)
+        return handler
+
+    @app.post("/v8/api/login")
+    async def v8_api_login(request: Request):
+        return await _v8_api_login(vulnerable=True)(request)
+
+    @app.post("/v8/api/safe-login")
+    async def v8_api_safe_login(request: Request):
+        return await _v8_api_login(vulnerable=False)(request)
+
     return app
