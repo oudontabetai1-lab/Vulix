@@ -326,6 +326,10 @@
 }
 
 /* Status styles */
+/* hidden 属性が効くよう上書きを明示（display:flex が UA の [hidden] を打ち消すため） */
+.ui-status[hidden] {
+  display: none;
+}
 .ui-status {
   padding: 10px 14px;
   border-radius: 6px;

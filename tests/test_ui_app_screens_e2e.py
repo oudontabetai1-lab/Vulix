@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import pytest
@@ -654,6 +655,69 @@ def test_app_findings_screen_filters_and_deep_links(e2e_harness: UIHarness):
 
         e2e_harness.assert_no_horizontal_overflow(page, max_allowed=1440 + 1)
         e2e_harness.assert_no_errors(page)
+    finally:
+        page.close()
+
+
+def test_app_findings_screen_status_states_single_display(e2e_harness: UIHarness):
+    """Verify Findings list shows exactly one of loading / results / empty / error.
+
+    Regression: the loading line stayed visible above rendered results because
+    `.ui-status { display: flex }` overrode the `hidden` attribute.
+    """
+    require_browser()
+    page = e2e_harness.new_page(**STANDARD_VIEWPORTS[1440])
+
+    loading_hidden_script = """() => {
+        const el = document.querySelector('#findingsListStatus');
+        return el && el.hidden === true && getComputedStyle(el).display === 'none';
+    }"""
+
+    try:
+        # 1. Results state: loading line is gone once findings render
+        page.goto(f"{e2e_harness.server_url}/app#/findings?scan=20261026_100000", wait_until="domcontentloaded")
+        page.wait_for_function("() => document.querySelectorAll('#findingsListContent .findings-list-card').length === 3")
+        assert page.locator("#findingsListStatus").is_hidden()
+        assert page.evaluate("""() => Array.from(document.querySelectorAll('#findingsSurface *')).some(el => {
+            return el.childElementCount === 0 && el.textContent.includes('読み込み中') && el.offsetParent !== null;
+        })""") is False
+
+        # Accessibility: aria-live behaviour preserved on surface and count summary
+        assert page.locator("#surface").get_attribute("aria-live") == "polite"
+        assert page.locator("#findingsCountSummary").get_attribute("aria-live") == "polite"
+
+        # Switching scans: loading clears for the newly selected scan too
+        page.locator("#findingsScanSelect").select_option("20261026_102000")
+        page.wait_for_function("() => document.querySelectorAll('#findingsListContent .findings-list-card').length === 2")
+        assert page.locator("#findingsListStatus").is_hidden()
+
+        # Refresh button: loading clears again after reload of the same scan
+        page.locator("#refreshFindingsBtn").click()
+        page.wait_for_function(loading_hidden_script)
+        page.wait_for_function("() => document.querySelectorAll('#findingsListContent .findings-list-card').length === 2")
+        assert page.locator("#findingsListStatus").is_hidden()
+        e2e_harness.assert_no_errors(page)
+
+        # 2. Empty state: no loading line, empty message is the single visible state
+        page.goto(f"{e2e_harness.server_url}/app#/findings?scan=20261026_101000", wait_until="domcontentloaded")
+        page.wait_for_selector("#findingsListContent .findings-empty-state")
+        assert page.locator("#findingsListStatus").is_hidden()
+        assert "0 件" in page.locator("#findingsListContent .findings-empty-state").inner_text()
+
+        # 3. Load error (network failure): error status shown, no empty-state "0 件" claim
+        page.route(re.compile(r"/api/v1/scans/[^/]+/findings$"), lambda route: route.abort())
+        page.goto(f"{e2e_harness.server_url}/app#/findings?scan=20261026_100000", wait_until="domcontentloaded")
+        page.wait_for_selector("#findingsListStatus.ui-status.error")
+        assert "通信に失敗" in page.locator("#findingsListStatus").inner_text()
+        assert page.locator("#findingsListContent .findings-empty-state").count() == 0
+        page.unroute(re.compile(r"/api/v1/scans/[^/]+/findings$"))
+
+        # 4. Unavailable data (findings: null): unavailable status, never "0 件"
+        page.goto(f"{e2e_harness.server_url}/app#/findings?scan=20261026_104000", wait_until="domcontentloaded")
+        page.wait_for_selector("#findingsListStatus.ui-status.unavailable")
+        assert "利用できません" in page.locator("#findingsListStatus").inner_text()
+        assert page.locator("#findingsListContent .findings-empty-state").count() == 0
+        # 手元の失敗手順（abort・404）は想定内のため、ここでは errors をクリアして終了
     finally:
         page.close()
 

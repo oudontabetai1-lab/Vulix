@@ -699,6 +699,7 @@
     let currentScanId = null;
     let allFindings = [];
     let backendMeta = null;
+    let findingsUnavailable = false;
     let selectedFinding = null;
     let selectedFindingId = null;
     let activeUrlFilter = null;
@@ -938,6 +939,14 @@
       const filtered = filterFindings(allFindings, filters);
       const counts = computeFindingCounts(allFindings, filters, backendMeta);
 
+      // データ取得不能なときは「0 件の正常空」を偽らない（状態バナーのみを表示する）
+      if (findingsUnavailable) {
+        dom.countSummary.textContent = '—';
+        dom.listContent.replaceChildren();
+        renderDetail(null);
+        return;
+      }
+
       dom.countSummary.textContent = counts.label;
       dom.listContent.replaceChildren();
 
@@ -1171,6 +1180,7 @@
     async function loadFindingsForScan(scanId, targetFindingId) {
       if (!scanId) return;
       currentScanId = scanId;
+      findingsUnavailable = false;
       dom.listStatus.hidden = false;
       dom.listStatus.className = 'ui-status loading';
       dom.listStatus.textContent = `スキャン (${scanId}) の検出結果を読み込み中…`;
@@ -1180,12 +1190,18 @@
         const res = await scope.get(`/api/v1/scans/${encodeURIComponent(scanId)}/findings`);
         dom.listStatus.hidden = true;
 
-        if (!res.ok || !res.data || res.data.findings === null || res.data.findings_available === false) {
+        // データ欠落（evidence.json 無し等・API は 404/500 で findings_available:false を返す）と
+        // 取得失敗（通信/HTTP エラー）を区別する
+        const dataUnavailable = !!(res.data && (res.data.findings === null || res.data.findings_available === false));
+        if (!res.ok || dataUnavailable) {
           dom.listStatus.hidden = false;
-          dom.listStatus.className = 'ui-status unavailable';
-          dom.listStatus.textContent = 'このスキャンの検出結果データは利用できません（evidence.json が存在しないか、読み取れません）。';
+          dom.listStatus.className = dataUnavailable ? 'ui-status unavailable' : 'ui-status error';
+          dom.listStatus.textContent = dataUnavailable
+            ? 'このスキャンの検出結果データは利用できません（evidence.json が存在しないか、読み取れません）。'
+            : '検出結果エンドポイントとの通信に失敗しました。';
           allFindings = [];
           backendMeta = null;
+          findingsUnavailable = true;
           updateTypeFilterOptions([]);
           renderList();
           renderDetail(null);
