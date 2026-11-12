@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-from .url_normalize import normalize_url_for_key
+from .url_normalize import key_url, normalize_url_for_key
 
 if TYPE_CHECKING:
     from wscan.injection_point import InjectionPoint
@@ -60,7 +60,7 @@ def unit_key(
     ``form_index=0``）が同じキーに潰れて一方が未検査のまま resume にスキップ
     されるのを防ぐため、入力種別（URL param / form）もキーに含める。
     """
-    norm_url = normalize_url_for_key(url or "")
+    norm_url = key_url(url)
     if location_token is None:
         location_token = "u" if is_url_param else "f"
     parts = [
@@ -443,9 +443,7 @@ class CheckpointState:
         ターゲット URL が一致し、要求チェックが保存時チェックの部分集合なら互換。
         新しいチェックを足した再開では「済み」が信用できないので非互換扱いにする。
         """
-        if normalize_url_for_key(self.target_url or "") != (
-            normalize_url_for_key(target_url or "")
-        ):
+        if key_url(self.target_url) != key_url(target_url):
             return False
         return set(checks or []).issubset(set(self.checks or []))
 
@@ -460,9 +458,10 @@ def save_checkpoint(output_dir: str | Path, state: CheckpointState) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     # 永続化の単一出口。finding の証跡だけ構造的に伏せる（unit key 等の識別子と JSON 構造は不変）
-    from wscan.url_scope import redact_finding_dict
-    data = state.to_dict()
-    data["findings"] = [redact_finding_dict(f) for f in data["findings"]]
+    from wscan.url_scope import redact_finding_dict, redact_url_fields
+    raw = state.to_dict()
+    data = redact_url_fields({**raw, "findings": []})  # reached_urls・scan_matrix[].url 等（鍵は生成時に key_url 済み）
+    data["findings"] = [redact_finding_dict(f) for f in raw["findings"]]
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)  # 同一ディレクトリ内 rename は原子的
     return path

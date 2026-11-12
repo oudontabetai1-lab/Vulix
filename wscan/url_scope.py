@@ -305,6 +305,21 @@ def _redact_leaves(value, key=""):
     return value
 
 
+def redact_url_fields(value, key=""):
+    """``*url`` / ``*urls`` キーの URL だけ伏せた複製を返す（他の文字列・キー・構造は不変）。
+
+    checkpoint/evidence の URL 系構造（reached_urls・scan_matrix・visited_urls 等）用。値ベースの
+    全文置換と違い識別子を書き換えない。"""
+    low = str(key).lower()
+    if isinstance(value, dict):
+        return {k: redact_url_fields(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [redact_url_fields(v, key) for v in value]
+    if isinstance(value, str) and (low.endswith("url") or low.endswith("urls")):
+        return redact_url_values(value)
+    return value
+
+
 def redact_finding_dict(finding: dict) -> dict:
     """永続化用に finding dict の証跡フィールドの文字列葉と url のクエリ等だけ伏せた複製を返す。
 

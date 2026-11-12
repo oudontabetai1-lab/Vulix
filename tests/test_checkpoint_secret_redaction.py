@@ -149,3 +149,67 @@ def test_marker_gate_is_label_agnostic_and_covers_evidence_details():
     assert ScanEngine._finding_has_unsendable_redaction(other)
     assert not ScanEngine._finding_has_unsendable_redaction(
         _login_finding(injection_location="", request={"body": "[REDACTED:len=12]"}))
+
+
+def _graphql_verify_completion(tmp_path, monkeypatch, **kw):
+    eng = ScanEngine("http://127.0.0.1:1", output_dir=str(tmp_path / "out"), auth_user=USER, auth_pass=PW,
+                     checks=["graphql"], llm_provider="none", **kw)
+    f = Finding(check_type="graphql_introspection", severity="low", url="http://t.test/gql?k=[REDACTED:auth_password]",
+                field_name="(graphql)", payload="", evidence="x", evidence_type="graphql_introspection",
+                request={"url": "http://t.test/gql", "method": "POST", "body": "{}"})
+    from wscan.checkpoint import unit_key
+    ledger = eng.request_logger.probe_ledger
+    ledger.expect(unit_key(f.url, f.field_name, 0, "graphql") + "\x1everify:" + f.evidence_type, "graphql",
+                  rules=("graphql_introspection",), role="verify")
+    state = asyncio.run(eng._verify_one(f))
+    return state, eng.evidence_completion()
+
+
+def test_redaction_gate_records_evidence_skip_like_state_profile_gate(tmp_path, monkeypatch):
+    """伏せ字ゲートも state-profile ゲートと同じ台帳状態（検証 skip を記録）に揃える。"""
+    monkeypatch.setenv("WSCAN_STATE_DIR", str(tmp_path / "state"))
+    try:
+        s1, c1 = _graphql_verify_completion(tmp_path / "a", monkeypatch)
+        s2, c2 = _graphql_verify_completion(tmp_path / "b", monkeypatch, state_profile="read-only")
+        assert s1 == s2 == "assumed"
+        for c in (c1, c2):  # どちらも PARTIAL・executed true（EVIDENCE_INCOMPLETE/executed false ではない）
+            g = c["checks"]["graphql"]
+            (unit,) = g["units"].values()
+            assert g["status"] == "PARTIAL" and unit["executed"] is True and not unit["missing_rules"]
+    finally:
+        url_scope.clear_secret_values()
+
+
+def test_url_structures_keep_keys_and_hide_configured_value(tmp_path, monkeypatch):
+    """クエリに設定値を持つ URL: 鍵は save→load 後も一致し、checkpoint/evidence に平文が残らない。"""
+    from wscan.injection_point import InjectionPoint
+    eng = _engine(tmp_path, monkeypatch, "admin", PW)
+    try:
+        url = f"http://t.test/admin/x?token={PW}&p=1"
+        ip = InjectionPoint.for_url_param(url, "p")
+        eng._init_checkpoint()
+        c = eng.checkpoint
+        c.mark_done(url, "p", 0, "sqli", True)
+        c.mark_done_ip(ip, "xss")
+        c.save_candidate_snapshot_ip(ip, "sqli", "baseline", ["a"], "test")
+        eng.reached_urls = {url}
+        eng.scan_matrix = [{"url": url, "check": "sqli", "status": "tested"}]
+        eng.visited_urls = {url}
+        # attempt_ledger の鍵は stable_key_parts（URL を含む）
+        assert PW not in json.dumps(ip.stable_key_parts())
+        assert eng._save_checkpoint()
+        eng.all_findings.clear()
+        eng._save_evidence()
+        for name in ("checkpoint.json", "evidence.json"):
+            assert PW not in (tmp_path / "out" / name).read_text(), name
+        state = cp.load_checkpoint(tmp_path / "out")
+        assert state.is_done(url, "p", 0, "sqli", True) and state.is_done_ip(ip, "xss")
+        assert state.reached_urls == ["http://t.test/admin/x?token=[REDACTED:auth_password]&p=1"]
+        assert state.scan_matrix[0]["url"] == state.reached_urls[0]
+        assert state.scan_matrix[0]["check"] == "sqli"  # 識別子は不変
+        assert any("/admin/x?" in k for k in state.completed_units)  # path の admin は不変
+        assert state.get_candidate_snapshot_ip(ip, "sqli", "baseline") == (True, ["a"])  # snapshot 鍵も一致
+        ev = json.loads((tmp_path / "out" / "evidence.json").read_text())
+        assert ev["visited_urls"] == [state.reached_urls[0]]
+    finally:
+        url_scope.clear_secret_values()

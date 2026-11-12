@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .scanner_contract import Carrier, ValueKind
-from .url_normalize import normalize_url_for_key
+from .url_normalize import key_url, normalize_url_for_key
 
 # InjectionPoint.location の canonical 値だけを carrier へ写す。scanner_contract の
 # LOCATION_TO_CARRIER は "query"/"json" 等の alias も含むが、InjectionPoint の他メソッド
@@ -471,7 +471,7 @@ class InjectionPoint:
         """既存互換の checkpoint キー生成に必要な部品を返す。"""
         # checkpoint と attempt_ledger の共有キーに同じ URL identity を使う。
         # 実際の攻撃送信には self.url を使うため、実攻撃 URL 自体は変更しない。
-        norm_url = normalize_url_for_key(self.url or "")
+        norm_url = key_url(self.url)
         field_name = self.display_name or self.parameter_id
         if self.location == "form":
             location_token, pointer = "f", ""
