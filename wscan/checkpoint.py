@@ -459,7 +459,9 @@ def save_checkpoint(output_dir: str | Path, state: CheckpointState) -> Path:
     path = checkpoint_path(output_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state.to_dict(), ensure_ascii=False), encoding="utf-8")
+    # 永続化の単一出口で、設定済み資格情報の値を伏せる（finding.request 等の証跡に混ざりうる）
+    from wscan.url_scope import redact_secret_values
+    tmp.write_text(redact_secret_values(json.dumps(state.to_dict(), ensure_ascii=False)), encoding="utf-8")
     tmp.replace(path)  # 同一ディレクトリ内 rename は原子的
     return path
 

@@ -262,6 +262,12 @@ def redact_secret_values(text):
     return text
 
 
+def has_secret_marker(text) -> bool:
+    """*text* に登録済み資格情報の伏せ字マーカー（``[REDACTED:<label>]``）が含まれるか。"""
+    return isinstance(text, str) and any(
+        f"[REDACTED:{label}]" in text for label in set(_SECRET_VALUES.values()))
+
+
 def redact_kv_values(text):
     """urlencoded / JSON の機微フィールド値をマスクする（URL query と body で共有）。
 

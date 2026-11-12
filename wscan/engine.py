@@ -8740,6 +8740,21 @@ class ScanEngine:
                     eta_total=len(to_verify),
                 )
 
+    @staticmethod
+    def _finding_has_unsendable_redaction(f: Finding) -> bool:
+        """finding の再送元に資格情報の伏せ字マーカーが入っていて、実値として送れないか（純粋）。
+
+        checkpoint は資格情報の値を伏せて保存する。resume で復元した finding を verify するとき、
+        url は常に再送元。request は provenance（form/url_param/json_body）を持たない検証
+        （privesc/graphql/websocket 等）だけが再送元で、provenance 付きは request を証跡としてのみ使う。
+        """
+        import json as _j
+        if url_scope.has_secret_marker(f.url):
+            return True
+        if f.injection_location:
+            return False
+        return url_scope.has_secret_marker(_j.dumps(f.request or {}, ensure_ascii=False, default=str))
+
     async def _verify_one(self, f: Finding) -> str:
         """
         Re-inject f.payload into f.field_name on f.url and check if the
@@ -8756,6 +8771,10 @@ class ScanEngine:
         # 判定する（unrestricted checkpoint を read-only/controlled-write で resume した際に、
         # 破壊的 POST finding が verify で再送されるのを防ぐ）。method 既知時のみ gate する。
         from wscan.state_profile import may_submit as _may_submit
+        if ScanEngine._finding_has_unsendable_redaction(f):
+            # 伏せ字を実値として再送すると偽の失敗（ログイン失敗等）で誤判定する → penalize しない terminal
+            self.wave_errors.append(f"verify_skipped_redacted_request:{f.check_type}")
+            return "assumed"
         _req = f.request or {}
         # 常時状態変更 scanner（deserialization/nosql/graphql/mass_assignment/prototype_pollution）は
         # request に method を持たなくても POST 相当。宣言メソッド不問で POST として判定する。
@@ -9066,7 +9085,8 @@ class ScanEngine:
             # 一時ファイルへ書き切ってから os.replace で入れ替える（失敗時も元ファイルは無傷）。
             tmp = path.with_name(path.name + ".tmp")
             tmp.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+                url_scope.redact_secret_values(json.dumps(data, ensure_ascii=False, indent=2)),
+                encoding="utf-8",
             )
             os.replace(tmp, path)
         except Exception:
@@ -9150,7 +9170,7 @@ class ScanEngine:
             evidence["coverage"]["evidence_completion"] = self.evidence_completion()
         evidence_path = self.output_dir / "evidence.json"
         with open(evidence_path, "w", encoding="utf-8") as fp:
-            json.dump(evidence, fp, ensure_ascii=False, indent=2)
+            fp.write(url_scope.redact_secret_values(json.dumps(evidence, ensure_ascii=False, indent=2)))
         console.print(f"  [dim]Evidence:[/dim] {evidence_path}")
         if llm_summary.get("provider") != "none":
             console.print(
