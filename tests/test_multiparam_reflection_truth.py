@@ -52,6 +52,20 @@ class ReflectionDecisionTests(unittest.TestCase):
             {},
         )
 
+    def test_existing_handler_after_escaped_reflection_is_not_attributed(self):
+        # 変わった（エスケープ済みの）反射が元からあるハンドラの直前にあっても、
+        # ハンドラ自体は baseline と同一なので payload の証拠にしない。
+        def page(a: str, b: str) -> str:
+            return (f"<body><p>a={a}</p><p>b={b}</p>"
+                    '<button onclick="alert(1)">legit</button></body>')
+
+        for payload, escaped in ((PAYLOAD, "&lt;script&gt;alert(&#x27;XSS&#x27;)&lt;/script&gt;"),
+                                 ("javascript:alert(1)", "javascript:alert(1)")):
+            self.assertEqual(
+                analyze_xss_reflection(page(escaped, "2"), payload, page("1", "2")), {})
+            self.assertEqual(
+                analyze_xss_reflection(page("1", escaped), payload, page("1", "2")), {})
+
     def test_verbatim_combined_reflection_is_still_detected(self):
         reflected = f'<html><body><input name="echo" value="{PAYLOAD}"></body></html>'
         reflection = analyze_xss_reflection(reflected, PAYLOAD, FORM_PAGE)

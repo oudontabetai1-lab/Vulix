@@ -15,6 +15,7 @@ import unittest
 
 import httpx
 
+from wscan.json_body_detect import analyze_xss_reflection
 from tests.fixtures.realistic_site import (
     EXPECTED_FINDINGS,
     SAFE_ENDPOINTS,
@@ -89,6 +90,27 @@ class RealisticSiteFixtureTests(unittest.IsolatedAsyncioTestCase):
         # msg はエスケープされ、新規ハンドラは生成されない
         self.assertNotIn("<b>hi</b>", resp.text)
         self.assertIn("&lt;b&gt;hi&lt;/b&gt;", resp.text)
+
+    async def test_compare_pair_reflection_attribution(self):
+        """二フィールド form の安全ページ/脆弱ツイン。安全側は a/b をエスケープしつつ
+        直後に正規 onclick=alert(1) を持ち、その元からあるハンドラを payload の反射と
+        誤認しないこと（baseline 比較）。脆弱ツインは生反射を検出し続けること。"""
+        payloads = ["<script>alert(1)</script>", "javascript:alert(1)", "alert(1)"]
+        for payload in payloads:
+            for field in ("a", "b"):
+                params = {"a": "1", "b": "2", field: payload}
+                safe_base = (await self.client.get("/compare/safe", params={"a": "1", "b": "2"})).text
+                safe = (await self.client.get("/compare/safe", params=params)).text
+                self.assertIn('onclick="alert(1)"', safe)
+                self.assertEqual(
+                    analyze_xss_reflection(safe, payload, safe_base), {},
+                    f"safe twin misattributed: field={field} payload={payload!r}",
+                )
+        vuln_base = (await self.client.get("/compare", params={"a": "1", "b": "2"})).text
+        vuln = (await self.client.get(
+            "/compare", params={"a": "<script>alert(1)</script>", "b": "2"})).text
+        found = analyze_xss_reflection(vuln, "<script>alert(1)</script>", vuln_base)
+        self.assertTrue(found and found["raw_payload_present"])
 
     async def test_track_safe_escapes_quote_breakout(self):
         """安全ツイン: クォートがエスケープされ、属性ブレイクアウトが成立しない。"""
