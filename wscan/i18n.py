@@ -120,6 +120,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "report.observability.dropped": "劣化・脱落した probe/wave: <strong>{total}</strong> 件",
         "report.observability.llm_calls": "LLM 呼び出し: <strong>{count}</strong> 件（詳細は llm_calls.jsonl）",
         "report.observability.warning": "0 findings は「安全」を意味しない可能性があります。",
+        "report.observability.warning_partial": "一部の probe が失敗・脱落したため検査は不完全です。ここに表示された以外にも問題が見逃されている可能性があります。",
         "report.observability.samples": "代表サンプル",
         "report.common.none": "なし",
         # ── Coverage ──
@@ -273,6 +274,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "report.observability.dropped": "Degraded / dropped probes and waves: <strong>{total}</strong>",
         "report.observability.llm_calls": "LLM calls: <strong>{count}</strong> (details in llm_calls.jsonl)",
         "report.observability.warning": "0 findings does not necessarily mean the target is safe.",
+        "report.observability.warning_partial": "Some probes failed or were dropped, so coverage is incomplete; more issues than those listed may have been missed.",
         "report.observability.samples": "Representative samples",
         "report.common.none": "none",
         # ── Coverage ──
@@ -468,6 +470,12 @@ def translate_or(key: str, lang: str, default: str) -> str:
     """
     template = _MESSAGES.get(normalize_lang(lang), {}).get(key)
     return default if template is None else template
+
+
+def observability_caveat(findings_count: int, lang: str = DEFAULT_LANG) -> str:
+    """観測性警告の注意文。件数に合わせて文言を切替える（console/レポート共通の単一点）。"""
+    key = "report.observability.warning" if findings_count <= 0 else "report.observability.warning_partial"
+    return translate(key, lang)
 
 
 def translator(lang: str = DEFAULT_LANG) -> Callable[..., str]:

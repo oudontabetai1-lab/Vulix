@@ -40,6 +40,7 @@ from typing import Optional
 from urllib.parse import urlparse, urljoin, parse_qs, urlsplit, unquote
 
 from wscan import url_scope
+from wscan.i18n import observability_caveat
 from wscan import js_form_detect
 from wscan.state_profile import VALID_PROFILES
 
@@ -197,7 +198,7 @@ class _FlowGate:
             self._cond.notify_all()
 
 
-def _observability_warning_text(summary: dict) -> str:
+def _observability_warning_text(summary: dict, findings_count: int = 0) -> str:
     """観測性サマリから console 警告文を組み立てる（表示判断を含む純粋関数）。"""
     total = int(summary.get("total", 0) or 0)
     if total <= 0:
@@ -210,7 +211,7 @@ def _observability_warning_text(summary: dict) -> str:
     detail = f"（{breakdown}）" if breakdown else ""
     return (
         f"⚠ 観測性: {total} 件の probe/wave が劣化・脱落{detail}。"
-        "0 findings は「安全」を意味しない可能性"
+        + observability_caveat(findings_count, "ja")
     )
 
 
@@ -9723,7 +9724,7 @@ class ScanEngine:
             )
         else:
             console.print("  Findings : [green]0[/green]")
-        observability_warning = _observability_warning_text(obs_summary)
+        observability_warning = _observability_warning_text(obs_summary, len(self.all_findings))
         if observability_warning:
             console.print(f"  [yellow]{observability_warning}[/yellow]")
         coverage = cov_summary

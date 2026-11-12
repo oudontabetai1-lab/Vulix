@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from . import url_scope
-from .i18n import DEFAULT_LANG, normalize_lang, translator
+from .i18n import DEFAULT_LANG, normalize_lang, observability_caveat, translator
 from .check_catalog import get_check_description, get_check_references
 from .scanners.base import Finding
 
@@ -603,7 +603,7 @@ class ReportGenerator:
         checklist_html = self._build_scan_checklist_html(scan_matrix)
         remediation_summary_html = self._build_remediation_summary_html(findings)
         llm_summary_html = self._build_llm_summary_html(llm_summary)
-        observability_html = self._build_observability_html(observability)
+        observability_html = self._build_observability_html(observability, len(findings))
         coverage_html = self._build_coverage_html(coverage)
 
         auth_status = (coverage or {}).get("auth_verification_status")
@@ -1593,7 +1593,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             {truncated}
         </div>"""
 
-    def _build_observability_html(self, observability: dict) -> str:
+    def _build_observability_html(self, observability: dict, findings_count: int = 0) -> str:
         """劣化・脱落した probe/wave を Finding と分離して明示する。"""
         t = self._t
         total = int(observability.get("total", 0) or 0)
@@ -1613,7 +1613,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         if total:
             warning = (
                 '<p style="color:#975a16;font-weight:600;margin-top:10px">'
-                f'{t("report.observability.warning")}</p>'
+                f'{observability_caveat(findings_count, self.lang)}</p>'
             )
         return f"""
         <div class="section observability-section">
@@ -2045,7 +2045,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             recs.append(t("report.exec.rec.headers"))
         recs.append(t("report.exec.rec.pentest"))
         rec_html = "".join(f"<li>{self._escape(r)}</li>" for r in recs)
-        observability_html = self._build_observability_html(observability or {})
+        observability_html = self._build_observability_html(observability or {}, len(findings))
         coverage_html = self._build_coverage_html(coverage or {})
 
         return f"""<!DOCTYPE html>
@@ -2197,7 +2197,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
             <div class="diff-bar">
                 {self._t('report.dev.diff_bar', new=len(diff_result.new_findings), fixed=len(diff_result.fixed_findings), persistent=len(diff_result.persistent_findings))}
             </div>"""
-        observability_html = self._build_observability_html(observability or {})
+        observability_html = self._build_observability_html(observability or {}, len(findings))
         coverage_html = self._build_coverage_html(coverage or {})
 
         return f"""<!DOCTYPE html>
