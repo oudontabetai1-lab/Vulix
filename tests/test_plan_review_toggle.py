@@ -52,3 +52,19 @@ def test_plan_confirm_timeout_says_scan_continues_and_clears_pending_review():
     assert edits == {}
     assert srv.pending_interactive is None  # 再接続時に古いモーダルを出さない
     assert "継続" in messages[0] or "continu" in messages[0]
+
+
+def test_plan_confirm_timeout_ignores_previous_scan_edits():
+    srv = MonitorServer(port=0, auth_token="")
+    srv.confirmed_plan_edits = {"http://old/": {"q": {"skip": True}}}
+    srv.emit_status = AsyncMock()
+    assert asyncio.run(srv.wait_for_plan_confirm(timeout=0.01)) == {}
+
+
+def test_new_scan_resets_previous_plan_confirmation_state():
+    srv = MonitorServer(port=0, auth_token="")
+    srv._handle_client_message('{"action":"plan_confirm","edits":{"http://old/":{}}}')
+    assert srv.plan_confirm_event.is_set() and srv.confirmed_plan_edits
+    srv._begin_scan_snapshot()
+    assert not srv.plan_confirm_event.is_set()
+    assert srv.confirmed_plan_edits == {}

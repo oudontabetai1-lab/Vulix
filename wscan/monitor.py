@@ -2524,6 +2524,9 @@ class MonitorServer:
     def _begin_scan_snapshot(self) -> None:
         """Start a new live-state generation without changing the public scan ID."""
         self._clear_pending_interactive()
+        # 前スキャンのプラン確認状態を持ち越さない（古い編集の誤適用・即時通過の防止）。
+        self.confirmed_plan_edits = {}
+        self.plan_confirm_event.clear()
         self._scan_run_id = uuid.uuid4().hex
         self._scan_sequence = 0
         self._scan_page_count = 0
@@ -2972,4 +2975,5 @@ class MonitorServer:
                 "warning",
             )
             self._clear_pending_interactive("plan_review")
+            return {}
         return self.confirmed_plan_edits
