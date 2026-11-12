@@ -133,6 +133,7 @@ EXPECTED_COMPONENT_SELECTORS = [
     ".ui-badge.mode",
     ".ui-badge.diff",
     ".ui-code",
+    ".ui-status[hidden]",
     ".ui-status",
     ".ui-status.loading",
     ".ui-status.error, .ui-status.unavailable",
