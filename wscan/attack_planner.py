@@ -576,6 +576,14 @@ Consider stored / second-order attacks carefully:
             # property）。監査に「実際に使ったモデル」を残すため context 内で捕捉する。context を
             # 抜けた後に読むと provider 既定に戻ってしまう。
             _resolved_model = getattr(self.payload_gen, f"{provider}_model", "") or ""
+            # 鍵単位の short-circuit：この role の model が既に恒久不達（例: モデル不在
+            # 404）なら実試行せず打ち切る。provider 全体は生きているため、別モデルを
+            # 使う他 role（payload/adaptive/report 等）の LLM 呼び出しは減らない。
+            _is_unavail = getattr(self.payload_gen, "is_llm_unavailable", None)
+            if callable(_is_unavail) and _is_unavail(
+                llm_client.availability_key(self.payload_gen, model=_resolved_model)
+            ):
+                return None
             if provider == "claude":
                 raw = await self._call_claude(prompt)
             elif provider == "openai":
@@ -620,11 +628,18 @@ Consider stored / second-order attacks carefully:
             if wave_errors is not None:
                 wave_errors.append(f"llm_timeout:planner:{url}")
         if _perm:
-            # 恒久失敗（モデル不在 404 等）を pg の共有可用性へ反映。以降の page や
-            # 他 role（baseline/adaptive/triage/report）は probe 無しで打ち切られる。
+            # 恒久失敗（モデル不在 404 等）を鍵 (provider, base, model) 単位で pg の
+            # 共有可用性へ反映。鍵単位のため別モデルを使う他 role は生かされる。
+            # context 抜き後の flip なので context 内で捕捉した model を明示的に渡す。
             mark = getattr(self.payload_gen, "mark_llm_unavailable", None)
             if callable(mark):
-                mark("permanent", caller="attack_planner._llm_plan")
+                mark(
+                    "permanent",
+                    caller="attack_planner._llm_plan",
+                    key=llm_client.availability_key(
+                        self.payload_gen, model=_resolved_model
+                    ),
+                )
 
         if not raw:
             return None

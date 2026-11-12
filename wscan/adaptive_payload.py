@@ -584,6 +584,13 @@ class AdaptivePayloadEngine:
             # role モデルは context 内でのみ解決される（*_model は _active_role 依存の property）。
             # 監査に実際に使ったモデルを残すため context 内で捕捉する。
             _resolved_model = getattr(self.pg, f"{provider}_model", "") or ""
+            # 鍵単位の short-circuit：この role の model が既に恒久不達なら実試行せず
+            # 打ち切る。provider 全体は生きているため別モデルを使う他 role は生かされる。
+            _is_unavail = getattr(self.pg, "is_llm_unavailable", None)
+            if callable(_is_unavail) and _is_unavail(
+                llm_client.availability_key(self.pg, model=_resolved_model)
+            ):
+                return []
             if provider == "claude":
                 raw = await self._stream_claude(prompt)
             elif provider == "openai":
@@ -628,9 +635,15 @@ class AdaptivePayloadEngine:
             if wave_errors is not None:
                 wave_errors.append(f"llm_timeout:adaptive_mutate:{check_type}")
         if _perm:
+            # 恒久失敗を鍵 (provider, base, model) 単位で pg の共有可用性へ反映。
+            # context 抜き後の flip なので context 内で捕捉した model を明示的に渡す。
             mark = getattr(self.pg, "mark_llm_unavailable", None)
             if callable(mark):
-                mark("permanent", caller="adaptive_payload.mutate_payload")
+                mark(
+                    "permanent",
+                    caller="adaptive_payload.mutate_payload",
+                    key=llm_client.availability_key(self.pg, model=_resolved_model),
+                )
 
         if not raw:
             return []
