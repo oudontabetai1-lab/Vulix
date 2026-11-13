@@ -123,6 +123,7 @@ diff が大きいほど意図した変更が埋もれる／「ついで修正」
 pip install -r requirements.txt && playwright install chromium
 
 # ドキュメント検証（ローカル参照・CLI例・設定ドリフト検証）
+# CI は README の vulix-install ブロックを scripts/readme_install.py で抽出して実行する
 python scripts/check_docs.py
 
 # テスト（CI と同一。push 前に必ず通す）

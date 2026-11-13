@@ -31,25 +31,30 @@ jobs:
           python-version: '3.11'
           cache: pip
 
-      - name: Install dependencies
+      # README の本体導入手順を正本とし、checkout 済みのクリーンな runner で実行する。
+      - name: Install Vulix from README
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          python scripts/readme_install.py > "$RUNNER_TEMP/vulix-install.sh"
+          for i in 1 2 3; do
+            bash -e "$RUNNER_TEMP/vulix-install.sh" && break
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            echo "README install failed (attempt $i/3); retrying..." >&2
+            sleep 5
+          done
+
+      - name: Install Chromium OS dependencies
+        run: python3 -m playwright install-deps chromium
+
+      - name: Installed runtime smoke
+        run: |
+          python main.py --help
+          python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(headless=True); b.close(); p.stop()"
+
+      - name: Install test dependencies
+        run: python -m pip install pytest pytest-asyncio
 
       - name: Validate offline documentation references and CLI examples
         run: python scripts/check_docs.py
-
-      # PR 毎の高速 E2E スモークと /app 画面群 E2E ブラウザテスト。
-      # Chromium をインストールし、UI テストが silent skip されず確実に実行されることを担保する。
-      - name: Install Chromium for Playwright
-        run: |
-          for i in 1 2 3; do
-            playwright install --with-deps chromium && break
-            echo "playwright install failed (attempt $i/3); retrying..." >&2
-            sleep 5
-          done
-          python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(headless=True); b.close(); p.stop()"
 
       # Unit and integration suite, including dashboard tests that launch Chromium.
       - name: Unit & integration tests

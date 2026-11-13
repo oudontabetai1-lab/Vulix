@@ -24,14 +24,7 @@ WScan は、モードごとに優先する品質が異なります。
 
 ## 2. 事前準備
 
-本体と Playwright Chromium をインストールします。
-
-```bash
-git clone https://github.com/oudontabetai1-lab/AutoXSScheckTool.git
-cd AutoXSScheckTool
-python3 -m pip install -r requirements.txt
-playwright install chromium
-```
+[README の本体導入手順](../README.md#本体) に従って、本体と Playwright Chromium をインストールします。
 
 Agent または Hybrid を使う場合は追加依存を入れます。
 
