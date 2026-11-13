@@ -338,3 +338,36 @@ def test_chromium_unsubmitted_form_with_script_marker_fails_auto_login(tmp_path)
                 await browser.close()
 
         asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("method,url,expected", [
+    ("GET", "http://fixture.test/api/private", "verified"),
+    ("POST", "http://fixture.test/api/private", "unknown"),
+    ("GET", "http://outside.test/api/private", "unknown"),
+    ("GET", "http://fixture.test/%6cogout", "unknown"),
+])
+def test_public_shell_uses_only_observed_safe_get_for_proof(tmp_path, method, url, expected):
+    engine = engine_for("http://fixture.test", tmp_path)
+    calls = []
+
+    async def response(candidate, *, browser=None):
+        calls.append(candidate)
+        if candidate == engine.target_url:
+            return 200, "Public shell", False
+        return (401, "Authentication required", False) if browser is None else (200, "Private data", False)
+
+    engine._protected_resource_response = response
+
+    class Browser:
+        network = SimpleNamespace(_observed_auth_headers={"http://fixture.test": {"method": method, "url": url}})
+
+        async def auto_login(self, *args, protected_access_check, **kwargs):
+            proof, reason = await protected_access_check(api_token_issued=True)
+            self.last_login_assessment = ls.assess_login_state(ls.LoginObservation(
+                post_url="http://fixture.test/home", api_token_issued=True,
+                protected_access=proof, protected_access_reason=reason))
+            return self.last_login_assessment.authenticated
+
+    asyncio.run(engine._auto_login(Browser()))
+    assert engine.authentication_state["protected_access"] == expected
+    assert (url in calls) is (expected == "verified")

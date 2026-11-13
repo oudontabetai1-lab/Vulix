@@ -432,6 +432,7 @@ class NetworkCapture:
             if len(self._observed_auth_headers) >= self._AUTH_HEADER_ORIGIN_LIMIT:
                 self._observed_auth_headers.pop(next(iter(self._observed_auth_headers)), None)
             self._observed_auth_headers[origin] = {
+                "method": getattr(request, "method", ""),
                 "url": str(request.url),
                 "headers": {normalized[0]: normalized[1]},
             }

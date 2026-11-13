@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import time
+import json
 from dataclasses import dataclass, field
 from html import escape
 from typing import List
@@ -672,7 +673,8 @@ def create_parallel_app(bearer: bool = False, expire: bool = False) -> FastAPI:
     @app.middleware("http")
     async def protect(request: Request, call_next):
         path = request.url.path
-        if "/protected" in path or path.endswith("/api/user"):
+        protected_path = ("/api/" in path and not path.endswith("/login")) if bearer else "/protected" in path
+        if protected_path:
             sid = (request.headers.get("authorization", "").removeprefix("Bearer ")
                    if bearer else request.cookies.get("parallel_session", ""))
             attack = bool(request.query_params.get("q") or request.query_params.get("safe_q"))
@@ -693,9 +695,32 @@ def create_parallel_app(bearer: bool = False, expire: bool = False) -> FastAPI:
     @app.get(f"/v{variant}/protected/{{number}}", response_class=HTMLResponse)
     async def protected(request: Request, number: int = 0, q: str = "", safe_q: str = ""):
         links = "".join(f'<a href="/v{variant}/protected/{i}">Page {i}</a>' for i in range(1, 4))
-        return (links + f'<h1>Protected</h1><a href="/logout">Log out</a>'
-                + f'<form><input name="q"><button>Search</button></form>{q}'
-                + f'<form><input name="safe_q"><button>Search</button></form>{escape(safe_q)}')
+        forms = ('<form><input name="q"><button>Search</button></form>'
+                 '<form><input name="safe_q"><button>Search</button></form>')
+        shell = links + '<h1>Protected</h1><a href="/logout">Log out</a>' + forms
+        if not bearer:
+            return shell + q + escape(safe_q)
+        api = request.url.path.replace("/protected", "/api/protected")
+        return shell.replace("<form>", f'<form action="{api}">') + "<div id=results></div>" + """<script>
+        async function load(query) {
+          const response = await fetch(API + '?' + query, {
+            headers: {Authorization: 'Bearer ' + localStorage.getItem('token')}
+          });
+          document.getElementById('results').innerHTML = await response.text();
+        }
+        for (const form of document.forms) {
+          form.addEventListener('submit', event => {
+            event.preventDefault();
+            load(new URLSearchParams(new FormData(form)));
+          });
+        }
+        load('');
+        </script>""".replace('API', json.dumps(api))
+
+    @app.get("/v4/api/protected", response_class=HTMLResponse)
+    @app.get("/v4/api/protected/{number}", response_class=HTMLResponse)
+    async def api_protected(number: int = 0, q: str = "", safe_q: str = ""):
+        return '<h2>Confidential results</h2>' + q + escape(safe_q)
 
     @app.get("/test/stats")
     async def stats():

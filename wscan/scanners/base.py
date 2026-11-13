@@ -1020,6 +1020,7 @@ class BaseScanner(ABC):
                     path = urlparse(note_key[1]).path or note_key[1]
                     self._record_scan_note(f"js_handled_form:{self.CHECK_TYPE}:{path}")
                 return
+        self._probe_failure("unexecutable")
         self._record_scan_note(self._probe_delivery_note(ip, "probe_not_delivered"))
 
     def _js_handled_form_gate(self, ip) -> bool:
@@ -1069,10 +1070,18 @@ class BaseScanner(ABC):
         self, ip: InjectionPoint, payload, *, probe_role="attack", probe_wave="standard",
         baseline_attempt_ids=(), control_attempt_ids=(), parent_attempt_id="",
     ) -> tuple[str, dict]:
-        return await self._send_probe(
+        source, pair = await self._send_probe(
             ip, lambda: self._apply_ip_unrecorded(ip, payload), role=probe_role, wave=probe_wave,
             baseline_attempt_ids=baseline_attempt_ids, control_attempt_ids=control_attempt_ids,
             parent_id=parent_attempt_id)
+        from wscan.auth_detect import url_looks_like_login
+        login_target = (getattr(getattr(self, "engine", None), "_is_login_target_url", lambda url: False)(ip.url)
+                        or url_looks_like_login(ip.url))
+        if not login_target and (pair.get("response") or {}).get("status") == 401:
+            pair["_authentication_lost"] = True
+            self._probe_failure("authentication_lost")
+            self._record_scan_note(self._probe_delivery_note(ip, "authentication_lost").replace("transport_error:", "auth_lost:", 1))
+        return source, pair
 
     async def _send_probe(self, ip, send, *, role="attack", wave="standard",
                           baseline_attempt_ids=(), control_attempt_ids=(), parent_id=""):
@@ -1115,6 +1124,10 @@ class BaseScanner(ABC):
             return source, pair
 
     def _probe_failure(self, outcome):
+        from wscan.engine import _FIELD_PROBE_FAILURES
+        failures = _FIELD_PROBE_FAILURES.get()
+        if failures is not None:
+            failures.add(outcome)
         from wscan.request_logger import current_probe
         context = current_probe(getattr(getattr(self, "engine", None), "request_logger", None))
         if context is not None:
@@ -1144,6 +1157,8 @@ class BaseScanner(ABC):
         context, attempt, observed = bound
         if context["logger"] is not logger or not observed:
             return None
+        if not matched and pair.get("_authentication_lost"):
+            outcome, rationale = "blocked", "authentication required; probe remains incomplete"
         context = dict(context, baseline_attempt_ids=tuple(baseline_attempt_ids),
                        control_attempt_ids=tuple(control_attempt_ids))
         return logger.scoped_probe(context, record_kind="decision", parent_id=observed,
