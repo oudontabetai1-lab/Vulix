@@ -191,6 +191,43 @@ class ScanStartedRedactionTests(unittest.TestCase):
         self.assertNotIn("cookie-value-777", blob)
         self.assertNotIn("header-token-123", blob)
 
+    def test_scan_started_registers_bearer_and_string_headers(self):
+        # serve は bearer / 文字列 headers を正規化してから engine へ渡す。scan_started の
+        # 登録も同じ有効ヘッダから作るため、キー名では伏せられない自由文へ同じ値が
+        # 現れても伏字になる（登録が engine と非同等だとここが漏れる）。
+        token = "tok-bearer-abc123"
+        header = "hdr-secret-9999"
+        data = self._emit({
+            "url": "http://t.test/",
+            "bearer": token,
+            "headers": f"X-Api-Auth: {header}",
+            # 非秘匿キー（キー基準では伏字対象外）に同じ値が現れるケース。
+            "login_success_indicator": f"{token} {header}",
+        })
+        blob = json.dumps(data, ensure_ascii=False)
+        self.assertNotIn(token, blob)
+        self.assertNotIn(header, blob)
+
+    def test_registration_matches_effective_headers_for_engine(self):
+        # 値集合は engine と共有する純粋関数から作る。文字列ヘッダ＋Bearer の
+        # 正規化結果（Authorization / 元ヘッダ）が両方とも登録対象になる。
+        from wscan import url_scope
+
+        url_scope.clear_secret_values()
+        try:
+            items, names = main._configured_secret_values({
+                "auth_user": USER,
+                "bearer": "tok-bearer-abc123",
+                "headers": "X-Api-Auth: hdr-secret-9999",
+                "cookies": "sid=cookie-value-777",
+            })
+        finally:
+            url_scope.clear_secret_values()
+        self.assertIn(("auth_user", USER), items)
+        self.assertIn(("header:X-Api-Auth", "hdr-secret-9999"), items)
+        self.assertIn(("header:Authorization", "Bearer tok-bearer-abc123"), items)
+        self.assertIn("sid", names)
+
 
 class ConfigSecretFallbackTests(unittest.TestCase):
     def test_username_falls_back_to_config_when_blank(self):

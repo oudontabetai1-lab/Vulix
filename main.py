@@ -359,39 +359,54 @@ def scan_config_snapshot(cfg: dict, submitted_at: str) -> dict:
     }
 
 
+def _configured_secret_values(cfg: dict):
+    """送信設定から redaction 登録用の ``(items, cookie_names)`` を作る（純粋関数）。
+
+    serve の ``scan_started`` はエンジンより先に配信されるため、エンジン構築時と同じ
+    値集合を先に登録する必要がある。値集合の正典は
+    ``url_scope.collect_configured_secret_values`` で、engine と共有する。
+
+    ヘッダは engine へ渡すのと同じ有効ヘッダ（文字列形式の解釈＋Bearer 合成）に
+    正規化してから渡す（Bearer はキー名で伏字にならない自由文へも現れ得るため）。
+    """
+    from wscan import url_scope
+    from wscan.header_manager import apply_bearer
+
+    headers = apply_bearer(
+        _coerce_headers(cfg.get("headers")), cfg.get("bearer", "") or ""
+    )
+    return url_scope.collect_configured_secret_values(
+        auth_user=cfg.get("auth_user"),
+        auth_pass=cfg.get("auth_pass"),
+        accounts=cfg.get("accounts") or [],
+        cookies=cfg.get("cookies") or "",
+        low_priv_cookies=cfg.get("low_priv_cookies") or "",
+        # serve は Cookie ファイルを読み込まない（エンジンへも空リストを渡す）。
+        cookie_list=[],
+        low_priv_cookie_list=[],
+        headers=headers,
+    )
+
+
 def _register_scan_secret_values(cfg: dict) -> None:
     """送信設定の資格情報値を値ベース redaction に登録する。
 
     ``scan_started`` はどのエンジンよりも先に配信されるため、エンジン構築時の
     登録（``ScanEngine._register_configured_secret_values``）に頼れない。最初の
     イベントから他のイベントと同じ伏字を通すため、配信前にここで登録する。
-    対象はエンジンが登録する値と同じ（ログイン資格情報・アカウント・Cookie・ヘッダ値）。
+    値集合は engine と共有する純粋関数から作る（Bearer/文字列ヘッダも含む）。
     """
     from wscan import url_scope
 
-    items = [
-        ("auth_user", cfg.get("auth_user")),
-        ("auth_password", cfg.get("auth_pass")),
-    ]
-    for i, account in enumerate(cfg.get("accounts") or []):
-        if isinstance(account, dict):
-            items += [
-                (f"account{i}_user", account.get("username")),
-                (f"account{i}_password", account.get("password")),
-            ]
-    for key in ("cookies", "low_priv_cookies"):
-        for part in str(cfg.get(key) or "").split(";"):
-            name, sep, value = part.partition("=")
-            if sep and name.strip():
-                items.append(("cookie", value.strip()))
-    headers = cfg.get("headers")
-    if isinstance(headers, dict):
-        for name, value in headers.items():
-            items += [
-                (f"header:{name}", value),
-                (f"header:{name}", str(value or "").rpartition(" ")[2]),
-            ]
+    items, _cookie_names = _configured_secret_values(cfg)
     url_scope.register_secret_values(items)
+
+
+def _clear_scan_secret_values() -> None:
+    """値ベース redaction の登録を捨てる（スキャン境界・終了時）。"""
+    from wscan import url_scope
+
+    url_scope.clear_secret_values()
 
 
 async def emit_scan_started(monitor, cfg: dict) -> None:
@@ -3691,6 +3706,10 @@ async def run_serve(args):
             monitor.pending_interactive = None
             cfg = monitor.scan_request_data or {}
             cfg = apply_config_secret_fallback(cfg, _CFG)
+            # 受理境界: 直前の開始失敗（検証エラー・例外）で残った登録値を捨てる。
+            # 409（実行中）はここへ来ないため、走行中スキャンの登録は壊さない。
+            # 今回の値は run_one_scan が scan_started 配信前に再登録する。
+            _clear_scan_secret_values()
             try:
                 if monitor.scan_max_seconds:
                     # watchdog はまず graceful な abort を要求する(scheduler_task)。
@@ -3731,6 +3750,9 @@ async def run_serve(args):
                     monitor.prune_old_scans()
                 except Exception:
                     pass
+                # 通知等の伏字が必要な後処理が済んだ後に登録値を捨てる。エンジンを
+                # 構築できなかった開始（検証エラー・コンストラクタ例外・中断）もここを通る。
+                _clear_scan_secret_values()
 
     async def scheduler_task():
         # 定期スキャンの期限を監視し、アイドル時に1件ずつ起動する。

@@ -9897,29 +9897,18 @@ class ScanEngine:
         """設定済み資格情報の値を値ベース redaction に登録する（キー名に依らず永続化/表示から伏せる）。"""
         from . import url_scope
         url_scope.clear_secret_values()
-        self.session_cookie_names: set[str] = set()
-        items = [("auth_user", auth_user), ("auth_password", auth_pass)]
-        for i, acct in enumerate(self.accounts):
-            if isinstance(acct, dict):
-                items += [(f"account{i}_user", acct.get("username")),
-                          (f"account{i}_password", acct.get("password"))]
-        for name, cookies in (("cookie", self._cookies), ("low_priv_cookie", self.low_priv_cookies)):
-            for part in str(cookies or "").split(";"):
-                cookie_name, sep, value = part.partition("=")
-                if sep and cookie_name.strip():
-                    self.session_cookie_names.add(cookie_name.strip())
-                    items.append((name, value.strip()))
-        for c in [*self.cookie_list, *self.low_priv_cookie_list]:
-            if isinstance(c, dict):
-                if isinstance(c.get("name"), str):
-                    self.session_cookie_names.add(c["name"])
-                items.append(("cookie", c.get("value")))
-        for k, v in self.header_manager.current().items():
-            v = str(v or "")
-            if k.lower() == "cookie":
-                self.session_cookie_names.update(
-                    part.partition("=")[0].strip() for part in v.split(";") if "=" in part)
-            items += [(f"header:{k}", v), (f"header:{k}", v.rpartition(" ")[2])]
+        # 値集合の正典は url_scope.collect_configured_secret_values（serve の
+        # scan_started 配信前登録と共有）。ここではライフサイクル（clear→register）だけ持つ。
+        items, self.session_cookie_names = url_scope.collect_configured_secret_values(
+            auth_user=auth_user,
+            auth_pass=auth_pass,
+            accounts=self.accounts,
+            cookies=self._cookies,
+            low_priv_cookies=self.low_priv_cookies,
+            cookie_list=self.cookie_list,
+            low_priv_cookie_list=self.low_priv_cookie_list,
+            headers=self.header_manager.current(),
+        )
         url_scope.register_secret_values(items)
         self._redaction_skipped = sorted(set(url_scope.skipped_secret_labels))
 

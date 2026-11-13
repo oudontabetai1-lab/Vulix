@@ -252,6 +252,57 @@ def register_secret_values(items) -> None:
             _SECRET_VALUES[value] = label
 
 
+def collect_configured_secret_values(
+    auth_user=None,
+    auth_pass=None,
+    accounts=None,
+    cookies="",
+    low_priv_cookies="",
+    cookie_list=None,
+    low_priv_cookie_list=None,
+    headers=None,
+):
+    """設定済み資格情報から redaction 登録用の値一覧と Cookie 名集合を作る（純粋関数）。
+
+    ``ScanEngine`` と serve（``scan_started`` の配信前）が**同じ値集合**を登録するための
+    単一の正典。文字列 Cookie / Cookie リスト / ヘッダ（``Cookie`` を含む）を横断して
+    ``(label, value)`` と ``cookie_names`` を返す。登録・クリアのライフサイクルは呼出側が持つ。
+
+    *headers* は呼出側で有効ヘッダ（Bearer 合成・文字列形式の解釈済み）を渡すこと。
+    """
+    items: list[tuple[str, object]] = [
+        ("auth_user", auth_user),
+        ("auth_password", auth_pass),
+    ]
+    for i, acct in enumerate(accounts or []):
+        if isinstance(acct, dict):
+            items += [
+                (f"account{i}_user", acct.get("username")),
+                (f"account{i}_password", acct.get("password")),
+            ]
+    cookie_names: set[str] = set()
+    for label, raw in (("cookie", cookies), ("low_priv_cookie", low_priv_cookies)):
+        for part in str(raw or "").split(";"):
+            cookie_name, sep, value = part.partition("=")
+            if sep and cookie_name.strip():
+                cookie_names.add(cookie_name.strip())
+                items.append((label, value.strip()))
+    for cookie in [*(cookie_list or []), *(low_priv_cookie_list or [])]:
+        if isinstance(cookie, dict):
+            if isinstance(cookie.get("name"), str):
+                cookie_names.add(cookie["name"])
+            items.append(("cookie", cookie.get("value")))
+    for name, value in (headers or {}).items():
+        value = str(value or "")
+        if str(name).lower() == "cookie":
+            cookie_names.update(
+                part.partition("=")[0].strip() for part in value.split(";") if "=" in part
+            )
+        # Authorization 等は "Bearer <token>" 形式なので値全体とトークン単体の両方を登録する。
+        items += [(f"header:{name}", value), (f"header:{name}", value.rpartition(" ")[2])]
+    return items, cookie_names
+
+
 def redact_secret_values(text):
     """登録済みの資格情報値（生・URL エンコード・JSON エスケープ形）を固定マーカーへ置換する。"""
     if not isinstance(text, str) or not text or not _SECRET_VALUES:

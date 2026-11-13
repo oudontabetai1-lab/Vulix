@@ -32,6 +32,7 @@ def test_app_summary_modules_contracts():
     vm.runInNewContext(legacyIpGuard, legacyIpContext);
     legacyIpContext.validateAndSanitizeClientIp = legacyIpContext.validateAndSanitizeClientIp.bind(legacyIpContext);
     vm.runInThisContext(fs.readFileSync('templates/ui/summary-reader.js', 'utf8'));
+    vm.runInThisContext(fs.readFileSync('templates/ui/history-labels.js', 'utf8'));
     vm.runInThisContext(fs.readFileSync('templates/ui/summary-modules.js', 'utf8'));
     const reader = VulixSummaryReader.createSummaryReader({ get: async () => ({ ok: true, data: { scans: [{ findings_count: null }, { findings_count: 0 }], storage: {} } }) });
     const calls = [];

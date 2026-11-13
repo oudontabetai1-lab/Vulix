@@ -7,16 +7,16 @@
   const button = (text, action) => { const node = el('button', text, 'history-btn'); node.type = 'button'; node.addEventListener('click', action); return node; };
   const cell = (row, value, cls) => row.appendChild(el('td', value, cls));
   const knownCount = (value) => typeof value === 'number' && Number.isFinite(value) ? String(value) : '未取得';
-  // 履歴の状態ラベル。レガシー履歴（dashboard.html）と同じ日本語表記に揃え、
-  // 生の API 値（scanning 等）をそのまま見せない。
-  const STATUS_LABELS = { done: '完了', scanning: '実行中', aborted: '中断', error: 'エラー', incomplete: '未完了', interrupted: '中断（途中）' };
-  const statusLabel = (value) => STATUS_LABELS[String(value || '').toLowerCase()] || (value || '不明');
+  // 履歴の状態ラベルはポータル（history-labels.js）と共有し、生の API 値
+  // （scanning 等）をそのまま見せない。
+  const historyLabels = global.VulixHistoryLabels;
+  const statusLabel = (value) => historyLabels.statusLabel(value);
   const findingsLabel = (scan) => {
     const count = knownCount(scan.findings_count);
     if (count === '未取得') return count;
-    if (!scan.partial) return count;
-    const running = String(scan.status || '').toLowerCase() === 'scanning';
-    return `${count} 件（${running ? '実行中・途中' : '途中'}）`;
+    const note = historyLabels.countsNote(
+      Boolean(scan.partial), String(scan.status || '').toLowerCase() === 'scanning');
+    return note ? `${count} ${note}` : count;
   };
   const timestamp = (value) => { if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)) return '不明'; const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '不明'; };
   const validIp = (value) => {
