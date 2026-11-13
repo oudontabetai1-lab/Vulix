@@ -2381,9 +2381,8 @@ class BrowserManager:
                     f"document.querySelectorAll('form')[{form_index}].requestSubmit()"
                 )
             await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
-            _js_wait = 0.2 * self.sleep_factor
-            if _js_wait > 0:
-                await asyncio.sleep(_js_wait)
+            # SPA の fetch 応答を送達判定に反映する待機は fast でも省略しない。
+            await asyncio.sleep(0.2)
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
@@ -2586,9 +2585,8 @@ class BrowserManager:
                 )
 
             await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
-            _js_wait = 0.2 * self.sleep_factor
-            if _js_wait > 0:
-                await asyncio.sleep(_js_wait)
+            # SPA の fetch 応答を送達判定に反映する待機は fast でも省略しない。
+            await asyncio.sleep(0.2)
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
