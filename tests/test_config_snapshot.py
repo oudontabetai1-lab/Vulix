@@ -196,7 +196,7 @@ class ScanConfigSnapshotTests(unittest.TestCase):
                 {"steps": [
                     {"action": "fill", "field": "password", "value": "third-party-pw"},
                     {"action": "fill", "field": "api_token", "value": "opaque-value"},
-                    {"action": "fill", "field": "email", "value": "someone@example.test"},
+                    {"action": "fill", "field": "notes", "value": "ordinary-text"},
                 ]},
             ],
         }
@@ -204,7 +204,37 @@ class ScanConfigSnapshotTests(unittest.TestCase):
         self.assertEqual(steps[0]["value"], "***REDACTED***")
         self.assertEqual(steps[1]["value"], "***REDACTED***")
         # 資格情報らしくない入力欄の値は変えない（識別子・通常入力の可読性を保つ）。
-        self.assertEqual(steps[2]["value"], "someone@example.test")
+        self.assertEqual(steps[2]["value"], "ordinary-text")
+
+    def test_flow_username_value_is_masked_for_short_configured_username(self):
+        # 4 文字未満の設定済みユーザー名は値ベース登録の対象外なので、欄名（field）で伏せる。
+        cfg = {
+            "url": "http://t.test/",
+            "auth_user": "ab",
+            "flows": [{"steps": [
+                {"action": "fill", "field": "username", "value": "ab"},
+            ]}],
+        }
+        step = main._redact_secrets(cfg)["flows"][0]["steps"][0]
+        self.assertEqual(step["value"], "***REDACTED***")
+        # 識別子（field 名）は変えない。
+        self.assertEqual(step["field"], "username")
+
+    def test_flow_only_username_value_is_masked(self):
+        # 設定に無く flow にだけ書かれたユーザー名も、field/selector の欄名で伏せる。
+        cfg = {
+            "url": "http://t.test/",
+            "flows": [{"steps": [
+                {"action": "fill", "field": "username", "value": "bob-the-user"},
+                {"action": "fill", "selector": "input[name=email]", "value": "bob@example.test"},
+            ]}],
+        }
+        steps = main._redact_secrets(cfg)["flows"][0]["steps"]
+        self.assertEqual(steps[0]["value"], "***REDACTED***")
+        self.assertEqual(steps[1]["value"], "***REDACTED***")
+        # field / selector の値そのものは変更しない。
+        self.assertEqual(steps[0]["field"], "username")
+        self.assertEqual(steps[1]["selector"], "input[name=email]")
 
     def test_blank_placeholder_applies_to_nested_credentials(self):
         # /api/config/defaults 用: 入れ子の資格情報も空で配信する。

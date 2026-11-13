@@ -304,8 +304,12 @@ _REDACT_IDENTIFIER_KEYS = frozenset(
 # flow step の入力値キー。同じ step の field/name/selector が秘匿キーを含むときだけ伏せる
 # （scan_config.json に flow の入力値が平文で残らないようにする）。
 _REDACT_VALUE_KEYS = frozenset(("value", "input"))
-# 入力欄名（field/selector）から資格情報らしさを判定する語。
-_SECRET_HINT_TOKENS = _SECRET_KEY_TOKENS + ("passwd", "pwd", "pass")
+# 入力欄名（field/selector）から資格情報らしさを判定する語。flow step の field/selector だけに
+# 使い、トップレベルの設定キー判定（_SECRET_KEY_TOKENS）には広げない。ログインユーザー系の欄も
+# 資格情報として扱う（4 文字未満の値は値ベース登録の対象外なので、欄名でしか伏せられない）。
+_SECRET_HINT_TOKENS = _SECRET_KEY_TOKENS + (
+    "passwd", "pwd", "pass", "username", "user", "login", "email", "auth_user",
+)
 
 # ダッシュボードへは空で配信する秘匿フィールド。空で戻ってきたら config へ
 # フォールバックする。headers は値に認証情報を含み得るため同様に扱う。
@@ -356,7 +360,12 @@ def _credential_values(cfg: dict) -> set[str]:
 
 
 def _has_secret_hint(text: str) -> bool:
-    """入力欄名などが資格情報らしい語を含むか（flow の入力値判定用）。"""
+    """入力欄名などが資格情報らしい語を含むか（flow step の field/selector 判定用）。
+
+    ログインユーザー系（username/user/login/email/auth_user 等）も対象。値ベース登録は
+    4 文字未満を登録しないため、短いユーザー名や flow にだけ書かれたユーザー名はここでしか
+    伏せられない。判定材料は field/selector 名だけで、識別子そのものは置換しない。
+    """
     low = str(text or "").lower()
     return any(tok in low for tok in _SECRET_HINT_TOKENS)
 
