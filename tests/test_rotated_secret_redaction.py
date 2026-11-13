@@ -61,7 +61,8 @@ async def test_rotated_header_registered():
 
 def test_rotated_cookie_registered(tmp_path, monkeypatch):
     monkeypatch.setenv('WSCAN_STATE_DIR', str(tmp_path / 'state'))
-    engine = ScanEngine('http://example.test', output_dir=str(tmp_path / 'out'))
+    engine = ScanEngine('http://example.test', output_dir=str(tmp_path / 'out'),
+                       cookies='sid=configured-session')
     engine.cookies = 'sid=synthetic-new-cookie'
     assert url_scope.redact_secret_values('synthetic-new-cookie') != 'synthetic-new-cookie'
 
@@ -72,7 +73,8 @@ async def test_adopted_credentials_redacted_in_evidence_and_report(tmp_path, mon
     from wscan.report import ReportGenerator
     from wscan.scanners.base import Finding
     monkeypatch.setenv('WSCAN_STATE_DIR', str(tmp_path / 'state'))
-    engine = ScanEngine('http://example.test', output_dir=str(tmp_path / 'out'))
+    engine = ScanEngine('http://example.test', output_dir=str(tmp_path / 'out'),
+                       cookies='sid=configured-session')
     engine.cookies = 'sid=synthetic-adopted-cookie'
     _store_synced_token(engine, engine.target_url,
                         {'Authorization': 'Bearer synthetic-adopted-token'})
@@ -156,3 +158,53 @@ def test_serve_rejects_concurrent_scan():
     server.scan_in_progress = True
     response = TestClient(server.app).post('/api/v1/scan', json={'url': 'http://example.test'})
     assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('worker', [False, True])
+async def test_jar_sync_only_masks_session_names(tmp_path, monkeypatch, worker):
+    from unittest.mock import AsyncMock
+    from wscan.engine import _WORKER_COOKIES
+    monkeypatch.setenv('WSCAN_STATE_DIR', str(tmp_path / 'state'))
+    engine = ScanEngine('http://example.test', output_dir=str(tmp_path / 'out'),
+                       cookies='sid=configured-session')
+    browser = SimpleNamespace(session_cookie_names={'login_session'}, network=None,
+        page=SimpleNamespace(context=SimpleNamespace(cookies=AsyncMock())))
+    token = _WORKER_COOKIES.set(engine.cookies) if worker else None
+    try:
+        for suffix in ('initial', 'rotated'):
+            browser.page.context.cookies.return_value = [
+                {'name': name, 'value': value, 'domain': 'example.test', 'path': '/'}
+                for name, value in [('sid', f'configured-{suffix}'),
+                    ('login_session', f'login-{suffix}'),
+                    ('echo', 'cookie-injection-probe'), ('lang', 'english')]]
+            assert await engine._sync_cookies_from_browser(browser)
+            for secret in (f'configured-{suffix}', f'login-{suffix}'):
+                assert url_scope.redact_secret_values(secret) != secret
+            for payload in ('cookie-injection-probe', 'english'):
+                assert url_scope.redact_secret_values(payload) == payload
+        assert url_scope.redact_secret_values('login-initial') != 'login-initial'
+    finally:
+        if token is not None:
+            _WORKER_COOKIES.reset(token)
+
+
+def test_login_cookie_diff_selects_only_changed_names():
+    from wscan.browser import BrowserManager
+    from wscan.login_surface import snapshot_cookie_state
+    browser = BrowserManager()
+    before = [{'name': 'lang', 'value': 'english', 'domain': 'example.test'}]
+    after = before + [{'name': 'session_id', 'value': 'login-session-initial', 'domain': 'example.test'}]
+    browser._register_login_cookies(snapshot_cookie_state(before), after, 'http://example.test')
+    assert browser.session_cookie_names == {'session_id'}
+    rotated = before + [{'name': 'session_id', 'value': 'login-session-rotated', 'domain': 'example.test'}]
+    browser._register_login_cookies(snapshot_cookie_state(after), rotated, 'http://example.test')
+    assert url_scope.redact_secret_values('login-session-rotated') != 'login-session-rotated'
+    assert url_scope.redact_secret_values('login-session-initial') != 'login-session-initial'
+    assert url_scope.redact_secret_values('english') == 'english'
+
+
+@pytest.mark.parametrize('value', [True, False, 12345, {'session': 'value'}, ['value']])
+def test_non_string_values_are_not_secrets(value):
+    url_scope.register_secret_values([('auth_token', value)])
+    assert url_scope.redact_secret_values(str(value)) == str(value)

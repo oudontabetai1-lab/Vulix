@@ -237,8 +237,7 @@ def clear_secret_values() -> None:
 def register_secret_values(items) -> None:
     """(label, value) を登録する。マーカーは ``[REDACTED:<label>]``。短すぎる値は登録せず記録する。"""
     for label, value in items:
-        value = str(value or "")
-        if not value:
+        if not isinstance(value, str) or not value:
             continue
         if len(value) < MIN_SECRET_LEN:
             skipped_secret_labels.append(label)

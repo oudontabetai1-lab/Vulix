@@ -815,6 +815,7 @@ class BrowserManager:
         self.monitor = monitor
         self.auth_user = auth_user
         self.auth_pass = auth_pass
+        self.session_cookie_names: set[str] = set()
         # MFA（2FA）ソルバ。設定時はログイン後のワンタイムコード入力を自動化。
         # None なら従来どおり MFA 段は何もしない。
         self.mfa_solver = mfa_solver
@@ -3031,6 +3032,21 @@ class BrowserManager:
         return configured or await self._editable_auth_selector(
             find_otp_field(body, mfa_context=await self._visible_mfa_context()) or "")
 
+    def _register_login_cookies(self, before, cookies, login_url: str) -> bool:
+        """ログイン応答で新規作成・値変更された Cookie をセッション Cookie として採用する。
+
+        採用した名前を以後の jar 同期で使い、この時点の値も redaction に登録する。
+        戻り値は採用した Cookie があったか（従来の Cookie 差分検知と同じ意味）。
+        """
+        from .login_surface import snapshot_cookie_state
+        from .url_scope import register_secret_values
+        after = snapshot_cookie_state(cookies, target_url=login_url)
+        changed = {key[0] for key, value in after.items() if before.get(key) != value}
+        self.session_cookie_names.update(changed)
+        register_secret_values(("cookie", c.get("value")) for c in cookies
+                               if c.get("name") in changed)
+        return bool(changed)
+
     async def auto_login(
         self,
         login_url: str,
@@ -3198,7 +3214,7 @@ class BrowserManager:
                     if ctx is not None:
                         try:
                             curr_cookies = await ctx.cookies()
-                            if ls.detect_cookie_diff(before_cookie_snapshot, curr_cookies, target_url=login_url):
+                            if self._register_login_cookies(before_cookie_snapshot, curr_cookies, login_url):
                                 auth_cookie_observed = True
                         except Exception:
                             pass
@@ -3871,6 +3887,7 @@ class WorkerBrowser(BrowserManager):
         self.monitor = real_browser.monitor
         self.auth_user = real_browser.auth_user
         self.auth_pass = real_browser.auth_pass
+        self.session_cookie_names = set(getattr(real_browser, "session_cookie_names", set()))
         # MFA ソルバも引き継ぐ（worker のセッション切れ再ログインでも MFA を解ける）。
         self.mfa_solver = getattr(real_browser, "mfa_solver", None)
         self.proxy = real_browser.proxy
