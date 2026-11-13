@@ -158,6 +158,13 @@ class HeaderManager:
         """Merge ``new_headers`` in (case-insensitive overwrite) and notify listeners."""
         if not new_headers:
             return self.current()
+        from .session_guard import _normalize_auth_header
+        from .url_scope import register_secret_values
+        for name, value in new_headers.items():
+            normalized = _normalize_auth_header(str(name), str(value))
+            if normalized:
+                register_secret_values([("auth_token", normalized[1]),
+                                        ("auth_token", normalized[1].rpartition(" ")[2])])
         async with self._lock:
             # Case-insensitive replacement so "authorization" doesn't duplicate "Authorization".
             existing_lower = {k.lower(): k for k in self._headers}

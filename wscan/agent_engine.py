@@ -218,6 +218,20 @@ class AgentEngine:
     # ------------------------------------------------------------------
 
     async def run(self):
+        from . import url_scope
+        # serve の /api/scan は実行中の次スキャンを 409 で拒否する。
+        url_scope.clear_secret_values()
+        url_scope.register_secret_values([
+            ("auth_user", self.auth_user), ("auth_password", self.auth_pass),
+            ("totp_secret", self.totp_secret),
+            *((f"header:{k}", v) for k, v in self.extra_headers.items()),
+        ])
+        try:
+            return await self._run()
+        finally:
+            url_scope.clear_secret_values()
+
+    async def _run(self):
         """Run the agent browser scan end-to-end."""
         from wscan.llm_agent_browser import AgentBrowserScanner, AgentScanResult
         from wscan.report import ReportGenerator

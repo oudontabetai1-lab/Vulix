@@ -2415,6 +2415,10 @@ class ScanEngine:
 
     @cookies.setter
     def cookies(self, value: str) -> None:
+        url_scope.register_secret_values(
+            ("cookie", part.partition("=")[2].strip())
+            for part in str(value or "").split(";")
+        )
         if _WORKER_COOKIES.get(_COOKIES_UNSET) is not _COOKIES_UNSET:
             _WORKER_COOKIES.set(value)
         else:
@@ -3750,6 +3754,13 @@ class ScanEngine:
         print(f"[PROFILE +{_t.monotonic() - t0:7.1f}s] {msg}", file=_s.stderr, flush=True)
 
     async def run(self):
+        # serve は同時 1 スキャン。例外・中断時も次のスキャンへ値を持ち越さない。
+        try:
+            return await self._run()
+        finally:
+            url_scope.clear_secret_values()
+
+    async def _run(self):
         """4-phase scan pipeline."""
         if self.monitor:
             await self.monitor.emit_status(f"Starting scan of {self.target_url}", "running")
