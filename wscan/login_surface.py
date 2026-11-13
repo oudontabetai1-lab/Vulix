@@ -809,6 +809,9 @@ def assess_login_state(obs: LoginObservation) -> LoginAssessment:
             return LoginAssessment(SUCCESS, evidence + ["configured_indicator"])
         return LoginAssessment(INCOMPLETE, evidence, ["unsubmitted_login"])
     if obs.protected_access == "unknown":
+        if (obs.protected_access_reason == "observed_api_unconfirmed"
+                and obs.api_token_issued and len(evidence) >= 2):
+            return LoginAssessment(SUCCESS, evidence)
         return LoginAssessment(INCOMPLETE, evidence,
                                [obs.protected_access_reason or "protected_access_unknown"])
     if reasons:

@@ -1279,8 +1279,7 @@ class SQLiScanner(BaseScanner):
                 sleep_factor=getattr(self.browser, "sleep_factor", 1.0),
             )
             await browser.init()
-            previous_browser = self.browser
-            self.browser = browser
+            browser_token = self._browser_override.set(browser)
             try:
                 await self.log_payload_test(
                     finding.field_name, finding.payload, "sqli_verify", finding.url
@@ -1296,7 +1295,7 @@ class SQLiScanner(BaseScanner):
                     bypassed, _ = self._detect_auth_bypass(finding.url, source)
                 return bypassed
             finally:
-                self.browser = previous_browser
+                self._browser_override.reset(browser_token)
                 await browser.close()
         except Exception:
             return None

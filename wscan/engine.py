@@ -71,6 +71,7 @@ _FIELD_ATTACK_DEADLINE: ContextVar = ContextVar("wscan_field_deadline", default=
 _FIELD_BUDGET_NOTES: ContextVar = ContextVar("wscan_field_budget_notes", default=None)
 _FIELD_BUDGET_TRUNCATED: ContextVar = ContextVar("wscan_field_budget_truncated", default=None)
 _FIELD_BUDGET_IDENT: ContextVar = ContextVar("wscan_field_budget_ident", default=None)
+_FIELD_PROBE_FAILURES: ContextVar = ContextVar("wscan_field_probe_failures", default=None)
 # Per-worker Cookie 状態。直列時は _UNSET のままで Cookie は共有 self.cookies に載る。
 # 並列時は worker_loop が各 task の ContextVar を self.cookies のスナップショットで種付けし、
 # pre-attack flow 後や per-page 再スコープで同期した Cookie が worker task 内に閉じる
@@ -3239,14 +3240,16 @@ class ScanEngine:
                         return True
         return False
 
-    def _protected_access_candidate(self) -> str:
+    def _protected_access_candidate(self, urls=None) -> str:
         """選択肢URLのデコード破壊判定を含める。raw URL の urlparse tokenization で
         /%6cogout /logout に偽装して scope を通過するのを防ぐ。"""
         from . import auth_detect
         from .state_profile import looks_destructive, may_submit
 
-        for url in [getattr(self, "target_url", ""), *getattr(self, "additional_target_urls", []),
-                    *getattr(self, "access_urls", []), *getattr(self, "seed_urls", [])]:
+        candidates = urls if urls is not None else [
+            getattr(self, "target_url", ""), *getattr(self, "additional_target_urls", []),
+            *getattr(self, "access_urls", []), *getattr(self, "seed_urls", [])]
+        for url in candidates:
             parsed = urlparse(url)
             if (parsed.scheme not in {"http", "https"} or not parsed.netloc
                     or parsed.username or parsed.password or parsed.fragment
@@ -3309,6 +3312,26 @@ class ScanEngine:
                     before_status=before[0], before_body=before[1],
                     before_login_redirect=before[2], after_status=after[0], after_body=after[1],
                     after_login_redirect=after[2])
+                proof_url = candidate
+                # 公開SPA shellでは、実観測した安全なGET APIの認証差分を確認する。
+                if api_token_issued and proof == "unknown":
+                    observed = getattr(getattr(browser, "network", None), "_observed_auth_headers", {})
+                    for item in observed.values():
+                        api = self._protected_access_candidate([item.get("url", "")]) if item.get("method") == "GET" else ""
+                        if not api or api == candidate:
+                            continue
+                        anonymous = await self._protected_resource_response(api)
+                        authenticated = await self._protected_resource_response(api, browser=browser)
+                        api_proof, api_reason = ls.assess_protected_access(
+                            before_status=anonymous[0], before_body=anonymous[1], before_login_redirect=anonymous[2],
+                            after_status=authenticated[0], after_body=authenticated[1], after_login_redirect=authenticated[2])
+                        if api_proof == "verified":
+                            proof, reason, proof_url = api_proof, api_reason, api
+                            break
+                        if api_proof == "denied":
+                            reason = "observed_api_unconfirmed"
+                if proof == "verified":
+                    self._authentication_probe_url = proof_url
                 if (api_token_issued and proof == "denied"
                         and not any(k.lower() in {"cookie", "authorization"}
                                     for k in self.auth_headers(url=candidate))):
@@ -3330,6 +3353,21 @@ class ScanEngine:
         if proof != "verified":
             self.wave_errors.append("authentication_unverified:" + reason)
         return bool(success)
+
+    async def _check_authenticated_session(self, browser) -> Optional[bool]:
+        """直前の攻撃応答と独立した既知の保護ページで、同じセッションを確認する。"""
+        from . import login_surface, session_guard
+        url = getattr(self, "_authentication_probe_url", "")
+        if not url:
+            return None
+        status, body, redirected = await self._protected_resource_response(url, browser=browser)
+        if redirected or session_guard.looks_logged_out(
+                status=status, final_url=url, body=body, login_url=self.login_url,
+                logged_in_marker=self.logged_in_marker):
+            return False
+        proof, _ = login_surface.assess_protected_access(
+            before_status=401, after_status=status, after_body=body)
+        return True if proof == "verified" else None
 
     def _filter_handoff_cookies(self, cookies: list) -> list:
         """Scope-filter Phase 1 handoff cookies to in-scope origins/hosts only."""
@@ -7618,6 +7656,13 @@ class ScanEngine:
                 checks_skipped_done += 1
                 continue
             _checkpoint_state = getattr(self, "checkpoint", None)
+            if (_checkpoint_state is not None
+                    and _checkpoint_state.is_truncation_exhausted_ip(ip, check_name + ":probe")):
+                self._record_scan_matrix(
+                    url=url, field_name=field_name, check_name=check_name, status="error",
+                    location=location, note="Probe retry limit reached; unit remains incomplete.")
+                checks_skipped_done += 1
+                continue
             if _checkpoint_state is not None and (
                 _checkpoint_state.has_legacy_truncation_without_candidates(ip, check_name)
                 or _checkpoint_state.is_legacy_candidate_unknown_ip(ip, check_name)
@@ -7698,6 +7743,8 @@ class ScanEngine:
             self._api_auth_failed = False
             scan_row = None
             _scan_note_start = len(self.wave_errors)
+            probe_failures = set()
+            probe_failure_token = _FIELD_PROBE_FAILURES.set(probe_failures)
             checks_executed += 1
             _dlg_check = getattr(self.browser, "dialog_total", 0)
             _begin_observation = getattr(scanner, "_begin_evolution_observation", None)
@@ -7786,6 +7833,16 @@ class ScanEngine:
                 )
                 console.print(f"    [yellow]Scanner error ({check_name}): {e}[/yellow]")
             finally:
+                _FIELD_PROBE_FAILURES.reset(probe_failure_token)
+                if probe_failures:
+                    check_errored = True
+                    if scan_row is not None:
+                        if scan_row["status"] == "tested":
+                            scan_row["status"] = "error"
+                        scan_row["note"] = "probe incomplete: " + ", ".join(sorted(probe_failures))
+                    attempts, exhausted = self._checkpoint_record_truncation_ip(ip, check_name + ":probe")
+                    if exhausted and scan_row is not None:
+                        scan_row["note"] += f"; retry limit reached after {attempts} attempts"
                 if _observation_scope is not None:
                     scanner._restore_evolution_observation(_observation_scope)
                 if _override_token is not None:
