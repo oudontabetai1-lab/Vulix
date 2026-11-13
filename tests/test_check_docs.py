@@ -537,4 +537,53 @@ def test_external_link_cli_main(tmp_path, monkeypatch, capsys):
     assert report.is_file()
 
 
+def test_findings_to_report_maps_check_file_line_message():
+    findings = [
+        check_docs.Finding("README.md", 3, "absent.md", "local target does not exist"),
+        check_docs.Finding("README.md", 8, "--not-a-vulix-option",
+                           "option is not defined by the Vulix CLI parser", "cli"),
+    ]
+    assert check_docs.findings_to_report(findings) == [
+        {"check": "markdown", "file": "README.md", "line": 3,
+         "message": "absent.md: local target does not exist"},
+        {"check": "cli", "file": "README.md", "line": 8,
+         "message": "--not-a-vulix-option: option is not defined by the Vulix CLI parser"},
+    ]
+
+
+def test_write_report_resolves_relative_path_against_root_and_creates_parents(tmp_path):
+    nested = tmp_path / "sub" / "report.json"
+    check_docs.write_report(nested, [{"check": "cli", "file": "README.md", "line": 1, "message": "m"}], tmp_path)
+    assert json.loads(nested.read_text(encoding="utf-8")) == [
+        {"check": "cli", "file": "README.md", "line": 1, "message": "m"},
+    ]
+    relative = Path("flat.json")
+    check_docs.write_report(relative, [], tmp_path)
+    assert (tmp_path / "flat.json").read_text(encoding="utf-8") == "[]\n"
+
+
+def test_main_offline_writes_per_failure_report(tmp_path):
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES / "invalid", repo)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "README.md", "docs/target.md"], check=True)
+    report = tmp_path / "docs-check-report.json"
+
+    assert check_docs.main(["--root", str(repo), "--report", str(report)]) == 1
+    entries = json.loads(report.read_text(encoding="utf-8"))
+    assert entries and all(set(entry) == {"check", "file", "line", "message"} for entry in entries)
+    messages = {entry["message"] for entry in entries}
+    assert "absent.md: local target does not exist" in messages
+    assert "--not-a-vulix-option: option is not defined by the Vulix CLI parser" in messages
+    assert {entry["check"] for entry in entries} <= {"markdown", "cli", "config"}
+    # file:line は CLI 出力と同じ粒度（ログを開かなくても report だけで位置が分かる）
+    assert all(isinstance(entry["line"], int) and entry["line"] >= 1 for entry in entries)
+
+
+def test_main_offline_passing_run_writes_empty_report(tmp_path):
+    report = tmp_path / "docs-check-report.json"
+    assert check_docs.main(["--root", str(FIXTURES / "valid"), "--report", str(report)]) == 0
+    assert json.loads(report.read_text(encoding="utf-8")) == []
+
+
 

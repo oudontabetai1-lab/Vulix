@@ -70,6 +70,8 @@ class Finding:
     line: int
     target: str
     reason: str
+    # 生成元の検査カテゴリ（markdown/cli/config/external）。レポート JSON の "check" 値。
+    check: str = "markdown"
 
     def __str__(self) -> str:
         return f"{self.path}:{self.line}: {self.target}: {self.reason}"
@@ -306,7 +308,7 @@ def _check_cli(root: Path, path: Path, text: str, parser, findings: list[Finding
                 name = candidate.split("=", 1)[0]
                 if name not in options:
                     findings.append(Finding(path.relative_to(root).as_posix(), line, name,
-                                            "option is not defined by the Vulix CLI parser"))
+                                            "option is not defined by the Vulix CLI parser", "cli"))
         # CLI examples are parsed only: no shell interpolation or command execution.
         args = shlex.split(re.sub(r"\[[^]]*\]", "", command), comments=True)
         module_entry = args[0] == "vulix" or (len(args) > 2 and args[0].startswith("python")
@@ -325,7 +327,7 @@ def _check_cli(root: Path, path: Path, text: str, parser, findings: list[Finding
         except SystemExit as exc:
             if exc.code:
                 findings.append(Finding(path.relative_to(root).as_posix(), line, command,
-                                        "arguments are rejected by the Vulix CLI parser"))
+                                        "arguments are rejected by the Vulix CLI parser", "cli"))
 
 
 def collect_config_key_paths(config_data: dict | None = None, config_path: Path | None = None) -> set[str]:
@@ -433,7 +435,7 @@ def compare_config_example_keys(block_text: str, start_line: int, file_path: str
         nodes = list(yaml.compose_all(block_text))
     except yaml.YAMLError as exc:
         return [Finding(file_path, start_line, "YAML syntax",
-                        f"malformed YAML configuration example: {exc}")]
+                        f"malformed YAML configuration example: {exc}", "config")]
 
     def _check_node(node, prefix: str = "") -> None:
         if isinstance(node, yaml.MappingNode):
@@ -445,7 +447,8 @@ def compare_config_example_keys(block_text: str, start_line: int, file_path: str
                     nearest = find_nearest_key(path, valid_paths)
                     findings.append(Finding(
                         file_path, line, path,
-                        f"unknown configuration key path (nearest valid key: '{nearest}')"
+                        f"unknown configuration key path (nearest valid key: '{nearest}')",
+                        "config"
                     ))
                 _check_node(v_node, path)
         elif isinstance(node, yaml.SequenceNode):
@@ -722,6 +725,30 @@ def check_external_links(
     return results
 
 
+def findings_to_report(findings: list[Finding]) -> list[dict]:
+    """Finding の一覧をレポート JSON 用の辞書列へ変換する（純粋関数）。
+
+    1 失敗につき 1 エントリ: check / file / line / message。
+    message は ``str(Finding)`` の path:line 部を除いた ``target: reason``。
+    """
+    return [
+        {
+            "check": finding.check,
+            "file": finding.path,
+            "line": finding.line,
+            "message": f"{finding.target}: {finding.reason}",
+        }
+        for finding in findings
+    ]
+
+
+def write_report(path: Path, entries: list[dict], root: Path = ROOT) -> None:
+    """レポート JSON を書き出す。外部リンク報告と失敗一覧の共通 writer。"""
+    path = path if path.is_absolute() else root / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entries, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def validate_external_links(
     root: Path = ROOT,
     documents: list[Path] | None = None,
@@ -762,12 +789,11 @@ def validate_external_links(
                 line_num,
                 item["url"],
                 f"broken external link (HTTP {item['status']})",
+                "external",
             ))
 
     if report_path:
-        report_path = report_path if report_path.is_absolute() else root / report_path
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        write_report(report_path, results, root)
 
     return results, findings
 
@@ -837,6 +863,8 @@ def main(argv: list[str] | None = None) -> int:
                             help="Check external http(s) links instead of offline validation")
     arg_parser.add_argument("--external-report", type=Path, default=None,
                             help="Path to write external link validation JSON artifact")
+    arg_parser.add_argument("--report", type=Path, default=None,
+                            help="Path to write per-failure JSON report (check/file/line/message)")
     arg_parser.add_argument("--skip-file", type=Path, default=None,
                             help="Path to custom skip list for external link checking")
     args = arg_parser.parse_args(argv)
@@ -847,6 +875,8 @@ def main(argv: list[str] | None = None) -> int:
             report_path=args.external_report,
             skip_file=args.skip_file,
         )
+        if args.report:
+            write_report(args.report, findings_to_report(findings), args.root)
         for finding in findings:
             print(finding, file=sys.stderr)
         summary_counts: dict[str, int] = {}
@@ -861,6 +891,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     findings = validate(args.root)
+    if args.report:
+        write_report(args.report, findings_to_report(findings), args.root)
     for finding in findings:
         print(finding, file=sys.stderr)
     if findings:
