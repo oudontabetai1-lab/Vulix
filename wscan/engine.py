@@ -3437,6 +3437,11 @@ class ScanEngine:
                 self.wave_errors.append("authentication_unverified:no_in_scope_handoff_cookies")
             return False
 
+        # Phase 1（Agent 偵察）でログインして引き渡された Cookie は採用済みのセッションなので、
+        # 名前を伏字対象に加える。以後 jar 同期で値が変わっても、同じ名前なら伏字を保つ。
+        self.session_cookie_names.update(
+            c["name"] for c in in_scope if isinstance(c.get("name"), str) and c["name"])
+
         candidate = self._protected_access_candidate()
         before = await self._protected_resource_response(candidate) if candidate else (None, "", False)
 

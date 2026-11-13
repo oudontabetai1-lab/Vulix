@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 from wscan.agent_engine import AgentEngine, AgentHandoffData
@@ -239,3 +240,42 @@ async def test_hybrid_phase2_credentials_authoritative_over_handoff_cookies(tmp_
 
     engine._auto_login.assert_awaited_once()
     engine._seed_and_verify_handoff_cookies.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handoff_session_cookie_names_are_masked(tmp_path):
+    """Phase 1 がログインで得た引き継ぎ Cookie の名前を、Phase 2 の jar 同期でも伏字対象にする。"""
+    from wscan import url_scope
+    engine = ScanEngine(
+        url="http://fixture.test/",
+        output_dir=str(tmp_path),
+        fast_mode=True,
+        handoff_cookies=[{"name": "session", "value": "adopted-session-value",
+                          "domain": "fixture.test"}],
+    )
+    engine._protected_access_candidate = MagicMock(return_value="http://fixture.test/dashboard")
+
+    async def mock_protected_resp(url, *, browser=None):
+        if browser is not None:
+            return (200, "Dashboard content", False)
+        return (401, "Login required", False)
+
+    engine._protected_resource_response = AsyncMock(side_effect=mock_protected_resp)
+    jar = [{"name": "session", "value": "adopted-session-value", "domain": "fixture.test"}]
+    browser = SimpleNamespace(
+        set_cookies_from_list=AsyncMock(),
+        page=SimpleNamespace(
+            url="http://fixture.test/dashboard",
+            context=SimpleNamespace(cookies=AsyncMock(return_value=jar)),
+        ),
+    )
+    try:
+        assert await engine._seed_and_verify_handoff_cookies(browser) is True
+        assert "session" in engine.session_cookie_names
+        assert url_scope.redact_secret_values("adopted-session-value") != "adopted-session-value"
+        # 引き継ぎに無い名前（Phase 2 で対象サイトが付けた Cookie）は伏字にしない。
+        engine.cookies = "session=rotated-session-value; lang=english"
+        assert url_scope.redact_secret_values("rotated-session-value") != "rotated-session-value"
+        assert url_scope.redact_secret_values("english") == "english"
+    finally:
+        url_scope.clear_secret_values()
