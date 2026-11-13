@@ -1078,10 +1078,21 @@ class BaseScanner(ABC):
         login_target = (getattr(getattr(self, "engine", None), "_is_login_target_url", lambda url: False)(ip.url)
                         or url_looks_like_login(ip.url))
         if not login_target and (pair.get("response") or {}).get("status") == 401:
-            pair["_authentication_lost"] = True
-            self._probe_failure("authentication_lost")
-            self._record_scan_note(self._probe_delivery_note(ip, "authentication_lost").replace("transport_error:", "auth_lost:", 1))
+            valid = await self._probe_session_valid(pair)
+            if valid is not True:
+                pair["_authentication_lost"] = True
+                reason = "authentication_lost" if valid is False else "authentication_unconfirmed"
+                self._probe_failure(reason)
+                prefix = "auth_lost:" if valid is False else "authentication_unverified:"
+                self._record_scan_note(self._probe_delivery_note(ip, reason).replace("transport_error:", prefix, 1))
         return source, pair
+
+    async def _probe_session_valid(self, pair) -> Optional[bool]:
+        # transport 側が先に確認した場合も、同じ401で保護ページを二度取得しない。
+        if "_session_valid" not in pair:
+            confirm = getattr(getattr(self, "engine", None), "_check_authenticated_session", None)
+            pair["_session_valid"] = await confirm(self.browser) if callable(confirm) else None
+        return pair["_session_valid"]
 
     async def _send_probe(self, ip, send, *, role="attack", wave="standard",
                           baseline_attempt_ids=(), control_attempt_ids=(), parent_id=""):
@@ -2593,7 +2604,7 @@ class BaseScanner(ABC):
                 body=response.text,
                 login_url=getattr(self.engine, "login_url", ""),
                 logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
-            ):
+            ) and (response.status_code != 401 or await self._probe_session_valid(pair) is not True):
                 if hasattr(self.engine, "_api_auth_failed"):
                     self.engine._api_auth_failed = True
                 if hasattr(self.engine, "clear_synced_token"):
@@ -2725,7 +2736,7 @@ class BaseScanner(ABC):
                     body=response.text,
                     login_url=getattr(self.engine, "login_url", ""),
                     logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
-                ):
+                ) and (response.status_code != 401 or await self._probe_session_valid(pair) is not True):
                     self.engine._api_auth_failed = True
             except Exception:
                 pass
@@ -2834,7 +2845,7 @@ class BaseScanner(ABC):
                     body=response.text,
                     login_url=getattr(self.engine, "login_url", ""),
                     logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
-                ):
+                ) and (response.status_code != 401 or await self._probe_session_valid(pair) is not True):
                     self.engine._api_auth_failed = True
             except Exception:
                 pass

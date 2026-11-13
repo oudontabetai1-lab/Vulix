@@ -673,11 +673,11 @@ def create_parallel_app(bearer: bool = False, expire: bool = False) -> FastAPI:
     @app.middleware("http")
     async def protect(request: Request, call_next):
         path = request.url.path
-        protected_path = ("/api/" in path and not path.endswith("/login")) if bearer else "/protected" in path
+        protected_path = ("/api/" in path and not path.endswith("/login")) if bearer else ("/protected" in path or path.startswith("/v1/account/"))
         if protected_path:
             sid = (request.headers.get("authorization", "").removeprefix("Bearer ")
                    if bearer else request.cookies.get("parallel_session", ""))
-            attack = bool(request.query_params.get("q") or request.query_params.get("safe_q"))
+            attack = bool(request.query_params.get("q") or request.query_params.get("safe_q") or request.query_params.get("code"))
             if expire and attack and not expired and sessions.get(sid):
                 sessions[sid] = False
                 expired.append(sid)
@@ -721,6 +721,14 @@ def create_parallel_app(bearer: bool = False, expire: bool = False) -> FastAPI:
     @app.get("/v4/api/protected/{number}", response_class=HTMLResponse)
     async def api_protected(number: int = 0, q: str = "", safe_q: str = ""):
         return '<h2>Confidential results</h2>' + q + escape(safe_q)
+
+    @app.get("/v1/account/verify-code", response_class=HTMLResponse)
+    @app.get("/v1/account/safe-code", response_class=HTMLResponse)
+    async def verify_code(request: Request, code: str = ""):
+        if code and request.url.path.endswith("/verify-code"):
+            return HTMLResponse("Invalid input", status_code=401)
+        return ('<h1>Account verification</h1><a href="/logout">Log out</a>'
+                '<form><input name="code"><button>Check</button></form>' + escape(code))
 
     @app.get("/test/stats")
     async def stats():

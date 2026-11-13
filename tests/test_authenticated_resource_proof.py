@@ -371,3 +371,33 @@ def test_public_shell_uses_only_observed_safe_get_for_proof(tmp_path, method, ur
     asyncio.run(engine._auto_login(Browser()))
     assert engine.authentication_state["protected_access"] == expected
     assert (url in calls) is (expected == "verified")
+
+
+@pytest.mark.parametrize("api_status,expected", [(200, "verified"), (401, "unknown"), (403, "unknown")])
+def test_observed_api_denial_does_not_reject_successful_login(tmp_path, api_status, expected):
+    engine = engine_for("http://fixture.test", tmp_path)
+
+    async def response(candidate, *, browser=None):
+        if candidate == engine.target_url:
+            return 200, "Public shell", False
+        return (401, "Denied", False) if browser is None else (api_status, "Private data", False)
+
+    engine._protected_resource_response = response
+
+    class Browser:
+        network = SimpleNamespace(_observed_auth_headers={"http://fixture.test": {
+            "method": "GET", "url": "http://fixture.test/api/permissions"}})
+
+        async def auto_login(self, *args, protected_access_check, **kwargs):
+            proof, reason = await protected_access_check(api_token_issued=True)
+            self.last_login_assessment = ls.assess_login_state(ls.LoginObservation(
+                login_url=engine.login_url, post_url="http://fixture.test/home",
+                body='<h1>Dashboard</h1><a href="/logout">Log out</a>', api_token_issued=True,
+                protected_access=proof, protected_access_reason=reason))
+            return self.last_login_assessment.authenticated
+
+    browser = Browser()
+    assert asyncio.run(engine._auto_login(browser))
+    assert browser.last_login_assessment.state == ls.SUCCESS
+    assert engine.authentication_state["protected_access"] == expected
+    assert engine.authentication_state["state"] != ls.FAILURE

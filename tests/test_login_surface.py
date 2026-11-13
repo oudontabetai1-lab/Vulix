@@ -635,3 +635,17 @@ def test_authentication_capture_redacts_late_response(tmp_path):
     response.text.assert_not_called()
     captured = repr(capture.pairs) + (tmp_path / "http_requests.jsonl").read_text()
     assert "private-" not in captured
+
+
+@pytest.mark.parametrize("token,body,status,expected", [
+    (True, "", 200, ls.INCOMPLETE),
+    (False, '<a href="/logout">Log out</a>', 200, ls.INCOMPLETE),
+    (True, '<a href="/logout">Log out</a>', 401, ls.FAILURE),
+    (True, '<div class="g-recaptcha"></div>', 200, ls.CHALLENGE),
+])
+def test_unconfirmed_observed_api_preserves_login_failure_and_evidence_gates(token, body, status, expected):
+    result = ls.assess_login_state(ls.LoginObservation(
+        login_url="http://fixture.test/login", post_url="http://fixture.test/login",
+        api_token_issued=token, body=body, status=status,
+        protected_access="unknown", protected_access_reason="observed_api_unconfirmed"))
+    assert result.state == expected
