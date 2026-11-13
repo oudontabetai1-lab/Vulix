@@ -80,6 +80,20 @@ _COOKIES_UNSET = object()
 _WORKER_COOKIES: ContextVar = ContextVar("wscan_worker_cookies", default=_COOKIES_UNSET)
 
 
+def _register_session_cookie_values(engine, value: str) -> None:
+    """Cookie 文字列のうちセッション Cookie 名の値だけを redaction 登録する。
+
+    対象サイトが発行する Cookie（反射した攻撃ペイロードや一般的な語）まで伏せると
+    証跡が壊れるため、利用者が指定した名前とログイン時に採用した名前だけを対象にする。
+    """
+    names = getattr(engine, "session_cookie_names", set())
+    url_scope.register_secret_values(
+        ("cookie", part.partition("=")[2].strip())
+        for part in str(value or "").split(";")
+        if part.partition("=")[0].strip() in names
+    )
+
+
 def _store_synced_cookies(engine, value: str) -> None:
     """同期した Cookie 文字列を保存する（純粋な振り分け）。
 
@@ -88,6 +102,7 @@ def _store_synced_cookies(engine, value: str) -> None:
     直列の挙動を完全に不変に保つ。
     """
     if _WORKER_COOKIES.get(_COOKIES_UNSET) is not _COOKIES_UNSET:
+        _register_session_cookie_values(engine, value)
         _WORKER_COOKIES.set(value)
     else:
         engine.cookies = value
@@ -110,7 +125,7 @@ _WORKER_AUTH_TOKEN: ContextVar = ContextVar("wscan_worker_auth_token", default=_
 
 
 def _store_synced_token(engine, origin_url: str, headers: dict) -> None:
-    """同期した認証トークンヘッダを保存する（純粋な振り分け）。
+    """セッションとして採用した認証トークンを登録・保存する。
 
     並列 worker task 内なら task-local な ContextVar へ、直列時は共有 engine へ書く。
     """
@@ -119,6 +134,12 @@ def _store_synced_token(engine, origin_url: str, headers: dict) -> None:
         if headers and origin_url
         else {}
     )
+    # 観測だけでは攻撃用の偽造トークンも含むため、セッション採用時だけ登録する。
+    if data:
+        for value in headers.values():
+            value = str(value or "")
+            url_scope.register_secret_values([
+                ("auth_token", value), ("auth_token", value.rpartition(" ")[2])])
     if _WORKER_AUTH_TOKEN.get(_AUTH_TOKEN_UNSET) is not _AUTH_TOKEN_UNSET:
         _WORKER_AUTH_TOKEN.set(data)
     else:
@@ -2415,6 +2436,7 @@ class ScanEngine:
 
     @cookies.setter
     def cookies(self, value: str) -> None:
+        _register_session_cookie_values(self, value)
         if _WORKER_COOKIES.get(_COOKIES_UNSET) is not _COOKIES_UNSET:
             _WORKER_COOKIES.set(value)
         else:
@@ -3415,6 +3437,11 @@ class ScanEngine:
                 self.wave_errors.append("authentication_unverified:no_in_scope_handoff_cookies")
             return False
 
+        # Phase 1（Agent 偵察）でログインして引き渡された Cookie は採用済みのセッションなので、
+        # 名前を伏字対象に加える。以後 jar 同期で値が変わっても、同じ名前なら伏字を保つ。
+        self.session_cookie_names.update(
+            c["name"] for c in in_scope if isinstance(c.get("name"), str) and c["name"])
+
         candidate = self._protected_access_candidate()
         before = await self._protected_resource_response(candidate) if candidate else (None, "", False)
 
@@ -3562,6 +3589,9 @@ class ScanEngine:
             cookies = await page.context.cookies()
         except Exception:
             return False
+
+        self.session_cookie_names = getattr(self, "session_cookie_names", set())
+        self.session_cookie_names.update(getattr(browser, "session_cookie_names", set()))
 
         # Token bridge: 観測された in-scope な Authorization/token ヘッダを抽出して同期する。
         # SPA が localStorage/sessionStorage 等に JWT を持ち、fetch/XHR で送っている場合、
@@ -3750,6 +3780,13 @@ class ScanEngine:
         print(f"[PROFILE +{_t.monotonic() - t0:7.1f}s] {msg}", file=_s.stderr, flush=True)
 
     async def run(self):
+        # serve は同時 1 スキャン。例外・中断時も次のスキャンへ値を持ち越さない。
+        try:
+            return await self._run()
+        finally:
+            url_scope.clear_secret_values()
+
+    async def _run(self):
         """4-phase scan pipeline."""
         if self.monitor:
             await self.monitor.emit_status(f"Starting scan of {self.target_url}", "running")
@@ -9860,6 +9897,7 @@ class ScanEngine:
         """設定済み資格情報の値を値ベース redaction に登録する（キー名に依らず永続化/表示から伏せる）。"""
         from . import url_scope
         url_scope.clear_secret_values()
+        self.session_cookie_names: set[str] = set()
         items = [("auth_user", auth_user), ("auth_password", auth_pass)]
         for i, acct in enumerate(self.accounts):
             if isinstance(acct, dict):
@@ -9867,12 +9905,20 @@ class ScanEngine:
                           (f"account{i}_password", acct.get("password"))]
         for name, cookies in (("cookie", self._cookies), ("low_priv_cookie", self.low_priv_cookies)):
             for part in str(cookies or "").split(";"):
-                items.append((name, part.partition("=")[2].strip()))
+                cookie_name, sep, value = part.partition("=")
+                if sep and cookie_name.strip():
+                    self.session_cookie_names.add(cookie_name.strip())
+                    items.append((name, value.strip()))
         for c in [*self.cookie_list, *self.low_priv_cookie_list]:
             if isinstance(c, dict):
+                if isinstance(c.get("name"), str):
+                    self.session_cookie_names.add(c["name"])
                 items.append(("cookie", c.get("value")))
         for k, v in self.header_manager.current().items():
             v = str(v or "")
+            if k.lower() == "cookie":
+                self.session_cookie_names.update(
+                    part.partition("=")[0].strip() for part in v.split(";") if "=" in part)
             items += [(f"header:{k}", v), (f"header:{k}", v.rpartition(" ")[2])]
         url_scope.register_secret_values(items)
         self._redaction_skipped = sorted(set(url_scope.skipped_secret_labels))

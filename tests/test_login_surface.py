@@ -583,6 +583,10 @@ def test_loopback_auto_login_cookie_issuance_success_and_safe_control():
                 assert bm.last_login_assessment.state == "success"
                 assert "auth_cookie_set" in bm.last_login_assessment.evidence
                 assert "left_login_page" in bm.last_login_assessment.evidence
+                assert "session_id" in bm.session_cookie_names
+                # ログインで得たセッション Cookie の値は伏字対象になる。
+                from wscan import url_scope
+                assert url_scope.redact_secret_values("secret_sess_123") != "secret_sess_123"
 
                 # 2. 安全制御: 失敗時にトラッキング Cookie が付いても SUCCESS にならない
                 bm_safe = BrowserManager(headless=True, auth_user="admin", auth_pass="wrong")
