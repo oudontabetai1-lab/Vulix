@@ -3401,8 +3401,8 @@ async def run_serve(args):
                 "running",
             )
 
-        await monitor.emit_status(f"Starting scan of {url}", "running")
-
+        # 「Starting scan of <url>」は ScanEngine.run が送る（構築時に資格情報の登録が済んでいる）。
+        # ここで URL 付きの status を送ると Phase 1 解除後〜Phase 2 登録前の境目で平文になる。
         try:
             # 文字列形式(headers_text)にも対応させ、Bearer を合成してから engine へ渡す
             # （Agent/Hybrid 経路と同じ流儀。--header の Authorization が bearer より優先）。
