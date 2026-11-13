@@ -12,7 +12,7 @@ from wscan.engine import ScanEngine
 pytestmark = pytest.mark.skipif(os.environ.get("WSCAN_E2E") != "1", reason="WSCAN_E2E=1")
 
 
-async def scan(base, bearer, concurrency, output, validation_pages=False, resume_dir=None):
+async def scan(base, bearer, concurrency, output, validation_pages=False, resume_dir=None, fast=None):
     variant = 4 if bearer else 1
     engine = ScanEngine(
         f"{base}/v{variant}/protected", login_url=f"{base}/v{variant}/login",
@@ -23,7 +23,7 @@ async def scan(base, bearer, concurrency, output, validation_pages=False, resume
         open_report=False, enable_waf_detection=False, enable_ai_analysis=False,
         enable_payload_learning=False, enable_adaptive_payloads=False,
         enable_payload_evolution=False, enable_payload_mutation=False,
-        enable_sitemap_crawl=False, depth=2, fast_mode=not bearer, max_payloads=1,
+        enable_sitemap_crawl=False, depth=2, fast_mode=not bearer if fast is None else fast, max_payloads=1,
         request_delay=0, use_planner=False, sarif=False, timeout=8, navigation_retries=0,
     )
     workers = []
@@ -134,3 +134,14 @@ def test_observed_api_permission_denial_keeps_browser_login_success(status, proo
             finally:
                 await browser.close()
         asyncio.run(login())
+
+
+def test_fast_parallel_bearer_authentication(tmp_path, monkeypatch):
+    monkeypatch.setenv("WSCAN_STATE_DIR", str(tmp_path / "state"))
+    with serving(fx.create_parallel_app(True)) as base:
+        engine, stats = asyncio.run(scan(base, True, 3, tmp_path / "fast", fast=True))
+    assert engine.authentication_state["protected_access"] == "verified"
+    assert all(r["valid"] for r in stats["records"] if r["attack"] or r["session"])
+    assert len({r["path"] for r in stats["records"] if r["attack"]}) >= 4
+    assert findings(engine) == {(suffix, "q") for suffix in ("", "/1", "/2", "/3")}
+    assert not any("probe_not_delivered" in str(e) for e in engine.wave_errors)
