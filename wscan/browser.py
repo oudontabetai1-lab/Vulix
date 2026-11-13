@@ -427,9 +427,6 @@ class NetworkCapture:
             normalized = session_guard._normalize_auth_header(str(name), str(value))
             if not normalized:
                 continue
-            from .url_scope import register_secret_values
-            register_secret_values([("auth_token", normalized[1]),
-                                    ("auth_token", normalized[1].rpartition(" ")[2])])
             # 更新時は末尾へ移し、上限超過は最も古い origin から落とす（LRU・無限増加を防ぐ）。
             self._observed_auth_headers.pop(origin, None)
             if len(self._observed_auth_headers) >= self._AUTH_HEADER_ORIGIN_LIMIT:
@@ -487,14 +484,6 @@ class NetworkCapture:
                 logging.getLogger(__name__).warning("probe_submission_error:%s", type(exc).__name__)
 
     def on_response(self, response: Response):
-        from http.cookies import SimpleCookie
-        from .url_scope import register_secret_values
-        cookies = SimpleCookie()
-        try:
-            cookies.load(response.headers.get("set-cookie", ""))
-            register_secret_values(("cookie", c.value) for c in cookies.values())
-        except Exception:
-            pass
         # Match by (url, id(response.request)) so concurrent requests to the same URL
         # are kept separate and don't overwrite each other.
         req_id = id(response.request) if response.request else None

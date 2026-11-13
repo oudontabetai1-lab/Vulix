@@ -110,7 +110,7 @@ _WORKER_AUTH_TOKEN: ContextVar = ContextVar("wscan_worker_auth_token", default=_
 
 
 def _store_synced_token(engine, origin_url: str, headers: dict) -> None:
-    """同期した認証トークンヘッダを保存する（純粋な振り分け）。
+    """セッションとして採用した認証トークンを登録・保存する。
 
     並列 worker task 内なら task-local な ContextVar へ、直列時は共有 engine へ書く。
     """
@@ -119,6 +119,12 @@ def _store_synced_token(engine, origin_url: str, headers: dict) -> None:
         if headers and origin_url
         else {}
     )
+    # 観測だけでは攻撃用の偽造トークンも含むため、セッション採用時だけ登録する。
+    if data:
+        for value in headers.values():
+            value = str(value or "")
+            url_scope.register_secret_values([
+                ("auth_token", value), ("auth_token", value.rpartition(" ")[2])])
     if _WORKER_AUTH_TOKEN.get(_AUTH_TOKEN_UNSET) is not _AUTH_TOKEN_UNSET:
         _WORKER_AUTH_TOKEN.set(data)
     else:
