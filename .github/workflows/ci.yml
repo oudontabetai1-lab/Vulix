@@ -43,7 +43,7 @@ jobs:
           done
 
       - name: Install Chromium OS dependencies
-        run: sudo python3 -m playwright install-deps chromium
+        run: python3 -m playwright install-deps chromium
 
       - name: Installed runtime smoke
         run: |

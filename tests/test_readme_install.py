@@ -53,7 +53,7 @@ def test_ci_runs_canonical_readme_install_before_test_dependencies():
     assert steps[install]["run"].splitlines()[0] == (
         'python scripts/readme_install.py > "$RUNNER_TEMP/vulix-install.sh"'
     )
-    assert steps[install + 1]["run"] == "sudo python3 -m playwright install-deps chromium"
+    assert steps[install + 1]["run"] == "python3 -m playwright install-deps chromium"
     assert "python main.py --help" in steps[install + 2]["run"]
     assert "chromium.launch(headless=True)" in steps[install + 2]["run"]
     assert steps[install + 3]["name"] == "Install test dependencies"

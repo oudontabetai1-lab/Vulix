@@ -237,7 +237,7 @@ python3 -m playwright install chromium
 ```
 <!-- vulix-install:end -->
 
-Linux で OS 依存不足により Chromium が起動しない場合は、apt 系ディストリビューションで `sudo python3 -m playwright install-deps chromium` を実行してください（管理者権限が必要です）。
+Linux で OS 依存不足により Chromium が起動しない場合は、apt 系ディストリビューションで `python3 -m playwright install-deps chromium` を実行してください（管理者権限が必要です）。
 CI はこの本体導入ブロックをそのまま実行し、CLI の起動と Chromium の起動・終了を確認します。
 
 `vulix` コマンドとして使いたい場合は、パッケージをインストールします。base 依存（`requirements.txt`）も同時に入るため、上の `pip install -r requirements.txt` は省略できます（`python -m vulix` と同等の入口です）。
