@@ -36,8 +36,7 @@ def findings(engine):
 
 @pytest.mark.parametrize("bearer", [False, pytest.param(True, marks=pytest.mark.xfail(
     strict=True, reason="SPA login verifies API access but Bearer is absent on protected crawl navigation"))], ids=["cookie", "bearer"])
-@pytest.mark.parametrize("concurrency", [1, pytest.param(3, marks=pytest.mark.xfail(
-    strict=True, reason="Parallel cookie scan loses reflected XSS findings present in serial scan"))])
+@pytest.mark.parametrize("concurrency", [1, 3])
 def test_serial_parallel_authentication(bearer, concurrency, tmp_path, monkeypatch):
     monkeypatch.setenv("WSCAN_STATE_DIR", str(tmp_path / "state"))
     with serving(fx.create_parallel_app(bearer)) as base:

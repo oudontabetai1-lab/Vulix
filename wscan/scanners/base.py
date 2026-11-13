@@ -697,10 +697,22 @@ class BaseScanner(ABC):
 
     def __init__(self, engine: "ScanEngine"):
         self.engine = engine
-        self.browser = engine.browser
+        self._browser_override = ContextVar("scanner_browser_override", default=None)
         self.monitor = engine.monitor
         self.payload_gen = engine.payload_gen
         self.findings: list[Finding] = []
+
+    @property
+    def browser(self):
+        # 操作先も evidence と同じ task-local worker から解決する。
+        override = self._browser_override.get()
+        return override if override is not None else self.engine.browser
+
+    @browser.setter
+    def browser(self, browser):
+        if not hasattr(self, "_browser_override"):
+            self._browser_override = ContextVar("scanner_browser_override", default=None)
+        self._browser_override.set(browser)
 
     def _record_scan_note(self, note: str) -> None:
         """検出力に関わる出来事を ``engine.wave_errors`` に記録する（観測可能化）。
