@@ -7,6 +7,17 @@
   const button = (text, action) => { const node = el('button', text, 'history-btn'); node.type = 'button'; node.addEventListener('click', action); return node; };
   const cell = (row, value, cls) => row.appendChild(el('td', value, cls));
   const knownCount = (value) => typeof value === 'number' && Number.isFinite(value) ? String(value) : '未取得';
+  // 履歴の状態ラベルはポータル（history-labels.js）と共有し、生の API 値
+  // （scanning 等）をそのまま見せない。
+  const historyLabels = global.VulixHistoryLabels;
+  const statusLabel = (value) => historyLabels.statusLabel(value);
+  const findingsLabel = (scan) => {
+    const count = knownCount(scan.findings_count);
+    if (count === '未取得') return count;
+    const note = historyLabels.countsNote(
+      Boolean(scan.partial), String(scan.status || '').toLowerCase() === 'scanning');
+    return note ? `${count} ${note}` : count;
+  };
   const timestamp = (value) => { if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)) return '不明'; const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '不明'; };
   const validIp = (value) => {
     if (typeof value !== 'string') return '—';
@@ -31,8 +42,8 @@
         const row = el('tr');
         cell(row, `${scan.id || '—'} · ${timestamp(scan.started_at)}`);
         const target = el('td', scan.target ? reader.redactDisplayUrl(scan.target) : '—', 'crawl-detail-url'); target.title = target.textContent; row.append(target);
-        cell(row, knownCount(scan.findings_count));
-        cell(row, scan.status || '不明');
+        cell(row, findingsLabel(scan));
+        cell(row, statusLabel(scan.status));
         const actions = el('td');
         if (scan.report_available && scan.id) { const report = el('a', 'レポート', 'history-btn'); report.href = `/reports/${encodeURIComponent(scan.id)}/report.html`; report.target = '_blank'; report.rel = 'noopener noreferrer'; actions.append(report); }
         if (scan.id) { const zip = el('a', 'ZIP', 'history-btn'); zip.href = `/api/v1/scans/${encodeURIComponent(scan.id)}/download`; actions.append(zip); }

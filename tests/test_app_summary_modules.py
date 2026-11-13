@@ -32,6 +32,7 @@ def test_app_summary_modules_contracts():
     vm.runInNewContext(legacyIpGuard, legacyIpContext);
     legacyIpContext.validateAndSanitizeClientIp = legacyIpContext.validateAndSanitizeClientIp.bind(legacyIpContext);
     vm.runInThisContext(fs.readFileSync('templates/ui/summary-reader.js', 'utf8'));
+    vm.runInThisContext(fs.readFileSync('templates/ui/history-labels.js', 'utf8'));
     vm.runInThisContext(fs.readFileSync('templates/ui/summary-modules.js', 'utf8'));
     const reader = VulixSummaryReader.createSummaryReader({ get: async () => ({ ok: true, data: { scans: [{ findings_count: null }, { findings_count: 0 }], storage: {} } }) });
     const calls = [];
@@ -40,7 +41,8 @@ def test_app_summary_modules_contracts():
         calls.push(['GET', path]);
         if (path === '/api/v1/scans') return { ok: true, data: { scans: [
           { id: 'safe', target: 'https://user:pass@example.test/?return=%3Ftoken%3Dsecret', findings_count: null, report_available: true },
-          { id: 'zero', target: 'example.test/a?key=secret', findings_count: 0, report_available: false }
+          { id: 'zero', target: 'example.test/a?key=secret', findings_count: 0, report_available: false },
+          { id: 'live', target: 'example.test/live', findings_count: 3, partial: true, status: 'scanning', report_available: false }
         ], storage: { total_bytes: 0, retention_days: 3 } } };
         if (path === '/api/v1/audit') return { ok: true, data: { audit: [{ ts: '2026-11-03T00:00:00Z', action: '<img src=x onerror=alert(1)>', ip: '<svg onload=alert(1)>', detail: '<script>alert(1)</script>' }] } };
         if (path === '/api/v1/scan/status') return { ok: true, data: { status: 'idle' } };
@@ -85,6 +87,9 @@ def test_app_summary_modules_contracts():
     assert "secret" not in data["urls"][2] and "secret" not in data["urls"][3]
     assert "/reports/safe/report.html" in data["report"]
     assert "未取得" in data["rendered"] and "0" in data["rendered"]
+    # /app 履歴も生 status（scanning）ではなく日本語ラベルと途中件数を示す。
+    assert "実行中" in data["rendered"] and "件（実行中・途中）" in data["rendered"]
+    assert "scanning" not in data["rendered"]
     assert "<img src=x onerror=alert(1)>" not in data["auditText"]
     assert "（詳細非表示）" in data["auditText"] and "—" in data["auditText"]
     assert data["inert"] is True

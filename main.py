@@ -284,11 +284,37 @@ _SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apike
 # 部分一致では拾えない明示キー（"auth_pass" は "password" を含まない、Cookie 系、
 # TOTP QR の画像パスなど）。login_pass_field 等の「フィールド名」は秘匿でないため対象にしない。
 # mfa_totp_qr はパス自体がシークレットを符号化した画像の所在を示すため伏せる。
-_SECRET_EXACT_KEYS = ("auth_pass", "cookies", "low_priv_cookies", "mfa_totp_qr")
+# auth_user は資格情報（ログインユーザー名）のため、パスワードと同じく保存・配信しない。
+# username は複数アカウント設定（accounts[]）のログインユーザー名で、3 文字以下でも伏せる。
+_SECRET_EXACT_KEYS = (
+    "auth_user",
+    "auth_pass",
+    "cookies",
+    "low_priv_cookies",
+    "mfa_totp_qr",
+    "username",
+)
+
+# 値ベースの伏字でも変えない識別子キー。flow の field/selector、検査名、URL は
+# 診断・再実行に必要な識別子なので、資格情報と一致しても置換しない。
+_REDACT_IDENTIFIER_KEYS = frozenset(
+    ("field", "field_name", "selector", "name", "action", "check_type", "type", "method",
+     "id", "url", "landed_url")
+)
+# flow step の入力値キー。同じ step の field/name/selector が秘匿キーを含むときだけ伏せる
+# （scan_config.json に flow の入力値が平文で残らないようにする）。
+_REDACT_VALUE_KEYS = frozenset(("value", "input"))
+# 入力欄名（field/selector）から資格情報らしさを判定する語。flow step の field/selector だけに
+# 使い、トップレベルの設定キー判定（_SECRET_KEY_TOKENS）には広げない。ログインユーザー系の欄も
+# 資格情報として扱う（4 文字未満の値は値ベース登録の対象外なので、欄名でしか伏せられない）。
+_SECRET_HINT_TOKENS = _SECRET_KEY_TOKENS + (
+    "passwd", "pwd", "pass", "username", "user", "login", "email", "auth_user",
+)
 
 # ダッシュボードへは空で配信する秘匿フィールド。空で戻ってきたら config へ
 # フォールバックする。headers は値に認証情報を含み得るため同様に扱う。
 _SERVE_SECRET_FALLBACK_KEYS = (
+    "auth_user",
     "auth_pass",
     "cookies",
     "low_priv_cookies",
@@ -313,38 +339,171 @@ _TOTP_SOURCE_KEYS = (
 )
 
 
+def _credential_values(cfg: dict) -> set[str]:
+    """cfg から値ベース伏字の対象になる資格情報値の集合を返す（純粋関数）。
+
+    登録（``url_scope.register_secret_values``）と同じ閾値（``MIN_SECRET_LEN`` 以上）を使い、
+    ``collect_configured_secret_values`` が集める値を対象にする。入れ子（accounts[] /
+    flows[]）の値を「登録済みの資格情報と一致するか」で伏せるために使う。
+    """
+    from wscan.url_scope import MIN_SECRET_LEN
+
+    items, _cookie_names = _configured_secret_values(cfg or {})
+    values: set[str] = set()
+    for _label, value in items:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        text = str(value)
+        if len(text) >= MIN_SECRET_LEN:
+            values.add(text)
+    return values
+
+
+def _has_secret_hint(text: str) -> bool:
+    """入力欄名などが資格情報らしい語を含むか（flow step の field/selector 判定用）。
+
+    ログインユーザー系（username/user/login/email/auth_user 等）も対象。値ベース登録は
+    4 文字未満を登録しないため、短いユーザー名や flow にだけ書かれたユーザー名はここでしか
+    伏せられない。判定材料は field/selector 名だけで、識別子そのものは置換しない。
+    """
+    low = str(text or "").lower()
+    return any(tok in low for tok in _SECRET_HINT_TOKENS)
+
+
+def _redact_nested(key, value, placeholder: str, secret_values: set[str], hint: str = ""):
+    """1 つの値を再帰的に伏字化する（dict/list の入れ子にも適用）。
+
+    *hint* は同じ step の field/selector 名（flow の入力値が資格情報かを判定する材料）。
+    識別子キー（field/selector/url/action 等）は値ベース置換の対象にしない。
+    """
+    lname = str(key).lower()
+    if lname == "headers" and isinstance(value, dict):
+        # ヘッダ名は診断に有用だが、値にはトークンや証明情報が含まれ得るため保存しない。
+        return {str(name): placeholder for name in value}
+    if lname == "headers" and isinstance(value, str) and value.strip():
+        # headers_text 形式（"Name: Value" 複数行の文字列。config 由来）。
+        return placeholder
+    if lname == "mfa_totp_uri" and value not in ("", None):
+        # otpauth URI はクエリに Base32 シークレットを含むため値全体を伏字にする。
+        return placeholder
+    if lname in _SECRET_EXACT_KEYS and value not in ("", None):
+        # 部分一致では拾えない明示キー（ログインPW・Cookie 等）を伏字にする。
+        return placeholder
+    if value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
+        # 秘匿キーの値は中身の形（list/dict 等）に依らず丸ごと伏せる。
+        return placeholder
+    if isinstance(value, dict):
+        step_hint = " ".join(
+            str(v) for k, v in value.items()
+            if str(k).lower() in ("field", "field_name", "name", "selector")
+            and v not in ("", None)
+        )
+        return {
+            k: _redact_nested(k, v, placeholder, secret_values, step_hint)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _redact_nested(key, item, placeholder, secret_values, hint)
+            for item in value
+        ]
+    if lname in _REDACT_IDENTIFIER_KEYS:
+        # フィールド名・セレクタ・検査名・URL は識別子なので変えない。
+        return value
+    if isinstance(value, str):
+        if value in secret_values:
+            # 設定済みの資格情報と完全一致する値（flows[] の入力値など）。
+            return placeholder
+        if lname in _REDACT_VALUE_KEYS and _has_secret_hint(hint):
+            # 登録済みでない値でも、password/token 欄への入力なら資格情報として伏せる。
+            return placeholder
+    return value
+
+
 def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
-    """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有・配信用）。
+    """秘匿値を伏字にした設定のコピーを返す（ディスク保存・共有・配信用）。
 
     ダッシュボードは IMAP アプリパスワード等を「送信のみ・非保存」として扱うため、
     成果物（``scan_config.json``）や再接続クライアントへ平文で書き出さない。
+    トップレベルのキー名判定に加え、``accounts[]`` や ``flows[]`` のような入れ子の
+    list/dict にも再帰して適用する（追加アカウントの資格情報、flow の入力値）。
 
     *placeholder* を ``""`` にすると値を空にできる。フォーム初期値
     （``/api/config/defaults``。未認証 serve では誰でも読める）へ秘匿値を
     載せないために使う（``"***REDACTED***"`` を入れると欄に文字列が入ってしまう）。
     """
-    redacted: dict = {}
-    for key, value in (cfg or {}).items():
-        lname = str(key).lower()
-        if lname == "headers" and isinstance(value, dict):
-            # ヘッダ名は診断に有用だが、値にはトークンや証明情報が含まれ得るため保存しない。
-            redacted[key] = {str(name): placeholder for name in value}
-        elif lname == "headers" and isinstance(value, str) and value.strip():
-            # headers_text 形式（"Name: Value" 複数行の文字列。config 由来）。
-            # dict と同様に値へ認証情報が入り得るため丸ごと伏字化する。
-            redacted[key] = placeholder
-        elif lname == "mfa_totp_uri" and value not in ("", None):
-            # otpauth URI はクエリに Base32 シークレットを含むため値全体を伏字にする。
-            redacted[key] = placeholder
-        elif lname in _SECRET_EXACT_KEYS and value not in ("", None):
-            # 部分一致では拾えない明示キー（ログインPW・Cookie 等）を伏字にする。
-            # scan_started の再生や snapshot でクレデンシャルが漏れないようにするため。
-            redacted[key] = placeholder
-        elif value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
-            redacted[key] = placeholder
-        else:
-            redacted[key] = value
-    return redacted
+    source = cfg if isinstance(cfg, dict) else {}
+    secret_values = _credential_values(source)
+    return {
+        key: _redact_nested(key, value, placeholder, secret_values)
+        for key, value in source.items()
+    }
+
+
+def scan_config_snapshot(cfg: dict, submitted_at: str) -> dict:
+    """``output/<scan>/scan_config.json`` の内容を返す（秘匿値は伏字。純粋関数）。"""
+    return {
+        "tool": "WScan",
+        "kind": "wscan-scan-config-snapshot",
+        "submitted_at": submitted_at,
+        "config": _redact_secrets(cfg),
+    }
+
+
+def _configured_secret_values(cfg: dict):
+    """送信設定から redaction 登録用の ``(items, cookie_names)`` を作る（純粋関数）。
+
+    serve の ``scan_started`` はエンジンより先に配信されるため、エンジン構築時と同じ
+    値集合を先に登録する必要がある。値集合の正典は
+    ``url_scope.collect_configured_secret_values`` で、engine と共有する。
+
+    ヘッダは engine へ渡すのと同じ有効ヘッダ（文字列形式の解釈＋Bearer 合成）に
+    正規化してから渡す（Bearer はキー名で伏字にならない自由文へも現れ得るため）。
+    """
+    from wscan import url_scope
+    from wscan.header_manager import apply_bearer
+
+    headers = apply_bearer(
+        _coerce_headers(cfg.get("headers")), cfg.get("bearer", "") or ""
+    )
+    return url_scope.collect_configured_secret_values(
+        auth_user=cfg.get("auth_user"),
+        auth_pass=cfg.get("auth_pass"),
+        accounts=cfg.get("accounts") or [],
+        cookies=cfg.get("cookies") or "",
+        low_priv_cookies=cfg.get("low_priv_cookies") or "",
+        # serve は Cookie ファイルを読み込まない（エンジンへも空リストを渡す）。
+        cookie_list=[],
+        low_priv_cookie_list=[],
+        headers=headers,
+    )
+
+
+def _register_scan_secret_values(cfg: dict) -> None:
+    """送信設定の資格情報値を値ベース redaction に登録する。
+
+    ``scan_started`` はどのエンジンよりも先に配信されるため、エンジン構築時の
+    登録（``ScanEngine._register_configured_secret_values``）に頼れない。最初の
+    イベントから他のイベントと同じ伏字を通すため、配信前にここで登録する。
+    値集合は engine と共有する純粋関数から作る（Bearer/文字列ヘッダも含む）。
+    """
+    from wscan import url_scope
+
+    items, _cookie_names = _configured_secret_values(cfg)
+    url_scope.register_secret_values(items)
+
+
+def _clear_scan_secret_values() -> None:
+    """値ベース redaction の登録を捨てる（スキャン境界・終了時）。"""
+    from wscan import url_scope
+
+    url_scope.clear_secret_values()
+
+
+async def emit_scan_started(monitor, cfg: dict) -> None:
+    """scan_started を他のイベントと同じ伏字経路で配信する（serve の最初のイベント）。"""
+    _register_scan_secret_values(cfg)
+    await monitor.emit_scan_started(_redact_secrets(cfg))
 
 
 def resolve_submitted_totp_sources(
@@ -3165,6 +3324,10 @@ async def run_serve(args):
     # 誰でも読める。config(wscan.yaml)に置かれた秘匿値（TOTP secret/URI・Bearer・
     # ログインPW・Cookie 等）を空にして配信し、エンドポイント経由の漏洩を防ぐ
     # （digits/period/algorithm 等の非秘匿フィールドは保持）。
+    # 入れ子（accounts[]/flows[]）も同じ基準で空にする。ここで空にしても画面の往復で
+    # 設定が失われないのは、この既定値に accounts/flows を含めておらず、dashboard も
+    # flows が存在するときだけ復元するため（config 由来の account/flow は serve の
+    # 送信設定に載らない）。将来ここへ account/flow を載せる場合は空欄のフォールバックが要る。
     monitor.default_scan_cfg = _redact_secrets(monitor.default_scan_cfg, placeholder="")
     # report と同じ宣言 matrix を表示するだけで、実行カバレッジは再計算しない。
     from wscan.scanners import SCANNERS
@@ -3218,8 +3381,9 @@ async def run_serve(args):
             })
         # scan_started は WebSocket で配信され state snapshot にも保持されるため、
         # Bearer/TOTP/ヘッダ等の秘匿値を伏字化する（エンジンへはフルの cfg を
-        # 別経路で渡すので機能には影響しない）。
-        await monitor.emit_scan_started(_redact_secrets(cfg))
+        # 別経路で渡すので機能には影響しない）。資格情報の値はエンジン構築前に
+        # 値ベース redaction へ登録し、他のイベントと同じ経路で伏せる。
+        await emit_scan_started(monitor, cfg)
 
         from wscan.timeout_validation import validate_scan_timeouts
         try:
@@ -3551,12 +3715,10 @@ async def run_serve(args):
                 snapshot_path = engine.output_dir / "scan_config.json"
                 snapshot_path.write_text(
                     _json.dumps(
-                        {
-                            "tool": "WScan",
-                            "kind": "wscan-scan-config-snapshot",
-                            "submitted_at": _dt.datetime.now().isoformat(timespec="seconds"),
-                            "config": _redact_secrets(cfg),
-                        },
+                        scan_config_snapshot(
+                            cfg,
+                            _dt.datetime.now().isoformat(timespec="seconds"),
+                        ),
                         ensure_ascii=False,
                         indent=2,
                     ),
@@ -3639,6 +3801,10 @@ async def run_serve(args):
             monitor.pending_interactive = None
             cfg = monitor.scan_request_data or {}
             cfg = apply_config_secret_fallback(cfg, _CFG)
+            # 受理境界: 直前の開始失敗（検証エラー・例外）で残った登録値を捨てる。
+            # 409（実行中）はここへ来ないため、走行中スキャンの登録は壊さない。
+            # 今回の値は run_one_scan が scan_started 配信前に再登録する。
+            _clear_scan_secret_values()
             try:
                 if monitor.scan_max_seconds:
                     # watchdog はまず graceful な abort を要求する(scheduler_task)。
@@ -3679,6 +3845,9 @@ async def run_serve(args):
                     monitor.prune_old_scans()
                 except Exception:
                     pass
+                # 通知等の伏字が必要な後処理が済んだ後に登録値を捨てる。エンジンを
+                # 構築できなかった開始（検証エラー・コンストラクタ例外・中断）もここを通る。
+                _clear_scan_secret_values()
 
     async def scheduler_task():
         # 定期スキャンの期限を監視し、アイドル時に1件ずつ起動する。

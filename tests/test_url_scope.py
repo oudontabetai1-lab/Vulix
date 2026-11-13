@@ -358,3 +358,43 @@ def test_same_page_matches_engine_delegator():
         ("http://t/a", "http://t/a#frag"),
     ]:
         assert ScanEngine._urls_same_page(a, b) == url_scope.same_page(a, b)
+
+
+# --- collect_configured_secret_values（engine と serve の共通値集合）-------------
+
+def test_collect_configured_secret_values_covers_accounts_cookies_headers():
+    """engine と serve が同じ値集合を登録するための純粋関数（単一の正典）。"""
+    items, names = url_scope.collect_configured_secret_values(
+        auth_user="alice.admin",
+        auth_pass="pw-alice-123",
+        accounts=[
+            {"username": "bob-user", "password": "pw-bob-123"},
+            {"username": "carol", "password": "pw-carol-123"},
+            "not-a-dict",
+        ],
+        cookies="sid=cookie-value-777",
+        low_priv_cookies="low=low-cookie-555",
+        cookie_list=[{"name": "file_cookie", "value": "file-cookie-999"}],
+        low_priv_cookie_list=[{"name": "low_file", "value": "low-file-123"}],
+        headers={
+            "Authorization": "Bearer tok-abcdef",
+            "Cookie": "hdrsid=header-cookie-42",
+        },
+    )
+    assert ("auth_user", "alice.admin") in items
+    assert ("auth_password", "pw-alice-123") in items
+    assert ("account0_user", "bob-user") in items
+    assert ("account1_password", "pw-carol-123") in items
+    assert ("cookie", "cookie-value-777") in items
+    assert ("low_priv_cookie", "low-cookie-555") in items
+    assert ("cookie", "file-cookie-999") in items
+    assert ("header:Authorization", "Bearer tok-abcdef") in items
+    # Authorization は "Bearer <token>" 形式なのでトークン単体も登録する。
+    assert ("header:Authorization", "tok-abcdef") in items
+    assert names == {"sid", "low", "file_cookie", "low_file", "hdrsid"}
+
+
+def test_collect_configured_secret_values_tolerates_missing_input():
+    items, names = url_scope.collect_configured_secret_values()
+    assert items == [("auth_user", None), ("auth_password", None)]
+    assert names == set()

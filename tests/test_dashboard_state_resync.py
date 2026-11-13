@@ -1081,9 +1081,11 @@ class DashboardResyncChromiumTests(unittest.TestCase):
                     for i in range(rows.count())
                 ]
 
-                # Verify presence of 'aborted' and 'done' statuses and styling
-                self.assertIn("aborted", badges)
-                self.assertIn("done", badges)
+                # 状態セルは生の API 値ではなく日本語ラベル（ポータルも統一）。
+                self.assertIn("中断", badges)
+                self.assertIn("完了", badges)
+                self.assertNotIn("aborted", badges)
+                self.assertNotIn("done", badges)
                 self.assertTrue(any("st aborted" in c for c in classes))
                 self.assertTrue(any("st done" in c for c in classes))
 

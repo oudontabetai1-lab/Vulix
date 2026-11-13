@@ -749,7 +749,7 @@ python3 main.py capability-matrix -o cap.md  # ファイルへ書き出し
 | `auth.mfa_type` | str | `""` | `--mfa-type` / 認証・Cookie |
 | `auth.mfa_field` | str | `""` | `--mfa-field` / 認証・Cookie |
 
-平文パスワードを YAML に保存しないでください。ダッシュボードから送った秘匿フィールドは `scan_config.json` で伏字化されます。
+平文パスワードを YAML に保存しないでください。ダッシュボードから送った秘匿フィールド（`auth_pass` だけでなくログインユーザー名 `auth_user`、Cookie、認証ヘッダ値など）は `scan_config.json` と WebSocket の `scan_started` で伏字化されます。追加アカウント（`accounts[]`）のユーザー名・パスワードや、シナリオ（flow）の入力値（ログイン欄のユーザー名・メールアドレス等を含む）も同じ基準で伏字化され、入力欄名・セレクタ・URL などの識別子は残ります。履歴や保存した `scan_config.json` からシナリオ（flow）を復元すると、資格情報の値は伏字のままなので再入力が必要です。そのため画面へは秘匿値を配信せず、認証欄が空のままスキャンを開始した場合はサーバー側の設定値（`config/wscan.yaml` など）が使われます。ユーザー名を変えたいときは画面の認証欄へ明示的に入力してください。
 
 ### `features`
 
