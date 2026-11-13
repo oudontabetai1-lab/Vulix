@@ -633,3 +633,79 @@ document.getElementById("login-form").addEventListener("submit", async function(
         return await _v8_api_login(vulnerable=False)(request)
 
     return app
+
+
+def create_parallel_app(bearer: bool = False, expire: bool = False) -> FastAPI:
+    """並列認証検証用。記録はダミーのセッション番号と要求の有効性のみ。"""
+    app = FastAPI()
+    sessions: dict[str, bool] = {}
+    records: list[dict] = []
+    expired: list[str] = []
+    variant = 4 if bearer else 1
+    source = create_app()
+    login_endpoint = next(r.endpoint for r in source.routes
+                          if getattr(r, "path", "") == f"/v{variant}/login"
+                          and "GET" in r.methods)
+
+    @app.get(f"/v{variant}/login", response_class=HTMLResponse)
+    async def login():
+        if bearer:
+            return await login_endpoint()
+        return '''<form method="post"><input name="username" autocomplete="username">
+        <input name="password" type="password" autocomplete="current-password">
+        <button type="submit">Sign in</button></form>'''
+
+    async def issue(request: Request):
+        data = await request.json() if bearer else await request.form()
+        if data.get("username") != USERNAME or data.get("password") != PASSWORD:
+            return JSONResponse({"error": "invalid credentials"}, status_code=401)
+        sid = "dummy-parallel-session-" + str(len(sessions) + 1)
+        sessions[sid] = True
+        if bearer:
+            return JSONResponse({"token": sid, "access_token": sid})
+        response = RedirectResponse(f"/v{variant}/protected", status_code=303)
+        response.set_cookie("parallel_session", sid, httponly=True)
+        return response
+
+    app.post(f"/v{variant}/api/login" if bearer else f"/v{variant}/login")(issue)
+
+    @app.middleware("http")
+    async def protect(request: Request, call_next):
+        path = request.url.path
+        if "/protected" in path or path.endswith("/api/user"):
+            sid = (request.headers.get("authorization", "").removeprefix("Bearer ")
+                   if bearer else request.cookies.get("parallel_session", ""))
+            attack = bool(request.query_params.get("q") or request.query_params.get("safe_q"))
+            if expire and attack and not expired and sessions.get(sid):
+                sessions[sid] = False
+                expired.append(sid)
+            valid = sessions.get(sid, False)
+            records.append(dict(session=sid, path=path, valid=valid, attack=attack, logged_in=bool(sessions)))
+            if not valid:
+                return HTMLResponse("<h1>Authentication required</h1>", status_code=401)
+        return await call_next(request)
+
+    @app.get(f"/v{variant}/api/user")
+    async def user():
+        return {"username": USERNAME, "status": "authenticated"}
+
+    @app.get(f"/v{variant}/protected", response_class=HTMLResponse)
+    @app.get(f"/v{variant}/protected/{{number}}", response_class=HTMLResponse)
+    async def protected(request: Request, number: int = 0, q: str = "", safe_q: str = ""):
+        links = "".join(f'<a href="/v{variant}/protected/{i}">Page {i}</a>' for i in range(1, 4))
+        return (links + f'<h1>Protected</h1><a href="/logout">Log out</a>'
+                + f'<form><input name="q"><button>Search</button></form>{q}'
+                + f'<form><input name="safe_q"><button>Search</button></form>{escape(safe_q)}')
+
+    @app.get("/test/stats")
+    async def stats():
+        return dict(records=records, logins=len(sessions), expired=expired)
+
+    @app.post("/test/expire/{sid}")
+    async def invalidate(sid: str):
+        if sid not in sessions:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        sessions[sid] = False
+        return {"expired": sid}
+
+    return app
