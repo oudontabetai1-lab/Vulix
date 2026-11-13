@@ -204,7 +204,22 @@ def test_login_cookie_diff_selects_only_changed_names():
     assert url_scope.redact_secret_values('english') == 'english'
 
 
-@pytest.mark.parametrize('value', [True, False, 12345, {'session': 'value'}, ['value']])
+@pytest.mark.parametrize('value', [True, False, None, {'session': 'value'}, ['value']])
 def test_non_string_values_are_not_secrets(value):
     url_scope.register_secret_values([('auth_token', value)])
     assert url_scope.redact_secret_values(str(value)) == str(value)
+
+
+@pytest.mark.parametrize('value', [123456, 1234.5])
+def test_numeric_credentials_are_registered(value):
+    # YAML で型が付いた数値のパスワードも伏せる（bool は "True"/"False" を伏せない）。
+    url_scope.register_secret_values([('auth_password', value)])
+    assert url_scope.redact_secret_values(str(value)) != str(value)
+
+
+def test_numeric_config_password_is_masked(tmp_path, monkeypatch):
+    # 設定 YAML で数値として読まれたパスワードも伏字対象になる（回帰）。
+    monkeypatch.setenv('WSCAN_STATE_DIR', str(tmp_path / 'state'))
+    ScanEngine('http://example.test', output_dir=str(tmp_path / 'out'),
+               auth_user='admin', auth_pass=123456)
+    assert url_scope.redact_secret_values('123456') != '123456'

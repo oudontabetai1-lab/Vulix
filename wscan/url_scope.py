@@ -235,9 +235,16 @@ def clear_secret_values() -> None:
 
 
 def register_secret_values(items) -> None:
-    """(label, value) を登録する。マーカーは ``[REDACTED:<label>]``。短すぎる値は登録せず記録する。"""
+    """(label, value) を登録する。マーカーは ``[REDACTED:<label>]``。短すぎる値は登録せず記録する。
+
+    YAML 等で型が付いた数値の資格情報も伏せるため int/float は文字列化して登録する。
+    bool は ``"True"``/``"False"`` を伏せると証跡を壊すため登録しない。
+    """
     for label, value in items:
-        if not isinstance(value, str) or not value:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        value = str(value)
+        if not value:
             continue
         if len(value) < MIN_SECRET_LEN:
             skipped_secret_labels.append(label)
