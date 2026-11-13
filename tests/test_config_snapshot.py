@@ -1,6 +1,11 @@
+import asyncio
+import json
 import unittest
 
 import main
+
+USER = "alice.admin@example.test"
+PASSWORD = "Zx9-very-secret"
 
 
 class RedactSecretsTests(unittest.TestCase):
@@ -100,6 +105,7 @@ class RedactSecretsTests(unittest.TestCase):
         # 部分一致では拾えない明示キー。scan_started の再生・snapshot 経由で
         # ログイン PW / セッション Cookie が別クライアントへ漏れないようにする。
         cfg = {
+            "auth_user": "alice",
             "auth_pass": "hunter2",
             "cookies": "session=abc; token=xyz",
             "low_priv_cookies": "session=low",
@@ -108,6 +114,7 @@ class RedactSecretsTests(unittest.TestCase):
             "login_user_field": "username",
         }
         out = main._redact_secrets(cfg)
+        self.assertEqual(out["auth_user"], "***REDACTED***")
         self.assertEqual(out["auth_pass"], "***REDACTED***")
         self.assertEqual(out["cookies"], "***REDACTED***")
         self.assertEqual(out["low_priv_cookies"], "***REDACTED***")
@@ -115,7 +122,93 @@ class RedactSecretsTests(unittest.TestCase):
         self.assertEqual(out["login_user_field"], "username")
 
 
+class ScanConfigSnapshotTests(unittest.TestCase):
+    """output/<scan>/scan_config.json の内容（ダッシュボード送信設定の保存物）。"""
+
+    def test_snapshot_masks_configured_username_and_password(self):
+        # 資格情報はパスワードだけでなくユーザー名も保存しない（コード/レポートへ
+        # 平文で残さない）。フィールド名・対象 URL は診断のため残す。
+        cfg = {
+            "url": "http://t.test/",
+            "auth_user": USER,
+            "auth_pass": PASSWORD,
+            "login_user_field": "username",
+            "login_pass_field": "password",
+            "checks": ["xss"],
+        }
+        snapshot = main.scan_config_snapshot(cfg, "2026-01-02T03:04:05")
+        blob = json.dumps(snapshot, ensure_ascii=False)
+        self.assertNotIn(USER, blob)
+        self.assertNotIn(PASSWORD, blob)
+        self.assertEqual(snapshot["config"]["auth_user"], "***REDACTED***")
+        self.assertEqual(snapshot["config"]["auth_pass"], "***REDACTED***")
+        self.assertEqual(snapshot["config"]["login_user_field"], "username")
+        self.assertEqual(snapshot["config"]["url"], "http://t.test/")
+        self.assertEqual(snapshot["submitted_at"], "2026-01-02T03:04:05")
+
+
+class ScanStartedRedactionTests(unittest.TestCase):
+    """serve の最初のイベント（scan_started）も他イベントと同じ伏字を通る。"""
+
+    def _emit(self, cfg):
+        from wscan import url_scope
+        from wscan.monitor import MonitorServer
+
+        url_scope.clear_secret_values()
+        try:
+            monitor = MonitorServer()
+            asyncio.run(main.emit_scan_started(monitor, cfg))
+            self.assertEqual(monitor.event_history[-1]["type"], "scan_started")
+            return monitor.event_history[-1]["data"]
+        finally:
+            url_scope.clear_secret_values()
+
+    def test_scan_started_masks_username_before_engine_registration(self):
+        # scan_started はどのエンジンよりも先に配信されるため、エンジン構築時の
+        # 値ベース登録に頼れない。登録前だと auth_user が平文で漏れる。
+        data = self._emit({
+            "url": "http://t.test/",
+            "auth_user": USER,
+            "auth_pass": PASSWORD,
+            "login_user_field": "username",
+            "login_pass_field": "password",
+        })
+        blob = json.dumps(data, ensure_ascii=False)
+        self.assertNotIn(USER, blob)
+        self.assertNotIn(PASSWORD, blob)
+        # 配信の形（キー・識別子）は保つ: ダッシュボードは非秘匿フィールドを読む。
+        self.assertEqual(data["url"], "http://t.test/")
+        self.assertEqual(data["login_user_field"], "username")
+        self.assertEqual(data["login_pass_field"], "password")
+
+    def test_scan_started_masks_cookie_and_header_values(self):
+        data = self._emit({
+            "url": "http://t.test/",
+            "cookies": "sid=cookie-value-777",
+            "headers": {"Authorization": "Bearer header-token-123"},
+        })
+        blob = json.dumps(data, ensure_ascii=False)
+        self.assertNotIn("cookie-value-777", blob)
+        self.assertNotIn("header-token-123", blob)
+
+
 class ConfigSecretFallbackTests(unittest.TestCase):
+    def test_username_falls_back_to_config_when_blank(self):
+        # 画面へユーザー名を配信しない代償として、空で戻った値は config で補う
+        # （パスワードと同じ扱い。ダッシュボードからのスキャンは従来どおり認証できる）。
+        out = main.apply_config_secret_fallback(
+            {"auth_user": "", "auth_pass": ""},
+            {"auth_user": "config-user", "auth_pass": "config-password"},
+        )
+        self.assertEqual(out["auth_user"], "config-user")
+        self.assertEqual(out["auth_pass"], "config-password")
+
+    def test_blank_served_defaults_hide_username(self):
+        # /api/config/defaults は未認証 serve でも読めるため、config のユーザー名も
+        # フォーム初期値として配信しない。
+        out = main._redact_secrets({"auth_user": "config-user"}, placeholder="")
+        self.assertEqual(out["auth_user"], "")
+
     def test_empty_values_fall_back_to_config_keys(self):
         cfg = {
             "auth_pass": "",

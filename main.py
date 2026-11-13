@@ -284,11 +284,13 @@ _SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apike
 # 部分一致では拾えない明示キー（"auth_pass" は "password" を含まない、Cookie 系、
 # TOTP QR の画像パスなど）。login_pass_field 等の「フィールド名」は秘匿でないため対象にしない。
 # mfa_totp_qr はパス自体がシークレットを符号化した画像の所在を示すため伏せる。
-_SECRET_EXACT_KEYS = ("auth_pass", "cookies", "low_priv_cookies", "mfa_totp_qr")
+# auth_user は資格情報（ログインユーザー名）のため、パスワードと同じく保存・配信しない。
+_SECRET_EXACT_KEYS = ("auth_user", "auth_pass", "cookies", "low_priv_cookies", "mfa_totp_qr")
 
 # ダッシュボードへは空で配信する秘匿フィールド。空で戻ってきたら config へ
 # フォールバックする。headers は値に認証情報を含み得るため同様に扱う。
 _SERVE_SECRET_FALLBACK_KEYS = (
+    "auth_user",
     "auth_pass",
     "cookies",
     "low_priv_cookies",
@@ -345,6 +347,57 @@ def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
         else:
             redacted[key] = value
     return redacted
+
+
+def scan_config_snapshot(cfg: dict, submitted_at: str) -> dict:
+    """``output/<scan>/scan_config.json`` の内容を返す（秘匿値は伏字。純粋関数）。"""
+    return {
+        "tool": "WScan",
+        "kind": "wscan-scan-config-snapshot",
+        "submitted_at": submitted_at,
+        "config": _redact_secrets(cfg),
+    }
+
+
+def _register_scan_secret_values(cfg: dict) -> None:
+    """送信設定の資格情報値を値ベース redaction に登録する。
+
+    ``scan_started`` はどのエンジンよりも先に配信されるため、エンジン構築時の
+    登録（``ScanEngine._register_configured_secret_values``）に頼れない。最初の
+    イベントから他のイベントと同じ伏字を通すため、配信前にここで登録する。
+    対象はエンジンが登録する値と同じ（ログイン資格情報・アカウント・Cookie・ヘッダ値）。
+    """
+    from wscan import url_scope
+
+    items = [
+        ("auth_user", cfg.get("auth_user")),
+        ("auth_password", cfg.get("auth_pass")),
+    ]
+    for i, account in enumerate(cfg.get("accounts") or []):
+        if isinstance(account, dict):
+            items += [
+                (f"account{i}_user", account.get("username")),
+                (f"account{i}_password", account.get("password")),
+            ]
+    for key in ("cookies", "low_priv_cookies"):
+        for part in str(cfg.get(key) or "").split(";"):
+            name, sep, value = part.partition("=")
+            if sep and name.strip():
+                items.append(("cookie", value.strip()))
+    headers = cfg.get("headers")
+    if isinstance(headers, dict):
+        for name, value in headers.items():
+            items += [
+                (f"header:{name}", value),
+                (f"header:{name}", str(value or "").rpartition(" ")[2]),
+            ]
+    url_scope.register_secret_values(items)
+
+
+async def emit_scan_started(monitor, cfg: dict) -> None:
+    """scan_started を他のイベントと同じ伏字経路で配信する（serve の最初のイベント）。"""
+    _register_scan_secret_values(cfg)
+    await monitor.emit_scan_started(_redact_secrets(cfg))
 
 
 def resolve_submitted_totp_sources(
@@ -3218,8 +3271,9 @@ async def run_serve(args):
             })
         # scan_started は WebSocket で配信され state snapshot にも保持されるため、
         # Bearer/TOTP/ヘッダ等の秘匿値を伏字化する（エンジンへはフルの cfg を
-        # 別経路で渡すので機能には影響しない）。
-        await monitor.emit_scan_started(_redact_secrets(cfg))
+        # 別経路で渡すので機能には影響しない）。資格情報の値はエンジン構築前に
+        # 値ベース redaction へ登録し、他のイベントと同じ経路で伏せる。
+        await emit_scan_started(monitor, cfg)
 
         from wscan.timeout_validation import validate_scan_timeouts
         try:
@@ -3551,12 +3605,10 @@ async def run_serve(args):
                 snapshot_path = engine.output_dir / "scan_config.json"
                 snapshot_path.write_text(
                     _json.dumps(
-                        {
-                            "tool": "WScan",
-                            "kind": "wscan-scan-config-snapshot",
-                            "submitted_at": _dt.datetime.now().isoformat(timespec="seconds"),
-                            "config": _redact_secrets(cfg),
-                        },
+                        scan_config_snapshot(
+                            cfg,
+                            _dt.datetime.now().isoformat(timespec="seconds"),
+                        ),
                         ensure_ascii=False,
                         indent=2,
                     ),
