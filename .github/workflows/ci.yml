@@ -35,7 +35,15 @@ jobs:
       - name: Install Vulix from README
         run: |
           python scripts/readme_install.py > "$RUNNER_TEMP/vulix-install.sh"
-          bash -e "$RUNNER_TEMP/vulix-install.sh"
+          for i in 1 2 3; do
+            bash -e "$RUNNER_TEMP/vulix-install.sh" && break
+            if [ "$i" -eq 3 ]; then exit 1; fi
+            echo "README install failed (attempt $i/3); retrying..." >&2
+            sleep 5
+          done
+
+      - name: Install Chromium OS dependencies
+        run: sudo python3 -m playwright install-deps chromium
 
       - name: Installed runtime smoke
         run: |
