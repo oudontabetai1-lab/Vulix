@@ -97,10 +97,9 @@ openssl rand -hex 16   # 例: トークン生成
 
 ## 2. 直接起動（最小構成）
 
-```bash
-pip install -r requirements.txt
-playwright install --with-deps chromium
+[README の本体導入手順](../README.md#本体) を済ませ、checkout のルートで実行します。
 
+```bash
 export WSCAN_AUTH_TOKEN="$(openssl rand -hex 16)"
 echo "Token: $WSCAN_AUTH_TOKEN"   # 利用者に共有
 
