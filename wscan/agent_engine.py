@@ -11,6 +11,7 @@ Usage (CLI-level — see main.py `agent` subcommand):
 """
 from __future__ import annotations
 
+import contextlib
 import datetime
 import re
 import webbrowser
@@ -217,19 +218,30 @@ class AgentEngine:
     # Public entry point
     # ------------------------------------------------------------------
 
-    async def run(self):
+    def _configured_secret_values(self) -> list[tuple[str, str]]:
+        """値ベース redaction に登録する設定済み資格情報（run/run_recon で共有）。"""
+        return [
+            ("auth_user", self.auth_user),
+            ("auth_password", self.auth_pass),
+            ("totp_secret", self.totp_secret),
+            *((f"header:{k}", v) for k, v in self.extra_headers.items()),
+        ]
+
+    @contextlib.contextmanager
+    def _registered_secret_values(self):
+        """実行期間だけ設定済み資格情報を登録する（ダッシュボードのライブイベントを伏せる）。"""
         from . import url_scope
         # serve の /api/scan は実行中の次スキャンを 409 で拒否する。
         url_scope.clear_secret_values()
-        url_scope.register_secret_values([
-            ("auth_user", self.auth_user), ("auth_password", self.auth_pass),
-            ("totp_secret", self.totp_secret),
-            *((f"header:{k}", v) for k, v in self.extra_headers.items()),
-        ])
+        url_scope.register_secret_values(self._configured_secret_values())
         try:
-            return await self._run()
+            yield
         finally:
             url_scope.clear_secret_values()
+
+    async def run(self):
+        with self._registered_secret_values():
+            return await self._run()
 
     async def _run(self):
         """Run the agent browser scan end-to-end."""
@@ -426,7 +438,15 @@ class AgentEngine:
         """
         偵察モードでエージェントを実行し、発見したURL・Finding・サイト情報を返す。
         URL 発見を主目的としつつ、探索中に見つけた脆弱性仮説も Phase 2 へ渡す。
+
+        Hybrid の Phase 1 は ScanEngine より先に走るため、この間だけ設定済み資格情報を
+        登録して偵察中のライブイベントを伏せる（終了時・例外時に解除。Phase 2 は
+        ScanEngine が自身の開始時に登録し直す）。
         """
+        with self._registered_secret_values():
+            return await self._run_recon()
+
+    async def _run_recon(self) -> AgentHandoffData:
         from wscan.llm_agent_browser import AgentBrowserScanner
 
         console.print(Panel.fit(
