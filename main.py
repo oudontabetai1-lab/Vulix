@@ -285,7 +285,27 @@ _SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apike
 # TOTP QR の画像パスなど）。login_pass_field 等の「フィールド名」は秘匿でないため対象にしない。
 # mfa_totp_qr はパス自体がシークレットを符号化した画像の所在を示すため伏せる。
 # auth_user は資格情報（ログインユーザー名）のため、パスワードと同じく保存・配信しない。
-_SECRET_EXACT_KEYS = ("auth_user", "auth_pass", "cookies", "low_priv_cookies", "mfa_totp_qr")
+# username は複数アカウント設定（accounts[]）のログインユーザー名で、3 文字以下でも伏せる。
+_SECRET_EXACT_KEYS = (
+    "auth_user",
+    "auth_pass",
+    "cookies",
+    "low_priv_cookies",
+    "mfa_totp_qr",
+    "username",
+)
+
+# 値ベースの伏字でも変えない識別子キー。flow の field/selector、検査名、URL は
+# 診断・再実行に必要な識別子なので、資格情報と一致しても置換しない。
+_REDACT_IDENTIFIER_KEYS = frozenset(
+    ("field", "field_name", "selector", "name", "action", "check_type", "type", "method",
+     "id", "url", "landed_url")
+)
+# flow step の入力値キー。同じ step の field/name/selector が秘匿キーを含むときだけ伏せる
+# （scan_config.json に flow の入力値が平文で残らないようにする）。
+_REDACT_VALUE_KEYS = frozenset(("value", "input"))
+# 入力欄名（field/selector）から資格情報らしさを判定する語。
+_SECRET_HINT_TOKENS = _SECRET_KEY_TOKENS + ("passwd", "pwd", "pass")
 
 # ダッシュボードへは空で配信する秘匿フィールド。空で戻ってきたら config へ
 # フォールバックする。headers は値に認証情報を含み得るため同様に扱う。
@@ -315,38 +335,100 @@ _TOTP_SOURCE_KEYS = (
 )
 
 
+def _credential_values(cfg: dict) -> set[str]:
+    """cfg から値ベース伏字の対象になる資格情報値の集合を返す（純粋関数）。
+
+    登録（``url_scope.register_secret_values``）と同じ閾値（``MIN_SECRET_LEN`` 以上）を使い、
+    ``collect_configured_secret_values`` が集める値を対象にする。入れ子（accounts[] /
+    flows[]）の値を「登録済みの資格情報と一致するか」で伏せるために使う。
+    """
+    from wscan.url_scope import MIN_SECRET_LEN
+
+    items, _cookie_names = _configured_secret_values(cfg or {})
+    values: set[str] = set()
+    for _label, value in items:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        text = str(value)
+        if len(text) >= MIN_SECRET_LEN:
+            values.add(text)
+    return values
+
+
+def _has_secret_hint(text: str) -> bool:
+    """入力欄名などが資格情報らしい語を含むか（flow の入力値判定用）。"""
+    low = str(text or "").lower()
+    return any(tok in low for tok in _SECRET_HINT_TOKENS)
+
+
+def _redact_nested(key, value, placeholder: str, secret_values: set[str], hint: str = ""):
+    """1 つの値を再帰的に伏字化する（dict/list の入れ子にも適用）。
+
+    *hint* は同じ step の field/selector 名（flow の入力値が資格情報かを判定する材料）。
+    識別子キー（field/selector/url/action 等）は値ベース置換の対象にしない。
+    """
+    lname = str(key).lower()
+    if lname == "headers" and isinstance(value, dict):
+        # ヘッダ名は診断に有用だが、値にはトークンや証明情報が含まれ得るため保存しない。
+        return {str(name): placeholder for name in value}
+    if lname == "headers" and isinstance(value, str) and value.strip():
+        # headers_text 形式（"Name: Value" 複数行の文字列。config 由来）。
+        return placeholder
+    if lname == "mfa_totp_uri" and value not in ("", None):
+        # otpauth URI はクエリに Base32 シークレットを含むため値全体を伏字にする。
+        return placeholder
+    if lname in _SECRET_EXACT_KEYS and value not in ("", None):
+        # 部分一致では拾えない明示キー（ログインPW・Cookie 等）を伏字にする。
+        return placeholder
+    if value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
+        # 秘匿キーの値は中身の形（list/dict 等）に依らず丸ごと伏せる。
+        return placeholder
+    if isinstance(value, dict):
+        step_hint = " ".join(
+            str(v) for k, v in value.items()
+            if str(k).lower() in ("field", "field_name", "name", "selector")
+            and v not in ("", None)
+        )
+        return {
+            k: _redact_nested(k, v, placeholder, secret_values, step_hint)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _redact_nested(key, item, placeholder, secret_values, hint)
+            for item in value
+        ]
+    if lname in _REDACT_IDENTIFIER_KEYS:
+        # フィールド名・セレクタ・検査名・URL は識別子なので変えない。
+        return value
+    if isinstance(value, str):
+        if value in secret_values:
+            # 設定済みの資格情報と完全一致する値（flows[] の入力値など）。
+            return placeholder
+        if lname in _REDACT_VALUE_KEYS and _has_secret_hint(hint):
+            # 登録済みでない値でも、password/token 欄への入力なら資格情報として伏せる。
+            return placeholder
+    return value
+
+
 def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
-    """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有・配信用）。
+    """秘匿値を伏字にした設定のコピーを返す（ディスク保存・共有・配信用）。
 
     ダッシュボードは IMAP アプリパスワード等を「送信のみ・非保存」として扱うため、
     成果物（``scan_config.json``）や再接続クライアントへ平文で書き出さない。
+    トップレベルのキー名判定に加え、``accounts[]`` や ``flows[]`` のような入れ子の
+    list/dict にも再帰して適用する（追加アカウントの資格情報、flow の入力値）。
 
     *placeholder* を ``""`` にすると値を空にできる。フォーム初期値
     （``/api/config/defaults``。未認証 serve では誰でも読める）へ秘匿値を
     載せないために使う（``"***REDACTED***"`` を入れると欄に文字列が入ってしまう）。
     """
-    redacted: dict = {}
-    for key, value in (cfg or {}).items():
-        lname = str(key).lower()
-        if lname == "headers" and isinstance(value, dict):
-            # ヘッダ名は診断に有用だが、値にはトークンや証明情報が含まれ得るため保存しない。
-            redacted[key] = {str(name): placeholder for name in value}
-        elif lname == "headers" and isinstance(value, str) and value.strip():
-            # headers_text 形式（"Name: Value" 複数行の文字列。config 由来）。
-            # dict と同様に値へ認証情報が入り得るため丸ごと伏字化する。
-            redacted[key] = placeholder
-        elif lname == "mfa_totp_uri" and value not in ("", None):
-            # otpauth URI はクエリに Base32 シークレットを含むため値全体を伏字にする。
-            redacted[key] = placeholder
-        elif lname in _SECRET_EXACT_KEYS and value not in ("", None):
-            # 部分一致では拾えない明示キー（ログインPW・Cookie 等）を伏字にする。
-            # scan_started の再生や snapshot でクレデンシャルが漏れないようにするため。
-            redacted[key] = placeholder
-        elif value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
-            redacted[key] = placeholder
-        else:
-            redacted[key] = value
-    return redacted
+    source = cfg if isinstance(cfg, dict) else {}
+    secret_values = _credential_values(source)
+    return {
+        key: _redact_nested(key, value, placeholder, secret_values)
+        for key, value in source.items()
+    }
 
 
 def scan_config_snapshot(cfg: dict, submitted_at: str) -> dict:
@@ -3233,6 +3315,10 @@ async def run_serve(args):
     # 誰でも読める。config(wscan.yaml)に置かれた秘匿値（TOTP secret/URI・Bearer・
     # ログインPW・Cookie 等）を空にして配信し、エンドポイント経由の漏洩を防ぐ
     # （digits/period/algorithm 等の非秘匿フィールドは保持）。
+    # 入れ子（accounts[]/flows[]）も同じ基準で空にする。ここで空にしても画面の往復で
+    # 設定が失われないのは、この既定値に accounts/flows を含めておらず、dashboard も
+    # flows が存在するときだけ復元するため（config 由来の account/flow は serve の
+    # 送信設定に載らない）。将来ここへ account/flow を載せる場合は空欄のフォールバックが要る。
     monitor.default_scan_cfg = _redact_secrets(monitor.default_scan_cfg, placeholder="")
     # report と同じ宣言 matrix を表示するだけで、実行カバレッジは再計算しない。
     from wscan.scanners import SCANNERS

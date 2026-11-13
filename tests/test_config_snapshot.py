@@ -146,6 +146,114 @@ class ScanConfigSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["config"]["url"], "http://t.test/")
         self.assertEqual(snapshot["submitted_at"], "2026-01-02T03:04:05")
 
+    def test_snapshot_masks_accounts_and_flow_input_values(self):
+        # 追加アカウント（accounts[]）の資格情報と flow の入力値も、トップレベルと同じ
+        # 基準で伏せる。フィールド名・セレクタ・URL・role 等の識別子は変えない。
+        cfg = {
+            "url": "http://t.test/",
+            "auth_user": USER,
+            "login_user_field": "username",
+            "accounts": [
+                {"username": "bob-the-user", "password": "pw-bob-1234", "role": "user"},
+                {"username": "ab", "password": "x", "role": "admin"},
+            ],
+            "flows": [
+                {
+                    "name": "login",
+                    "steps": [
+                        {"action": "navigate", "url": "http://t.test/login?next=%2Fadmin"},
+                        {"action": "fill", "field": "username", "value": "bob-the-user"},
+                        {"action": "fill", "field": "password", "value": "pw-bob-1234"},
+                        {"action": "click", "selector": "#login", "timeout": 5.0},
+                    ],
+                },
+            ],
+        }
+        config = main.scan_config_snapshot(cfg, "2026-01-02T03:04:05")["config"]
+        blob = json.dumps(config, ensure_ascii=False)
+        for secret in ("bob-the-user", "pw-bob-1234"):
+            self.assertNotIn(secret, blob)
+        # 短い（4 文字未満の）アカウントの資格情報も、キー基準で伏せる。
+        self.assertNotIn('"x"', blob)
+        self.assertEqual(config["accounts"][0]["username"], "***REDACTED***")
+        self.assertEqual(config["accounts"][0]["password"], "***REDACTED***")
+        self.assertEqual(config["accounts"][1]["username"], "***REDACTED***")
+        # 識別子・非秘匿フィールドは残す（診断と再実行に必要）。
+        self.assertEqual(config["accounts"][0]["role"], "user")
+        steps = config["flows"][0]["steps"]
+        self.assertEqual(config["flows"][0]["name"], "login")
+        self.assertEqual(steps[0]["url"], "http://t.test/login?next=%2Fadmin")
+        self.assertEqual(steps[1]["field"], "username")
+        self.assertEqual(steps[1]["value"], "***REDACTED***")
+        self.assertEqual(steps[3]["selector"], "#login")
+        self.assertEqual(steps[3]["action"], "click")
+
+    def test_snapshot_masks_unregistered_flow_value_under_credential_field(self):
+        # 設定済み資格情報と一致しなくても、password/token 欄への入力は資格情報として伏せる。
+        cfg = {
+            "url": "http://t.test/",
+            "flows": [
+                {"steps": [
+                    {"action": "fill", "field": "password", "value": "third-party-pw"},
+                    {"action": "fill", "field": "api_token", "value": "opaque-value"},
+                    {"action": "fill", "field": "email", "value": "someone@example.test"},
+                ]},
+            ],
+        }
+        steps = main._redact_secrets(cfg)["flows"][0]["steps"]
+        self.assertEqual(steps[0]["value"], "***REDACTED***")
+        self.assertEqual(steps[1]["value"], "***REDACTED***")
+        # 資格情報らしくない入力欄の値は変えない（識別子・通常入力の可読性を保つ）。
+        self.assertEqual(steps[2]["value"], "someone@example.test")
+
+    def test_blank_placeholder_applies_to_nested_credentials(self):
+        # /api/config/defaults 用: 入れ子の資格情報も空で配信する。
+        cfg = {
+            "accounts": [{"username": "bob-the-user", "password": "pw-bob-1234"}],
+            "flows": [{"steps": [{"field": "password", "value": "pw-bob-1234"}]}],
+        }
+        out = main._redact_secrets(cfg, placeholder="")
+        self.assertEqual(out["accounts"], [{"username": "", "password": ""}])
+        self.assertEqual(out["flows"][0]["steps"][0]["value"], "")
+        self.assertEqual(out["flows"][0]["steps"][0]["field"], "password")
+
+    def test_nested_redaction_masks_registered_values_under_any_key(self):
+        # 登録済みの資格情報と一致する値は、キー名が資格情報らしくなくても伏せる
+        # （flow の入力欄が email/search 等でも、設定済みの token/パスワードそのものなら残さない）。
+        cfg = {
+            "url": "http://t.test/",
+            "auth_pass": PASSWORD,
+            "cookies": "sid=cookie-value-777",
+            "flows": [{"steps": [
+                {"action": "fill", "field": "search", "value": PASSWORD},
+                {"action": "fill", "field": "q", "value": "cookie-value-777"},
+                {"action": "fill", "field": "q", "value": "ordinary-query"},
+            ]}],
+        }
+        steps = main._redact_secrets(cfg)["flows"][0]["steps"]
+        self.assertEqual(steps[0]["value"], "***REDACTED***")
+        self.assertEqual(steps[1]["value"], "***REDACTED***")
+        self.assertEqual(steps[2]["value"], "ordinary-query")
+        self.assertEqual(steps[0]["field"], "search")
+
+    def test_nested_secret_key_masks_container_value(self):
+        # 秘匿キーの値は形（list/dict）に依らず丸ごと伏せる。入れ子の list でも
+        # 中の平文を残さない（再帰の途中でキー判定を落とさない）。
+        cfg = {"extra_api_tokens": ["tok-one-123", {"nested": "tok-two-456"}]}
+        out = main._redact_secrets(cfg)
+        self.assertEqual(out["extra_api_tokens"], "***REDACTED***")
+
+    def test_redact_secrets_does_not_mutate_input(self):
+        # 再帰で新しい dict/list を作る（呼出元の設定を書き換えない）。
+        cfg = {
+            "accounts": [{"username": "bob-the-user", "password": "pw-bob-1234"}],
+            "flows": [{"steps": [{"field": "password", "value": "pw-bob-1234"}]}],
+        }
+        main._redact_secrets(cfg)
+        self.assertEqual(cfg["accounts"][0]["username"], "bob-the-user")
+        self.assertEqual(cfg["accounts"][0]["password"], "pw-bob-1234")
+        self.assertEqual(cfg["flows"][0]["steps"][0]["value"], "pw-bob-1234")
+
 
 class ScanStartedRedactionTests(unittest.TestCase):
     """serve の最初のイベント（scan_started）も他イベントと同じ伏字を通る。"""
