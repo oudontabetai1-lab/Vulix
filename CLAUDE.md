@@ -124,6 +124,7 @@ pip install -r requirements.txt && playwright install chromium
 
 # ドキュメント検証（ローカル参照・CLI例・設定ドリフト検証）
 # CI は README の vulix-install ブロックを scripts/readme_install.py で抽出して実行する
+# 失敗一覧を JSON（check/file/line/message）で残すときは --report <path>（CI の artifact 用）
 python scripts/check_docs.py
 
 # テスト（CI と同一。push 前に必ず通す）
