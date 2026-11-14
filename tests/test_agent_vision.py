@@ -25,7 +25,7 @@ def test_backward_compatible_default(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_first_multimodal_error_restarts_text_only():
+async def test_first_multimodal_error_restarts_text_only(monkeypatch):
     llm = types.SimpleNamespace(ainvoke=AsyncMock(side_effect=[RuntimeError('HTTP 400: model does not support multimodal requests'), 'ok']))
     invoke = llm.ainvoke
     modes = []
@@ -47,7 +47,8 @@ async def test_first_multimodal_error_restarts_text_only():
             return History()
     module = types.ModuleType('browser_use')
     module.Agent, module.Browser = Agent, Browser
-    with patch.dict(sys.modules, {'browser_use': module}), patch('wscan.llm_agent_browser._build_llm', return_value=llm), patch('httpx.AsyncClient.post', side_effect=__import__('httpx').ConnectError('unavailable')):
+    monkeypatch.setitem(sys.modules, 'browser_use', module)
+    with patch('wscan.llm_agent_browser._build_llm', return_value=llm), patch('httpx.AsyncClient.post', side_effect=__import__('httpx').ConnectError('unavailable')):
         result = await AgentBrowserScanner('http://fixture.test', llm_provider='ollama').run()
     assert modes == [True, False]
     assert len(browsers) == 2
@@ -58,7 +59,7 @@ async def test_first_multimodal_error_restarts_text_only():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('retry_fails', [False, True])
-async def test_auth_then_first_vision_request_falls_back_once(tmp_path, retry_fails):
+async def test_auth_then_first_vision_request_falls_back_once(tmp_path, retry_fails, monkeypatch):
     modes = []
     class Browser:
         def __init__(self, **kwargs): pass
@@ -85,7 +86,9 @@ async def test_auth_then_first_vision_request_falls_back_once(tmp_path, retry_fa
     module.Agent, module.Browser, module.BrowserSession = Agent, Browser, Browser
     profile = types.ModuleType('browser_use.browser.profile')
     profile.BrowserProfile = Profile
-    with patch.dict(sys.modules, {'browser_use': module, 'browser_use.browser.profile': profile}), patch('wscan.llm_agent_browser._build_llm', return_value=llm), patch('httpx.AsyncClient.post', side_effect=__import__('httpx').ConnectError('unavailable')):
+    monkeypatch.setitem(sys.modules, 'browser_use', module)
+    monkeypatch.setitem(sys.modules, 'browser_use.browser.profile', profile)
+    with patch('wscan.llm_agent_browser._build_llm', return_value=llm), patch('httpx.AsyncClient.post', side_effect=__import__('httpx').ConnectError('unavailable')):
         result = await AgentBrowserScanner(
             'http://fixture.test', llm_provider='ollama',
             login_url='http://fixture.test/login', auth_user='fixture-user',
