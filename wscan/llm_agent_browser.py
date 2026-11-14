@@ -1806,6 +1806,14 @@ class AgentBrowserScanner:
 
                 on_step_start = _apply_headers_on_step
 
+            if self._harness:
+                prepare_browser_step = on_step_start
+
+                async def on_step_start(current_agent):
+                    await self._on_step_start(current_agent)
+                    if prepare_browser_step:
+                        await prepare_browser_step(current_agent)
+
             async def run_with_vision_fallback(current_agent, kwargs, run_kwargs):
                 nonlocal use_vision, browser, episode_uses_vision
                 episode_uses_vision = kwargs["use_vision"]
@@ -2768,21 +2776,39 @@ class AgentBrowserScanner:
             f"Reconnaissance remains the priority; a targeted security check must not stop site mapping."
         )
 
-    async def _on_step_end(self, agent) -> None:
-        """実行結果のある action だけを proposal に対応づけて追記する。"""
-        record = getattr(self, "_pending_step_record", None)
-        history = getattr(getattr(agent, "history", None), "history", [])
-        if not self._harness or record is None or not history:
-            return
-        item = history[-1]
-        actions = getattr(getattr(item, "model_output", None), "action", []) or []
-        results = getattr(item, "result", []) or []
-        self._harness.record_execution(record, actions[:len(results)])
+    async def _on_step_start(self, agent) -> None:
         self._pending_step_record = None
+        self._step_history_context = (
+            agent, self._active_episode_id, len(agent.history.history)
+        )
+
+    async def _on_step_end(self, agent) -> None:
+        """当該ステップの新規履歴と、エラーのない操作結果だけを実行証拠にする。"""
+        record = getattr(self, "_pending_step_record", None)
+        self._pending_step_record = None
+        if not self._harness or record is None:
+            return
+        history = getattr(getattr(agent, "history", None), "history", [])
+        context = getattr(self, "_step_history_context", None)
+        executed = []
+        if (context is not None and context[0] is agent
+                and context[1] == record.episode_id == self._active_episode_id
+                and len(history) == context[2] + 1):
+            item = history[-1]
+            step_number = getattr(getattr(item, "metadata", None), "step_number", None)
+            actions = getattr(getattr(item, "model_output", None), "action", []) or []
+            results = getattr(item, "result", []) or []
+            # 汎用ステップエラーでは実行済み prefix も失われるため推定しない。
+            if (step_number == self._pending_step_number and results
+                    and len(results) <= len(actions)
+                    and all(hasattr(result, "error") and not result.error for result in results)):
+                executed = actions[:len(results)]
+        self._harness.record_execution(record, executed)
 
     async def _on_step(self, state, output, step_num: int) -> None:
         """各ステップ実行時のコールバック。"""
         self._step_count = self._episode_offset + step_num
+        self._pending_step_number = step_num
 
         # browser-use の new-step callback は model action の実行前に呼ばれる。
         # 対象外/access-only/exclude 上では入力・JS・upload 等を action 列から除去し、

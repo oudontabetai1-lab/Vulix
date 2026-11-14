@@ -215,6 +215,7 @@ class AgentStepRecord:
     repeat_signature: str
     repeated: bool
     timestamp: float
+    execution_status: str = "unconfirmed"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -488,6 +489,7 @@ class AgentHarness:
             repeat_signature=signature,
             repeated=repeated,
             timestamp=time.time(),
+            execution_status="confirmed" if executed else "unconfirmed",
         )
         self._append_trace(record)
         self.checkpoint()
@@ -500,7 +502,11 @@ class AgentHarness:
         executed = tuple(
             self._redact_runtime(_redact_action(action)) for action in actions
         )
-        self._append_trace(replace(record, executed_actions=executed, timestamp=time.time()))
+        self._append_trace(replace(
+            record, executed_actions=executed,
+            execution_status="confirmed" if executed else "unconfirmed",
+            timestamp=time.time(),
+        ))
 
     def note_coverage(
         self,
