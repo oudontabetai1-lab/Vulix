@@ -1339,6 +1339,7 @@ class AgentBrowserScanner:
     def _build_browser_profile(self, profile_type):
         options = {
             "headless": self.headless,
+            "keep_alive": True,
             "disable_security": True,
             "allowed_domains": sorted({
                 parsed.hostname
@@ -1805,6 +1806,14 @@ class AgentBrowserScanner:
 
                 on_step_start = _apply_headers_on_step
 
+            if self._harness:
+                prepare_browser_step = on_step_start
+
+                async def on_step_start(current_agent):
+                    await self._on_step_start(current_agent)
+                    if prepare_browser_step:
+                        await prepare_browser_step(current_agent)
+
             async def run_with_vision_fallback(current_agent, kwargs, run_kwargs):
                 nonlocal use_vision, browser, episode_uses_vision
                 episode_uses_vision = kwargs["use_vision"]
@@ -1816,7 +1825,8 @@ class AgentBrowserScanner:
                     agent_kwargs["use_vision"] = False
                     kwargs["use_vision"] = False
                     await note_text_only()
-                    # Agent.run の finally はブラウザも閉じるため新規セッションへ戻す。
+                    # 再生成するセッションも先に明示破棄する。
+                    await (browser.kill() if hasattr(browser, "kill") else browser.stop())
                     if agent_browser_arg == "browser_session":
                         browser = BrowserSession(browser_profile=self._build_browser_profile(BrowserProfile))
                     else:
@@ -1888,10 +1898,12 @@ class AgentBrowserScanner:
                     before_auth_cookies = None
                     before_auth_tokens = None
                     if work.role == AgentRole.AUTHENTICATOR:
+                        if hasattr(browser, "start"):
+                            await browser.start()
                         before_auth_cookies = await self._capture_cookies(browser)
                         before_auth_tokens = await self._capture_tokens(browser)
                     episode_agent = Agent(**{agent_browser_arg: browser}, **episode_kwargs)
-                    run_kwargs = {"max_steps": episode_budget}
+                    run_kwargs = {"max_steps": episode_budget, "on_step_end": self._on_step_end}
                     if on_step_start:
                         run_kwargs["on_step_start"] = on_step_start
                     history = await run_with_vision_fallback(episode_agent, episode_kwargs, run_kwargs)
@@ -2183,9 +2195,8 @@ class AgentBrowserScanner:
                 except Exception:
                     pass
                 try:
-                    # BrowserSession は close() を持たない — stop() が正しい。
-                    # Agent task の cancel 時もここを通し、プローブを確実に止める。
-                    await browser.stop()
+                    # 共有セッションの寿命は episode ではなくハーネスが所有する。
+                    await (browser.kill() if hasattr(browser, "kill") else browser.stop())
                 except Exception as exc:
                     console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
 
@@ -2765,9 +2776,39 @@ class AgentBrowserScanner:
             f"Reconnaissance remains the priority; a targeted security check must not stop site mapping."
         )
 
+    async def _on_step_start(self, agent) -> None:
+        self._pending_step_record = None
+        self._step_history_context = (
+            agent, self._active_episode_id, len(agent.history.history)
+        )
+
+    async def _on_step_end(self, agent) -> None:
+        """当該ステップの新規履歴と、エラーのない操作結果だけを実行証拠にする。"""
+        record = getattr(self, "_pending_step_record", None)
+        self._pending_step_record = None
+        if not self._harness or record is None:
+            return
+        history = getattr(getattr(agent, "history", None), "history", [])
+        context = getattr(self, "_step_history_context", None)
+        executed = []
+        if (context is not None and context[0] is agent
+                and context[1] == record.episode_id == self._active_episode_id
+                and len(history) == context[2] + 1):
+            item = history[-1]
+            step_number = getattr(getattr(item, "metadata", None), "step_number", None)
+            actions = getattr(getattr(item, "model_output", None), "action", []) or []
+            results = getattr(item, "result", []) or []
+            # 汎用ステップエラーでは実行済み prefix も失われるため推定しない。
+            if (step_number == self._pending_step_number and results
+                    and len(results) <= len(actions)
+                    and all(hasattr(result, "error") and not result.error for result in results)):
+                executed = actions[:len(results)]
+        self._harness.record_execution(record, executed)
+
     async def _on_step(self, state, output, step_num: int) -> None:
         """各ステップ実行時のコールバック。"""
         self._step_count = self._episode_offset + step_num
+        self._pending_step_number = step_num
 
         # browser-use の new-step callback は model action の実行前に呼ばれる。
         # 対象外/access-only/exclude 上では入力・JS・upload 等を action 列から除去し、
@@ -2819,7 +2860,7 @@ class AgentBrowserScanner:
 
         if self._harness:
             try:
-                self._harness.record_step(
+                self._pending_step_record = self._harness.record_step(
                     episode_id=self._active_episode_id,
                     local_step=self._step_count,
                     url=current_url,

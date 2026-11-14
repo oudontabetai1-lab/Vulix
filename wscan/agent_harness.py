@@ -215,6 +215,7 @@ class AgentStepRecord:
     repeat_signature: str
     repeated: bool
     timestamp: float
+    execution_status: str = "unconfirmed"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -488,10 +489,24 @@ class AgentHarness:
             repeat_signature=signature,
             repeated=repeated,
             timestamp=time.time(),
+            execution_status="confirmed" if executed else "unconfirmed",
         )
         self._append_trace(record)
         self.checkpoint()
         return record
+
+    def record_execution(self, record: AgentStepRecord, actions: Iterable) -> None:
+        # 同じ step_id の後続レコードは実行後の証拠。予算とループ判定は増やさない。
+        from dataclasses import replace
+
+        executed = tuple(
+            self._redact_runtime(_redact_action(action)) for action in actions
+        )
+        self._append_trace(replace(
+            record, executed_actions=executed,
+            execution_status="confirmed" if executed else "unconfirmed",
+            timestamp=time.time(),
+        ))
 
     def note_coverage(
         self,
