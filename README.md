@@ -528,11 +528,14 @@ python3 main.py scan URL [URL ...] [options]
 python3 main.py agent URL [options]
 ```
 
+Agent / Hybrid 偵察はローカルのテキスト専用モデルでも DOM・テキストだけで動作します。画像にしか現れない情報や視覚的な検査は対象外となり、結果にも制限を記録します。ダッシュボードの Agent 設定「画像入力」で自動・有効・無効を選べます（設定 `agent_vision: auto`、CLI `--agent-vision auto|on|off`）。自動では Ollama のモデル能力を起動時に確認し、能力不明時は画像入力を維持します。最初のモデル呼び出しが画像非対応エラーなら一度だけテキスト専用で再開します。
+
 | オプション | 既定 | 内容 |
 | --- | --- | --- |
 | `--llm` | `claude` | `claude/openai/openai_compatible/ollama` |
 | `--llm-base-url URL` | 空 | OpenAI 互換ベース URL |
 | `--model MODEL` | provider 既定 | Agent 用モデル |
+| `--agent-vision auto/on/off` | `auto` | 画像入力を自動判定 / 強制有効 / DOM 専用 |
 | `--proxy URL` | `browser.proxy` / 空 | Agent ブラウザの HTTP プロキシ |
 | `--ollama-url URL` | `http://localhost:11434` | Ollama API |
 | `--checks CHECK...` | `xss sqli ssti os path_traversal ssrf` | Agent の検査種別 |

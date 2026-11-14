@@ -97,6 +97,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     o   = raw.get("output",   {})
 
     from wscan.i18n import normalize_lang
+    cfg["agent_vision"] = raw.get("agent_vision", "auto")
     cfg["report_lang"] = normalize_lang(o.get("language", "ja"))
     cfg["checks"]                  = s.get("checks",    ["sqli", "xss", "os"])
     cfg["depth"]                   = int(s.get("depth",     2))
@@ -1694,6 +1695,8 @@ Examples:
             "discover and exploit vulnerabilities (requires browser-use)"
         ),
     )
+    agent.add_argument("--agent-vision", choices=("auto", "on", "off"),
+                       default=_CFG.get("agent_vision", "auto"), help="Agent image input")
     agent.add_argument("url", help="Target URL (e.g. https://example.com)")
     agent.add_argument(
         "--proxy", metavar="URL", default=_CFG.get("proxy", ""),
@@ -2337,6 +2340,7 @@ async def run_agent(args):
             auth_pass=getattr(args, "auth_pass", "") or "",
             login_url=getattr(args, "login_url", "") or "",
             max_steps=args.max_steps,
+            agent_vision=getattr(args, "agent_vision", _CFG.get("agent_vision", "auto")),
             output_dir=args.output or None,
             open_report=_effective_open_report(args),
             monitor=monitor,
@@ -2377,6 +2381,7 @@ async def run_agent(args):
                 auth_pass=getattr(args, "auth_pass", "") or "",
                 login_url=getattr(args, "login_url", "") or "",
                 max_steps=args.max_steps,
+                agent_vision=getattr(args, "agent_vision", _CFG.get("agent_vision", "auto")),
                 output_dir=args.output or None,
                 open_report=_effective_open_report(args),
                 monitor=monitor,
@@ -3243,6 +3248,7 @@ async def run_serve(args):
 
     monitor.default_scan_cfg = {
         "report_lang": _CFG.get("report_lang", "ja"),
+        "agent_vision": _CFG.get("agent_vision", "auto"),
         "checks": _CFG.get("checks", ["sqli", "xss", "os"]),
         "depth": _CFG.get("depth", 2),
         "timeout": _CFG.get("timeout", 30),
@@ -3457,6 +3463,7 @@ async def run_serve(args):
                     exclude_urls=cfg.get("exclude_urls", []) or [],
                     exclude_fields=cfg.get("exclude_fields", []) or [],
                     max_steps=_serve_ints["agent_max_steps"],
+                    agent_vision=cfg.get("agent_vision", "auto"),
                     open_report=bool(cfg.get("open_report", True)),
                     monitor=monitor,
                     port=port,
@@ -3520,6 +3527,7 @@ async def run_serve(args):
                     exclude_urls=cfg.get("exclude_urls", []) or [],
                     exclude_fields=cfg.get("exclude_fields", []) or [],
                     max_steps=_serve_ints["hybrid_max_steps"],
+                    agent_vision=cfg.get("agent_vision", "auto"),
                     open_report=False,
                     monitor=monitor,
                     port=port,

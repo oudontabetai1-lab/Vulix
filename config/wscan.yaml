@@ -376,3 +376,6 @@ output:
 
   # カスタムペイロードファイル
   payloads_file: ""
+
+# Agent / Hybrid 画像入力: auto | on | off
+agent_vision: auto

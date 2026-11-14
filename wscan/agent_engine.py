@@ -164,6 +164,7 @@ class AgentEngine:
         report_lang: str = "ja",
         proxy: str = "",
         llm_timeout_seconds: float = 30.0,
+        agent_vision: str = "auto",
     ):
         self.url = url.rstrip("/")
         from .i18n import normalize_lang
@@ -177,6 +178,7 @@ class AgentEngine:
         self.auth_user = auth_user
         self.auth_pass = auth_pass
         self.login_url = login_url
+        self.agent_vision = agent_vision
         self.max_steps = max_steps
         self.open_report = open_report
         self.monitor = monitor
@@ -270,6 +272,7 @@ class AgentEngine:
             auth_pass=self.auth_pass,
             login_url=self.login_url,
             max_steps=self.max_steps,
+            agent_vision=self.agent_vision,
             monitor=self.monitor,
             target_urls=self.target_urls,
             access_urls=self.access_urls,
@@ -475,6 +478,7 @@ class AgentEngine:
             auth_pass=self.auth_pass,
             login_url=self.login_url,
             max_steps=self.max_steps,
+            agent_vision=self.agent_vision,
             monitor=self.monitor,
             recon_mode=True,
             target_urls=self.target_urls,
@@ -491,6 +495,11 @@ class AgentEngine:
         )
 
         result = await scanner.run()
+        if "vision:text_only" in getattr(result, "coverage_gaps", []):
+            (self.output_dir / "agent_vision_note.md").write_text(
+                "model has no image input; running text-only (DOM only; visual checks unavailable)\n",
+                encoding="utf-8",
+            )
 
         # 初期化・実行のハードエラー（browser-use 未導入=ImportError／provider 不在等）を
         # 「偵察完了」と誤表示しない。呼び出し側の Hybrid 失敗ブランチ（seed 無しで Phase 2 を
