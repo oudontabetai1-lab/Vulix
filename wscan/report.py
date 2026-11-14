@@ -834,6 +834,7 @@ a {{ color:var(--accent); }}
 .status-tested {{ background:#e7e5fe; color:var(--accent); }}
 .status-finding {{ background:#f1d6dd; color:var(--s-crit); }}
 .status-error {{ background:#f7ede0; color:var(--s-high); }}
+.status-partial {{ background:#faf6e8; color:var(--s-high); }}
 .status-skipped {{ background:var(--rule); color:var(--ink2); }}
 
 /* 修正サマリ */

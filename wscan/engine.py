@@ -2310,6 +2310,35 @@ class ScanEngine:
             "note": note,
         })
 
+    def _mark_scan_matrix_budget_partial(
+        self, ip, check_name: str, note: str = ""
+    ) -> None:
+        """時間枠で打ち切られた check の実行行を ``partial`` にする。
+
+        adaptive パス中の打ち切りは baseline の行（既に tested）を書き換える必要がある。
+        finding 行は陽性証拠なので status を変えず note だけ残す。対象行が無ければ何もしない
+        （checkpoint/resume の truncated 記録には触れない＝再試行挙動は不変）。
+        """
+        location = {"form": "form field", "url_param": "URL param"}.get(
+            getattr(ip, "location", ""), getattr(ip, "location", "")
+        )
+        for row in reversed(getattr(self, "scan_matrix", None) or []):
+            if not isinstance(row, dict):
+                continue
+            if (
+                row.get("check") != check_name
+                or row.get("url") != getattr(ip, "url", None)
+                or row.get("field_name") != getattr(ip, "parameter_id", None)
+                or row.get("location") != location
+            ):
+                continue
+            if row.get("status") != "finding":
+                row["status"] = "partial"
+            if note:
+                existing = row.get("note", "") or ""
+                row["note"] = f"{existing}; {note}" if existing else note
+            return
+
     def _record_external_script_scan_matrix(
         self,
         page,
@@ -7733,7 +7762,7 @@ class ScanEngine:
                     url=url,
                     field_name=field_name,
                     check_name=check_name,
-                    status="error",
+                    status="partial",
                     location=location,
                     note="Skipped — field budget retry limit reached; unit remains incomplete.",
                 )
@@ -7753,7 +7782,7 @@ class ScanEngine:
                     url=url,
                     field_name=field_name,
                     check_name=check_name,
-                    status="error",
+                    status="partial",
                     location=location,
                     note="field attack budget exceeded before scan (time-box)",
                 )
@@ -7894,7 +7923,9 @@ class ScanEngine:
                 _truncated = _FIELD_BUDGET_TRUNCATED.get() or set()
                 if check_name in _truncated:
                     if scan_row is not None:
-                        scan_row["status"] = "error"
+                        # finding は送達の陽性証拠なので残し、未検出の行だけを partial にする。
+                        if scan_row.get("status") != "finding":
+                            scan_row["status"] = "partial"
                         scan_row["note"] = "field attack budget exceeded; check remains incomplete"
                     _record_truncation = getattr(
                         self, "_checkpoint_record_truncation_ip", None
@@ -8367,6 +8398,16 @@ class ScanEngine:
                 _truncated = _FIELD_BUDGET_TRUNCATED.get() or set()
                 if check_name in _truncated:
                     generation_failed = True
+                    _mark_partial = getattr(
+                        self, "_mark_scan_matrix_budget_partial", None
+                    )
+                    if callable(_mark_partial):
+                        _mark_partial(
+                            ip,
+                            check_name,
+                            "field attack budget exceeded during adaptive pass; "
+                            "check remains incomplete",
+                        )
                 else:
                     if _candidate_state is not None:
                         _candidate_state.clear_candidate_snapshots_ip(ip, check_name, {"adaptive"})

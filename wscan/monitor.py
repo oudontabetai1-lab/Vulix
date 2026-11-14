@@ -265,6 +265,23 @@ def due_schedule_ids(schedules: list, now_epoch: Optional[float] = None) -> list
     return [i for i in out if i]
 
 
+_TERMINAL_STATUS_MESSAGES = {
+    "done": "Scan complete",
+    "aborted": "Scan aborted (partial report)",
+    "incomplete": "Scan incomplete",
+    "error": "Scan failed",
+}
+
+
+def _completion_status_message(status: str) -> str:
+    """scan_complete 時に status_message へ残す確定メッセージ（純粋）。
+
+    スキャン中に最後に届いた phase 文言（例 "OS injection testing: ..."）を
+    snapshot へ持ち越さないため、終端状態ごとの文言を一元生成する。
+    """
+    return _TERMINAL_STATUS_MESSAGES.get(str(status or ""), "Scan finished")
+
+
 class MonitorServer:
     """Real-time monitoring server for scan progress."""
 
@@ -2657,6 +2674,11 @@ class MonitorServer:
                 else:
                     status = "done"
             self.api_scan_status = status
+            # 終端では最後の phase 文言を残さない（Done なのに "OS injection testing" が
+            # snapshot/再接続後も見える回帰を防ぐ）。ここが完了を確定する唯一の場所。
+            # error だけは直前の具体的な失敗理由を優先し、無い場合のみ既定文言にする。
+            if status != "error" or not self._scan_status_message:
+                self._scan_status_message = _completion_status_message(status)
             if status == "done":
                 if self.api_progress.get("total", 0) > 0:
                     self.api_progress["current"] = self.api_progress["total"]
