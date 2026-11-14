@@ -468,6 +468,19 @@ def _page_state_fingerprint(state) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16] if text else ""
 
 
+def decide_agent_vision(mode: str = "auto", capabilities=None) -> bool:
+    """不明な能力は従来動作を維持する。"""
+    if mode not in {"auto", "on", "off"}:
+        raise ValueError("agent_vision must be auto, on or off")
+    if mode != "auto":
+        return mode == "on"
+    return "vision" in capabilities if isinstance(capabilities, list) else True
+
+
+class _VisionUnsupported(BaseException):
+    """browser-use の通常 retry を抜けて一度だけ再起動する。"""
+
+
 def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11434",
                base_url: str = "", timeout: float | None = None):
     """
@@ -670,6 +683,7 @@ class AgentBrowserScanner:
         proxy: str = "",
         llm_timeout_seconds: float = 30.0,
         request_logger: Any = None,
+        agent_vision: str = "auto",
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
         raw_target_url = str(target_url or "").strip()
@@ -680,6 +694,8 @@ class AgentBrowserScanner:
             if raw_url and not re.match(r"^https?://", raw_url, re.IGNORECASE)
         }
         self.target_url = _normalize_agent_url(target_url)
+        self.agent_vision = agent_vision
+        decide_agent_vision(agent_vision)
         self.llm_provider = llm_provider
         self.llm_model = llm_model
         self.ollama_url = ollama_url
@@ -1567,6 +1583,35 @@ class AgentBrowserScanner:
         task = self._build_recon_task() if self.recon_mode else self._build_task()
         browser = None
 
+        capabilities = None
+        if self.llm_provider == "ollama" and self.agent_vision == "auto":
+            import httpx
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    response = await client.post(
+                        self.ollama_url.rstrip("/") + "/api/show",
+                        json={"model": self.llm_model or "llama3"},
+                    )
+                    response.raise_for_status()
+                    capabilities = response.json().get("capabilities")
+            except (httpx.HTTPError, ValueError, AttributeError):
+                pass
+        use_vision = decide_agent_vision(self.agent_vision, capabilities)
+        text_only_note = "model has no image input; running text-only (DOM only; visual checks unavailable)"
+        announced_text_only = False
+
+        async def note_text_only():
+            nonlocal announced_text_only
+            if not announced_text_only:
+                announced_text_only = True
+                console.print(text_only_note)
+                if self.monitor:
+                    await self.monitor.emit_status(text_only_note, "running")
+
+        if not use_vision:
+            await note_text_only()
+        invocation_count = 0
+
         resolved_for_log = (
             getattr(llm, "model", None)
             or getattr(llm, "model_name", None)
@@ -1583,12 +1628,20 @@ class AgentBrowserScanner:
                 _status = "ok"
                 _exc = None
                 _resp_chars = 0
+                nonlocal invocation_count
+                invocation_count += 1
                 try:
                     res = await orig_ainvoke(*args, **kwargs)
                     if hasattr(res, "completion"):
                         _resp_chars = len(str(res.completion))
                     return res
                 except Exception as exc:
+                    if (invocation_count == 1 and use_vision
+                            and self.llm_provider == "ollama" and self.agent_vision == "auto"
+                            and "does not support multimodal" in str(exc).lower()):
+                        _exc = exc
+                        _status = "error"
+                        raise _VisionUnsupported() from exc
                     _exc = exc
                     exc_name = type(exc).__name__
                     is_to = isinstance(exc, (asyncio.TimeoutError, _httpx.TimeoutException)) or "timeout" in exc_name.lower()
@@ -1665,7 +1718,7 @@ class AgentBrowserScanner:
                 llm=llm,
                 extend_system_message=system_prompt,
                 max_failures=5,
-                use_vision=True,
+                use_vision=use_vision,
                 use_thinking=True,
                 enable_planning=True,
                 directly_open_url=False,           # 自動 URL 抽出を無効化 (複数 URL 問題を回避)
@@ -1750,6 +1803,26 @@ class AgentBrowserScanner:
 
                 on_step_start = _apply_headers_on_step
 
+            async def run_with_vision_fallback(current_agent, kwargs, run_kwargs):
+                nonlocal use_vision, browser
+                try:
+                    return await current_agent.run(**run_kwargs)
+                except _VisionUnsupported:
+                    use_vision = False
+                    agent_kwargs["use_vision"] = False
+                    kwargs["use_vision"] = False
+                    await note_text_only()
+                    # Agent.run の finally はブラウザも閉じるため新規セッションへ戻す。
+                    if agent_browser_arg == "browser_session":
+                        browser = BrowserSession(browser_profile=self._build_browser_profile(BrowserProfile))
+                    else:
+                        browser = _build_legacy_browser()
+                    self._request_scoped_headers = await self._enable_request_scoped_headers(browser)
+                    if not self._request_scoped_headers:
+                        await self._prepare_extra_headers_before_run(browser, start_url)
+                    replacement = Agent(**{agent_browser_arg: browser}, **kwargs)
+                    return await replacement.run(**run_kwargs)
+
             if self._harness:
                 histories = []
                 texts: list[str] = [
@@ -1800,7 +1873,7 @@ class AgentBrowserScanner:
                             .replace("{SESSION_NONCE}", episode_nonce)
                             .replace("{SECURITY_SCOPE}", self._build_security_scope_policy())
                         )
-                    episode_kwargs["use_vision"] = work.role not in {
+                    episode_kwargs["use_vision"] = use_vision and work.role not in {
                         AgentRole.AUTHENTICATOR,
                         AgentRole.ADVERSARIAL_REVIEWER,
                     }
@@ -1817,7 +1890,7 @@ class AgentBrowserScanner:
                     run_kwargs = {"max_steps": episode_budget}
                     if on_step_start:
                         run_kwargs["on_step_start"] = on_step_start
-                    history = await episode_agent.run(**run_kwargs)
+                    history = await run_with_vision_fallback(episode_agent, episode_kwargs, run_kwargs)
                     histories.append(history)
                     final = history.final_result() or ""
                     episode_text = "\n".join(
@@ -1992,7 +2065,7 @@ class AgentBrowserScanner:
                     run_kwargs["on_step_start"] = on_step_start
                 before_auth_cookies = await self._capture_cookies(browser) if self.login_url else None
                 before_auth_tokens = await self._capture_tokens(browser) if self.login_url else None
-                history = await agent.run(**run_kwargs)
+                history = await run_with_vision_fallback(agent, agent_kwargs, run_kwargs)
 
                 result.steps_taken = self._step_count
                 result.success = history.is_successful()
@@ -2118,6 +2191,10 @@ class AgentBrowserScanner:
 
         # 実行失敗（例外）または history 上の非成功で 0 findings なら、「成功・0 findings」と
         # 誤表示しない。findings があれば不完全でも検出結果は有効なので表示する。
+        if announced_text_only:
+            result.coverage_gaps.append("vision:text_only")
+            result.final_summary = text_only_note + "\n" + result.final_summary
+
         incomplete_empty = (
             not result.error and not result.success and not result.findings
         )

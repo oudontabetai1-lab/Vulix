@@ -2157,6 +2157,8 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
           </div>
           <div class="cfg-field">
             <label>最大ステップ数</label>
+            <label for="agentVision">画像入力（Agent / Hybrid）</label>
+            <select id="agentVision" onchange="document.getElementById('hybridVision').value=this.value"><option value="auto">自動</option><option value="on">有効</option><option value="off">無効（DOM のみ）</option></select>
             <input type="number" id="agentMaxSteps" value="100" min="5" max="500">
           </div>
           <div class="cfg-field">
@@ -2232,6 +2234,8 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
             <input type="text" id="hybridModel" placeholder="claude-sonnet-4-5-20250929">
           </div>
           <div class="cfg-field">
+            <label for="hybridVision">画像入力</label>
+            <select id="hybridVision" onchange="document.getElementById('agentVision').value=this.value"><option value="auto">自動</option><option value="on">有効</option><option value="off">無効（DOM のみ）</option></select>
             <label>偵察ステップ数上限</label>
             <input type="number" id="hybridMaxSteps" value="30" min="5" max="100">
           </div>
@@ -4527,6 +4531,7 @@ function submitAgentScan() {
     report_lang: document.getElementById('cfgReportLang')?.value || 'ja',
     llm: document.getElementById('agentLlm').value,
     agent_model: document.getElementById('agentModel').value.trim(),
+    agent_vision: document.getElementById('agentVision').value,
     agent_max_steps: parseInt(document.getElementById('agentMaxSteps').value) || 50,
     agent_ollama_url: document.getElementById('agentOllamaUrl').value.trim() || 'http://localhost:11434',
     llm_timeout_seconds: parseFloat(document.getElementById('agentLlmTimeout')?.value) || 30,
@@ -4562,7 +4567,7 @@ function submitAgentScan() {
 // フィールドは「明示的に列挙しない限り漏れない」。TLS の *_cert/_key/_pfx/_ca は
 // ファイルパスであり秘密そのものではないため保存する（cert_password のみ除外）。
 const CONFIG_SAVE_ALLOWLIST = [
-  'report_lang',
+  'report_lang', 'agent_vision',
   'url', 'restore_target', 'depth', 'timeout', 'llm_timeout_seconds', 'llm_stream_timeout_seconds',
   'max_forms', 'concurrency', 'max_payloads', 'request_delay', 'navigation_retries', 'proxy',
   'tls_client_cert', 'tls_client_key', 'tls_client_pfx', 'tls_ca_cert',
@@ -4791,6 +4796,7 @@ function saveConfigToStorage() {
       manual_crawl_file: document.getElementById('cfgManualCrawlFile').value,
       manual_crawl_output: document.getElementById('manualCrawlOutput').value,
       auto_register_count: document.getElementById('cfgAutoRegisterCount').value,
+      agent_vision: document.getElementById('agentVision').value,
       checks: getSelectedChecks(),
     };
     const cfg = {};
@@ -4808,6 +4814,7 @@ function loadConfigFromStorage() {
     if (restoreTarget && cfg.url && safeUrlForStorage(cfg.url) !== undefined) document.getElementById('cfgInputUrl').value = cfg.url;
     if (cfg.depth) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
+    if (cfg.agent_vision) { document.getElementById('agentVision').value = cfg.agent_vision; document.getElementById('hybridVision').value = cfg.agent_vision; }
     if (cfg.report_lang) document.getElementById('cfgReportLang').value = cfg.report_lang;
     if (cfg.llm_timeout_seconds != null) document.getElementById('cfgLlmTimeoutInput').value = cfg.llm_timeout_seconds;
     if (cfg.llm_stream_timeout_seconds != null) document.getElementById('cfgLlmStreamTimeoutInput').value = cfg.llm_stream_timeout_seconds;
@@ -4883,6 +4890,7 @@ async function loadDefaultConfigFromServer() {
     if (cfg.capability_matrix_html) document.getElementById('carrierCoverageMatrix').innerHTML = cfg.capability_matrix_html;
     if (cfg.depth != null) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout != null) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
+    if (cfg.agent_vision) { document.getElementById('agentVision').value = cfg.agent_vision; document.getElementById('hybridVision').value = cfg.agent_vision; }
     if (cfg.report_lang) document.getElementById('cfgReportLang').value = cfg.report_lang;
     if (cfg.llm_timeout_seconds != null) document.getElementById('cfgLlmTimeoutInput').value = cfg.llm_timeout_seconds;
     if (cfg.llm_stream_timeout_seconds != null) document.getElementById('cfgLlmStreamTimeoutInput').value = cfg.llm_stream_timeout_seconds;
@@ -6826,6 +6834,7 @@ function submitHybridScan() {
     url,
     hybrid_mode:       true,
     hybrid_llm:        document.getElementById('hybridLlm').value,
+    agent_vision: document.getElementById('agentVision').value,
     hybrid_model:      (document.getElementById('hybridModel').value || '').trim(),
     hybrid_max_steps:  parseInt(document.getElementById('hybridMaxSteps').value) || 30,
     hybrid_ollama_url: (document.getElementById('hybridOllamaUrl').value || '').trim() || 'http://localhost:11434',

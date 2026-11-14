@@ -256,6 +256,8 @@ FIELDS = (
     _field("agent_mode", "Agent モード選択", True, modes=("agent",)),
     _field("hybrid_mode", "Hybrid モード選択", True, modes=("hybrid",)),
     _field("url", "対象 URL", "", modes=ALL_MODES, redacted=True),
+    _field("agent_vision", "画像入力", "auto", modes=("agent", "hybrid"),
+           constraints={"enum": ["auto", "on", "off"]}),
     _field("agent_model", "Agent モデル", "", modes=("agent",), redacted=True),
     _field("agent_ollama_url", "Agent Ollama URL", "", modes=("agent",), redacted=True),
     _field("agent_max_steps", "Agent 最大ステップ", 50, modes=("agent",), constraints={"minimum": 0}),
