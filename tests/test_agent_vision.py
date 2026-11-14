@@ -54,3 +54,50 @@ async def test_first_multimodal_error_restarts_text_only():
     assert invoke.await_count == 2
     assert 'vision:text_only' in result.coverage_gaps
     assert 'running text-only' in result.final_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('retry_fails', [False, True])
+async def test_auth_then_first_vision_request_falls_back_once(tmp_path, retry_fails):
+    modes = []
+    class Browser:
+        def __init__(self, **kwargs): pass
+        async def stop(self): pass
+    class Profile:
+        def __init__(self, **kwargs): pass
+    class History:
+        def is_successful(self): return True
+        def final_result(self): return 'AUTH COMPLETE'
+        def extracted_content(self): return []
+        def errors(self): return []
+    async def invoke(*args, **kwargs):
+        if len(modes) == 2 or (retry_fails and len(modes) == 3):
+            raise RuntimeError('HTTP 400: model does not support multimodal requests')
+        return 'ok'
+    llm = types.SimpleNamespace(ainvoke=invoke)
+    class Agent:
+        def __init__(self, **kwargs): self.kwargs = kwargs
+        async def run(self, **kwargs):
+            modes.append(self.kwargs['use_vision'])
+            await llm.ainvoke([])
+            return History()
+    module = types.ModuleType('browser_use')
+    module.Agent, module.Browser, module.BrowserSession = Agent, Browser, Browser
+    profile = types.ModuleType('browser_use.browser.profile')
+    profile.BrowserProfile = Profile
+    with patch.dict(sys.modules, {'browser_use': module, 'browser_use.browser.profile': profile}), patch('wscan.llm_agent_browser._build_llm', return_value=llm), patch('httpx.AsyncClient.post', side_effect=__import__('httpx').ConnectError('unavailable')):
+        result = await AgentBrowserScanner(
+            'http://fixture.test', llm_provider='ollama',
+            login_url='http://fixture.test/login', auth_user='fixture-user',
+            auth_pass='fixture-password', harness_output_dir=tmp_path, max_steps=8,
+        ).run()
+    assert modes[:3] == [False, True, False]
+    assert modes.count(True) == 1
+    assert 'vision:text_only' in result.coverage_gaps
+    if retry_fails:
+        assert len(modes) == 3
+        assert 'does not support multimodal' in result.error
+    else:
+        assert len(modes) > 3
+        assert all(mode is False for mode in modes[3:])
+        assert result.error is None

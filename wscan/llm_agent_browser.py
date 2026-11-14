@@ -1610,7 +1610,8 @@ class AgentBrowserScanner:
 
         if not use_vision:
             await note_text_only()
-        invocation_count = 0
+        vision_invocation_count = 0
+        episode_uses_vision = False
 
         resolved_for_log = (
             getattr(llm, "model", None)
@@ -1628,15 +1629,16 @@ class AgentBrowserScanner:
                 _status = "ok"
                 _exc = None
                 _resp_chars = 0
-                nonlocal invocation_count
-                invocation_count += 1
+                nonlocal vision_invocation_count
+                if episode_uses_vision:
+                    vision_invocation_count += 1
                 try:
                     res = await orig_ainvoke(*args, **kwargs)
                     if hasattr(res, "completion"):
                         _resp_chars = len(str(res.completion))
                     return res
                 except Exception as exc:
-                    if (invocation_count == 1 and use_vision
+                    if (vision_invocation_count == 1 and episode_uses_vision and use_vision
                             and self.llm_provider == "ollama" and self.agent_vision == "auto"
                             and "does not support multimodal" in str(exc).lower()):
                         _exc = exc
@@ -1804,11 +1806,13 @@ class AgentBrowserScanner:
                 on_step_start = _apply_headers_on_step
 
             async def run_with_vision_fallback(current_agent, kwargs, run_kwargs):
-                nonlocal use_vision, browser
+                nonlocal use_vision, browser, episode_uses_vision
+                episode_uses_vision = kwargs["use_vision"]
                 try:
                     return await current_agent.run(**run_kwargs)
                 except _VisionUnsupported:
                     use_vision = False
+                    episode_uses_vision = False
                     agent_kwargs["use_vision"] = False
                     kwargs["use_vision"] = False
                     await note_text_only()
