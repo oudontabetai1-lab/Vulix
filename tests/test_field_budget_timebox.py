@@ -898,10 +898,13 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
                         state.is_truncation_exhausted_ip(ip, "xss"), attempt == 3
                     )
                     self.assertEqual(first.scan_matrix[-1]["check"], "sqli")
-                    self.assertEqual(first.scan_matrix[-1]["status"], "error")
+                    self.assertEqual(first.scan_matrix[-1]["status"], "partial")
                     xss_rows = [r for r in first.scan_matrix if r.get("check") == "xss"]
                     self.assertEqual(len(xss_rows), attempt)
-                    self.assertTrue(all(r["status"] == "error" for r in xss_rows))
+                    # finding 行は陽性証拠として残し、未検出の打ち切り行は partial。
+                    self.assertTrue(
+                        all(r["status"] in {"finding", "partial"} for r in xss_rows)
+                    )
                     self.assertFalse(any(r["status"] in {"tested", "safe", "done"} for r in xss_rows))
                     self.assertEqual(xss_rows[0]["finding_count"], 1)
                     first._save_checkpoint()
@@ -937,7 +940,9 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(state.is_done_ip(ip, "sqli"))
             self.assertEqual(later.calls, 1)
             xss_rows = [r for r in resumed.scan_matrix if r.get("check") == "xss"]
-            self.assertTrue(all(r["status"] == "error" for r in xss_rows))
+            self.assertTrue(
+                all(r["status"] in {"finding", "partial"} for r in xss_rows)
+            )
             sqli_rows = [r for r in resumed.scan_matrix if r.get("check") == "sqli"]
             self.assertEqual(sqli_rows[-1]["status"], "tested")
             self.assertEqual(len(resumed.all_findings), 1)
@@ -950,7 +955,7 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_budget_exceeded_skips_legacy_scanner_and_not_checkpointed(self):
-        """予算超過後は scan_injection_point を持つ legacy 直送 scanner も呼ばず、error 記録・未完。"""
+        """予算超過後は scan_injection_point を持つ legacy 直送 scanner も呼ばず、partial 記録・未完。"""
         class _Legacy(BaseScanner):
             CHECK_TYPE = "file_upload"
 
@@ -978,7 +983,7 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sc.called, 0)
 
     async def test_scan_field_skips_legacy_scanner_when_budget_exhausted(self):
-        """実 _scan_field: 予算 0 近傍で legacy 直送 scanner が呼ばれず error 行が残り checkpoint 未完了。"""
+        """実 _scan_field: 予算 0 近傍で legacy 直送 scanner が呼ばれず partial 行が残り checkpoint 未完了。"""
         from wscan.engine import ScanEngine
 
         class _Legacy(BaseScanner):
@@ -1003,7 +1008,7 @@ class CentralBudgetGateTests(unittest.IsolatedAsyncioTestCase):
         await e._scan_field("http://127.0.0.1:1/u", 0, {"name": "f", "type": "file"})
         self.assertEqual(sc.called, 0)
         rows = [r for r in e.scan_matrix if r["check"] == "file_upload"]
-        self.assertEqual([r["status"] for r in rows], ["error"])
+        self.assertEqual([r["status"] for r in rows], ["partial"])
         ip = e._injection_point_for("http://127.0.0.1:1/u", "f", 0, False, -1, {"name": "f", "type": "file"})
         self.assertFalse(e._checkpoint_is_done_ip(ip, "file_upload"))
 
