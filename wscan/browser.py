@@ -2159,6 +2159,23 @@ class BrowserManager:
         except Exception:
             return False
 
+    async def _wait_for_form_response(self, fields: dict, submission: dict, since: int):
+        """相関した応答本文が揃えば終了し、遅延送信にも最大 200ms を残す。"""
+        deadline = time.monotonic() + 0.2
+        while True:
+            if any(
+                isinstance(pair.get("response", {}).get("body"), str)
+                and all(_request_carries_form_value(
+                    pair, field, payload, submission=submission, since=since
+                ) for field, payload in fields.items())
+                for pair in self.network.pairs
+            ):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(0.01, remaining))
+
     async def _fill_and_submit_form_once(
         self,
         form_index: int,
@@ -2381,8 +2398,9 @@ class BrowserManager:
                     f"document.querySelectorAll('form')[{form_index}].requestSubmit()"
                 )
             await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
-            # SPA の fetch 応答を送達判定に反映する待機は fast でも省略しない。
-            await asyncio.sleep(0.2)
+            await self._wait_for_form_response(
+                {result.get("fieldName") or field_name: payload}, result, net_before_submit
+            )
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
@@ -2585,8 +2603,7 @@ class BrowserManager:
                 )
 
             await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
-            # SPA の fetch 応答を送達判定に反映する待機は fast でも省略しない。
-            await asyncio.sleep(0.2)
+            await self._wait_for_form_response(field_payloads, result, net_before_submit)
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
