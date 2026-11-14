@@ -1339,6 +1339,7 @@ class AgentBrowserScanner:
     def _build_browser_profile(self, profile_type):
         options = {
             "headless": self.headless,
+            "keep_alive": True,
             "disable_security": True,
             "allowed_domains": sorted({
                 parsed.hostname
@@ -1816,7 +1817,8 @@ class AgentBrowserScanner:
                     agent_kwargs["use_vision"] = False
                     kwargs["use_vision"] = False
                     await note_text_only()
-                    # Agent.run の finally はブラウザも閉じるため新規セッションへ戻す。
+                    # 再生成するセッションも先に明示破棄する。
+                    await (browser.kill() if hasattr(browser, "kill") else browser.stop())
                     if agent_browser_arg == "browser_session":
                         browser = BrowserSession(browser_profile=self._build_browser_profile(BrowserProfile))
                     else:
@@ -1888,10 +1890,12 @@ class AgentBrowserScanner:
                     before_auth_cookies = None
                     before_auth_tokens = None
                     if work.role == AgentRole.AUTHENTICATOR:
+                        if hasattr(browser, "start"):
+                            await browser.start()
                         before_auth_cookies = await self._capture_cookies(browser)
                         before_auth_tokens = await self._capture_tokens(browser)
                     episode_agent = Agent(**{agent_browser_arg: browser}, **episode_kwargs)
-                    run_kwargs = {"max_steps": episode_budget}
+                    run_kwargs = {"max_steps": episode_budget, "on_step_end": self._on_step_end}
                     if on_step_start:
                         run_kwargs["on_step_start"] = on_step_start
                     history = await run_with_vision_fallback(episode_agent, episode_kwargs, run_kwargs)
@@ -2183,9 +2187,8 @@ class AgentBrowserScanner:
                 except Exception:
                     pass
                 try:
-                    # BrowserSession は close() を持たない — stop() が正しい。
-                    # Agent task の cancel 時もここを通し、プローブを確実に止める。
-                    await browser.stop()
+                    # 共有セッションの寿命は episode ではなくハーネスが所有する。
+                    await (browser.kill() if hasattr(browser, "kill") else browser.stop())
                 except Exception as exc:
                     console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
 
@@ -2765,6 +2768,18 @@ class AgentBrowserScanner:
             f"Reconnaissance remains the priority; a targeted security check must not stop site mapping."
         )
 
+    async def _on_step_end(self, agent) -> None:
+        """実行結果のある action だけを proposal に対応づけて追記する。"""
+        record = getattr(self, "_pending_step_record", None)
+        history = getattr(getattr(agent, "history", None), "history", [])
+        if not self._harness or record is None or not history:
+            return
+        item = history[-1]
+        actions = getattr(getattr(item, "model_output", None), "action", []) or []
+        results = getattr(item, "result", []) or []
+        self._harness.record_execution(record, actions[:len(results)])
+        self._pending_step_record = None
+
     async def _on_step(self, state, output, step_num: int) -> None:
         """各ステップ実行時のコールバック。"""
         self._step_count = self._episode_offset + step_num
@@ -2819,7 +2834,7 @@ class AgentBrowserScanner:
 
         if self._harness:
             try:
-                self._harness.record_step(
+                self._pending_step_record = self._harness.record_step(
                     episode_id=self._active_episode_id,
                     local_step=self._step_count,
                     url=current_url,
