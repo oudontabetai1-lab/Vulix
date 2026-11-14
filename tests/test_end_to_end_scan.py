@@ -101,10 +101,38 @@ _CHROMIUM_OK = _chromium_available()
 SCAN_TIMEOUT_S = 900  # payload mutation wave + XSS 発火トリガ層/追加フィクスチャ分の余裕
 
 
+async def _run_measured_scan(engine):
+    """時間切れは recall 未計測として、チェック別の累積秒とともに表示する。"""
+    import sys
+    timings = {}
+    for name, scanner in engine.scanners.items():
+        send = scanner.scan_injection_point
+
+        async def measured(*args, _name=name, _send=send, **kwargs):
+            started = time.monotonic()
+            try:
+                return await _send(*args, **kwargs)
+            finally:
+                timings[_name] = timings.get(_name, 0) + time.monotonic() - started
+
+        scanner.scan_injection_point = measured
+    started = time.monotonic()
+    try:
+        await asyncio.wait_for(engine.run(), timeout=SCAN_TIMEOUT_S)
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError(
+            f"SCAN TIMEOUT: budget={SCAN_TIMEOUT_S}s; recall NOT EVALUATED"
+        ) from exc
+    finally:
+        print(f"SCAN elapsed={time.monotonic() - started:.1f}s; "
+              f"check cumulative seconds={timings}", file=sys.stderr, flush=True)
+
+
 async def _run_scan(port: int, output_dir: str):
     engine = ScanEngine(
         f"http://127.0.0.1:{port}/",
         checks=list(CHECKS),
+        concurrency=4,  # 全 ground truth と安全ツインを維持して待機を並列化する
         llm_provider="none",
         headless=True,
         output_dir=output_dir,
@@ -123,7 +151,7 @@ async def _run_scan(port: int, output_dir: str):
         timeout=8,
         navigation_retries=0,
     )
-    await asyncio.wait_for(engine.run(), timeout=SCAN_TIMEOUT_S)
+    await _run_measured_scan(engine)
     return engine
 
 
@@ -152,7 +180,7 @@ async def _run_spa_json_scan(port: int, output_dir: str):
         timeout=8,
         navigation_retries=0,
     )
-    await asyncio.wait_for(engine.run(), timeout=SCAN_TIMEOUT_S)
+    await _run_measured_scan(engine)
     return engine
 
 
@@ -256,6 +284,7 @@ class EndToEndRealisticScanTests(unittest.TestCase):
         # recall ゲートは専用の nightly workflow（.github/workflows/nightly-recall.yml、
         # WSCAN_E2E=1・blocking）で担保する＝recall の release gate を定期実行で確実に回す。
         report = compute_recall(EXPECTED_FINDINGS, self.reported, target_checks=CHECKS)
+        print(report.describe(), flush=True)
         self.assertTrue(
             report.is_complete,
             "RECALL REGRESSION (見逃し発生):\n" + report.describe(),
