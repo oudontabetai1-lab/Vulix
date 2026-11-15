@@ -166,9 +166,11 @@ def redact_url(url):
 class RequestLogger:
     """リクエスト/ペイロードを JSONL ファイルへ追記するロガー。"""
 
-    def __init__(self, output_dir, *, enabled: bool = True):
+    def __init__(self, output_dir, *, enabled: bool = True, configured_proxy: str = ""):
         self.output_dir = Path(output_dir)
         self.enabled = enabled
+        self._configured_proxy: str = ""
+        self.configured_proxy = configured_proxy
         self.http_path = self.output_dir / "http_requests.jsonl"
         self.payload_path = self.output_dir / "payloads.jsonl"
         self.llm_path = self.output_dir / "llm_calls.jsonl"
@@ -186,6 +188,19 @@ class RequestLogger:
         # Import lazily: the ledger schema shares this module's redaction helpers.
         from wscan.probe_recorder import ProbeLedger
         self.probe_ledger = ProbeLedger(self.output_dir, self.output_dir.name, enabled=enabled)
+
+    @property
+    def configured_proxy(self) -> str:
+        return self._configured_proxy
+
+    @configured_proxy.setter
+    def configured_proxy(self, val: str) -> None:
+        from .url_normalize import split_proxy_credentials
+        if val:
+            stripped, _, _ = split_proxy_credentials(val)
+            self._configured_proxy = stripped or ""
+        else:
+            self._configured_proxy = ""
 
     def log_probe(self, *, role, pair=None, transport=None, check="", field="",
                   payload=None, url="", sent=False, actor="", rationale="",
@@ -328,6 +343,9 @@ class RequestLogger:
         """HTTPX event hook; never consume a streaming request body."""
         from wscan.probe_ledger import ProbeRole, Transport
         try:
+            if self.configured_proxy and request.extensions.get("vulix_proxy_applied") is False:
+                self.probe_ledger.manifest.note_gap("proxy_configured_but_bypassed")
+
             if (request.extensions.get("vulix_probe_request_identity") == (self, id(request))
                     and request.extensions.get("vulix_probe_request_open")):
                 return
@@ -444,6 +462,7 @@ class RequestLogger:
             "ts": req.get("timestamp") or time.time(),
             "method": req.get("method", ""),
             "url": _redact_url(req.get("url", "")),
+            "transport_route": req.get("transport_route") or ("proxy" if self.configured_proxy else "direct"),
             "request_headers": _redact_headers(req.get("headers", {})),
             "post_data": _redact_text(post_data),
             "status": resp.get("status"),

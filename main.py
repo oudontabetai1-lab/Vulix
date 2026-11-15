@@ -1975,6 +1975,10 @@ Examples:
         "--headless", action="store_true", default=False,
         help="Run in headless mode (not recommended for recording)",
     )
+    record.add_argument(
+        "--proxy", metavar="URL", default=_CFG.get("proxy", ""),
+        help="HTTP proxy URL for the flow recorder browser",
+    )
 
     manual = sub.add_parser(
         "manual-crawl",
@@ -4091,16 +4095,20 @@ async def run_record(args):
     from wscan.flow_recorder import FlowRecorder
 
     console = Console()
-    recorder = FlowRecorder()
+    proxy = getattr(args, "proxy", "") or ""
+    recorder = FlowRecorder(proxy=proxy)
     console.print(f"\n[bold cyan][FlowRecorder] 記録モード開始[/bold cyan]")
     console.print(f"  対象 URL: [cyan]{args.url}[/cyan]")
     console.print(f"  出力先:   [cyan]{args.output}[/cyan]")
+    if proxy:
+        console.print(f"  Proxy:    [cyan]{proxy}[/cyan]")
     console.print(f"  ブラウザ操作後、Ctrl+C で記録を終了してください。\n")
     try:
         steps = await recorder.record_interactive(
             start_url=args.url,
             output_path=args.output,
             headless=getattr(args, "headless", False),
+            proxy=proxy,
         )
         console.print(f"\n[bold green]✓ {len(steps)} ステップを保存しました:[/bold green] {args.output}")
         # 出力パスに空白（例: "checkout flow.json"）があると、そのまま貼れるコマンドとして
