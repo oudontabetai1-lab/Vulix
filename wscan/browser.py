@@ -43,6 +43,12 @@ def _playwright_proxy_options(proxy: str) -> dict[str, str] | None:
     return options
 
 
+def form_response_is_quiet(*, pending: int, correlated: bool,
+                           last_activity: float, now: float) -> bool:
+    """相関応答があり、未完了要求がなく、50ms 静止していれば終了できる。"""
+    return correlated and pending == 0 and now - last_activity >= 0.05
+
+
 def _request_carries_form_value(pair: dict, field: str, payload: str, *, submission=None, since=None) -> bool:
     request = (pair or {}).get("request") or {}
     if submission is not None:
@@ -2160,18 +2166,45 @@ class BrowserManager:
             return False
 
     async def _wait_for_form_response(self, fields: dict, submission: dict, since: int):
-        """相関した応答本文が揃えば終了し、遅延送信にも最大 200ms を残す。"""
+        """送信後の通信が静止するまで、最大 200ms 観測する。"""
         deadline = time.monotonic() + 0.2
+        last_activity = time.monotonic()
+        cursor = 0
+        awaiting_body = []
+        correlated = False
+        requests_seen = since
         while True:
-            if any(
-                isinstance(pair.get("response", {}).get("body"), str)
-                and all(_request_carries_form_value(
+            now = time.monotonic()
+            # 初回だけ既存 pair を選別し、以後は追記分と本文未取得分だけを調べる。
+            for pair in self.network.pairs[cursor:]:
+                if pair.get("request", {}).get("_capture_sequence", 0) > since:
+                    awaiting_body.append(pair)
+                    last_activity = now
+            cursor = len(self.network.pairs)
+            request_count = getattr(self.network, "_requests_since_clear", 0)
+            if request_count != requests_seen:
+                last_activity = now
+                requests_seen = request_count
+            pending = sum(
+                req.get("_capture_sequence", 0) > since
+                for req in getattr(self.network, "_pending", {}).values()
+            )
+            incomplete = []
+            for pair in awaiting_body:
+                if not isinstance(pair.get("response", {}).get("body"), str):
+                    incomplete.append(pair)
+                    continue
+                last_activity = now
+                correlated = correlated or all(_request_carries_form_value(
                     pair, field, payload, submission=submission, since=since
                 ) for field, payload in fields.items())
-                for pair in self.network.pairs
+            awaiting_body = incomplete
+            if form_response_is_quiet(
+                pending=pending + len(incomplete), correlated=correlated,
+                last_activity=last_activity, now=now,
             ):
                 return
-            remaining = deadline - time.monotonic()
+            remaining = deadline - now
             if remaining <= 0:
                 return
             await asyncio.sleep(min(0.01, remaining))
