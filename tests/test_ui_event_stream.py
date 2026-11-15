@@ -600,6 +600,23 @@ class EventStreamNodeUnitTests(unittest.TestCase):
                 self.assertEqual(result["final"]["serverInstanceId"], "srv-a")
                 self.assertEqual(result["final"]["scanRunId"], "run-1")
 
+    def test_projection_fixtures_state_gate_synthetic_scenarios(self):
+        """Replay synthetic partial, failed, agent unconfirmed, and reconnect event streams."""
+        expectations = {
+            "partial_stream.json": (4, 4),
+            "failed_stream.json": (2, 3),
+            "agent_unconfirmed_stream.json": (3, 4),
+            "reconnect_gap_stream.json": (2, 2),
+        }
+        for name, (last_seq, event_count) in expectations.items():
+            with self.subTest(fixture=name):
+                result, fixture = _run_projection_fixture(name)
+                self.assertEqual(result["actions"], fixture["expected_actions"])
+                for key in ("serverInstanceId", "scanRunId", "lastEventSequence", "eventCount"):
+                    self.assertEqual(result["final"][key], fixture["expected_final"][key])
+                self.assertEqual(result["final"]["lastEventSequence"], last_seq)
+                self.assertEqual(result["final"]["eventCount"], event_count)
+
     def test_event_stream_dispose_cancels_timer_raf_and_late_callbacks(self):
         """dispose() must cancel the reconnect timer/RAF, clear the queue, and ignore late socket callbacks."""
         script = """
@@ -1077,4 +1094,185 @@ class EventStreamChromiumIntegrationTests(unittest.TestCase):
             self.assertFalse(result["pendingSet"])
             self.assertIn("WebSocket未接続", result["statusText"])
 
+            browser.close()
+
+    def test_browser_synthetic_state_gate_partial_and_failed_states_never_show_clean_negative(self):
+        """Synthetic partial and failed event streams must display explicit non-pass states and never false clean-negative."""
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            for width in (768, 1280):
+                context = browser.new_context(viewport={"width": width, "height": 900})
+                page = context.new_page()
+                page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+                page.wait_for_function("() => window._eventStream && window._eventStream.connected")
+
+                # Dispose active client from live test server so late frames/reconnects do not overwrite synthetic events
+                page.evaluate("() => window._eventStream.dispose()")
+
+                # 1. Partial / aborted stream
+                page.evaluate("""() => {
+                    resetLiveScanState();
+                    handleEvent({
+                        type: 'scan_complete',
+                        data: {
+                            status: 'aborted',
+                            aborted: true,
+                            total_findings: 1,
+                            report_path: '/tmp/output/report.html',
+                            findings: [{
+                                id: 'f_partial_live_01',
+                                check_type: 'xss',
+                                severity: 'high',
+                                url: 'http://target.local/q',
+                                field_name: 'q',
+                                evidence: 'reflected probe before abort',
+                                verified: true,
+                                verification_state: 'reproduced',
+                            }],
+                        },
+                        timestamp: Date.now() / 1000,
+                    });
+                }""")
+                page.wait_for_function("() => state.status === 'aborted' && state.scanDone")
+
+                # Verify visible status indicators
+                status_text = page.locator("#statusText").inner_text()
+                remain_text = page.locator("#statRemain").inner_text()
+                self.assertIn("aborted", status_text.lower())
+                self.assertEqual(remain_text, "中断")
+
+                # Invariant: Must NOT show false completed / clean-negative
+                self.assertNotIn("完了", status_text)
+                no_findings_msg = page.locator("#findingsPanel .no-findings-msg")
+                if no_findings_msg.count() > 0:
+                    self.assertNotIn("No vulnerabilities detected.", no_findings_msg.inner_text())
+
+                # 2. Failed / error stream
+                page.evaluate("""() => {
+                    resetLiveScanState();
+                    applyScanSnapshot({
+                        server_id: 'srv-live',
+                        run_id: 'run-err',
+                        sequence: 1,
+                        timestamp: Date.now() / 1000,
+                        data: {
+                            status: 'error',
+                            status_message: 'ターゲット到達不能 (Connection refused: target host offline)',
+                            findings: [],
+                        },
+                    });
+                }""")
+                page.wait_for_function("() => state.status === 'error'")
+
+                err_status = page.locator("#statusText").inner_text()
+                self.assertIn("到達不能", err_status)
+                self.assertNotIn("完了", err_status)
+                self.assertNotIn("Scan complete", err_status)
+
+                context.close()
+            browser.close()
+
+    def test_browser_synthetic_agent_unconfirmed_provenance_label(self):
+        """Synthetic agent hypothesis finding must receive assumed verification and unconfirmed provenance badge.
+
+        Note: Synthetic fixture verifies UI presentation contract and does not replace real-provider QA.
+        """
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            for width in (768, 1280):
+                context = browser.new_context(viewport={"width": width, "height": 900})
+                page = context.new_page()
+                page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+                page.wait_for_function("() => window._eventStream && window._eventStream.connected")
+
+                # Dispose active client from live test server so late frames/reconnects do not overwrite synthetic events
+                page.evaluate("() => window._eventStream.dispose()")
+
+                # Dispatch synthetic agent unconfirmed finding via event dispatcher
+                page.evaluate("""() => {
+                    resetLiveScanState();
+                    dispatchLegacyEvent({
+                        type: 'finding',
+                        data: {
+                            id: 'f_agent_hyp_live_01',
+                            check_type: 'sqli',
+                            severity: 'high',
+                            confidence: 'tentative',
+                            url: 'http://target.local/api/search',
+                            field_name: 'query',
+                            source: 'agent',
+                            agent_verified: false,
+                            verified: false,
+                            verification_state: 'assumed',
+                            evidence: 'LLM heuristic anomaly hypothesis (unconfirmed)',
+                        },
+                        timestamp: Date.now() / 1000,
+                    });
+                }""")
+
+                page.wait_for_function("() => document.querySelectorAll('#findingsPanel .finding-card').length >= 1")
+
+                info = page.evaluate("""() => {
+                    const card = document.querySelector('#findingsPanel .finding-card');
+                    if (!card) return null;
+                    const badge = card.querySelector('.fc-verify-badge');
+                    return {
+                        hasBadge: Boolean(badge),
+                        isAssumed: badge ? badge.classList.contains('fc-assumed') : false,
+                        isVerified: badge ? badge.classList.contains('fc-verified') : false,
+                        badgeText: badge ? badge.textContent.toLowerCase() : '',
+                        cardConfirmed: card.getAttribute('data-confirmed'),
+                        confirmedCount: state.confirmedCount,
+                        hypothesisCount: state.hypothesisCount,
+                    };
+                }""")
+                self.assertIsNotNone(info)
+                self.assertTrue(info["isAssumed"])
+                self.assertFalse(info["isVerified"])
+                self.assertIn("assumed", info["badgeText"])
+                self.assertEqual(info["cardConfirmed"], "false")
+                self.assertEqual(info["confirmedCount"], 0)
+                self.assertEqual(info["hypothesisCount"], 1)
+
+                context.close()
+            browser.close()
+
+    def test_browser_ws_disconnect_and_reconnect_lifecycle(self):
+        """Verify visible UI indicators transition cleanly across WS disconnect and reconnect."""
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            for width in (768, 1280):
+                context = browser.new_context(viewport={"width": width, "height": 900})
+                page = context.new_page()
+                page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
+                page.wait_for_function("() => window._eventStream && window._eventStream.connected")
+
+                # Connected baseline
+                ws_badge = page.locator("#wsBadge")
+                self.assertIn("Connected", ws_badge.inner_text())
+                self.assertTrue(ws_badge.evaluate("el => el.classList.contains('connected')"))
+
+                # Close socket to trigger real disconnect event
+                page.evaluate("() => state.ws.close(1000)")
+                page.wait_for_function("() => !window._eventStream.connected")
+
+                self.assertIn("Disconnected", ws_badge.inner_text())
+                self.assertFalse(ws_badge.evaluate("el => el.classList.contains('connected')"))
+                self.assertIn("Disconnected", page.locator("#statusText").inner_text())
+
+                # Invariant: Disconnected state must not show completed or false clean-negative
+                self.assertNotIn("完了", page.locator("#statusText").inner_text())
+
+                # EventStreamClient automatically reconnects with standard delay or explicit reconnect
+                page.wait_for_function("() => window._eventStream.connected", timeout=6000)
+                self.assertIn("Connected", ws_badge.inner_text())
+                self.assertTrue(ws_badge.evaluate("el => el.classList.contains('connected')"))
+
+                context.close()
             browser.close()

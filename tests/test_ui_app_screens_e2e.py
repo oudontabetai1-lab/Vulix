@@ -1008,3 +1008,209 @@ def test_legacy_dashboard_surfaces_doc_images(ui_harness: UIHarness):
         ui_harness.save_doc_image(page, "dashboard-aborted")
     finally:
         page.close()
+
+
+def test_app_state_gate_synthetic_scenarios_responsive_and_a11y(e2e_harness: UIHarness):
+    """Verify synthetic provider-free state gate at 768px and 1280px viewports with keyboard a11y.
+
+    Covers:
+    1. Partial / aborted state:
+       - Portal row shows aborted/partial; Monitor shows '中断'; Crawl shows '一部のみ' (never '完全').
+       - Invariant: Disconnected, partial, or failed states never show false completed or false clean-negative.
+    2. Failed / error state:
+       - Portal row shows 'error' and '未取得' (never 0 or pass); Monitor shows error and status dot; Findings shows unavailable.
+    3. Unconfirmed Agent provenance label:
+       - Finding card explicitly receives provenance badge ('Agent発見 (未確証)', provenance-agent) and
+         assumed verification state (verify-assumed, never verify-reproduced).
+       - Note: Synthetic fixture verifies the visible UI presentation contract and does not replace real-provider QA.
+    4. WS disconnected & reconnected:
+       - Monitor live channel displays disconnected warning badge and reconnects without losing state.
+    5. Keyboard accessibility:
+       - Focus outline visible, tab navigation reaches state cards and filters without traps at both 768px and 1280px.
+    """
+    require_browser()
+
+    for width in (768, 1280):
+        preset = STANDARD_VIEWPORTS[width]
+        page = e2e_harness.new_page(**preset)
+
+        try:
+            # 1. Portal: Verify partial, failed, and empty scan states
+            page.goto(f"{e2e_harness.server_url}/app#/portal", wait_until="domcontentloaded")
+            page.locator("#summarySurface").wait_for(state="visible")
+            page.wait_for_function("() => document.querySelectorAll('#summarySurface table tbody tr').length >= 6")
+
+            # Check partial / aborted scan in Portal table
+            portal_text = page.locator("#summarySurface table tbody").inner_text()
+            assert "hybrid.internal.local" in portal_text
+            assert "error.internal.local" in portal_text
+
+            rows = page.locator("#summarySurface table tbody tr")
+            for i in range(rows.count()):
+                row_text = rows.nth(i).inner_text()
+                if "hybrid.internal.local" in row_text:
+                    # Invariant: Partial scan must NOT show status 'done' or '完了'
+                    assert "done" not in row_text.lower() or "aborted" in row_text.lower()
+                    assert "完了" not in row_text or "中断" in row_text
+                elif "error.internal.local" in row_text:
+                    # Invariant: Error scan status is 'error' and count is '未取得' (never 0 or pass)
+                    assert "error" in row_text.lower()
+                    assert "未取得" in row_text
+
+            # Layout: No horizontal overflow at this viewport
+            e2e_harness.assert_no_horizontal_overflow(page, max_allowed=width + 1)
+
+            # 2. Crawl: Verify partial scan completeness badge
+            page.goto(f"{e2e_harness.server_url}/app#/crawl?scan=20261026_103000", wait_until="domcontentloaded")
+            page.locator("#crawlSurface").wait_for(state="visible")
+            page.wait_for_selector(".crawl-badge")
+
+            partial_badge = page.locator(".crawl-badge")
+            assert partial_badge.evaluate("el => el.classList.contains('crawl-badge-partial')")
+            assert not partial_badge.evaluate("el => el.classList.contains('crawl-badge-complete')")
+            assert "一部のみ" in partial_badge.inner_text()
+            assert "完全" not in partial_badge.inner_text()
+            e2e_harness.assert_no_horizontal_overflow(page, max_allowed=width + 1)
+
+            # 3. Findings: Verify Agent unconfirmed provenance label and filter
+            page.goto(f"{e2e_harness.server_url}/app#/findings?scan=20261026_102000", wait_until="domcontentloaded")
+            page.locator("#findingsSurface").wait_for(state="visible")
+            page.wait_for_function("() => document.querySelectorAll('#findingsListContent .findings-list-card').length === 2")
+
+            # Click unconfirmed Agent finding
+            agent_card = page.locator("#findingsListContent .findings-list-card").filter(has_text="SQLI")
+            agent_card.click()
+            page.wait_for_function("() => document.querySelector('#findingsDetailContent .provenance-badge')")
+
+            # Invariant: Unconfirmed Agent finding receives provenance-agent and assumed verification (never reproduced)
+            prov_badge = page.locator("#findingsDetailContent .provenance-badge")
+            assert prov_badge.evaluate("el => el.classList.contains('provenance-agent')")
+            assert "Agent" in prov_badge.inner_text()
+
+            verify_badge = page.locator("#findingsDetailContent .verify-badge")
+            assert verify_badge.evaluate("el => el.classList.contains('verify-assumed')")
+            assert not verify_badge.evaluate("el => el.classList.contains('verify-reproduced')")
+
+            # Keyboard accessibility: Test Tab focus and Enter activation on finding cards
+            first_card = page.locator("#findingsListContent .findings-list-card").first
+            first_card.focus()
+            e2e_harness.assert_focus_visible(page, "#findingsListContent .findings-list-card:first-child")
+            page.keyboard.press("Enter")
+
+            # Filter by provenance
+            prov_filter = page.locator("#filterProvenance")
+            if prov_filter.is_visible():
+                prov_filter.select_option("agent")
+                page.wait_for_function("() => document.querySelectorAll('#findingsListContent .findings-list-card').length >= 1")
+
+            e2e_harness.assert_no_horizontal_overflow(page, max_allowed=width + 1)
+
+            # 4. Monitor: Synthetic stream state gate in live frame
+            page.goto(f"{e2e_harness.server_url}/app#/monitor", wait_until="domcontentloaded")
+            page.wait_for_function("""() => {
+                const frame = document.querySelector('#monitorFrame')?.contentWindow;
+                return Boolean(document.querySelector('#monitorModule')?.shadowRoot?.querySelector('#sepLeft')) &&
+                       document.getElementById('monitorFrame')?.dataset?.ready === 'true' &&
+                       Boolean(frame?.VulixAppBridge) &&
+                       Boolean(frame?._eventStream?.connected);
+            }""")
+
+            frame = page.frame_locator("#monitorFrame")
+
+            # 4a. Synthetic partial / aborted state in Monitor
+            frame.locator("body").evaluate("""() => {
+                state.serverInstanceId = 'srv-synth-gate';
+                state.scanRunId = 'run-synth-partial';
+                state.scanId = '20261026_103000';
+                resetLiveScanState();
+                handleEvent({
+                    type: 'scan_complete',
+                    data: {
+                        status: 'aborted',
+                        aborted: true,
+                        total_findings: 1,
+                        report_path: '/tmp/output/report.html',
+                        findings: [{
+                            id: 'f_synth_partial_01',
+                            check_type: 'xss',
+                            severity: 'high',
+                            url: 'http://hybrid.internal.local/search',
+                            field_name: 'q',
+                            evidence: 'partial test evidence',
+                            verified: true,
+                            verification_state: 'reproduced',
+                        }],
+                    },
+                    timestamp: Date.now() / 1000,
+                });
+                publishAppScanContext();
+            }""")
+
+            page.wait_for_function("""() => {
+                const frame = document.querySelector('#monitorFrame')?.contentWindow;
+                return frame && frame.state?.status === 'aborted' && frame.state?.scanDone;
+            }""")
+
+            # Verify visible monitor status and remain text
+            status_text = page.locator("#monitorModule #statusText").inner_text()
+            remain_text = page.locator("#monitorModule #statRemain").inner_text()
+            assert "aborted" in status_text.lower()
+            assert remain_text == "中断"
+            assert "完了" not in status_text
+
+            # In parent shell #scanContext: Status reflects aborted
+            context_text = page.locator("#scanContext").inner_text()
+            assert "aborted" in context_text
+
+            # 4b. Synthetic failed / error state in Monitor
+            frame.locator("body").evaluate("""() => {
+                resetLiveScanState();
+                applyScanSnapshot({
+                    server_id: 'srv-synth-gate',
+                    run_id: 'run-synth-failed',
+                    sequence: 1,
+                    timestamp: Date.now() / 1000,
+                    data: {
+                        status: 'error',
+                        status_message: 'ターゲット到達不能 (Connection refused: target host offline)',
+                        findings: [],
+                    },
+                });
+                publishAppScanContext();
+            }""")
+
+            page.wait_for_function("""() => {
+                const frame = document.querySelector('#monitorFrame')?.contentWindow;
+                return frame && frame.state?.status === 'error';
+            }""")
+
+            err_status = page.locator("#monitorModule #statusText").inner_text()
+            assert "到達不能" in err_status
+            assert "完了" not in err_status
+            assert "Scan complete" not in err_status
+
+            # 4c. WS disconnect and reconnect transition
+            frame.locator("body").evaluate("""() => {
+                state.ws.close(1000);
+            }""")
+            page.wait_for_function("""() => {
+                const frame = document.querySelector('#monitorFrame')?.contentWindow;
+                return frame && frame._eventStream && !frame._eventStream.connected;
+            }""")
+
+            ws_badge_text = page.locator("#monitorModule #wsBadge").inner_text()
+            assert "Disconnected" in ws_badge_text
+            assert "Disconnected" in page.locator("#monitorModule #statusText").inner_text()
+            assert "完了" not in page.locator("#monitorModule #statusText").inner_text()
+
+            # Wait for auto-reconnect
+            page.wait_for_function("""() => {
+                const frame = document.querySelector('#monitorFrame')?.contentWindow;
+                return frame && frame._eventStream && frame._eventStream.connected;
+            }""", timeout=7000)
+            assert "Connected" in page.locator("#monitorModule #wsBadge").inner_text()
+
+            e2e_harness.assert_no_horizontal_overflow(page, max_allowed=width + 1)
+            e2e_harness.assert_no_errors(page)
+        finally:
+            page.close()

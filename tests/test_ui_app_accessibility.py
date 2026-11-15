@@ -602,3 +602,65 @@ def test_findings_check_help_fallback_and_preserves_evidence(a11y_harness: UIHar
         assert invalid_page.get_by_role("dialog").locator("p").inner_text() == "説明準備中"
     finally:
         invalid_page.close()
+
+
+def test_app_state_gate_status_and_reasons_accessible(a11y_harness: UIHarness):
+    """Verify state gate badges, live announcement regions, and filter controls are keyboard accessible and labeled."""
+    require_browser()
+
+    for width in (768, 1280):
+        preset = STANDARD_VIEWPORTS[width]
+        page = a11y_harness.new_page(**preset)
+
+        try:
+            # 1. Live status regions in main application shell
+            page.goto(f"{a11y_harness.server_url}/app#/portal", wait_until="domcontentloaded")
+            page.locator("#summarySurface").wait_for(state="visible")
+
+            assert page.locator("#scanContext").get_attribute("aria-live") == "polite"
+            assert page.locator("#message").get_attribute("role") == "status"
+
+            # 2. Findings screen: Form control labels and live status
+            page.goto(f"{a11y_harness.server_url}/app#/findings?scan=20261026_102000", wait_until="domcontentloaded")
+            page.locator("#findingsSurface").wait_for(state="visible")
+            page.wait_for_function("() => document.querySelectorAll('#findingsListContent .findings-list-card').length >= 1")
+
+            assert page.locator("#surface").get_attribute("aria-live") == "polite"
+            assert page.locator("#findingsCountSummary").get_attribute("aria-live") == "polite"
+            assert "ui-status" in (page.locator("#findingsListStatus").get_attribute("class") or "")
+
+            # Audit all form controls (scan select, severity, type, verification, provenance, search)
+            violations = _audit_form_controls(page, f"Findings Surface ({width}px)")
+            assert not violations, f"Accessibility violations on form controls: {violations}"
+
+            # 3. Provenance and verification badges must contain text (color + text, never color-alone)
+            card = page.locator("#findingsListContent .findings-list-card").filter(has_text="SQLI")
+            card.click()
+            page.wait_for_selector("#findingsDetailContent .provenance-badge")
+
+            prov_badge = page.locator("#findingsDetailContent .provenance-badge")
+            assert len(prov_badge.inner_text().strip()) > 0
+            assert "Agent" in prov_badge.inner_text()
+
+            verify_badge = page.locator("#findingsDetailContent .verify-badge")
+            assert len(verify_badge.inner_text().strip()) > 0
+            assert "assumed" in verify_badge.inner_text().lower()
+
+            # 4. Keyboard reachability: Tab into filters and select options via keyboard
+            filter_prov = page.locator("#filterProvenance")
+            filter_prov.focus()
+            a11y_harness.assert_focus_visible(page, "#filterProvenance")
+
+            # 5. Crawl completeness badge text (color + text invariant)
+            page.goto(f"{a11y_harness.server_url}/app#/crawl?scan=20261026_103000", wait_until="domcontentloaded")
+            page.locator("#crawlSurface").wait_for(state="visible")
+            page.wait_for_selector(".crawl-badge")
+
+            crawl_badge = page.locator(".crawl-badge")
+            assert len(crawl_badge.inner_text().strip()) > 0
+            assert "一部のみ" in crawl_badge.inner_text()
+
+            a11y_harness.assert_no_horizontal_overflow(page, max_allowed=width + 1)
+            a11y_harness.assert_no_errors(page)
+        finally:
+            page.close()

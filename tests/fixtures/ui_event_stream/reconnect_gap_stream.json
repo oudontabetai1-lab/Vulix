@@ -1,0 +1,41 @@
+{
+  "description": "合成再接続ツイン: sequence gap 検出により再接続（reconnect_on_gap）がトリガーされ、最新スナップショットで復帰する。",
+  "state": {
+    "serverInstanceId": "srv-state-gate",
+    "scanRunId": "target-run-reconnect",
+    "scanId": "scan-reconnect",
+    "lastEventSequence": 2,
+    "eventCount": 2
+  },
+  "events": [
+    {
+      "type": "page_start",
+      "server_id": "srv-state-gate",
+      "run_id": "target-run-reconnect",
+      "sequence": 4,
+      "data": {
+        "url": "http://target.internal.local/gap"
+      }
+    },
+    {
+      "type": "scan_snapshot",
+      "server_id": "srv-state-gate",
+      "run_id": "target-run-reconnect",
+      "sequence": 4,
+      "data": {
+        "status": "scanning",
+        "findings": []
+      }
+    }
+  ],
+  "expected_actions": [
+    "reconnect_on_gap",
+    "apply_snapshot"
+  ],
+  "expected_final": {
+    "serverInstanceId": "srv-state-gate",
+    "scanRunId": "target-run-reconnect",
+    "lastEventSequence": 2,
+    "eventCount": 2
+  }
+}
