@@ -19,6 +19,150 @@
   const setupSurface = document.getElementById('setupSurface');
   const title = document.getElementById('viewTitle');
   const context = document.getElementById('scanContext');
+  let currentScanStatus = null;
+
+  function redactDisplayUrl(raw) {
+    if (!raw || typeof raw !== 'string') return raw || '';
+    const str = raw.trim();
+    if (!str) return '';
+    let url = str.replace(/\b(https?:\/\/)[^\s/?#@]+(?::[^\s/?#@]*)?@/gi, '$1<redacted>@');
+    const sensitive = /(?:^key$|(?:api|access|auth)[_-]?key|password|passwd|pwd|secret|token|auth[_-]?token|cookie|session[_-]?id|csrf|xsrf|credentials?|signature|samlresponse|(?:^|[._-])(?:sid|sessid|jwt|sig|jsessionid|phpsessid|bearer)(?:$|[._-])|(?:^|[._-])(?:auth|authentication|authorization|session|otp|ticket)$)/i;
+    url = url.replace(/([?&#])([^=&#]+)=([^&#]*)/g, (match, sep, k, v) => {
+      if (sensitive.test(k)) {
+        return sep + k + '=<redacted>';
+      }
+      return match;
+    });
+    return url;
+  }
+
+  function renderScanStatusBar(state) {
+    if (!state || (!state.scan_id && !state.scanId && !state.status)) {
+      currentScanStatus = null;
+      if (typeof context.replaceChildren === 'function') context.replaceChildren();
+      else context.innerHTML = '';
+      context.textContent = '';
+      return;
+    }
+    currentScanStatus = Object.assign({}, currentScanStatus || {}, state);
+    const scanId = state.scan_id || state.scanId || (currentScanStatus && (currentScanStatus.scan_id || currentScanStatus.scanId)) || '';
+    const rawStatus = (state.status || (currentScanStatus && currentScanStatus.status) || 'idle').toLowerCase();
+
+    // Map execution status: idle | running | paused | done | aborted | error | partial | unknown
+    let execState = 'idle';
+    if (/running|scanning|active/.test(rawStatus)) execState = 'running';
+    else if (/paused/.test(rawStatus)) execState = 'paused';
+    else if (/done|completed|success/.test(rawStatus)) execState = 'done';
+    else if (/aborted|cancelled|canceled/.test(rawStatus)) execState = 'aborted';
+    else if (/error|failed/.test(rawStatus)) execState = 'error';
+    else if (/partial/.test(rawStatus)) execState = 'partial';
+    else if (/unknown/.test(rawStatus)) execState = 'unknown';
+    else if (rawStatus) execState = rawStatus;
+
+    const mode = state.mode || (currentScanStatus && currentScanStatus.mode) || 'normal';
+    const rawTarget = state.target || state.target_url || (currentScanStatus && (currentScanStatus.target || currentScanStatus.target_url)) || '';
+    const safeTarget = rawTarget ? redactDisplayUrl(rawTarget) : '';
+    const phase = state.phase || (currentScanStatus && currentScanStatus.phase) || '';
+
+    // Connection state: connected | reconnecting | disconnected
+    let connState = state.connection || 'connected';
+    if (monitor && monitor.contentWindow) {
+      try {
+        const cw = monitor.contentWindow;
+        if (cw._eventStream) {
+          if (cw._eventStream.connected) connState = 'connected';
+          else if (cw._eventStream.connecting) connState = 'reconnecting';
+          else connState = 'disconnected';
+        } else if (cw.state && cw.state.ws) {
+          const rs = cw.state.ws.readyState;
+          if (rs === 1) connState = 'connected';
+          else if (rs === 0) connState = 'reconnecting';
+          else connState = 'disconnected';
+        }
+      } catch (_) {}
+    }
+
+    // Freshness: fresh | stale | snapshot
+    let freshness = state.freshness;
+    if (!freshness) {
+      if (['done', 'aborted', 'error', 'partial'].includes(execState)) {
+        freshness = 'snapshot';
+      } else if (connState === 'connected') {
+        freshness = 'fresh';
+      } else {
+        freshness = 'stale';
+      }
+    }
+
+    const freshnessLabel = freshness === 'fresh' ? 'fresh' : (freshness === 'snapshot' ? 'snapshot' : 'stale');
+
+    if (typeof context.replaceChildren === 'function') context.replaceChildren();
+    else context.innerHTML = '';
+
+    const bar = document.createElement('span');
+    bar.className = 'scan-status-bar';
+    bar.setAttribute('data-testid', 'scan-status-bar');
+
+    // Main status text: Scan <id> · <status> (preserves exact substrings for tests)
+    const main = document.createElement('span');
+    main.className = 'scan-status-main';
+    main.textContent = `Scan ${scanId || '—'} · ${rawStatus || 'idle'}`;
+
+    // Meta items
+    const meta = document.createElement('span');
+    meta.className = 'scan-status-meta';
+
+    // Mode badge
+    const modeBadge = document.createElement('span');
+    modeBadge.className = 'scan-mode-badge';
+    modeBadge.dataset.mode = mode;
+    modeBadge.textContent = `[${mode}]`;
+    meta.appendChild(modeBadge);
+
+    // Target URL (redacted)
+    if (safeTarget) {
+      const targetEl = document.createElement('span');
+      targetEl.className = 'scan-target-url';
+      targetEl.textContent = safeTarget;
+      targetEl.title = safeTarget;
+      meta.appendChild(targetEl);
+    }
+
+    // Phase badge
+    if (phase) {
+      const phaseBadge = document.createElement('span');
+      phaseBadge.className = 'scan-phase-badge';
+      phaseBadge.dataset.phase = phase;
+      phaseBadge.textContent = `phase: ${phase}`;
+      meta.appendChild(phaseBadge);
+    }
+
+    // Connection badge
+    const connBadge = document.createElement('span');
+    connBadge.className = `scan-conn-badge scan-conn-${connState}`;
+    connBadge.dataset.conn = connState;
+    connBadge.textContent = `● ${connState}`;
+    meta.appendChild(connBadge);
+
+    // Freshness badge
+    const freshBadge = document.createElement('span');
+    freshBadge.className = `scan-freshness-badge scan-freshness-${freshness}`;
+    freshBadge.dataset.freshness = freshness;
+    freshBadge.textContent = freshnessLabel;
+    meta.appendChild(freshBadge);
+
+    // Help button for status_execution_vs_connection
+    const checkHelp = global.VulixCheckHelp || (typeof require === 'function' && typeof process !== 'undefined' ? require(process.cwd() + '/templates/ui/check-help.js') : null);
+    if (checkHelp && typeof checkHelp.createHelpButton === 'function') {
+      const helpBtn = checkHelp.createHelpButton(document, document.body, 'status_execution_vs_connection', 'ja');
+      meta.appendChild(helpBtn);
+    }
+
+    bar.appendChild(main);
+    bar.appendChild(meta);
+    context.appendChild(bar);
+  }
+
   let activeScope = null;
   let contextHandler = null;
   // マウント世代トークン: ナビゲーションごとに加算する。iframe の load 完了コールバックは
@@ -108,7 +252,7 @@
       monitor.classList.toggle('transport-owner', surface === 'monitor');
       monitor.setAttribute('aria-hidden', String(surface === 'monitor'));
       const current = bridge.getContext();
-      context.textContent = `Scan ${current.scan_id || '—'} · ${current.status || 'status unavailable'}`;
+      renderScanStatusBar(current);
       if (onReady) onReady(bridge, current);
       else {
         monitor.hidden = false;
@@ -136,9 +280,10 @@
   });
   summaryModules.forEach((module) => registry.register(module));
 
-  registry.register({ id: 'setup', title: 'Scan Setup', route: '#/setup', mount() {
+  registry.register({ id: 'setup', title: 'Scan Setup', route: '#/setup', mount(route) {
     title.textContent = 'Scan Setup';
-    context.textContent = '';
+    if (route && route.scanId) renderScanStatusBar({ scan_id: route.scanId, status: 'idle' });
+    else renderScanStatusBar(null);
     clearMessage();
     cancelPendingMonitorLoad();
     stopContextSubscription();
@@ -195,7 +340,7 @@
           monitor.setAttribute('tabindex', '-1');
           monitor.hidden = true;
           const current = bridge.getContext();
-          context.textContent = `Scan ${current.scan_id || '—'} · ${current.status || 'status unavailable'}`;
+          if (current && current.scan_id) renderScanStatusBar(current);
         });
         return;
       }
@@ -243,7 +388,7 @@
                 if (btn) btn.disabled = false;
                 clearSetupError();
                 if (scanId) {
-                  context.textContent = `Scan ${scanId} · scanning`;
+                  renderScanStatusBar({ scan_id: scanId, status: 'scanning', freshness: 'fresh' });
                 }
                 global.location.hash = '#/monitor';
               },
@@ -306,7 +451,7 @@
             monitor.setAttribute('tabindex', '-1');
             monitor.hidden = true;
             const current = bridge.getContext();
-            context.textContent = `Scan ${current.scan_id || '—'} · ${current.status || 'status unavailable'}`;
+            if (current && current.scan_id) renderScanStatusBar(current);
           });
         }
       });
@@ -375,7 +520,7 @@
       if (!data || data.type !== 'vulix:scan-context' || !data.context ||
           typeof data.context.status !== 'string') return;
       const current = data.context;
-      context.textContent = `Scan ${current.scan_id || '—'} · ${current.status}`;
+      renderScanStatusBar(current);
       applySelectedContext(current);
     };
     global.addEventListener('message', contextHandler);
@@ -411,9 +556,10 @@
     monitor.hidden = true;
   } });
 
-  registry.register({ id: 'agent-skills', title: 'Agent Skills', route: '#/agent-skills', mount() {
+  registry.register({ id: 'agent-skills', title: 'Agent Skills', route: '#/agent-skills', mount(route) {
     title.textContent = 'Agent Skills';
-    context.textContent = '';
+    if (route && route.scanId) renderScanStatusBar({ scan_id: route.scanId, status: 'idle' });
+    else renderScanStatusBar(null);
     clearMessage();
     cancelPendingMonitorLoad();
     stopContextSubscription();
@@ -540,16 +686,16 @@
     const params = new URLSearchParams(parts[1] || '');
 
     const allowed = {
-      '/portal': [],
+      '/portal': ['scan'],
       '/history': [],
       '/audit': [],
-      '/setup': [],
+      '/setup': ['scan'],
       '/monitor': ['scan'],
       '/findings': ['scan', 'finding', 'url', 'search', 'severity', 'checkType', 'verification', 'provenance'],
       '/crawl': ['scan', 'node', 'url', 'mode', 'kind', 'search'],
       '/traffic': ['scan', 'entry', 'url', 'method', 'status', 'source', 'type', 'search'],
-      '/agent-skills': [],
-      '/settings': [],
+      '/agent-skills': ['scan'],
+      '/settings': ['scan'],
     }[route] || [];
 
     for (const key of params.keys()) {
@@ -559,7 +705,7 @@
 
     const scanId = params.get('scan');
     if (scanId !== null && (!scanId || scanId.length > 128 || !/^[A-Za-z0-9._-]+$/.test(scanId))) return null;
-    if (scanId !== null && route !== '/monitor' && route !== '/findings' && route !== '/crawl' && route !== '/traffic') return null;
+    if (scanId !== null && !['/monitor', '/findings', '/crawl', '/traffic', '/portal', '/setup', '/settings', '/agent-skills'].includes(route)) return null;
 
     const findingId = params.get('finding');
     if (findingId !== null && (!findingId || findingId.length > 512)) return null;
@@ -655,6 +801,11 @@
     try {
       if (registry.getActiveId() === route.id) registry.destroy();
       registry.transition(route.id, route);
+      if (route.scanId) {
+        renderScanStatusBar(Object.assign({ scan_id: route.scanId, status: 'snapshot', freshness: 'snapshot' }, (currentScanStatus && currentScanStatus.scan_id === route.scanId) ? currentScanStatus : {}));
+      } else if (route.id !== 'monitor') {
+        renderScanStatusBar(null);
+      }
       document.querySelectorAll('[data-route]').forEach((button) => {
         if (button.dataset.route === route.id) button.setAttribute('aria-current', 'page');
         else button.removeAttribute('aria-current');
@@ -684,6 +835,16 @@
     login.textContent = 'ログイン';
     message.append(login);
   });
+
+  if (global.VulixAppShell) {
+    global.VulixAppShell.renderScanStatus = renderScanStatusBar;
+    global.VulixAppShell.getScanStatus = () => currentScanStatus;
+  }
+  global.VulixAppEntry = {
+    renderScanStatusBar,
+    getScanStatus: () => currentScanStatus,
+    redactDisplayUrl,
+  };
 
   if (!global.location.hash) global.history.replaceState(null, '', `${global.location.pathname}${global.location.search}#/portal`);
   renderRoute();

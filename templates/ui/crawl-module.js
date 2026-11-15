@@ -1750,7 +1750,11 @@
             search: route && route.search ? route.search : null,
             onContextUpdated: (scanId, completeness) => {
               if (options.contextEl) {
-                options.contextEl.textContent = `Scan ${scanId || '—'} · ${completeness || 'unknown'}`;
+                if (global.VulixAppShell && typeof global.VulixAppShell.renderScanStatus === 'function') {
+                  global.VulixAppShell.renderScanStatus({ scan_id: scanId, status: completeness || 'unknown', freshness: 'snapshot' });
+                } else {
+                  options.contextEl.textContent = `Scan ${scanId || '—'} · ${completeness || 'unknown'}`;
+                }
               }
             },
           });
