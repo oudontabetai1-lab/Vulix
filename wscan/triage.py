@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urljoin
 
+from wscan.browser import _playwright_proxy_options
 from wscan.url_normalize import normalize_proxy_server
 
 from rich.console import Console
@@ -422,17 +423,21 @@ class TriageEngine:
 
         async with async_playwright() as pw:
             launch_kwargs: dict = {"headless": self.headless}
-            if self.proxy:
-                launch_kwargs["proxy"] = {"server": self.proxy}
+            proxy_opt = _playwright_proxy_options(self.proxy)
+            if proxy_opt:
+                launch_kwargs["proxy"] = proxy_opt
 
             browser = await pw.chromium.launch(**launch_kwargs)
-            context = await browser.new_context(
-                ignore_https_errors=True,
-                user_agent=(
+            context_kwargs: dict = {
+                "ignore_https_errors": True,
+                "user_agent": (
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 ),
-            )
+            }
+            if proxy_opt:
+                context_kwargs["proxy"] = proxy_opt
+            context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
 
             # BFS crawl

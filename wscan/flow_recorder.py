@@ -34,6 +34,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from wscan.browser import _playwright_proxy_options
+from wscan.url_normalize import normalize_proxy_server
+
 
 # click から main-frame 遷移までを「click 起因」とみなす上限秒数。
 VIA_CLICK_WINDOW_S = 3.0
@@ -237,7 +240,8 @@ def _build_recorder_script(fn_fill: str, fn_click: str, fn_submit: str, fn_notif
 class FlowRecorder:
     """Playwright 操作を JSON ステップとして記録・再生する。"""
 
-    def __init__(self):
+    def __init__(self, proxy: str = ""):
+        self.proxy = normalize_proxy_server(proxy) if proxy else ""
         self._steps: list[dict] = []
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -249,6 +253,7 @@ class FlowRecorder:
         start_url: str,
         output_path: str,
         headless: bool = False,
+        proxy: Optional[str] = None,
     ) -> list[dict]:
         """
         非ヘッドレスで Playwright を起動し、ユーザー操作を記録する。
@@ -260,13 +265,23 @@ class FlowRecorder:
         """
         from playwright.async_api import async_playwright
 
+        effective_proxy = normalize_proxy_server(proxy) if proxy is not None else self.proxy
+        proxy_opt = _playwright_proxy_options(effective_proxy)
+
         print(f"[FlowRecorder] 記録開始: {start_url}")
         print("[FlowRecorder] 操作を行い、終了したら Ctrl+C を押してください。")
         steps: list[dict] = [{"action": "navigate", "url": start_url}]
 
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=headless)
-            page = await browser.new_page()
+            launch_kwargs: dict = {"headless": headless}
+            if proxy_opt:
+                launch_kwargs["proxy"] = proxy_opt
+            browser = await pw.chromium.launch(**launch_kwargs)
+            context_kwargs: dict = {}
+            if proxy_opt:
+                context_kwargs["proxy"] = proxy_opt
+            context = await browser.new_context(**context_kwargs)
+            page = await context.new_page()
 
             # ナビゲーション追跡。初期 goto（steps[0] と重複）だけを除き、いったん離れて
             # start_url へ**戻ってきた**遷移は記録する。全 start_url 遷移を潰すと、最後の

@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlparse, urlsplit
 import httpx
 
 from .browser import _playwright_proxy_options
+from .url_normalize import normalize_proxy_server
 
 
 def classify_exception(exc: BaseException) -> tuple[str, str]:
@@ -284,18 +285,56 @@ def _probe_login_page(
         return None, "", (reason, detail)
 
 
-def proxy_applied(client: httpx.Client, url: str, configured_proxy: str) -> bool | None:
+def _extract_url_scheme_host_port(proxy_url: object) -> httpx.URL | None:
+    """Extract scheme, host, and port from httpcore.URL, httpx.URL, or string."""
+    if proxy_url is None:
+        return None
+    if isinstance(proxy_url, httpx.URL):
+        return proxy_url.copy_with(username="", password="")
+    if hasattr(proxy_url, "__bytes__") and not isinstance(proxy_url, str):
+        try:
+            return httpx.URL(bytes(proxy_url).decode("ascii", errors="ignore")).copy_with(username="", password="")
+        except Exception:
+            pass
+    if hasattr(proxy_url, "scheme") and hasattr(proxy_url, "host"):
+        try:
+            scheme = proxy_url.scheme.decode("ascii", "ignore") if isinstance(proxy_url.scheme, bytes) else str(proxy_url.scheme)
+            host = proxy_url.host.decode("ascii", "ignore") if isinstance(proxy_url.host, bytes) else str(proxy_url.host)
+            port = getattr(proxy_url, "port", None)
+            return httpx.URL(scheme=scheme, host=host, port=port)
+        except Exception:
+            pass
+    try:
+        raw_s = str(proxy_url)
+        if "://" in raw_s:
+            return httpx.URL(raw_s).copy_with(username="", password="")
+    except Exception:
+        pass
+    return None
+
+
+def proxy_applied(client: httpx.Client | httpx.AsyncClient, url: str, configured_proxy: str) -> bool | None:
     """Inspect the transport selected for URL and report whether it uses a proxy."""
     try:
+        norm_cfg = normalize_proxy_server(configured_proxy) if configured_proxy else ""
+        if not norm_cfg:
+            return False
+        configured = httpx.URL(norm_cfg).copy_with(username="", password="")
+
         target = httpx.URL(url)
         matches = [(pattern, transport) for pattern, transport in client._mounts.items()
                    if pattern.matches(target)]
         if not matches:
             return False
         _, transport = max(matches, key=lambda item: item[0].priority)
-        proxy_url = transport._pool._proxy_url
-        configured = httpx.URL(configured_proxy).copy_with(username="", password="")
-        return proxy_url == configured.copy_with(username="", password="") if proxy_url is not None else False
+        pool = getattr(transport, "_pool", None)
+        proxy_url = getattr(pool, "_proxy_url", None)
+        if proxy_url is None:
+            return False
+        actual = _extract_url_scheme_host_port(proxy_url)
+        if actual is None:
+            return False
+        return (actual.scheme, actual.host, actual.port) == (configured.scheme, configured.host, configured.port)
     except (AttributeError, TypeError, ValueError):
         return None
 

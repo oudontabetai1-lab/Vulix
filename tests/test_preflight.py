@@ -580,3 +580,11 @@ def test_run_preflight_no_monitor_integration(monkeypatch, tmp_path):
     ws_row = next(r for r in report["checks"] if r["id"] == "websocket")
     assert ws_row["status"] == "not_applicable"
     assert ws_row["reason_code"] == "monitor_disabled"
+
+
+def test_real_httpx_client_proxy_applied_with_credentials_and_no_proxy_env(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    proxy = "http://user:secret@127.0.0.1:8080"
+    client = httpx.Client(proxy=proxy, trust_env=False)
+    assert proxy_applied(client, "http://target.example/path", proxy) is True
+    assert proxy_applied(client, "http://127.0.0.1:8000/path", "http://127.0.0.1:8080") is True

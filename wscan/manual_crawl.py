@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from wscan import url_scope
+from wscan.browser import _playwright_proxy_options
 from wscan.mfa import seconds_until_next_window
 from wscan.totp import generate_totp, resolve_totp_secret
 from wscan.url_normalize import normalize_proxy_server
@@ -680,8 +681,9 @@ class ManualCrawlSession:
         try:
             self._pw = await async_playwright().start()
             launch_kwargs: dict[str, Any] = {"headless": headless}
-            if proxy:
-                launch_kwargs["proxy"] = {"server": proxy}
+            proxy_opt = _playwright_proxy_options(proxy)
+            if proxy_opt:
+                launch_kwargs["proxy"] = proxy_opt
             try:
                 self._browser = await self._pw.chromium.launch(**launch_kwargs)
             except Exception as exc:
@@ -693,6 +695,8 @@ class ManualCrawlSession:
                     ) from exc
                 raise
             context_kwargs: dict[str, Any] = {"ignore_https_errors": True}
+            if proxy_opt:
+                context_kwargs["proxy"] = proxy_opt
             if stream:
                 context_kwargs["viewport"] = {
                     "width": self.view_width,

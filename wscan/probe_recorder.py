@@ -95,6 +95,11 @@ class LedgerManifest:
         self.write_errors.append({"error": reason, "role": "", "outcome": "gap"})
 
     @property
+    def gaps(self) -> list[str]:
+        """Return list of gap reasons recorded on the manifest."""
+        return [entry["error"] for entry in self.write_errors if entry.get("outcome") == "gap"]
+
+    @property
     def had_write_error(self) -> bool:
         """証跡の欠落/書込み失敗があったか（No evidence, no COMPLETE の判定に使う）。"""
         return bool(self.write_errors)

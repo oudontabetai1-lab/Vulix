@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .url_normalize import normalize_proxy_server
+
 
 # ---------------------------------------------------------------------------
 # WAF fingerprints
@@ -95,7 +97,7 @@ class WAFDetector:
         record_status: Optional[Callable[[int, object], None]] = None,
     ):
         self.payload_gen = payload_gen
-        self.proxy = proxy or ""
+        self.proxy = normalize_proxy_server(proxy) if proxy else ""
         # Callable returning a dict of HTTP headers (pulls fresh values each call
         # so a rotated bearer token is used on every probe).
         self.headers_provider = headers_provider
@@ -130,15 +132,16 @@ class WAFDetector:
                 except Exception:
                     extra_headers = {}
             tls_kwargs = self.tls_options_provider() if self.tls_options_provider else {"verify": False}
-            async with httpx.AsyncClient(
-                **{
-                    **tls_kwargs,
-                    "timeout": timeout,
-                    "follow_redirects": True,
-                    "proxy": self.proxy or None,
-                    "headers": extra_headers,
-                }
-            ) as client:
+            client_kwargs: dict = {
+                **tls_kwargs,
+                "timeout": timeout,
+                "follow_redirects": True,
+                "proxy": self.proxy or None,
+                "headers": extra_headers,
+            }
+            if self.proxy:
+                client_kwargs["trust_env"] = False
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 # First: normal request (collect always-present WAF headers)
                 resp = await client.get(url)
                 if self._record_status:

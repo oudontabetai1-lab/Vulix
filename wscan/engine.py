@@ -1310,7 +1310,11 @@ class ScanEngine:
             clear_sensitive_headers,
             register_sensitive_headers,
         )
-        self.request_logger = RequestLogger(self.output_dir)
+        from .url_normalize import split_proxy_credentials
+        self.request_logger = RequestLogger(
+            self.output_dir,
+            configured_proxy=split_proxy_credentials(self.proxy)[0] if self.proxy else "",
+        )
         if self.monitor is not None:
             self.monitor.request_logger = self.request_logger
         # Let the monitor/portal map the running scan to its artifact folder.
@@ -2048,15 +2052,105 @@ class ScanEngine:
         kwargs = self.tls_config.httpx_options()
         if self.proxy and "proxy" not in overrides:
             kwargs["proxy"] = self.proxy
+        if self.proxy:
+            kwargs.setdefault("trust_env", False)
         kwargs.update(overrides)
         logger = getattr(self, "request_logger", None)
+        if logger is not None and self.proxy and not getattr(logger, "configured_proxy", ""):
+            from .url_normalize import split_proxy_credentials
+            logger.configured_proxy = split_proxy_credentials(self.proxy)[0]
+
+        hooks = dict(kwargs.get("event_hooks") or {})
+        request_hooks = list(hooks.get("request") or [])
+
+        if self.proxy:
+            import httpx
+            from .preflight import _extract_url_scheme_host_port
+            from .url_normalize import normalize_proxy_server
+            configured_proxy = self.proxy
+            effective_proxy = kwargs.get("proxy")
+            transport_override = kwargs.get("transport")
+            mounts_override = kwargs.get("mounts")
+            trust_env = kwargs.get("trust_env", False)
+
+            def _is_matching_proxy(actual_proxy) -> bool:
+                try:
+                    norm_cfg = normalize_proxy_server(configured_proxy) if configured_proxy else ""
+                    if not norm_cfg:
+                        return False
+                    cfg_url = httpx.URL(norm_cfg).copy_with(username="", password="")
+                    if hasattr(actual_proxy, "url"):
+                        actual_url = actual_proxy.url
+                    else:
+                        actual_url = actual_proxy
+                    extracted = _extract_url_scheme_host_port(actual_url)
+                    if extracted is None:
+                        return False
+                    return (extracted.scheme, extracted.host, extracted.port) == (cfg_url.scheme, cfg_url.host, cfg_url.port)
+                except Exception:
+                    return False
+
+            class _ProxyTagHook:
+                def __call__(self, request: httpx.Request):
+                    self._tag(request)
+                    return self
+
+                def __await__(self):
+                    async def _noop():
+                        pass
+                    return _noop().__await__()
+
+                def _tag(self, request: httpx.Request) -> None:
+                    if "vulix_proxy_applied" in request.extensions:
+                        applied = request.extensions["vulix_proxy_applied"]
+                    else:
+                        applied = True
+                        target = httpx.URL(str(request.url))
+                        if mounts_override:
+                            from httpx._utils import URLPattern
+                            matches = [
+                                (pattern if isinstance(pattern, URLPattern) else URLPattern(pattern), t)
+                                for pattern, t in mounts_override.items()
+                            ]
+                            matched = [t for p, t in matches if p.matches(target)]
+                            if matched:
+                                t = matched[-1]
+                                pool = getattr(t, "_pool", None)
+                                proxy_url = getattr(pool, "_proxy_url", None)
+                                if proxy_url is None:
+                                    applied = False
+                                else:
+                                    applied = _is_matching_proxy(proxy_url)
+                        if applied and transport_override is not None:
+                            pool = getattr(transport_override, "_pool", None)
+                            proxy_url = getattr(pool, "_proxy_url", None)
+                            if proxy_url is None:
+                                applied = False
+                            else:
+                                applied = _is_matching_proxy(proxy_url)
+                        if applied and not effective_proxy and not transport_override and not mounts_override:
+                            applied = False
+                        if applied and effective_proxy:
+                            applied = _is_matching_proxy(effective_proxy)
+                        if applied and trust_env:
+                            import urllib.request
+                            if urllib.request.proxy_bypass(target.host):
+                                applied = False
+
+                    request.extensions["vulix_proxy_applied"] = applied
+                    request.extensions["vulix_transport_route"] = "proxy" if applied else "direct"
+
+            request_hooks.append(_ProxyTagHook())
+
         hook = getattr(logger, "log_httpx_submission", None)
         if callable(hook):
-            hooks = dict(kwargs.get("event_hooks") or {})
-            hooks["request"] = [*(hooks.get("request") or []), hook]
+            request_hooks.append(hook)
             response_hook = getattr(logger, "log_httpx_response", None)
             if callable(response_hook):
                 hooks["response"] = [*(hooks.get("response") or []), response_hook]
+
+        if request_hooks:
+            hooks["request"] = request_hooks
             kwargs["event_hooks"] = hooks
         return kwargs
 
