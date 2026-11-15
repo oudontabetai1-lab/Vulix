@@ -150,14 +150,50 @@
     if (crawlSurface) crawlSurface.hidden = true;
     if (trafficSurface) trafficSurface.hidden = true;
 
+    if (setupSurface) setupSurface._scanStartInFlight = false;
+    const getSetupStartBtn = () => setupSurface ? setupSurface.querySelector('#setupStartScanBtn') : null;
+    const showSetupError = (text) => {
+      let errBox = setupSurface ? setupSurface.querySelector('#setupStartError') : null;
+      if (!errBox && setupSurface) {
+        errBox = document.createElement('div');
+        errBox.id = 'setupStartError';
+        errBox.className = 'setup-start-error';
+        errBox.setAttribute('role', 'alert');
+        errBox.style.cssText = 'background:rgba(226,112,143,0.18);border:1px solid var(--critical);color:var(--critical);padding:10px 14px;border-radius:6px;margin:8px 0 12px;font-size:0.85rem;font-weight:600;';
+        const header = setupSurface.querySelector('.setup-header') || setupSurface.firstChild;
+        if (header && header.parentNode) {
+          header.parentNode.insertBefore(errBox, header.nextSibling);
+        } else {
+          setupSurface.insertBefore(errBox, setupSurface.firstChild);
+        }
+      }
+      if (errBox) {
+        errBox.textContent = text;
+        errBox.hidden = false;
+      }
+    };
+    const clearSetupError = () => {
+      const errBox = setupSurface ? setupSurface.querySelector('#setupStartError') : null;
+      if (errBox) {
+        errBox.hidden = true;
+        errBox.textContent = '';
+      }
+    };
+
     if (global.VulixSetupModule && setupSurface) {
       if (setupSurface.childElementCount > 0) {
         clearMessage();
+        clearSetupError();
+        setupSurface._scanStartInFlight = false;
+        const existingBtn = getSetupStartBtn();
+        if (existingBtn) existingBtn.disabled = false;
         setupSurface.hidden = false;
         monitor.hidden = true;
         ensureMonitor((bridge) => {
           monitor.classList.add('transport-owner');
           monitor.setAttribute('aria-hidden', 'true');
+          monitor.setAttribute('tabindex', '-1');
+          monitor.hidden = true;
           const current = bridge.getContext();
           context.textContent = `Scan ${current.scan_id || '—'} · ${current.status || 'status unavailable'}`;
         });
@@ -187,36 +223,88 @@
           });
         },
         onStartScan: (config) => {
+          if (setupSurface && setupSurface._scanStartInFlight) return;
+          if (setupSurface) setupSurface._scanStartInFlight = true;
+          const startBtn = getSetupStartBtn();
+          if (startBtn) startBtn.disabled = true;
+          clearSetupError();
+
           ensureMonitor((bridge) => {
-            if (typeof bridge.startScan === 'function') {
-              bridge.startScan(config);
-            } else if (monitor.contentWindow && monitor.contentWindow.state && monitor.contentWindow.state.ws) {
-              const ws = monitor.contentWindow.state.ws;
-              if (typeof monitor.contentWindow._markOwnScan === 'function') {
-                monitor.contentWindow._markOwnScan(config);
+            const resetInFlight = () => {
+              if (setupSurface) setupSurface._scanStartInFlight = false;
+              const btn = getSetupStartBtn();
+              if (btn) btn.disabled = false;
+            };
+
+            const callbacks = {
+              onAccepted: (scanId) => {
+                if (setupSurface) setupSurface._scanStartInFlight = false;
+                const btn = getSetupStartBtn();
+                if (btn) btn.disabled = false;
+                clearSetupError();
+                if (scanId) {
+                  context.textContent = `Scan ${scanId} · scanning`;
+                }
+                global.location.hash = '#/monitor';
+              },
+              onRejected: (rejectionMsg) => {
+                resetInFlight();
+                showSetupError(`スキャン開始が拒否されました: ${rejectionMsg || ''}`);
+                context.textContent = `スキャン開始拒否: ${rejectionMsg || ''}`;
+              },
+              onTimeout: () => {
+                resetInFlight();
+                showSetupError('スキャン開始リクエストがタイムアウトしました。');
+                context.textContent = 'スキャン開始タイムアウト';
+              },
+            };
+
+            let started = false;
+            try {
+              if (typeof bridge.startScan === 'function') {
+                started = bridge.startScan(config, callbacks);
+              } else if (monitor.contentWindow && monitor.contentWindow.state && monitor.contentWindow.state.ws) {
+                const ws = monitor.contentWindow.state.ws;
+                if (typeof monitor.contentWindow._markOwnScan === 'function') {
+                  monitor.contentWindow._markOwnScan(config);
+                }
+                if (ws.readyState === 1) {
+                  ws.send(JSON.stringify({ action: 'start_scan', config }));
+                  started = true;
+                } else if (ws.readyState === 0) {
+                  ws.addEventListener('open', () => {
+                    try {
+                      ws.send(JSON.stringify({ action: 'start_scan', config }));
+                    } catch (_) {}
+                  }, { once: true });
+                  started = true;
+                }
               }
-              if (ws.readyState === 1) {
-                ws.send(JSON.stringify({ action: 'start_scan', config }));
-              } else if (ws.readyState === 0) {
-                ws.addEventListener('open', () => {
-                  try {
-                    ws.send(JSON.stringify({ action: 'start_scan', config }));
-                  } catch (_) {}
-                }, { once: true });
-              }
+            } catch (_) {
+              started = false;
             }
-            global.location.hash = '#/monitor';
+
+            if (!started) {
+              resetInFlight();
+              showSetupError('WebSocket未接続。スキャンを開始できませんでした。');
+              context.textContent = 'WebSocket未接続';
+              return;
+            }
           });
         },
       }).then((ok) => {
         if (activeScope !== scope || registry.getActiveId() !== 'setup') return;
         if (ok && setupSurface) {
           clearMessage();
+          clearSetupError();
+          setupSurface._scanStartInFlight = false;
           setupSurface.hidden = false;
           monitor.hidden = true;
           ensureMonitor((bridge) => {
             monitor.classList.add('transport-owner');
             monitor.setAttribute('aria-hidden', 'true');
+            monitor.setAttribute('tabindex', '-1');
+            monitor.hidden = true;
             const current = bridge.getContext();
             context.textContent = `Scan ${current.scan_id || '—'} · ${current.status || 'status unavailable'}`;
           });
@@ -228,11 +316,18 @@
   }, unmount() {
     cancelPendingMonitorLoad();
     stopContextSubscription();
+    try {
+      if (monitor.contentWindow && monitor.contentWindow.VulixAppBridge &&
+          typeof monitor.contentWindow.VulixAppBridge.cancelPendingStartScan === 'function') {
+        monitor.contentWindow.VulixAppBridge.cancelPendingStartScan();
+      }
+    } catch (_) {}
     if (activeScope) activeScope.cancelAll('Setup module unmounted');
     activeScope = null;
     if (setupSurface) {
       setupSurface.hidden = true;
     }
+    monitor.classList.remove('transport-owner');
     monitor.hidden = true;
   } });
 

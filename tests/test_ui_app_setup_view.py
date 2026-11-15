@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+import urllib.request
 
 import pytest
 
@@ -965,10 +966,28 @@ def test_setup_credentials_e2e_websocket_payload():
                     page.wait_for_timeout(50)
                 assert len(messages) >= expected, f"Expected at least {expected} start_scan messages, got {len(messages)}"
 
+            def abort_and_wait(timeout_s: float = 10.0) -> None:
+                try:
+                    req = urllib.request.Request(f"{harness.server_url}/api/v1/scan/abort", data=b"", method="POST")
+                    urllib.request.urlopen(req, timeout=2)
+                except Exception:
+                    pass
+                deadline = time.monotonic() + timeout_s
+                while time.monotonic() < deadline:
+                    try:
+                        with urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status", timeout=2) as resp:
+                            st = json.loads(resp.read().decode("utf-8")).get("status")
+                            if st in ("idle", "done", "error", "aborted"):
+                                return
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(200)
+
             # 1. Normal mode submission
             page.locator("#setupStartScanBtn").click()
             page.wait_for_function("() => location.hash.includes('/monitor')")
             wait_for_start_scan_frames(1)
+            abort_and_wait()
 
             # Return to setup
             page.locator('[data-route="setup"]').click()
@@ -979,6 +998,7 @@ def test_setup_credentials_e2e_websocket_payload():
             page.locator("#setupStartScanBtn").click()
             page.wait_for_function("() => location.hash.includes('/monitor')")
             wait_for_start_scan_frames(2)
+            abort_and_wait()
 
             # Return to setup
             page.locator('[data-route="setup"]').click()
@@ -1134,3 +1154,149 @@ console.log(JSON.stringify({{
     assert res["blockedWithoutUrl"] is True
     assert res["urlInvalidAttr"] == "true"
     assert res["submittedWithUrl"] is True
+
+
+def test_setup_start_scan_disconnected_ws_blocks_and_shows_error():
+    """Verify that attempting to start a scan with a disconnected WebSocket
+    retains the /app#/setup view, displays an explicit error banner, and keeps the button enabled.
+    """
+    require_browser()
+    with UIHarness(seed_fixtures=False) as harness:
+        page = harness.new_page()
+        try:
+            page.goto(f"{harness.server_url}/app#/setup", wait_until="domcontentloaded")
+            page.wait_for_selector("#setupSurface")
+            page.wait_for_function("() => Boolean(document.querySelector('#monitorFrame')?.contentWindow?.state?.ws)")
+
+            # Fill target URL
+            page.locator("#cfgInputUrl").fill("http://127.0.0.1:18080")
+
+            # Sever WebSocket connection in monitor frame
+            page.evaluate(
+                "() => { const w = document.querySelector('#monitorFrame')?.contentWindow; "
+                "if (w && w.state && w.state.ws) { w.state.ws.close(); w.state.ws = null; } "
+                "if (w && w._eventStream && w._eventStream.ws) { w._eventStream.ws.close(); w._eventStream.ws = null; } }"
+            )
+
+            # Click start scan
+            page.locator("#setupStartScanBtn").click()
+
+            # Hash must NOT navigate away to /monitor
+            page.wait_for_timeout(300)
+            current_hash = page.evaluate("() => location.hash")
+            assert "#/setup" in current_hash, f"Expected to remain on #/setup, got {current_hash}"
+
+            # Error message must be visible
+            error_el = page.locator("#setupStartError")
+            assert error_el.is_visible()
+            assert "WebSocket" in error_el.inner_text()
+
+            # Start button remains enabled for retry
+            assert page.locator("#setupStartScanBtn").is_enabled()
+        finally:
+            page.close()
+
+
+def test_setup_start_scan_duplicate_click_prevention():
+    """Verify that rapid duplicate clicks on #setupStartScanBtn dispatch only 1 start_scan frame."""
+    require_browser()
+    with UIHarness(seed_fixtures=False) as harness:
+        page = harness.new_page()
+        try:
+            messages = []
+
+            def on_ws(ws):
+                def on_frame(payload):
+                    try:
+                        data = json.loads(payload)
+                        if data.get("action") == "start_scan":
+                            messages.append(data)
+                    except Exception:
+                        pass
+
+                ws.on("framesent", on_frame)
+
+            page.on("websocket", on_ws)
+            page.goto(f"{harness.server_url}/app#/setup", wait_until="domcontentloaded")
+            page.wait_for_selector("#setupSurface")
+            page.wait_for_function("() => Boolean(document.querySelector('#monitorFrame')?.contentWindow?.state?.ws)")
+
+            page.locator("#cfgInputUrl").fill("http://127.0.0.1:18080")
+
+            # Rapid duplicate click in the same microtask
+            page.evaluate(
+                "() => { const btn = document.querySelector('#setupStartScanBtn'); btn.click(); btn.click(); }"
+            )
+
+            # Wait for navigation to monitor
+            page.wait_for_function("() => location.hash.includes('/monitor')")
+            page.wait_for_timeout(500)
+
+            start_scan_msgs = [m for m in messages if m.get("action") == "start_scan"]
+            assert len(start_scan_msgs) == 1, f"Expected exactly 1 start_scan message, got {len(start_scan_msgs)}"
+        finally:
+            page.close()
+
+
+def test_setup_start_scan_rejection_shows_error_and_stays_on_setup():
+    """Verify that scan rejection retains #/setup, displays the rejection reason, and re-enables the button."""
+    require_browser()
+    with UIHarness(seed_fixtures=False) as harness:
+        page = harness.new_page()
+        try:
+            page.goto(f"{harness.server_url}/app#/setup", wait_until="domcontentloaded")
+            page.wait_for_selector("#setupSurface")
+            page.wait_for_function("() => Boolean(document.querySelector('#monitorFrame')?.contentWindow?.state?.ws)")
+
+            page.locator("#cfgInputUrl").fill("http://127.0.0.1:18080")
+
+            # 1. Start a scan
+            page.locator("#setupStartScanBtn").click()
+            page.wait_for_function("() => location.hash.includes('/monitor')")
+
+            # 2. Return to setup immediately while the first scan is still scanning
+            page.locator('[data-route="setup"]').click()
+            page.wait_for_function("() => location.hash.includes('/setup')")
+
+            # Try to start another scan
+            page.locator("#setupStartScanBtn").click()
+
+            # Wait for rejection error banner to appear
+            page.wait_for_selector("#setupStartError:not([hidden])", timeout=5000)
+            err_text = page.locator("#setupStartError").inner_text()
+            assert "拒否" in err_text and "実行中" in err_text
+
+            # Hash must still be #/setup
+            assert "#/setup" in page.evaluate("() => location.hash")
+
+            # Button should be re-enabled
+            assert page.locator("#setupStartScanBtn").is_enabled()
+        finally:
+            page.close()
+
+
+def test_setup_start_scan_accepted_navigates_and_updates_context():
+    """Verify that an accepted scan transitions to #/monitor and updates shell scan context with accepted scan ID."""
+    require_browser()
+    with UIHarness(seed_fixtures=False) as harness:
+        page = harness.new_page()
+        try:
+            page.goto(f"{harness.server_url}/app#/setup", wait_until="domcontentloaded")
+            page.wait_for_selector("#setupSurface")
+            page.wait_for_function("() => Boolean(document.querySelector('#monitorFrame')?.contentWindow?.state?.ws)")
+
+            page.locator("#cfgInputUrl").fill("http://127.0.0.1:18080")
+            page.locator("#setupStartScanBtn").click()
+
+            # Wait for navigation to monitor
+            page.wait_for_function("() => location.hash === '#/monitor'", timeout=10000)
+            current_hash = page.evaluate("() => location.hash")
+            assert current_hash == "#/monitor"
+
+            # Verify context bar reflects accepted scan ID
+            page.wait_for_function(
+                "() => { const ctx = document.getElementById('scanContext')?.textContent || ''; "
+                "return ctx.includes('Scan ') && !ctx.includes('Scan —'); }"
+            )
+        finally:
+            page.close()

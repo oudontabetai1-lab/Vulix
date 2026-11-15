@@ -2964,6 +2964,17 @@ function publishAppScanContext() {
   window.parent.postMessage({ type: 'vulix:scan-context', context }, window.location.origin);
 }
 
+let _activeStartScanAck = null;
+
+function _clearStartScanAck() {
+  if (typeof window !== 'undefined' && window._ackTrace) window._ackTrace.push('_clearStartScanAck, hadAck=' + Boolean(_activeStartScanAck));
+  if (_activeStartScanAck) {
+    if (_activeStartScanAck.timer) clearTimeout(_activeStartScanAck.timer);
+    if (_activeStartScanAck.pollTimer) clearInterval(_activeStartScanAck.pollTimer);
+  }
+  _activeStartScanAck = null;
+}
+
 window.VulixAppBridge = Object.freeze({
   getContext: () => ({
     server_id: typeof state.serverInstanceId === 'string' ? state.serverInstanceId : '',
@@ -2982,12 +2993,50 @@ window.VulixAppBridge = Object.freeze({
     overlay.classList.toggle('active', surface === 'setup');
     return true;
   },
-  startScan(config) {
+  startScan(config, callbacks) {
+    const isWsOpen = (window._eventStream && window._eventStream.ws && window._eventStream.ws.readyState === 1) ||
+                     (state.ws && state.ws.readyState === 1);
+    if (!isWsOpen) {
+      setStatus('WebSocket未接続。スキャンを開始できません。', 'error');
+      return false;
+    }
+    const nonce = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ((typeof self !== 'undefined' && self.crypto && self.crypto.randomUUID)
+          ? self.crypto.randomUUID()
+          : (Date.now() + '-' + Math.random().toString(16).slice(2)));
+    config._client_nonce = nonce;
+
     function applySuccess() {
-      _markOwnScan(config);
+      state.myScanNonce = nonce;
+      state.pendingScanConfig = _createNonsecretDescriptor(config);
       saveConfigToStorage();
       document.getElementById('scanConfigOverlay')?.classList.remove('active');
       setStatus('スキャン開始リクエスト送信中...', 'running');
+      if (callbacks && typeof callbacks === 'object') {
+        _clearStartScanAck();
+        const timeoutMs = (typeof callbacks.timeoutMs === 'number' && callbacks.timeoutMs > 0)
+          ? callbacks.timeoutMs
+          : 10000;
+        const timer = setTimeout(() => {
+          if (_activeStartScanAck && _activeStartScanAck.nonce === nonce) {
+            const cb = _activeStartScanAck.callbacks;
+            _clearStartScanAck();
+            if (cb && typeof cb.onTimeout === 'function') cb.onTimeout();
+          }
+        }, timeoutMs);
+        const pollTimer = setInterval(() => {
+          if (window._eventStream && typeof window._eventStream._flushMsgQueue === 'function') {
+            window._eventStream._flushMsgQueue();
+          }
+        }, 50);
+        _activeStartScanAck = {
+          nonce: nonce,
+          callbacks: callbacks,
+          timer: timer,
+          pollTimer: pollTimer,
+        };
+      }
     }
 
     if (window._eventStream && typeof window._eventStream.sendWhenConnected === 'function') {
@@ -3012,8 +3061,12 @@ window.VulixAppBridge = Object.freeze({
       applySuccess();
       return true;
     }
+    delete config._client_nonce;
     setStatus('WebSocket未接続。スキャンを開始できませんでした。', 'error');
     return false;
+  },
+  cancelPendingStartScan() {
+    _clearStartScanAck();
   },
 });
 
@@ -5837,6 +5890,13 @@ function dispatchLegacyEvent(event) {
       // 別タブ/ユーザーの拒否で観測中タブのステータスを error にしない（自分のスキャンは継続中）。
       if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
         setStatus(`スキャン開始が拒否されました: ${data.message || ''}`, 'error');
+        if (_activeStartScanAck && _activeStartScanAck.nonce === data._client_nonce) {
+          const cb = _activeStartScanAck.callbacks;
+          _clearStartScanAck();
+          if (cb && typeof cb.onRejected === 'function') {
+            cb.onRejected(data.message || '');
+          }
+        }
       }
       break;
 
@@ -5852,8 +5912,29 @@ function dispatchLegacyEvent(event) {
       _promotePendingScan(data);
       showPostScanActions(false);
       if (!event.run_id) resetLiveScanState();
+      if (event.scan_id) {
+        state.scanId = event.scan_id;
+      }
       setStatus(`スキャン開始: ${data.url || ''}`, 'running');
       addEventLog('status', `Scan started: ${data.url || 'target'}`);
+      if (typeof window !== 'undefined' && window._ackTrace) {
+        window._ackTrace.push('scan_started arrived: data_nonce=' + (data && data._client_nonce) + ' myScanNonce=' + state.myScanNonce + ' hasAck=' + Boolean(_activeStartScanAck) + ' ack_nonce=' + (_activeStartScanAck ? _activeStartScanAck.nonce : null));
+      }
+      if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
+        if (_activeStartScanAck && _activeStartScanAck.nonce === data._client_nonce) {
+          const cb = _activeStartScanAck.callbacks;
+          const acceptedId = event.scan_id || (data && data.scan_id) || state.scanId || '';
+          if (typeof window !== 'undefined' && window._ackTrace) window._ackTrace.push('calling cb.onAccepted with id=' + acceptedId);
+          _clearStartScanAck();
+          if (cb && typeof cb.onAccepted === 'function') {
+            try {
+              cb.onAccepted(acceptedId);
+            } catch (err) {
+              if (typeof window !== 'undefined' && window._ackTrace) window._ackTrace.push('cb.onAccepted threw error: ' + String(err));
+            }
+          }
+        }
+      }
       break;
   }
   document.getElementById('eventCount').textContent = state.eventCount;
@@ -5991,7 +6072,19 @@ function applyScanSnapshot(event) {
   renderUrlList();
   replaceFindings(findings);
 
-  if (data.started_config) _promotePendingScan(data.started_config);
+  if (data.started_config) {
+    _promotePendingScan(data.started_config);
+    if (data.started_config._client_nonce && data.started_config._client_nonce === state.myScanNonce) {
+      if (_activeStartScanAck && _activeStartScanAck.nonce === data.started_config._client_nonce) {
+        const cb = _activeStartScanAck.callbacks;
+        const acceptedId = event.scan_id || state.scanId || '';
+        _clearStartScanAck();
+        if (cb && typeof cb.onAccepted === 'function') {
+          cb.onAccepted(acceptedId);
+        }
+      }
+    }
+  }
   if (data.scan_config) handleEvent({type: 'scan_config', data: data.scan_config, timestamp: event.timestamp});
   setPauseState(!!data.paused);
   if (state.phase) updatePhaseBar(state.phase);
@@ -8212,7 +8305,7 @@ async function bootDashboard() {
 }
 
 Object.assign(window, {
-  publishAppScanContext, _markOwnScan, isSecretKeyName, sanitizeUrlForExport, sanitizeUrlListForExport, recursiveSanitizeNonsecret, hasCredentialsInConfig, _createNonsecretDescriptor, _sanitizeConfigForExport, containsRedactedValues, _discardRejectedPendingScan, _promotePendingScan, findingKey, computeVerification, isFindingConfirmed, updateFindingCounters, renderCheckGroups, initCheckGroups, loadScannerCapabilities, setScanMode, getSelectedChecks, selectAllChecks, setSelectedChecks, setCfgToggle, toggleCfg, showCfgTab, applyScanProfile, updateLlmModelField, collectRoleModels, restoreRoleModels, mfaImapFields, mfaImapPassword, applyMfaImap, mfaTotpFields, parseHeaderText, authHeaderFields, timeWindowFields, applyTimeWindows, applyMfaTotp, applyAuthHeaders, validateTotpReadiness, wireTotpQrPreview, uploadFile, wireUpload, renderManualCrawlStatus, startManualCrawl, stopManualCrawl, importManualCrawl, _wsSend, startRemoteBrowser, remoteNavigate, hasRemoteTotpConfig, armMfaFieldSelection, selectRemoteMfaField, fillRemoteTotp, bindRemoteScreen, useManualCrawlOutput, showPostScanActions, rerunLastScan, openManualCrawlAfterScan, submitScanConfig, _collectFullConfigForExport, _downloadJson, _filenameForConfig, exportConfigToFile, importConfigFromFile, applyImportedConfig, initConfigOverlay, updateAgentModelPlaceholder, submitAgentScan, hasSensitiveMatrixParam, safeUrlForStorage, safeUrlListForStorage, safeExcludeUrl, safeExcludeUrlsForStorage, saveConfigToStorage, loadConfigFromStorage, loadDefaultConfigFromServer, _esc, openScenarioBuilder, scnCloseBuilder, scnDefaultStep, scnAddStep, scnInsertStep, scnDeleteStep, scnDuplicateStep, scnMoveStep, scnChangeAction, scnSetField, scnLoadLoginTemplate, scnRender, scnStepSummary, scnRenderPreview, scnRenderPalette, scnPalNavigate, scnPalFill, scnPalAddForm, scnState_push, scnSaveBuilder, _scnSummaryCard, scnDeleteFlow, renderCfgFlows, renderReviewFlows, addAccount, collectAccounts, collectFlows, restoreFlows, formatDuration, updateETA, _onEventStreamStatusChange, _onEventStreamAuthRequired, _onEventStreamWireStale, initEventStream, connect, handleEvent, dispatchLegacyEvent, resetLiveScanState, applyScanSnapshot, updatePhaseBar, renderUrlList, renderCheckCounters, updatePayloadDisplay, togglePayloadExpand, setStatus, timeStr, addEventLog, updateScreenshot, addFinding, replaceFindings, updateRequest, updateResponse, showNetTab, openLightbox, escapeHtml, sendIntervention, confirmAbort, setPauseState, showPlanModal, confirmPlan, filterFindings, closeInteractiveModals, beginCrawlReview, resetCrawlReviewDetailState, openCrawlReviewDetails, showCrawlReviewModal, renderCrawlReviewList, sendCrawlReview, openManualCrawlFromReview, toggleManualPayload, sendManualPayload, showAiAnalysis, runAutoConfig, applyAutoConfig, submitHybridScan, handleWafDetected, switchCenterTab, loadD3, initSiteMapD3, _smEl, _smShort, _smNorm, _smModel, _sitemapRerender, _smArrowDefs, _smApplyView, _smRenderCompact, _smRenderShots, _smHash, _smRenderExplorer, _smShowPopover, _smHidePopover, smSetMode, smOnSearch, smExpandAll, smZoom, smResetView, _smWirePan, _smNodeColor, addSiteMapNode, markSiteMapVuln, showSiteMapFallback, _updateSiteMapFallback, _showSmTooltip, _hideSmTooltip, updatePhaseTimingStrip, _showSubphase, renderCheckProgressBars, switchMainView, onHistorySearchInput, onHistoryFilterChange, isSensitiveKey, maskPathSecrets, hasUnmaskedSensitivePath, maskNestedKv, maskKv, redactDisplayUrl, formatHistoryBytes, formatHistoryDate, setHistoryViewState, cancelScanHistory, loadScanHistory, renderHistoryTable, getAuditActionMeta, onAuditSearchInput, onAuditFilterChange, formatAuditTimestamp, validateAndSanitizeClientIp, formatSafeAuditDetail, setAuditViewState, loadAuditLog, renderAuditTable, bootDashboard
+  _clearStartScanAck, publishAppScanContext, _markOwnScan, isSecretKeyName, sanitizeUrlForExport, sanitizeUrlListForExport, recursiveSanitizeNonsecret, hasCredentialsInConfig, _createNonsecretDescriptor, _sanitizeConfigForExport, containsRedactedValues, _discardRejectedPendingScan, _promotePendingScan, findingKey, computeVerification, isFindingConfirmed, updateFindingCounters, renderCheckGroups, initCheckGroups, loadScannerCapabilities, setScanMode, getSelectedChecks, selectAllChecks, setSelectedChecks, setCfgToggle, toggleCfg, showCfgTab, applyScanProfile, updateLlmModelField, collectRoleModels, restoreRoleModels, mfaImapFields, mfaImapPassword, applyMfaImap, mfaTotpFields, parseHeaderText, authHeaderFields, timeWindowFields, applyTimeWindows, applyMfaTotp, applyAuthHeaders, validateTotpReadiness, wireTotpQrPreview, uploadFile, wireUpload, renderManualCrawlStatus, startManualCrawl, stopManualCrawl, importManualCrawl, _wsSend, startRemoteBrowser, remoteNavigate, hasRemoteTotpConfig, armMfaFieldSelection, selectRemoteMfaField, fillRemoteTotp, bindRemoteScreen, useManualCrawlOutput, showPostScanActions, rerunLastScan, openManualCrawlAfterScan, submitScanConfig, _collectFullConfigForExport, _downloadJson, _filenameForConfig, exportConfigToFile, importConfigFromFile, applyImportedConfig, initConfigOverlay, updateAgentModelPlaceholder, submitAgentScan, hasSensitiveMatrixParam, safeUrlForStorage, safeUrlListForStorage, safeExcludeUrl, safeExcludeUrlsForStorage, saveConfigToStorage, loadConfigFromStorage, loadDefaultConfigFromServer, _esc, openScenarioBuilder, scnCloseBuilder, scnDefaultStep, scnAddStep, scnInsertStep, scnDeleteStep, scnDuplicateStep, scnMoveStep, scnChangeAction, scnSetField, scnLoadLoginTemplate, scnRender, scnStepSummary, scnRenderPreview, scnRenderPalette, scnPalNavigate, scnPalFill, scnPalAddForm, scnState_push, scnSaveBuilder, _scnSummaryCard, scnDeleteFlow, renderCfgFlows, renderReviewFlows, addAccount, collectAccounts, collectFlows, restoreFlows, formatDuration, updateETA, _onEventStreamStatusChange, _onEventStreamAuthRequired, _onEventStreamWireStale, initEventStream, connect, handleEvent, dispatchLegacyEvent, resetLiveScanState, applyScanSnapshot, updatePhaseBar, renderUrlList, renderCheckCounters, updatePayloadDisplay, togglePayloadExpand, setStatus, timeStr, addEventLog, updateScreenshot, addFinding, replaceFindings, updateRequest, updateResponse, showNetTab, openLightbox, escapeHtml, sendIntervention, confirmAbort, setPauseState, showPlanModal, confirmPlan, filterFindings, closeInteractiveModals, beginCrawlReview, resetCrawlReviewDetailState, openCrawlReviewDetails, showCrawlReviewModal, renderCrawlReviewList, sendCrawlReview, openManualCrawlFromReview, toggleManualPayload, sendManualPayload, showAiAnalysis, runAutoConfig, applyAutoConfig, submitHybridScan, handleWafDetected, switchCenterTab, loadD3, initSiteMapD3, _smEl, _smShort, _smNorm, _smModel, _sitemapRerender, _smArrowDefs, _smApplyView, _smRenderCompact, _smRenderShots, _smHash, _smRenderExplorer, _smShowPopover, _smHidePopover, smSetMode, smOnSearch, smExpandAll, smZoom, smResetView, _smWirePan, _smNodeColor, addSiteMapNode, markSiteMapVuln, showSiteMapFallback, _updateSiteMapFallback, _showSmTooltip, _hideSmTooltip, updatePhaseTimingStrip, _showSubphase, renderCheckProgressBars, switchMainView, onHistorySearchInput, onHistoryFilterChange, isSensitiveKey, maskPathSecrets, hasUnmaskedSensitivePath, maskNestedKv, maskKv, redactDisplayUrl, formatHistoryBytes, formatHistoryDate, setHistoryViewState, cancelScanHistory, loadScanHistory, renderHistoryTable, getAuditActionMeta, onAuditSearchInput, onAuditFilterChange, formatAuditTimestamp, validateAndSanitizeClientIp, formatSafeAuditDetail, setAuditViewState, loadAuditLog, renderAuditTable, bootDashboard
 });
 Object.assign(window, { _eventLogEntries });
 Object.defineProperty(window, '_eventLogWindowStart', { configurable: true, get: () => _eventLogWindowStart });
