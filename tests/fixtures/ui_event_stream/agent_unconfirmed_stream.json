@@ -1,0 +1,70 @@
+{
+  "description": "合成Agent仮説ツイン: Agent自律探索の仮説所見。未確証ラベル（assumed/unconfirmed）が付与され、決定論スキャナによる確証所見と混同されない。",
+  "state": {
+    "serverInstanceId": "srv-state-gate",
+    "scanRunId": "target-run-agent-hyp",
+    "scanId": "scan-agent-hyp",
+    "lastEventSequence": 2,
+    "eventCount": 2
+  },
+  "events": [
+    {
+      "type": "page_start",
+      "server_id": "srv-state-gate",
+      "run_id": "target-run-agent-hyp",
+      "sequence": 3,
+      "data": {
+        "url": "http://target.internal.local/api/items"
+      }
+    },
+    {
+      "type": "finding",
+      "data": {
+        "id": "f_agent_synthetic_hyp_01",
+        "check_type": "sqli",
+        "severity": "high",
+        "url": "http://target.internal.local/api/items",
+        "field_name": "query",
+        "source": "agent",
+        "agent_verified": false,
+        "verification_state": "assumed",
+        "confidence": "tentative",
+        "evidence": "LLM heuristic timing anomaly hypothesis (synthetic fixture)"
+      }
+    },
+    {
+      "type": "scan_snapshot",
+      "server_id": "srv-state-gate",
+      "run_id": "target-run-agent-hyp",
+      "sequence": 4,
+      "data": {
+        "status": "scanning",
+        "findings": [
+          {
+            "id": "f_agent_synthetic_hyp_01",
+            "check_type": "sqli",
+            "severity": "high",
+            "url": "http://target.internal.local/api/items",
+            "field_name": "query",
+            "source": "agent",
+            "agent_verified": false,
+            "verification_state": "assumed",
+            "confidence": "tentative",
+            "evidence": "LLM heuristic timing anomaly hypothesis (synthetic fixture)"
+          }
+        ]
+      }
+    }
+  ],
+  "expected_actions": [
+    "process",
+    "process",
+    "apply_snapshot"
+  ],
+  "expected_final": {
+    "serverInstanceId": "srv-state-gate",
+    "scanRunId": "target-run-agent-hyp",
+    "lastEventSequence": 3,
+    "eventCount": 4
+  }
+}

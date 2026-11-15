@@ -1,0 +1,39 @@
+{
+  "description": "合成障害ツイン: 接続障害やサーバエラーによりスキャンが失敗。エラー状態を保持し、完了やクリーンネガティブを偽装しない。",
+  "state": {
+    "serverInstanceId": "srv-state-gate",
+    "scanRunId": "target-run-failed",
+    "scanId": "scan-failed",
+    "lastEventSequence": 2,
+    "eventCount": 2
+  },
+  "events": [
+    {
+      "type": "status",
+      "data": {
+        "message": "ターゲット到達不能 (Connection refused: target host offline)"
+      }
+    },
+    {
+      "type": "scan_snapshot",
+      "server_id": "srv-state-gate",
+      "run_id": "target-run-failed",
+      "sequence": 3,
+      "data": {
+        "status": "error",
+        "status_message": "ターゲット到達不能 (Connection refused: target host offline)",
+        "findings": []
+      }
+    }
+  ],
+  "expected_actions": [
+    "process",
+    "apply_snapshot"
+  ],
+  "expected_final": {
+    "serverInstanceId": "srv-state-gate",
+    "scanRunId": "target-run-failed",
+    "lastEventSequence": 2,
+    "eventCount": 3
+  }
+}

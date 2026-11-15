@@ -1,0 +1,81 @@
+{
+  "description": "合成部分中断ツイン: スキャン開始後に中断（aborted/partial）が発生。未完了状態として確定し、完了・クリーンネガティブを偽装しない。",
+  "state": {
+    "serverInstanceId": "srv-state-gate",
+    "scanRunId": "target-run-partial",
+    "scanId": "scan-partial",
+    "lastEventSequence": 2,
+    "eventCount": 2
+  },
+  "events": [
+    {
+      "type": "page_start",
+      "server_id": "srv-state-gate",
+      "run_id": "target-run-partial",
+      "sequence": 3,
+      "data": {
+        "url": "http://target.internal.local/search"
+      }
+    },
+    {
+      "type": "finding",
+      "data": {
+        "id": "f_partial_01",
+        "check_type": "xss",
+        "severity": "high",
+        "url": "http://target.internal.local/search?q=test",
+        "field_name": "q",
+        "evidence": "Partial scan reflected probe detected before interruption",
+        "verified": true,
+        "verification_state": "reproduced"
+      }
+    },
+    {
+      "type": "scan_complete",
+      "server_id": "srv-state-gate",
+      "run_id": "target-run-partial",
+      "sequence": 4,
+      "data": {
+        "status": "aborted",
+        "aborted": true,
+        "total_findings": 1,
+        "report_path": "/tmp/output/report.html"
+      }
+    },
+    {
+      "type": "scan_snapshot",
+      "server_id": "srv-state-gate",
+      "run_id": "target-run-partial",
+      "sequence": 5,
+      "data": {
+        "status": "aborted",
+        "aborted": true,
+        "total_findings": 1,
+        "findings": [
+          {
+            "id": "f_partial_01",
+            "check_type": "xss",
+            "severity": "high",
+            "url": "http://target.internal.local/search?q=test",
+            "field_name": "q",
+            "evidence": "Partial scan reflected probe detected before interruption",
+            "verified": true,
+            "verification_state": "reproduced"
+          }
+        ]
+      }
+    }
+  ],
+  "expected_actions": [
+    "process",
+    "process",
+    "process",
+    "apply_snapshot"
+  ],
+  "expected_final": {
+    "serverInstanceId": "srv-state-gate",
+    "scanRunId": "target-run-partial",
+    "lastEventSequence": 4,
+    "eventCount": 4
+  }
+}
