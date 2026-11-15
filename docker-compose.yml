@@ -13,10 +13,12 @@ services:
     image: wscan:latest
     container_name: wscan
     restart: unless-stopped
-    # Bind to the host's LAN interface so other machines on the intranet can
-    # reach it. Change "8765:8765" to "127.0.0.1:8765:8765" to keep it local.
+    # By default, bind only to host loopback (127.0.0.1) to prevent accidental
+    # unauthenticated LAN exposure when WSCAN_AUTH_TOKEN is unset.
+    # To expose on the LAN, set WSCAN_BIND_HOST=0.0.0.0 (or a specific LAN IP)
+    # in your environment together with a strong WSCAN_AUTH_TOKEN.
     ports:
-      - "8765:8765"
+      - "${WSCAN_BIND_HOST:-127.0.0.1}:${WSCAN_PORT:-8765}:8765"
     environment:
       # REQUIRED for a networked deployment: anyone who can reach the port can
       # otherwise drive the scanner. Generate with `openssl rand -hex 16`.

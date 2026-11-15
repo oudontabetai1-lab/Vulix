@@ -35,12 +35,24 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+python -m pip check
+if errorlevel 1 (
+    echo [ERROR] Dependency consistency check (pip check) failed.
+    pause
+    exit /b 1
+)
 
 echo.
 echo [2/3] Installing Playwright browsers (Chromium)...
 python -m playwright install chromium
 if errorlevel 1 (
     echo [ERROR] Playwright browser install failed.
+    pause
+    exit /b 1
+)
+python -m wscan.install_readiness --require-core
+if errorlevel 1 (
+    echo [ERROR] Core runtime readiness verification failed.
     pause
     exit /b 1
 )
