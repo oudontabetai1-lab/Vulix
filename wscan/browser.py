@@ -44,9 +44,10 @@ def _playwright_proxy_options(proxy: str) -> dict[str, str] | None:
     return options
 
 
-def form_submit_wait_seconds(*, fast: bool, navigated: bool, observed: bool) -> float:
-    """fast でも、文書の置換を確認できない送信は従来どおり観測する。"""
-    return 0.0 if fast and observed and navigated else 0.2
+def form_submit_wait_seconds(*, fast: bool, navigated: bool, observed: bool,
+                             default_prevented: Optional[bool] = None) -> float:
+    """既定送信と文書置換を確認できた fast だけ待機を省く。"""
+    return 0.0 if fast and observed and navigated and default_prevented is False else 0.2
 
 
 def _request_carries_form_value(pair: dict, field: str, payload: str, *, submission=None, since=None) -> bool:
@@ -2166,40 +2167,77 @@ class BrowserManager:
             return False
 
     @asynccontextmanager
-    async def _form_submit_wait(self):
-        """同じ document に残る JS 送信と判定不能時は、200ms 観測する。"""
+    async def _form_submit_wait(self, result: dict, form_index: int, *, direct_submit: bool = False):
+        """既定送信と文書置換の両方を観測できた fast 送信だけ待機を省く。"""
         fast = self.sleep_factor == 0
-        marker = None
+        result["default_prevented"] = False if direct_submit else None
+        page = self.page
+        marker = observers = key = None
+        marked = False
+        cleanup = ("const state = document[key]; if (state) { clearTimeout(state.timer); "
+                   "if (state.listener) document.removeEventListener('submit', state.listener); } "
+                   "delete document[key];")
         if fast:
-            key = f"__vulix_form_{time.monotonic_ns()}"
+            marker = key = f"__vulix_form_{time.monotonic_ns()}"
             try:
-                marked = await self.page.evaluate(
-                    "(key) => { Object.defineProperty(document, key, "
-                    "{value: true, configurable: true}); return true; }", key)
-                if marked is True:
-                    marker = key
+                if not direct_submit:
+                    observers = getattr(page, "_vulix_submit_observers", None)
+                    if observers is None:
+                        observers = {}
+                        def record(source, key, prevented):
+                            if (not isinstance(key, str) or not isinstance(prevented, bool)
+                                    or source.get("frame") is not page.main_frame):
+                                return
+                            target = observers.get(key)
+                            if target is not None and target["default_prevented"] is not True:
+                                target["default_prevented"] = prevented
+                        await page.expose_binding("__vulix_form_submit", record)
+                        page._vulix_submit_observers = observers
+                    observers[marker] = result
+                marked = await page.evaluate(
+                    """([key, index, direct]) => {
+                        const form = document.querySelectorAll('form')[index];
+                        if (!form) return false;
+                        const state = {};
+                        Object.defineProperty(document, key, {value: state, configurable: true});
+                        if (!direct) {
+                            state.listener = event => {
+                                if (event.target !== form) return;
+                                // キャンセルは取り消せない。false は dispatch 終了後に確認する。
+                                if (event.defaultPrevented) window.__vulix_form_submit(key, true);
+                                else state.timer = setTimeout(() =>
+                                    window.__vulix_form_submit(key, event.defaultPrevented), 0);
+                            };
+                            document.addEventListener('submit', state.listener);
+                        }
+                        return true;
+                    }""", [marker, form_index, direct_submit])
             except Exception:
                 pass
         try:
             yield
             observed = navigated = False
-            if marker:
+            if marker and marked is True:
                 try:
-                    present = await self.page.evaluate(
+                    present = await page.evaluate(
                         "(key) => { const present = Object.prototype.hasOwnProperty.call(document, key); "
-                        "delete document[key]; return present; }", marker)
+                        + cleanup + " return present; }", marker)
                     marker = None
                     observed = isinstance(present, bool)
                     navigated = observed and not present
                 except Exception:
                     pass
-            delay = form_submit_wait_seconds(fast=fast, navigated=navigated, observed=observed)
+            delay = form_submit_wait_seconds(
+                fast=fast, navigated=navigated, observed=observed,
+                default_prevented=result["default_prevented"])
             if delay:
                 await asyncio.sleep(delay)
         finally:
+            if observers is not None:
+                observers.pop(key, None)
             if marker:
                 try:
-                    await self.page.evaluate("(key) => delete document[key]", marker)
+                    await page.evaluate("(key) => { " + cleanup + " }", marker)
                 except Exception:
                     pass
 
@@ -2408,7 +2446,7 @@ class BrowserManager:
             # 見る。fill script の validation XHR や背景 polling を submit のリクエストと取り違えない。
             net_before_submit = self.network.request_count()
             self.network.probe_context = getattr(self.network, "pending_probe_context", None)
-            async with self._form_submit_wait():
+            async with self._form_submit_wait(result, form_index):
                 if submit_btn and await submit_btn.is_visible():
                     if bypass_validation:
                         await self.page.evaluate(
@@ -2620,7 +2658,9 @@ class BrowserManager:
             # submit 直前の送信数。送達は「submit 後に送られたリクエストが payload を運んだか」で
             # 判定する（fill script の XHR や背景 polling を結合送信と取り違えない）。
             net_before_submit = self.network.request_count()
-            async with self._form_submit_wait():
+            async with self._form_submit_wait(
+                result, form_index, direct_submit=submit_btn is None
+            ):
                 if submit_btn:
                     await submit_btn.click()
                 else:
