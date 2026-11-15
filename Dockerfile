@@ -16,9 +16,10 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Install Python dependencies first to leverage Docker layer caching.
-COPY requirements.txt ./
+COPY pyproject.toml requirements*.txt ./
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt && \
+    python -m pip check && \
     # Fetch the Chromium build matching the installed Playwright version,
     # together with the required OS libraries.
     playwright install --with-deps chromium
