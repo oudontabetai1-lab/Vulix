@@ -386,6 +386,34 @@
   }
 
   /**
+   * Pure function to build a deep link to the Traffic view focused on a URL/entry.
+   *
+   * @param {string} [scanId]
+   * @param {string|Object} [findingOrUrl]
+   * @returns {string} Hash string e.g. '#/traffic?scan=123&url=http%3A%2F%2F...'
+   */
+  function buildTrafficLink(scanId, findingOrUrl) {
+    let hash = '#/traffic';
+    const params = new URLSearchParams();
+    if (scanId) params.set('scan', String(scanId).trim());
+
+    let targetUrl = '';
+    if (typeof findingOrUrl === 'string') {
+      targetUrl = findingOrUrl.trim();
+    } else if (findingOrUrl && typeof findingOrUrl === 'object') {
+      if (findingOrUrl.url) targetUrl = String(findingOrUrl.url).trim();
+    }
+
+    if (targetUrl) {
+      params.set('url', redactDisplayUrl(targetUrl));
+    }
+
+    const qs = params.toString();
+    if (qs) hash += '?' + qs;
+    return hash;
+  }
+
+  /**
    * Pure function to resolve action entry points for a finding based on
    * implemented backend capabilities and finding data.
    *
@@ -394,13 +422,45 @@
    * @returns {Array<{ id: string, label: string, enabled: boolean, reason: string|null, href?: string, url?: string }>}
    */
   function resolveFindingActions(finding, options = {}) {
-    const scanId = options.scanId || (finding && finding.scan_id) || null;
+    const scanId = options.scanId !== undefined ? options.scanId : ((finding && finding.scan_id) || null);
     const url = finding && finding.url ? String(finding.url).trim() : '';
     const hasValidHttpUrl = Boolean(url && /^https?:\/\//i.test(url));
 
     const manifest = options.manifest || null;
-    const hasReplayCapability = Boolean(manifest && manifest.capabilities && manifest.capabilities.replay_finding);
-    const hasRequestDetailCapability = Boolean(manifest && manifest.capabilities && manifest.capabilities.request_detail);
+    const capabilities = (manifest && manifest.capabilities) || null;
+    const hasReplayCapability = Boolean(capabilities && (capabilities.replay_finding || capabilities.replay));
+
+    const hasTrafficCap = Boolean(
+      capabilities && (
+        capabilities.traffic === true ||
+        (capabilities.traffic && capabilities.traffic.available !== false)
+      )
+    );
+    const hasExplicitReqDetail = Boolean(
+      capabilities && (
+        capabilities.request_detail === true ||
+        (capabilities.request_detail && capabilities.request_detail.available !== false)
+      )
+    );
+
+    const hasRequestDetailCapability = Boolean(
+      hasExplicitReqDetail || (hasTrafficCap && scanId && url)
+    );
+
+    let reqDetailReason = null;
+    let reqDetailHref = null;
+
+    if (hasRequestDetailCapability) {
+      if (scanId && url) {
+        reqDetailHref = buildTrafficLink(scanId, url);
+      }
+    } else {
+      if (hasTrafficCap && (!scanId || !url)) {
+        reqDetailReason = 'スキャンIDまたはURLがありません';
+      } else {
+        reqDetailReason = 'not available in this version';
+      }
+    }
 
     return [
       {
@@ -427,7 +487,8 @@
         id: 'request_detail',
         label: 'リクエスト詳細',
         enabled: hasRequestDetailCapability,
-        reason: hasRequestDetailCapability ? null : 'not available in this version',
+        href: reqDetailHref,
+        reason: reqDetailReason,
       },
     ];
   }
@@ -715,6 +776,20 @@
     let activeUrlFilter = null;
     let checkCatalog = {};
     let checkCatalogLang = 'ja';
+    let currentManifest = options.manifest || (global.VulixCapabilityReader && global.VulixCapabilityReader.defaultReader && global.VulixCapabilityReader.defaultReader.manifest) || null;
+
+    async function loadCapabilityManifest() {
+      if (currentManifest) return currentManifest;
+      try {
+        const res = await scope.get('/api/capability-manifest');
+        if (res && res.ok && res.data) {
+          currentManifest = res.data;
+        }
+      } catch (_) {
+        // Fallback: leave currentManifest as null
+      }
+      return currentManifest;
+    }
 
     function getFilters() {
       return {
@@ -753,7 +828,52 @@
       }
     }
 
-    function renderDetail(finding, notFoundId) {
+    function resetFiltersAndSelect(targetFindingId) {
+      dom.sevSelect.value = 'all';
+      dom.typeSelect.value = 'all';
+      dom.verifySelect.value = 'all';
+      dom.provSelect.value = 'all';
+      dom.searchInput.value = '';
+      activeUrlFilter = null;
+      if (dom.urlChip) dom.urlChip.hidden = true;
+
+      selectedFindingId = targetFindingId;
+      selectedFinding = findFindingById(allFindings, targetFindingId);
+
+      const currentFilters = getFilters();
+      if (global.location && typeof global.location.hash === 'string') {
+        const nextHash = buildFindingHash(currentScanId, targetFindingId, currentFilters);
+        if (global.location.hash !== nextHash) {
+          if (global.history && global.history.replaceState) {
+            global.history.replaceState(null, '', nextHash);
+          } else {
+            global.location.hash = nextHash;
+          }
+        }
+      }
+
+      renderList();
+      if (selectedFinding) {
+        renderDetail(selectedFinding, null, { isFilteredOut: false });
+      }
+
+      if (dom.listContent) {
+        const targetIdStr = String(targetFindingId);
+        const cards = dom.listContent.querySelectorAll('.findings-list-card');
+        for (let i = 0; i < cards.length; i++) {
+          if (cards[i].dataset.findingId === targetIdStr) {
+            cards[i].classList.add('active');
+            cards[i].setAttribute('aria-selected', 'true');
+            if (typeof cards[i].scrollIntoView === 'function') {
+              cards[i].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    function renderDetail(finding, notFoundId, renderOpts) {
       dom.detailContent.replaceChildren();
 
       if (notFoundId) {
@@ -781,6 +901,30 @@
 
       dom.detailEmpty.hidden = true;
       dom.detailContent.hidden = false;
+
+      renderOpts = renderOpts || {};
+      const isFilteredOut = Boolean(renderOpts.isFilteredOut);
+
+      if (isFilteredOut) {
+        const banner = document.createElement('div');
+        banner.className = 'findings-filtered-out-banner';
+        banner.setAttribute('role', 'status');
+
+        const bannerText = document.createElement('span');
+        bannerText.className = 'findings-filtered-out-text';
+        bannerText.textContent = '現在表示中の検出結果は現在のフィルタ条件により一覧から除外されています。';
+
+        const resetBtn = document.createElement('button');
+        resetBtn.type = 'button';
+        resetBtn.className = 'history-btn findings-reset-filter-btn';
+        resetBtn.textContent = 'フィルタを解除して一覧に表示';
+        resetBtn.addEventListener('click', function () {
+          resetFiltersAndSelect(selectedFindingId || (finding && getFindingId(finding)));
+        });
+
+        banner.append(bannerText, resetBtn);
+        dom.detailContent.appendChild(banner);
+      }
 
       const sev = getSeverityLabel(finding);
       const verify = getVerificationLabel(finding);
@@ -830,7 +974,7 @@
       const actionsRow = document.createElement('div');
       actionsRow.className = 'findings-actions-row';
 
-      const actions = resolveFindingActions(finding, { scanId: currentScanId });
+      const actions = resolveFindingActions(finding, { scanId: currentScanId, manifest: currentManifest });
       actions.forEach(function (act) {
         if (act.enabled) {
           if (act.href) {
@@ -847,6 +991,12 @@
             a.rel = 'noopener noreferrer';
             a.textContent = `↗ ${act.label}`;
             actionsRow.appendChild(a);
+          } else {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'history-btn findings-action-btn';
+            btn.textContent = act.label;
+            actionsRow.appendChild(btn);
           }
         } else {
           const btn = document.createElement('button');
@@ -854,6 +1004,8 @@
           btn.className = 'history-btn findings-action-btn disabled';
           btn.disabled = true;
           btn.setAttribute('aria-disabled', 'true');
+          btn.setAttribute('aria-label', `${act.label}: ${act.reason || 'not available in this version'}`);
+          btn.tabIndex = 0;
           btn.title = act.reason || 'not available in this version';
 
           const labelSpan = document.createElement('span');
@@ -978,6 +1130,13 @@
         noMatch.className = 'findings-empty-state';
         noMatch.textContent = 'フィルタ条件に一致する検出結果はありません。';
         dom.listContent.appendChild(noMatch);
+        if (selectedFindingId) {
+          const foundAnywhere = findFindingById(allFindings, selectedFindingId);
+          if (foundAnywhere) {
+            renderDetail(foundAnywhere, null, { isFilteredOut: true });
+            return;
+          }
+        }
         renderDetail(null);
         return;
       }
@@ -1172,7 +1331,7 @@
           const foundAnywhere = findFindingById(allFindings, selectedFindingId);
           if (foundAnywhere) {
             // Selected finding exists in full dataset but filtered out
-            renderDetail(foundAnywhere);
+            renderDetail(foundAnywhere, null, { isFilteredOut: true });
           } else {
             // Stale or unknown ID
             renderDetail(null, selectedFindingId);
@@ -1188,6 +1347,8 @@
           }
           renderDetail(selectedFinding);
         }
+      } else if (selectedFinding) {
+        renderDetail(selectedFinding, null, { isFilteredOut: false });
       }
     }
 
@@ -1244,7 +1405,6 @@
         }
 
         renderList();
-        renderDetail(selectedFinding);
       } catch (err) {
         dom.listStatus.hidden = false;
         dom.listStatus.className = 'ui-status error';
@@ -1254,6 +1414,42 @@
     }
 
     async function initScansAndLoad(route) {
+      const targetScanId = route && route.scanId ? route.scanId : null;
+      const targetFindingId = route && route.findingId ? route.findingId : null;
+      const targetUrl = route && route.url ? route.url : null;
+      const targetSearch = route && route.search ? route.search : null;
+
+      if (targetUrl) {
+        activeUrlFilter = targetUrl;
+        dom.searchInput.value = targetUrl;
+        if (dom.urlChip) {
+          dom.urlChip.hidden = false;
+          dom.urlChip.replaceChildren();
+          const chipText = document.createElement('span');
+          chipText.textContent = `URLフィルタ: ${targetUrl}`;
+          const chipClear = document.createElement('button');
+          chipClear.type = 'button';
+          chipClear.className = 'findings-chip-clear';
+          chipClear.textContent = '✕';
+          chipClear.title = 'URLフィルタ解除';
+          chipClear.addEventListener('click', function () {
+            activeUrlFilter = null;
+            dom.searchInput.value = '';
+            dom.urlChip.hidden = true;
+            onFilterChange();
+          });
+          dom.urlChip.append(chipText, chipClear);
+        }
+      } else if (targetSearch) {
+        dom.searchInput.value = targetSearch;
+      }
+
+      if (route && route.severity) dom.sevSelect.value = route.severity;
+      if (route && route.checkType) dom.typeSelect.value = route.checkType;
+      if (route && route.verification) dom.verifySelect.value = route.verification;
+      if (route && route.provenance) dom.provSelect.value = route.provenance;
+
+      await loadCapabilityManifest();
       const lang = document.documentElement && document.documentElement.lang;
       checkCatalogLang = lang && lang.toLowerCase().startsWith('en') ? 'en' : 'ja';
       if (CHECK_HELP) {
@@ -1294,41 +1490,6 @@
           opt.textContent = `${s.id}${target}${cnt}`;
           dom.scanSelect.appendChild(opt);
         });
-
-        const targetScanId = route && route.scanId ? route.scanId : null;
-        const targetFindingId = route && route.findingId ? route.findingId : null;
-        const targetUrl = route && route.url ? route.url : null;
-        const targetSearch = route && route.search ? route.search : null;
-
-        if (targetUrl) {
-          activeUrlFilter = targetUrl;
-          dom.searchInput.value = targetUrl;
-          if (dom.urlChip) {
-            dom.urlChip.hidden = false;
-            dom.urlChip.replaceChildren();
-            const chipText = document.createElement('span');
-            chipText.textContent = `URLフィルタ: ${targetUrl}`;
-            const chipClear = document.createElement('button');
-            chipClear.type = 'button';
-            chipClear.className = 'findings-chip-clear';
-            chipClear.textContent = '✕';
-            chipClear.title = 'URLフィルタ解除';
-            chipClear.addEventListener('click', function () {
-              activeUrlFilter = null;
-              dom.searchInput.value = '';
-              dom.urlChip.hidden = true;
-              onFilterChange();
-            });
-            dom.urlChip.append(chipText, chipClear);
-          }
-        } else if (targetSearch) {
-          dom.searchInput.value = targetSearch;
-        }
-
-        if (route && route.severity) dom.sevSelect.value = route.severity;
-        if (route && route.checkType) dom.typeSelect.value = route.checkType;
-        if (route && route.verification) dom.verifySelect.value = route.verification;
-        if (route && route.provenance) dom.provSelect.value = route.provenance;
 
         if (targetScanId) {
           const foundScan = allScans.some(function (s) { return s.id === targetScanId; });
@@ -1410,6 +1571,7 @@
   function createFindingsModule(options) {
     options = options || {};
     let viewInstance = null;
+    let cachedManifest = options.manifest || null;
 
     return {
       id: 'findings',
@@ -1439,7 +1601,7 @@
         }
         if (options.surfaceEl) {
           options.surfaceEl.hidden = false;
-          viewInstance = renderFindingsView(options.surfaceEl, { api: options.api });
+          viewInstance = renderFindingsView(options.surfaceEl, { api: options.api, manifest: cachedManifest });
           viewInstance.initScansAndLoad(route);
         }
       },
@@ -1472,6 +1634,7 @@
     parseFindingDeepLink: parseFindingDeepLink,
     buildFindingHash: buildFindingHash,
     buildCrawlLink: buildCrawlLink,
+    buildTrafficLink: buildTrafficLink,
     resolveFindingActions: resolveFindingActions,
     renderEvidenceContent: renderEvidenceContent,
     buildFindingsDOM: buildFindingsDOM,

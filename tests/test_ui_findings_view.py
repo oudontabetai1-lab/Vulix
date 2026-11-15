@@ -445,6 +445,251 @@ class FindingsModulePureFunctionsTests(unittest.TestCase):
         self.assertEqual(res["r2ViewId"], "findings")
         self.assertEqual(res["r3ViewId"], "findings")
 
+    def test_resolve_finding_actions_traffic_capabilities_and_links(self):
+        script = f"""
+        const fs = require('fs');
+        const code = fs.readFileSync('{FINDINGS_MODULE_JS}', 'utf-8');
+        eval(code);
+        const FM = global.VulixFindingsModule;
+
+        const finding = {{
+          id: 'item_sqli_1',
+          scan_id: 'scan_20261115_01',
+          check_type: 'sqli',
+          url: 'http://example.com/api/items?id=10',
+          field_name: 'id',
+          severity: 'high',
+        }};
+
+        // 1. buildTrafficLink directly
+        const directLink1 = FM.buildTrafficLink('scan_20261115_01', 'http://example.com/api/items?id=10');
+        const directLink2 = FM.buildTrafficLink('scan_20261115_01', finding);
+
+        // 2. manifest with traffic capability (read-only live traffic available)
+        const manifestWithTraffic = {{
+          schema_version: '1.0.0',
+          capabilities: {{
+            traffic: {{
+              id: 'traffic',
+              name: 'HTTP traffic inspection',
+              available: true,
+              read_only: true,
+            }},
+          }},
+        }};
+        const actionsTraffic = FM.resolveFindingActions(finding, {{ scanId: 'scan_20261115_01', manifest: manifestWithTraffic }});
+
+        // 3. manifest with traffic capability, but missing scanId or url
+        const findingNoUrl = {{ id: 'item_no_url', check_type: 'headers', url: '' }};
+        const actionsNoUrl = FM.resolveFindingActions(findingNoUrl, {{ scanId: 'scan_20261115_01', manifest: manifestWithTraffic }});
+        const actionsNoScan = FM.resolveFindingActions(finding, {{ scanId: null, manifest: manifestWithTraffic }});
+
+        // 4. manifest with request_detail capability boolean true
+        const manifestWithReqDetail = {{
+          schema_version: '1.0.0',
+          capabilities: {{
+            request_detail: true,
+          }},
+        }};
+        const actionsReqDetail = FM.resolveFindingActions(finding, {{ scanId: 'scan_20261115_01', manifest: manifestWithReqDetail }});
+
+        // 5. manifest without traffic or request_detail
+        const manifestEmpty = {{ schema_version: '1.0.0', capabilities: {{}} }};
+        const actionsEmpty = FM.resolveFindingActions(finding, {{ scanId: 'scan_20261115_01', manifest: manifestEmpty }});
+
+        // 6. omitted manifest (backward compatibility)
+        const actionsOmitted = FM.resolveFindingActions(finding, {{ scanId: 'scan_20261115_01' }});
+
+        console.log(JSON.stringify({{
+          directLink1,
+          directLink2,
+          actionsTraffic,
+          actionsNoUrl,
+          actionsNoScan,
+          actionsReqDetail,
+          actionsEmpty,
+          actionsOmitted,
+        }}));
+        """
+        res = _run_node(script)
+        self.assertEqual(res["directLink1"], "#/traffic?scan=scan_20261115_01&url=http%3A%2F%2Fexample.com%2Fapi%2Fitems%3Fid%3D10")
+        self.assertEqual(res["directLink2"], "#/traffic?scan=scan_20261115_01&url=http%3A%2F%2Fexample.com%2Fapi%2Fitems%3Fid%3D10")
+
+        # 2. Traffic capability enabled
+        act_tr = {a["id"]: a for a in res["actionsTraffic"]}
+        self.assertTrue(act_tr["request_detail"]["enabled"])
+        self.assertIn("#/traffic?scan=scan_20261115_01", act_tr["request_detail"]["href"])
+        self.assertIsNone(act_tr["request_detail"]["reason"])
+
+        # 3. Missing URL or scanId
+        act_no_url = {a["id"]: a for a in res["actionsNoUrl"]}
+        self.assertFalse(act_no_url["request_detail"]["enabled"])
+        self.assertIn("スキャンIDまたはURLがありません", act_no_url["request_detail"]["reason"])
+        act_no_scan = {a["id"]: a for a in res["actionsNoScan"]}
+        self.assertFalse(act_no_scan["request_detail"]["enabled"])
+        self.assertIn("スキャンIDまたはURLがありません", act_no_scan["request_detail"]["reason"])
+
+        # 4. request_detail explicit boolean true
+        act_req = {a["id"]: a for a in res["actionsReqDetail"]}
+        self.assertTrue(act_req["request_detail"]["enabled"])
+        self.assertIn("#/traffic?scan=scan_20261115_01", act_req["request_detail"]["href"])
+
+        # 5. Empty capabilities
+        act_empty = {a["id"]: a for a in res["actionsEmpty"]}
+        self.assertFalse(act_empty["request_detail"]["enabled"])
+        self.assertIn("not available in this version", act_empty["request_detail"]["reason"])
+
+        # 6. Omitted manifest
+        act_omitted = {a["id"]: a for a in res["actionsOmitted"]}
+        self.assertFalse(act_omitted["request_detail"]["enabled"])
+        self.assertIn("not available in this version", act_omitted["request_detail"]["reason"])
+
+    def test_filtered_out_selected_finding_banner_and_reset_action(self):
+        script = f"""
+        function makeElement(tag) {{
+          const children = [];
+          const el = {{
+            tagName: tag.toUpperCase(),
+            className: '',
+            id: '',
+            children: children,
+            dataset: {{}},
+            tabIndex: 0,
+            title: '',
+            hidden: false,
+            value: '',
+            textContent: '',
+            type: 'text',
+            style: {{}},
+            _attrs: {{}},
+            _listeners: {{}},
+            setAttribute(k, v) {{ this._attrs[k] = v; }},
+            getAttribute(k) {{ return this._attrs[k]; }},
+            removeAttribute(k) {{ delete this._attrs[k]; }},
+            appendChild(c) {{ children.push(c); c.parentNode = this; return c; }},
+            append(...cs) {{ cs.forEach(c => this.appendChild(c)); }},
+            replaceChildren(...cs) {{ children.length = 0; cs.forEach(c => this.appendChild(c)); }},
+            removeChild(c) {{ const i = children.indexOf(c); if (i >= 0) children.splice(i, 1); }},
+            remove() {{ if (this.parentNode) this.parentNode.removeChild(this); }},
+            classList: {{
+              _classes: new Set(),
+              add(c) {{ this._classes.add(c); }},
+              remove(c) {{ this._classes.delete(c); }},
+              contains(c) {{ return this._classes.has(c); }},
+            }},
+            addEventListener(evt, fn) {{
+              this._listeners[evt] = this._listeners[evt] || [];
+              this._listeners[evt].push(fn);
+            }},
+            trigger(evt) {{
+              (this._listeners[evt] || []).forEach(fn => fn({{ preventDefault: () => {{}}, target: this }}));
+            }},
+            querySelector(sel) {{
+              return this.querySelectorAll(sel)[0] || null;
+            }},
+            querySelectorAll(sel) {{
+              const results = [];
+              function walk(node) {{
+                if (!node || !node.children) return;
+                for (const child of node.children) {{
+                  let match = false;
+                  if (sel.startsWith('.')) {{
+                    const cls = sel.slice(1);
+                    if (child.className && child.className.split(/\\s+/).includes(cls)) match = true;
+                    if (child.classList && child.classList.contains(cls)) match = true;
+                  }} else if (sel.startsWith('#')) {{
+                    if (child.id === sel.slice(1)) match = true;
+                  }} else if (sel.includes('[data-finding-id=')) {{
+                    const m = sel.match(/\\[data-finding-id="([^"]+)"\\]/);
+                    if (m && child.dataset && child.dataset.findingId === m[1]) match = true;
+                  }}
+                  if (match) results.push(child);
+                  walk(child);
+                }}
+              }}
+              walk(this);
+              return results;
+            }}
+          }};
+          return el;
+        }}
+        global.document = {{
+          createElement: makeElement,
+          createDocumentFragment: () => makeElement('fragment'),
+          createTextNode: (t) => ({{ textContent: t }}),
+          documentElement: {{ lang: 'ja' }},
+        }};
+        global.window = {{ location: {{ hash: '' }}, history: {{ replaceState: (s, t, h) => {{ global.window.location.hash = h; }} }} }};
+        global.location = global.window.location;
+        global.history = global.window.history;
+
+        const FM = require('{FINDINGS_MODULE_JS}');
+        const container = makeElement('div');
+        const mockApi = {{
+          createScope: () => ({{
+            get: async (url) => {{
+              if (url === '/api/capability-manifest') {{
+                return {{ ok: true, data: {{ capabilities: {{ traffic: {{ available: true }} }} }} }};
+              }}
+              if (url.includes('/findings')) {{
+                return {{
+                  ok: true,
+                  data: {{
+                    findings: [
+                      {{ id: 'item_xss_1', check_type: 'xss', severity: 'low', url: 'http://example.com/search', field_name: 'q' }},
+                      {{ id: 'item_sqli_1', check_type: 'sqli', severity: 'critical', url: 'http://example.com/login', field_name: 'user' }},
+                    ]
+                  }}
+                }};
+              }}
+              if (url === '/api/v1/scans') {{
+                return {{ ok: true, data: {{ scans: [{{ id: 'scan_test_1', findings_count: 2 }}] }} }};
+              }}
+              return {{ ok: false }};
+            }},
+            cancelAll: () => {{}}
+          }})
+        }};
+
+        const view = FM.renderFindingsView(container, {{ api: mockApi }});
+        view.initScansAndLoad({{ scanId: 'scan_test_1', findingId: 'item_xss_1', severity: 'critical' }}).then(() => {{
+          const banner = view.dom.detailContent.querySelector('.findings-filtered-out-banner');
+          const bannerPresent = !!banner;
+          const bannerRole = banner ? banner.getAttribute('role') : null;
+          const textEl = banner ? banner.querySelector('.findings-filtered-out-text') : null;
+          const bannerText = textEl ? textEl.textContent : '';
+          const resetBtn = banner ? banner.querySelector('.findings-reset-filter-btn') : null;
+          const resetBtnPresent = !!resetBtn;
+
+          if (resetBtn) {{
+            resetBtn.trigger('click');
+          }}
+
+          const sevAfterReset = view.dom.sevSelect.value;
+          const hashAfterReset = global.location.hash;
+          const bannerAfterReset = !!view.dom.detailContent.querySelector('.findings-filtered-out-banner');
+
+          console.log(JSON.stringify({{
+            bannerPresent,
+            bannerRole,
+            bannerText,
+            resetBtnPresent,
+            sevAfterReset,
+            hashAfterReset,
+            bannerAfterReset,
+          }}));
+        }});
+        """
+        res = _run_node(script)
+        self.assertTrue(res["bannerPresent"])
+        self.assertEqual(res["bannerRole"], "status")
+        self.assertIn("現在表示中の検出結果は現在のフィルタ条件により一覧から除外されています", res["bannerText"])
+        self.assertTrue(res["resetBtnPresent"])
+        self.assertEqual(res["sevAfterReset"], "all")
+        self.assertIn("scan=scan_test_1", res["hashAfterReset"])
+        self.assertIn("finding=item_xss_1", res["hashAfterReset"])
+        self.assertFalse(res["bannerAfterReset"])
+
 
 if __name__ == "__main__":
     unittest.main()

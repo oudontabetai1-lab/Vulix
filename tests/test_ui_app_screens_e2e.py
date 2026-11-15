@@ -638,8 +638,13 @@ def test_app_findings_screen_filters_and_deep_links(e2e_harness: UIHarness):
         assert "crawl" in (crawl_link.get_attribute("href") or "")
         assert "クロールグラフで表示" in crawl_link.inner_text()
 
+        traffic_link = page.locator("#findingsDetailContent a.findings-action-btn[href*='/traffic']")
+        assert traffic_link.is_visible()
+        assert "traffic" in (traffic_link.get_attribute("href") or "")
+        assert "リクエスト詳細" in traffic_link.inner_text()
+
         disabled_actions = page.locator("#findingsDetailContent button.findings-action-btn:disabled")
-        assert disabled_actions.count() >= 2
+        assert disabled_actions.count() >= 1
         for idx in range(disabled_actions.count()):
             assert "not available in this version" in disabled_actions.nth(idx).inner_text()
 
