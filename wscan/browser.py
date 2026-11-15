@@ -2170,7 +2170,7 @@ class BrowserManager:
     async def _form_submit_wait(self, result: dict, form_index: int, *, direct_submit: bool = False):
         """既定送信と文書置換の両方を観測できた fast 送信だけ待機を省く。"""
         fast = self.sleep_factor == 0
-        result["default_prevented"] = False if direct_submit else None
+        result["default_prevented"] = None
         page = self.page
         marker = observers = key = None
         marked = False

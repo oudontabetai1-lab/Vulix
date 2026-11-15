@@ -87,7 +87,7 @@ async def test_preserves_delayed_response_without_observed_navigation(fast, reso
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fast", [False, True])
 @pytest.mark.parametrize("multi", [False, True])
-@pytest.mark.parametrize("js", [False, True, "redirect", "window_redirect", "direct"])
+@pytest.mark.parametrize("js", [False, True, "redirect", "window_redirect", "direct", "overridden_submit"])
 async def test_native_navigation_and_delayed_js_submission(monkeypatch, fast, multi, js):
     from fastapi import FastAPI
     from fastapi.responses import HTMLResponse
@@ -111,7 +111,12 @@ async def test_native_navigation_and_delayed_js_submission(monkeypatch, fast, mu
                 fetch('/form', {method: 'POST', body: new URLSearchParams(new FormData(event.target))});
                 location.assign('/done');
             });</script>""".replace("TARGET", target)
-        button = "" if js == "direct" else "<button>Submit</button>"
+        if js == "overridden_submit":
+            handler = """<script>document.querySelector('form').submit = function() {
+                fetch('/form', {method: 'POST', body: new URLSearchParams(new FormData(this))});
+                location.assign('/done');
+            };</script>"""
+        button = "" if js in ("direct", "overridden_submit") else "<button>Submit</button>"
         return ('<form method="post" action="/form"><input name="q">'
                 '<input name="other">' + button + '</form>' + handler)
 
@@ -139,19 +144,20 @@ async def test_native_navigation_and_delayed_js_submission(monkeypatch, fast, mu
                 _, captured = await browser.fill_and_submit_form_multi(0, {"q": "probe", "other": "second"})
             else:
                 _, captured = await browser.fill_and_submit_form(0, "q", "probe")
-            if js not in ("redirect", "window_redirect"):
+            if js not in ("redirect", "window_redirect") and not (js == "overridden_submit" and multi):
                 assert browser.last_probe_delivered
                 assert "error in your sql syntax" in captured["response"]["body"]
             observation, seconds = observations[-1]
             native = js in (False, "direct")
-            if js == "direct":
+            if js in ("direct", "overridden_submit"):
                 # evaluate と文書遷移が競合した場合も、観測不能なら待機を維持する。
                 assert seconds == form_submit_wait_seconds(**observation)
                 if multi:
-                    assert observation["default_prevented"] is False
+                    assert observation["default_prevented"] is None
+                    assert seconds == .2
             else:
                 assert seconds == (0 if fast and native else .2)
-            if fast and js != "direct":
+            if fast and js not in ("direct", "overridden_submit"):
                 assert observation["observed"]
                 assert observation["navigated"] == (js is not True)
                 if js not in ("window_redirect", "direct"):
@@ -188,7 +194,7 @@ async def test_submit_binding_is_reused_and_validates_observations(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_direct_submit_does_not_require_submit_event(monkeypatch):
+async def test_direct_submit_keeps_cancellation_unknown(monkeypatch):
     page = SimpleNamespace(evaluate=AsyncMock(side_effect=[True, False]), expose_binding=AsyncMock())
     browser = SimpleNamespace(page=page, sleep_factor=0)
     sleep = AsyncMock()
@@ -196,6 +202,6 @@ async def test_direct_submit_does_not_require_submit_event(monkeypatch):
     result = {}
     async with BrowserManager._form_submit_wait(browser, result, 0, direct_submit=True):
         pass
-    assert result["default_prevented"] is False
+    assert result["default_prevented"] is None
     page.expose_binding.assert_not_awaited()
-    sleep.assert_not_awaited()
+    sleep.assert_awaited_once_with(.2)
