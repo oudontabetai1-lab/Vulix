@@ -21,6 +21,86 @@
   const context = document.getElementById('scanContext');
   let currentScanStatus = null;
 
+  const ROUTE_GROUP_MAP = {
+    portal: { group: 'overview', label: '概要' },
+    history: { group: 'overview', label: '概要' },
+    setup: { group: 'scan', label: 'スキャン実行' },
+    monitor: { group: 'scan', label: 'スキャン実行' },
+    findings: { group: 'investigation', label: '結果・調査' },
+    crawl: { group: 'investigation', label: '結果・調査' },
+    traffic: { group: 'investigation', label: '結果・調査' },
+    audit: { group: 'operations', label: '運用・設定' },
+    'agent-skills': { group: 'operations', label: '運用・設定' },
+    settings: { group: 'operations', label: '運用・設定' },
+  };
+
+  function updateNavCount(route, count) {
+    const btn = document.querySelector(`button.history-btn[data-route="${route}"]`);
+    if (!btn) return;
+    const num = Number(count) || 0;
+    if (num > 0) {
+      btn.setAttribute('data-nav-count', String(num));
+    } else {
+      btn.removeAttribute('data-nav-count');
+    }
+    const badge = btn.querySelector('.nav-count-badge') || document.querySelector(`[data-nav-badge="${route}"]`);
+    if (badge) {
+      badge.textContent = String(num);
+      badge.hidden = num <= 0;
+    }
+  }
+
+  function updateNavCounts(counts) {
+    if (!counts) {
+      updateNavCount('findings', 0);
+      updateNavCount('crawl', 0);
+      updateNavCount('traffic', 0);
+      return;
+    }
+    if (counts.findings !== undefined || counts.findings_count !== undefined || counts.findingsCount !== undefined || counts.total_findings !== undefined) {
+      const f = counts.findings_count ?? counts.findingsCount ?? counts.total_findings ?? counts.findings;
+      updateNavCount('findings', Array.isArray(f) ? f.length : f);
+    }
+    if (counts.crawl !== undefined || counts.crawl_count !== undefined || counts.crawled_urls_count !== undefined || counts.crawledUrlsCount !== undefined || counts.crawled_count !== undefined || counts.pages_count !== undefined || counts.pages !== undefined) {
+      const c = counts.crawl_count ?? counts.crawled_urls_count ?? counts.crawledUrlsCount ?? counts.crawled_count ?? counts.pages_count ?? counts.pages ?? counts.crawl;
+      updateNavCount('crawl', Array.isArray(c) ? c.length : c);
+    }
+    if (counts.traffic !== undefined || counts.traffic_count !== undefined || counts.trafficCount !== undefined || counts.http_count !== undefined || counts.requests_count !== undefined || counts.entries !== undefined) {
+      const t = counts.traffic_count ?? counts.trafficCount ?? counts.http_count ?? counts.requests_count ?? counts.entries ?? counts.traffic;
+      updateNavCount('traffic', Array.isArray(t) ? t.length : t);
+    }
+  }
+
+  function activateRoute(routeId) {
+    const groupInfo = ROUTE_GROUP_MAP[routeId] || { group: 'overview', label: '概要' };
+    const viewGroupBadge = document.getElementById('viewGroupBadge');
+    if (viewGroupBadge) {
+      viewGroupBadge.textContent = groupInfo.label;
+      viewGroupBadge.setAttribute('data-group', groupInfo.group);
+    }
+
+    let activeGroupEl = null;
+    document.querySelectorAll('[data-route]').forEach((button) => {
+      if (button.dataset.route === routeId) {
+        button.setAttribute('aria-current', 'page');
+        activeGroupEl = button.closest('.nav-group');
+      } else {
+        button.removeAttribute('aria-current');
+      }
+    });
+
+    document.querySelectorAll('.nav-group').forEach((groupEl) => {
+      const isMatch = (activeGroupEl && groupEl === activeGroupEl) || (groupEl.dataset.navGroup === groupInfo.group);
+      if (isMatch) {
+        groupEl.setAttribute('data-active', 'true');
+        groupEl.classList.add('nav-group-active');
+      } else {
+        groupEl.removeAttribute('data-active');
+        groupEl.classList.remove('nav-group-active');
+      }
+    });
+  }
+
   function redactDisplayUrl(raw) {
     if (!raw || typeof raw !== 'string') return raw || '';
     const str = raw.trim();
@@ -36,16 +116,37 @@
     return url;
   }
 
+  function getActiveScanId() {
+    const currentRoute = parseRoute(global.location.hash);
+    if (currentRoute && currentRoute.scanId && /^[A-Za-z0-9._-]+$/.test(currentRoute.scanId)) {
+      return currentRoute.scanId;
+    }
+    const statusScanId = currentScanStatus && (currentScanStatus.scan_id || currentScanStatus.scanId);
+    if (statusScanId && typeof statusScanId === 'string' && statusScanId !== '—' && /^[A-Za-z0-9._-]+$/.test(statusScanId)) {
+      return statusScanId;
+    }
+    return null;
+  }
+
   function renderScanStatusBar(state) {
     if (!state || (!state.scan_id && !state.scanId && !state.status)) {
       currentScanStatus = null;
       if (typeof context.replaceChildren === 'function') context.replaceChildren();
       else context.innerHTML = '';
       context.textContent = '';
+      updateNavCounts(null);
       return;
     }
+    updateNavCounts(state);
     currentScanStatus = Object.assign({}, currentScanStatus || {}, state);
-    const scanId = state.scan_id || state.scanId || (currentScanStatus && (currentScanStatus.scan_id || currentScanStatus.scanId)) || '';
+    let scanId = state.scan_id || state.scanId || (currentScanStatus && (currentScanStatus.scan_id || currentScanStatus.scanId)) || '';
+    if (scanId === '—' || !/^[A-Za-z0-9._-]+$/.test(scanId)) {
+      scanId = '';
+      if (currentScanStatus) {
+        delete currentScanStatus.scan_id;
+        delete currentScanStatus.scanId;
+      }
+    }
     const rawStatus = (state.status || (currentScanStatus && currentScanStatus.status) || 'idle').toLowerCase();
 
     // Map execution status: idle | running | paused | done | aborted | error | partial | unknown
@@ -806,17 +907,23 @@
       } else if (route.id !== 'monitor') {
         renderScanStatusBar(null);
       }
-      document.querySelectorAll('[data-route]').forEach((button) => {
-        if (button.dataset.route === route.id) button.setAttribute('aria-current', 'page');
-        else button.removeAttribute('aria-current');
-      });
+      activateRoute(route.id);
     } catch (_) {
       unavailable('画面の初期化に失敗しました。');
     }
   }
 
   document.querySelectorAll('[data-route]').forEach((button) => {
-    button.addEventListener('click', () => { global.location.hash = `/${button.dataset.route}`; });
+    button.addEventListener('click', () => {
+      const targetRoute = button.dataset.route;
+      const activeScanId = getActiveScanId();
+      const scanAllowed = ['portal', 'setup', 'monitor', 'findings', 'crawl', 'traffic', 'agent-skills', 'settings'].includes(targetRoute);
+      if (activeScanId && scanAllowed) {
+        global.location.hash = `/${targetRoute}?scan=${encodeURIComponent(activeScanId)}`;
+      } else {
+        global.location.hash = `/${targetRoute}`;
+      }
+    });
   });
   global.addEventListener('hashchange', renderRoute);
   global.addEventListener('pagehide', () => {
@@ -826,8 +933,11 @@
     if (activeScope) activeScope.cancelAll('App shell unloaded');
   }, { once: true });
   global.addEventListener('message', (event) => {
-    if (event.origin !== global.location.origin || event.source !== monitor.contentWindow ||
-        !event.data || event.data.type !== 'vulix:auth-required') return;
+    if (event.origin !== global.location.origin) return;
+    if (event.data && event.data.type === 'vulix:scan-counts') {
+      updateNavCounts(event.data.counts || event.data);
+    }
+    if (event.source !== monitor.contentWindow || !event.data || event.data.type !== 'vulix:auth-required') return;
     registry.destroy();
     unavailable('認証セッションの再確認が必要です。ログイン後に /app を開き直してください。');
     const login = document.createElement('a');
@@ -839,11 +949,21 @@
   if (global.VulixAppShell) {
     global.VulixAppShell.renderScanStatus = renderScanStatusBar;
     global.VulixAppShell.getScanStatus = () => currentScanStatus;
+    global.VulixAppShell.activateRoute = activateRoute;
+    global.VulixAppShell.updateNavCounts = updateNavCounts;
+    global.VulixAppShell.updateNavCount = updateNavCount;
+    global.VulixAppShell.getActiveScanId = getActiveScanId;
+    global.VulixAppShell.ROUTE_GROUP_MAP = ROUTE_GROUP_MAP;
   }
   global.VulixAppEntry = {
     renderScanStatusBar,
     getScanStatus: () => currentScanStatus,
     redactDisplayUrl,
+    activateRoute,
+    updateNavCounts,
+    updateNavCount,
+    getActiveScanId,
+    ROUTE_GROUP_MAP,
   };
 
   if (!global.location.hash) global.history.replaceState(null, '', `${global.location.pathname}${global.location.search}#/portal`);

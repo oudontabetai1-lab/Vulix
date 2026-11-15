@@ -8,6 +8,19 @@
   --text: #e9e9ed;
   --text-muted: #9397ab;
 
+  /* Semantic typography tokens */
+  --font-size-2xs: 0.7rem;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.8125rem;
+  --font-size-base: 0.875rem;
+  --font-size-md: 1rem;
+  --font-size-lg: 1.15rem;
+
+  /* Line height tokens */
+  --line-height-tight: 1.25;
+  --line-height-base: 1.5;
+  --line-height-relaxed: 1.65;
+
   /* Brand (isolated from status) */
   --accent: #9184d9;
   --accent-glow: rgba(145,132,217,0.18);

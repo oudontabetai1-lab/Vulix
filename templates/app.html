@@ -13,13 +13,20 @@
     body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 14px system-ui, sans-serif; }
     .app { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
     :focus-visible { outline: var(--focus-outline, 2px solid var(--accent)); outline-offset: var(--focus-ring-offset, 2px); }
-    aside { padding: var(--space-xl) 14px; background: var(--rail); border-right: 1px solid var(--border); }
-    .brand { display: flex; align-items: center; gap: 9px; padding: 0 8px 22px; font-size: 1.1rem; font-weight: 750; }
+    aside { padding: var(--space-xl) 14px; background: var(--rail); border-right: 1px solid var(--border); overflow-y: auto; max-height: 100vh; position: sticky; top: 0; box-sizing: border-box; }
+    .brand { display: flex; align-items: center; gap: 9px; padding: 0 8px 16px; font-size: 1.1rem; font-weight: 750; }
     .brand img { width: 24px; height: 24px; object-fit: contain; }
-    nav { display: grid; gap: 6px; }
-    nav button { width: 100%; justify-content: flex-start; }
-    nav button[aria-current="page"] { color: var(--text); border-color: var(--accent); background: var(--surface); }
-    nav button:focus-visible, nav button:focus { outline: var(--focus-outline, 2px solid var(--accent)); outline-offset: var(--focus-ring-offset, 2px); }
+    nav { display: flex; flex-direction: column; gap: 12px; }
+    .nav-group { display: flex; flex-direction: column; gap: 3px; }
+    .nav-group-label { font-size: var(--font-size-2xs, 0.7rem); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); padding: 6px 10px 2px; user-select: none; transition: color 0.15s ease-in-out; }
+    .nav-group[data-active="true"] > .nav-group-label, .nav-group.nav-group-active > .nav-group-label { color: var(--accent); }
+    nav button.history-btn { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 7px 12px; border-radius: 6px; font-size: var(--font-size-sm, 0.8125rem); font-weight: 500; line-height: var(--line-height-base, 1.5); color: var(--text-muted); background: transparent; border: 1px solid transparent; border-left: 3px solid transparent; cursor: pointer; text-align: left; transition: all 0.15s ease-in-out; box-sizing: border-box; }
+    nav button.history-btn:hover { background: var(--surface2); color: var(--text); border-color: var(--border); border-left-color: var(--accent); }
+    nav button.history-btn[aria-current="page"] { color: var(--text); background: var(--surface); border-color: var(--border); border-left: 3px solid var(--accent); font-weight: 700; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2); }
+    nav button.history-btn:focus-visible, nav button:focus { outline: var(--focus-outline, 2px solid var(--accent)); outline-offset: 2px; }
+    .nav-count-badge { display: inline-flex; align-items: center; justify-content: center; margin-left: auto; font-size: var(--font-size-2xs, 0.7rem); font-weight: 700; line-height: 1; padding: 2px 6px; border-radius: 10px; background: var(--surface2, #232532); color: var(--accent, #9184d9); border: 1px solid var(--border, #3f424d); min-width: 18px; text-align: center; }
+    .nav-count-badge[hidden] { display: none !important; }
+    .view-group-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: var(--font-size-2xs, 0.7rem); font-weight: 700; letter-spacing: 0.03em; background: var(--surface2); color: var(--accent); border: 1px solid var(--border); flex-shrink: 0; }
     main { min-width: 0; display: flex; flex-direction: column; }
     header { min-height: 58px; display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
     #scanContext { color: var(--text-muted); font-size: .82rem; overflow-wrap: anywhere; display: inline-flex; align-items: center; gap: 8px; }
@@ -86,28 +93,28 @@
     .findings-section-heading { margin: 0 0 8px 0; font-size: 0.9rem; font-weight: 700; color: var(--text); }
     .findings-evidence-wrap { border: 1px solid var(--border); border-radius: 6px; padding: 14px; background: var(--surface2); }
     .agent-finding-callout { background: var(--accent-glow); border: 1px solid var(--accent); border-radius: 6px; padding: 10px 14px; font-size: 0.78rem; line-height: 1.4; color: var(--text); }
-    .sev-badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.04em; }
-    .sev-badge.sev-critical { color: var(--critical); border: 1px solid rgba(226,112,143,0.45); background: rgba(226,112,143,0.15); }
-    .sev-badge.sev-high { color: var(--high); border: 1px solid rgba(217,154,99,0.45); background: rgba(217,154,99,0.15); }
-    .sev-badge.sev-medium { color: var(--medium); border: 1px solid rgba(199,185,106,0.45); background: rgba(199,185,106,0.15); }
-    .sev-badge.sev-low { color: var(--low); border: 1px solid rgba(143,185,201,0.45); background: rgba(143,185,201,0.15); }
-    .sev-badge.sev-info { color: var(--info); border: 1px solid rgba(181,171,252,0.45); background: rgba(181,171,252,0.15); }
-    .verify-badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 4px; font-size: 0.68rem; font-weight: 600; }
+    /* Findings Badge Hierarchy (Primary: sev-badge, Secondary: verify-badge, Tertiary: review-badge & provenance-badge) */
+    .sev-badge { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 4px; font-size: var(--font-size-2xs, 0.7rem); font-weight: 700; line-height: var(--line-height-tight, 1.25); letter-spacing: 0.04em; text-transform: uppercase; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); }
+    .sev-badge.sev-critical { color: var(--critical); border: 1.5px solid var(--critical); background: rgba(226,112,143,0.22); }
+    .sev-badge.sev-high { color: var(--high); border: 1.5px solid var(--high); background: rgba(217,154,99,0.22); }
+    .sev-badge.sev-medium { color: var(--medium); border: 1.5px solid var(--medium); background: rgba(199,185,106,0.22); }
+    .sev-badge.sev-low { color: var(--low); border: 1.5px solid var(--low); background: rgba(143,185,201,0.22); }
+    .sev-badge.sev-info { color: var(--info); border: 1.5px solid var(--info); background: rgba(181,171,252,0.22); }
+    .verify-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 9999px; font-size: var(--font-size-2xs, 0.7rem); font-weight: 600; line-height: var(--line-height-tight, 1.25); }
     .verify-badge.verify-reproduced { color: var(--status-pass); border: 1px solid var(--status-pass-border); background: var(--status-pass-bg); }
     .verify-badge.verify-assumed { color: var(--status-warning); border: 1px solid var(--status-warning-border); background: var(--status-warning-bg); }
     .verify-badge.verify-unreproduced { color: var(--status-not-checked); border: 1px solid var(--status-not-checked-border); background: var(--status-not-checked-bg); }
     .verify-badge.verify-skipped { color: var(--status-stale); border: 1px solid var(--status-stale-border); background: var(--status-stale-bg); }
-    .review-badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 4px; font-size: 0.68rem; font-weight: 600; }
-    .review-badge.review-reviewed { color: var(--status-pass); border: 1px solid var(--status-pass-border); background: var(--status-pass-bg); }
-    .review-badge.review-in-review { color: var(--status-warning); border: 1px solid var(--status-warning-border); background: var(--status-warning-bg); }
-    .review-badge.review-false-positive { color: var(--status-not-checked); border: 1px solid var(--status-not-checked-border); background: var(--status-not-checked-bg); }
-    .review-badge.review-accepted { color: var(--info); border: 1px solid rgba(181,171,252,0.45); background: rgba(181,171,252,0.12); }
-    .review-badge.review-needs-review { color: var(--status-stale); border: 1px solid var(--status-stale-border); background: var(--status-stale-bg); }
+    .review-badge, .provenance-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 3px; font-size: var(--font-size-2xs, 0.68rem); font-weight: 500; line-height: var(--line-height-tight, 1.25); opacity: 0.88; }
+    .review-badge.review-reviewed { color: var(--status-pass); border: 1px solid rgba(34,197,94,0.2); background: rgba(34,197,94,0.08); }
+    .review-badge.review-in-review { color: var(--status-warning); border: 1px solid rgba(199,185,106,0.2); background: rgba(199,185,106,0.08); }
+    .review-badge.review-false-positive { color: var(--text-muted); border: 1px solid var(--border); background: transparent; }
+    .review-badge.review-accepted { color: var(--info); border: 1px solid rgba(181,171,252,0.25); background: rgba(181,171,252,0.08); }
+    .review-badge.review-needs-review { color: var(--status-stale); border: 1px solid rgba(217,154,99,0.2); background: rgba(217,154,99,0.08); }
     .review-badge.review-unset { color: var(--text-muted); border: 1px dashed var(--border); background: transparent; }
-    .provenance-badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 4px; font-size: 0.68rem; font-weight: 600; }
-    .provenance-badge.provenance-scanner { color: var(--text-muted); border: 1px solid var(--border); background: var(--surface2); }
-    .provenance-badge.provenance-agent { color: var(--accent); border: 1px solid var(--accent); background: var(--accent-glow); }
-    .provenance-badge.provenance-agent-verified { color: var(--status-pass); border: 1px solid var(--status-pass-border); background: var(--status-pass-bg); }
+    .provenance-badge.provenance-scanner { color: var(--text-muted); border: 1px solid var(--border); background: transparent; }
+    .provenance-badge.provenance-agent { color: var(--accent); border: 1px solid rgba(145,132,217,0.3); background: rgba(145,132,217,0.08); }
+    .provenance-badge.provenance-agent-verified { color: var(--status-pass); border: 1px solid rgba(34,197,94,0.2); background: rgba(34,197,94,0.08); }
     .evidence-viewer pre { background: var(--surface); padding: 8px 12px; border-radius: 4px; overflow-x: auto; color: var(--text); border: 1px solid var(--border); font-size: 0.78rem; word-break: break-all; white-space: pre-wrap; overflow-wrap: anywhere; }
     .evidence-viewer h4 { margin: 8px 0 4px 0; font-size: 0.85rem; color: var(--accent); }
     .fc-evidence-label { font-weight: 600; font-size: 0.78rem; color: var(--text-muted); display: block; margin-top: 6px; }
@@ -354,10 +361,12 @@
     .traffic-unavailable-reason { color: var(--text-muted); font-size: 0.8rem; margin: 0; }
     @media (max-width: 768px) {
       .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-      aside { padding: 10px 14px; border-right: 0; border-bottom: 1px solid var(--border); }
+      aside { padding: 10px 14px; border-right: 0; border-bottom: 1px solid var(--border); max-height: none; position: static; }
       .brand { padding: 0 6px 8px; }
-      nav { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px; }
-      nav button { justify-content: center; padding: 8px 5px; }
+      nav { display: flex; flex-direction: column; gap: 8px; }
+      .nav-group { display: flex; flex-wrap: wrap; gap: 4px; }
+      .nav-group-label { width: 100%; padding: 4px 6px 2px; }
+      nav button.history-btn { width: auto; flex: 1 1 calc(50% - 4px); min-width: 120px; justify-content: space-between; padding: 6px 8px; }
       .findings-split-view { grid-template-columns: 1fr; }
       .crawl-explorer-tree { width: 100%; max-width: 280px; }
       .crawl-detail-drawer { width: min(380px, calc(100vw - 32px)); }
@@ -369,20 +378,32 @@
     <aside aria-label="サイドバー">
       <div class="brand"><img src="/ui/vulix-logo-mark.png" alt="Vulix">Vulix</div>
       <nav aria-label="Application">
-        <button class="history-btn" type="button" data-route="portal">ポータル</button>
-        <button class="history-btn" type="button" data-route="history">スキャン履歴</button>
-        <button class="history-btn" type="button" data-route="audit">監査ログ</button>
-        <button class="history-btn" type="button" data-route="setup">Scan Setup</button>
-        <button class="history-btn" type="button" data-route="monitor">Monitor</button>
-        <button class="history-btn" type="button" data-route="findings">Findings</button>
-        <button class="history-btn" type="button" data-route="crawl">Crawl</button>
-        <button class="history-btn" type="button" data-route="traffic">Traffic</button>
-        <button class="history-btn" type="button" data-route="agent-skills">Agent Skills</button>
-        <button class="history-btn" type="button" data-route="settings">Settings</button>
+        <div class="nav-group" role="group" data-nav-group="overview" aria-labelledby="nav-group-overview">
+          <div class="nav-group-label" id="nav-group-overview">概要</div>
+          <button class="history-btn" type="button" data-route="portal">ポータル</button>
+          <button class="history-btn" type="button" data-route="history">スキャン履歴</button>
+        </div>
+        <div class="nav-group" role="group" data-nav-group="scan" aria-labelledby="nav-group-scan">
+          <div class="nav-group-label" id="nav-group-scan">スキャン実行</div>
+          <button class="history-btn" type="button" data-route="setup">Scan Setup</button>
+          <button class="history-btn" type="button" data-route="monitor">Monitor</button>
+        </div>
+        <div class="nav-group" role="group" data-nav-group="investigation" aria-labelledby="nav-group-investigation">
+          <div class="nav-group-label" id="nav-group-investigation">結果・調査</div>
+          <button class="history-btn" type="button" data-route="findings">Findings<span class="nav-count-badge" data-nav-badge="findings" hidden>0</span></button>
+          <button class="history-btn" type="button" data-route="crawl">Crawl<span class="nav-count-badge" data-nav-badge="crawl" hidden>0</span></button>
+          <button class="history-btn" type="button" data-route="traffic">Traffic<span class="nav-count-badge" data-nav-badge="traffic" hidden>0</span></button>
+        </div>
+        <div class="nav-group" role="group" data-nav-group="operations" aria-labelledby="nav-group-operations">
+          <div class="nav-group-label" id="nav-group-operations">運用・設定</div>
+          <button class="history-btn" type="button" data-route="audit">監査ログ</button>
+          <button class="history-btn" type="button" data-route="agent-skills">Agent Skills</button>
+          <button class="history-btn" type="button" data-route="settings">Settings</button>
+        </div>
       </nav>
     </aside>
     <main>
-      <header role="banner"><img src="/ui/vulix-logo-mark.png" alt="Vulix" style="width:24px;height:24px;object-fit:contain;border-radius:4px;flex-shrink:0"><strong id="viewTitle">ポータル</strong><span id="scanContext" aria-live="polite"></span></header>
+      <header role="banner"><img src="/ui/vulix-logo-mark.png" alt="Vulix" style="width:24px;height:24px;object-fit:contain;border-radius:4px;flex-shrink:0"><span id="viewGroupBadge" class="view-group-badge">概要</span><strong id="viewTitle">ポータル</strong><span id="scanContext" aria-live="polite"></span></header>
       <section id="surface" aria-live="polite">
         <iframe id="monitorFrame" title="Vulix Monitor" hidden></iframe>
         <div id="monitorModule" hidden></div>

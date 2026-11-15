@@ -815,3 +815,190 @@
 .setup-check-popover h4 { margin: 10px 0 3px; color: var(--text-muted); font-size: 0.76rem; }
 .setup-check-popover p { margin: 0; font-size: 0.78rem; line-height: 1.45; overflow-wrap: anywhere; }
 .setup-check-popover-close { margin-top: 12px; padding: 5px 10px; border-radius: 5px; }
+
+/* ==========================================================================
+   Navigation Workflow Groups & Count Badges
+   ========================================================================== */
+.nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.nav-group-label {
+  font-size: var(--font-size-2xs, 0.7rem);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 6px 10px 2px;
+  user-select: none;
+  transition: color 0.15s ease-in-out;
+}
+.nav-group[data-active="true"] > .nav-group-label,
+.nav-group.nav-group-active > .nav-group-label {
+  color: var(--accent);
+}
+.nav-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  font-size: var(--font-size-2xs, 0.7rem);
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: var(--surface2, #232532);
+  color: var(--accent, #9184d9);
+  border: 1px solid var(--border, #3f424d);
+  min-width: 18px;
+  text-align: center;
+}
+.nav-count-badge[hidden] {
+  display: none !important;
+}
+.view-group-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: var(--font-size-2xs, 0.7rem);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  background: var(--surface2);
+  color: var(--accent);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* ==========================================================================
+   Findings Badges Hierarchy (Primary / Secondary / Tertiary)
+   ========================================================================== */
+/* Primary: .sev-badge (prominent weight 700, solid border, higher contrast) */
+.sev-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: var(--font-size-2xs, 0.7rem);
+  font-weight: 700;
+  line-height: var(--line-height-tight, 1.25);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.sev-badge.sev-critical { color: var(--critical); border: 1.5px solid var(--critical); background: rgba(226, 112, 143, 0.22); }
+.sev-badge.sev-high { color: var(--high); border: 1.5px solid var(--high); background: rgba(217, 154, 99, 0.22); }
+.sev-badge.sev-medium { color: var(--medium); border: 1.5px solid var(--medium); background: rgba(199, 185, 106, 0.22); }
+.sev-badge.sev-low { color: var(--low); border: 1.5px solid var(--low); background: rgba(143, 185, 201, 0.22); }
+.sev-badge.sev-info { color: var(--info); border: 1.5px solid var(--info); background: rgba(181, 171, 252, 0.22); }
+
+/* Secondary: .verify-badge (medium emphasis, distinct verification pill) */
+.verify-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: var(--font-size-2xs, 0.7rem);
+  font-weight: 600;
+  line-height: var(--line-height-tight, 1.25);
+}
+.verify-badge.verify-reproduced { color: var(--status-pass); border: 1px solid var(--status-pass-border); background: var(--status-pass-bg); }
+.verify-badge.verify-assumed { color: var(--status-warning); border: 1px solid var(--status-warning-border); background: var(--status-warning-bg); }
+.verify-badge.verify-unreproduced { color: var(--status-not-checked); border: 1px solid var(--status-not-checked-border); background: var(--status-not-checked-bg); }
+.verify-badge.verify-skipped { color: var(--status-stale); border: 1px solid var(--status-stale-border); background: var(--status-stale-bg); }
+
+/* Tertiary: .review-badge and .provenance-badge (subtle compact metadata pills) */
+.review-badge,
+.provenance-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: var(--font-size-2xs, 0.68rem);
+  font-weight: 500;
+  line-height: var(--line-height-tight, 1.25);
+  opacity: 0.88;
+}
+.review-badge.review-reviewed { color: var(--status-pass); border: 1px solid rgba(34, 197, 94, 0.2); background: rgba(34, 197, 94, 0.08); }
+.review-badge.review-in-review { color: var(--status-warning); border: 1px solid rgba(199, 185, 106, 0.2); background: rgba(199, 185, 106, 0.08); }
+.review-badge.review-false-positive { color: var(--text-muted); border: 1px solid var(--border); background: transparent; }
+.review-badge.review-accepted { color: var(--info); border: 1px solid rgba(181, 171, 252, 0.25); background: rgba(181, 171, 252, 0.08); }
+.review-badge.review-needs-review { color: var(--status-stale); border: 1px solid rgba(217, 154, 99, 0.2); background: rgba(217, 154, 99, 0.08); }
+.review-badge.review-unset { color: var(--text-muted); border: 1px dashed var(--border); background: transparent; }
+
+.provenance-badge.provenance-scanner { color: var(--text-muted); border: 1px solid var(--border); background: transparent; }
+.provenance-badge.provenance-agent { color: var(--accent); border: 1px solid rgba(145, 132, 217, 0.3); background: rgba(145, 132, 217, 0.08); }
+.provenance-badge.provenance-agent-verified { color: var(--status-pass); border: 1px solid rgba(34, 197, 94, 0.2); background: rgba(34, 197, 94, 0.08); }
+
+/* ==========================================================================
+   Long URL, JSON, and Payload Overflow Prevention
+   ========================================================================== */
+.url-cell,
+.payload-preview,
+.context-value,
+.findings-card-url,
+.findings-card-field,
+.findings-card-evidence,
+.findings-detail-title,
+.findings-detail-th,
+.findings-evidence-wrap,
+.crawl-table td,
+.crawl-node-url,
+.crawl-node-field,
+.traffic-table td,
+.traffic-url-cell,
+.traffic-payload-cell,
+.traffic-entry-url,
+.setup-url-input,
+.setup-effective-diff-item,
+.setup-diff-key,
+.setup-diff-val,
+.setup-diff-before,
+.evidence-viewer pre {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* ==========================================================================
+   Primary CTA vs Secondary/Auxiliary Action Button Distinctions
+   ========================================================================== */
+.btn-primary,
+.setup-start-btn,
+.action-btn.primary,
+.history-btn.primary {
+  background: var(--accent) !important;
+  color: #161826 !important;
+  border: 1px solid var(--accent) !important;
+  font-weight: 700 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+.btn-primary:hover,
+.setup-start-btn:hover,
+.action-btn.primary:hover,
+.history-btn.primary:hover {
+  opacity: 0.9;
+}
+
+.btn-secondary,
+.setup-prelaunch-rerun-btn,
+.findings-action-btn,
+.crawl-action-btn,
+.traffic-action-btn,
+.action-btn.secondary {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+}
+.btn-secondary:hover:not(:disabled),
+.setup-prelaunch-rerun-btn:hover:not(:disabled),
+.findings-action-btn:hover:not(:disabled),
+.crawl-action-btn:hover:not(:disabled),
+.traffic-action-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
