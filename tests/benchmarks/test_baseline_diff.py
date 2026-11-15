@@ -68,3 +68,26 @@ def test_invalid_tier_rejected():
 def test_empty_scorecards_have_empty_diff():
     diff = compute_baseline_diff({}, {})
     assert diff == {"new": [], "removed": [], "regressed": [], "improved": []}
+
+
+def test_detection_gate_integration_with_baseline_diff():
+    from wscan.recall_gate import evaluate_detection_gate
+
+    baseline = {
+        "metrics": {"confirmed": {"tp": 2, "fn": 0, "fp": 0, "tn": 0, "recall": 1.0, "precision": 1.0, "recall_denominator": 2}},
+        "cases": [_case("v1", confirmed="tp"), _case("v2", confirmed="tp")],
+    }
+    # v1 regressed to fn
+    current = {
+        "case_counts": {"planned": 2, "completed": 2, "incomplete": 0},
+        "metrics": {"confirmed": {"tp": 1, "fn": 1, "fp": 0, "tn": 0, "recall": 0.5, "precision": 1.0, "recall_denominator": 2}},
+        "cases": [
+            {"case_id": "v1", "state": "completed", "classification": {"confirmed": "fn"}},
+            {"case_id": "v2", "state": "completed", "classification": {"confirmed": "tp"}},
+        ],
+    }
+    verdict = evaluate_detection_gate(current, baseline=baseline, tier="confirmed")
+    assert verdict.passed is False
+    assert "v1" in verdict.regressed_cases
+    assert any("Baseline case regression" in r for r in verdict.reasons)
+

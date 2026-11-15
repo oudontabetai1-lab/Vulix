@@ -1101,3 +1101,13 @@ def discover_benchmark_suites(
         seen.add(suite.suite_id)
         suites.append(suite)
     return suites
+
+
+# 検出回帰ゲート・Nightly 有効期限ゲート判定の再公開
+from wscan.recall_gate import (  # noqa: E402
+    DetectionGateVerdict,
+    NightlyFreshnessVerdict,
+    evaluate_detection_gate,
+    evaluate_nightly_freshness,
+)
+
