@@ -10,7 +10,7 @@ import pytest
 from wscan.llm_agent_browser import AgentBrowserScanner
 
 
-def test_agent_browser_cancel_stops_browser():
+def test_agent_browser_cancel_stops_browser(monkeypatch):
     started = asyncio.Event()
     browsers = []
 
@@ -36,9 +36,8 @@ def test_agent_browser_cancel_stops_browser():
 
     async def run_test():
         scanner = AgentBrowserScanner(target_url="http://fixture.test")
-        with patch(
-            "wscan.llm_agent_browser._build_llm", return_value=object()
-        ), patch.dict(sys.modules, {"browser_use": browser_use}):
+        monkeypatch.setitem(sys.modules, "browser_use", browser_use)
+        with patch("wscan.llm_agent_browser._build_llm", return_value=object()):
             task = asyncio.create_task(scanner.run())
             await started.wait()
             task.cancel()
