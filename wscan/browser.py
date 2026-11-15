@@ -14,6 +14,7 @@ from email import policy
 from email.parser import BytesParser
 from functools import wraps
 import urllib.request
+from contextlib import asynccontextmanager
 from collections.abc import Mapping
 from urllib.parse import parse_qs, unquote, urlparse as _urlparse
 from typing import Optional, Callable, Any
@@ -41,6 +42,12 @@ def _playwright_proxy_options(proxy: str) -> dict[str, str] | None:
     if username is not None or password is not None:
         options.update(username=username or "", password=password or "")
     return options
+
+
+def form_submit_wait_seconds(*, fast: bool, navigated: bool, observed: bool,
+                             default_prevented: Optional[bool] = None) -> float:
+    """既定送信と文書置換を確認できた fast だけ待機を省く。"""
+    return 0.0 if fast and observed and navigated and default_prevented is False else 0.2
 
 
 def _request_carries_form_value(pair: dict, field: str, payload: str, *, submission=None, since=None) -> bool:
@@ -2159,6 +2166,81 @@ class BrowserManager:
         except Exception:
             return False
 
+    @asynccontextmanager
+    async def _form_submit_wait(self, result: dict, form_index: int, *, direct_submit: bool = False):
+        """既定送信と文書置換の両方を観測できた fast 送信だけ待機を省く。"""
+        fast = self.sleep_factor == 0
+        result["default_prevented"] = None
+        page = self.page
+        marker = observers = key = None
+        marked = False
+        cleanup = ("const state = document[key]; if (state) { clearTimeout(state.timer); "
+                   "if (state.listener) document.removeEventListener('submit', state.listener); } "
+                   "delete document[key];")
+        if fast:
+            marker = key = f"__vulix_form_{time.monotonic_ns()}"
+            try:
+                if not direct_submit:
+                    observers = getattr(page, "_vulix_submit_observers", None)
+                    if observers is None:
+                        observers = {}
+                        def record(source, key, prevented):
+                            if (not isinstance(key, str) or not isinstance(prevented, bool)
+                                    or source.get("frame") is not page.main_frame):
+                                return
+                            target = observers.get(key)
+                            if target is not None and target["default_prevented"] is not True:
+                                target["default_prevented"] = prevented
+                        await page.expose_binding("__vulix_form_submit", record)
+                        page._vulix_submit_observers = observers
+                    observers[marker] = result
+                marked = await page.evaluate(
+                    """([key, index, direct]) => {
+                        const form = document.querySelectorAll('form')[index];
+                        if (!form) return false;
+                        const state = {};
+                        Object.defineProperty(document, key, {value: state, configurable: true});
+                        if (!direct) {
+                            state.listener = event => {
+                                if (event.target !== form) return;
+                                // キャンセルは取り消せない。false は dispatch 終了後に確認する。
+                                if (event.defaultPrevented) window.__vulix_form_submit(key, true);
+                                else state.timer = setTimeout(() =>
+                                    window.__vulix_form_submit(key, event.defaultPrevented), 0);
+                            };
+                            document.addEventListener('submit', state.listener);
+                        }
+                        return true;
+                    }""", [marker, form_index, direct_submit])
+            except Exception:
+                pass
+        try:
+            yield
+            observed = navigated = False
+            if marker and marked is True:
+                try:
+                    present = await page.evaluate(
+                        "(key) => { const present = Object.prototype.hasOwnProperty.call(document, key); "
+                        + cleanup + " return present; }", marker)
+                    marker = None
+                    observed = isinstance(present, bool)
+                    navigated = observed and not present
+                except Exception:
+                    pass
+            delay = form_submit_wait_seconds(
+                fast=fast, navigated=navigated, observed=observed,
+                default_prevented=result["default_prevented"])
+            if delay:
+                await asyncio.sleep(delay)
+        finally:
+            if observers is not None:
+                observers.pop(key, None)
+            if marker:
+                try:
+                    await page.evaluate("(key) => { " + cleanup + " }", marker)
+                except Exception:
+                    pass
+
     async def _fill_and_submit_form_once(
         self,
         form_index: int,
@@ -2364,25 +2446,24 @@ class BrowserManager:
             # 見る。fill script の validation XHR や背景 polling を submit のリクエストと取り違えない。
             net_before_submit = self.network.request_count()
             self.network.probe_context = getattr(self.network, "pending_probe_context", None)
-            if submit_btn and await submit_btn.is_visible():
-                if bypass_validation:
+            async with self._form_submit_wait(result, form_index):
+                if submit_btn and await submit_btn.is_visible():
+                    if bypass_validation:
+                        await self.page.evaluate(
+                            f"""() => {{
+                                const form = document.querySelectorAll('form')[{form_index}];
+                                if (form) {{
+                                    const btn = form.querySelector('[type=submit], button');
+                                    if (btn) btn.formNoValidate = true;
+                                }}
+                            }}"""
+                        )
+                    await submit_btn.click()
+                else:
                     await self.page.evaluate(
-                        f"""() => {{
-                            const form = document.querySelectorAll('form')[{form_index}];
-                            if (form) {{
-                                const btn = form.querySelector('[type=submit], button');
-                                if (btn) btn.formNoValidate = true;
-                            }}
-                        }}"""
+                        f"document.querySelectorAll('form')[{form_index}].requestSubmit()"
                     )
-                await submit_btn.click()
-            else:
-                await self.page.evaluate(
-                    f"document.querySelectorAll('form')[{form_index}].requestSubmit()"
-                )
-            await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
-            # SPA の fetch 応答を送達判定に反映する待機は fast でも省略しない。
-            await asyncio.sleep(0.2)
+                await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
@@ -2577,16 +2658,17 @@ class BrowserManager:
             # submit 直前の送信数。送達は「submit 後に送られたリクエストが payload を運んだか」で
             # 判定する（fill script の XHR や背景 polling を結合送信と取り違えない）。
             net_before_submit = self.network.request_count()
-            if submit_btn:
-                await submit_btn.click()
-            else:
-                await self.page.evaluate(
-                    f"document.querySelectorAll('form')[{form_index}].submit()"
-                )
+            async with self._form_submit_wait(
+                result, form_index, direct_submit=submit_btn is None
+            ):
+                if submit_btn:
+                    await submit_btn.click()
+                else:
+                    await self.page.evaluate(
+                        f"document.querySelectorAll('form')[{form_index}].submit()"
+                    )
 
-            await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
-            # SPA の fetch 応答を送達判定に反映する待機は fast でも省略しない。
-            await asyncio.sleep(0.2)
+                await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
