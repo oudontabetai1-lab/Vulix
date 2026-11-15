@@ -267,7 +267,12 @@ def _proxy_sdk_modules():
     }
 
 
-def test_agent_browser_profile_receives_normalized_proxy_without_sdk_global_config():
+def _install_proxy_sdk_modules(monkeypatch):
+    for name, module in _proxy_sdk_modules().items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def test_agent_browser_profile_receives_normalized_proxy_without_sdk_global_config(monkeypatch):
     scanner = AgentBrowserScanner("http://fixture.test", proxy="127.0.0.1:8080")
     captured = {}
 
@@ -275,24 +280,24 @@ def test_agent_browser_profile_receives_normalized_proxy_without_sdk_global_conf
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    with patch.dict(sys.modules, _proxy_sdk_modules()):
-        scanner._build_browser_profile(Profile)
+    _install_proxy_sdk_modules(monkeypatch)
+    scanner._build_browser_profile(Profile)
 
     assert captured["proxy"].server == "http://127.0.0.1:8080"
     assert captured["proxy"].bypass == "<-loopback>"
     assert captured["proxy"].credential_kwargs == {}
 
 
-def test_proxy_profile_rejects_sdk_without_proxy_support():
+def test_proxy_profile_rejects_sdk_without_proxy_support(monkeypatch):
     scanner = AgentBrowserScanner("http://fixture.test", proxy="http://127.0.0.1:8080")
 
     class LegacyProfile:
         def __init__(self, *, headless, disable_security, allowed_domains, storage_state):
             pass
 
-    with patch.dict(sys.modules, _proxy_sdk_modules()):
-        with pytest.raises(RuntimeError, match="proxy を browser-use profile"):
-            scanner._build_browser_profile(LegacyProfile)
+    _install_proxy_sdk_modules(monkeypatch)
+    with pytest.raises(RuntimeError, match="proxy を browser-use profile"):
+        scanner._build_browser_profile(LegacyProfile)
 
 
 def test_agent_browser_profile_keeps_no_proxy_default():
@@ -367,7 +372,7 @@ def test_split_proxy_credentials(raw, expected):
     assert split_proxy_credentials(raw) == expected
 
 
-def test_agent_browser_profile_maps_proxy_userinfo_to_credentials():
+def test_agent_browser_profile_maps_proxy_userinfo_to_credentials(monkeypatch):
     scanner = AgentBrowserScanner(
         "http://fixture.test", proxy="http://agent:s%40cret@proxy.test:3128"
     )
@@ -377,8 +382,8 @@ def test_agent_browser_profile_maps_proxy_userinfo_to_credentials():
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    with patch.dict(sys.modules, _proxy_sdk_modules()):
-        scanner._build_browser_profile(Profile)
+    _install_proxy_sdk_modules(monkeypatch)
+    scanner._build_browser_profile(Profile)
 
     proxy = captured["proxy"]
     assert proxy.server == "http://proxy.test:3128"

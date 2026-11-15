@@ -1,5 +1,6 @@
 """Agent 初期化失敗を正常な 0 findings と誤表示しないことを検証する。"""
 
+import sys
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -98,10 +99,9 @@ async def test_agent_missing_browser_use_is_failed_not_traceback():
 
 
 @pytest.mark.asyncio
-async def test_agent_unsuccessful_history_is_incomplete_not_clean():
+async def test_agent_unsuccessful_history_is_incomplete_not_clean(monkeypatch):
     # browser-use が例外でなく history.is_successful()=False で失敗を報告し、findings が
     # 空のとき、「正常完了・0 findings」と誤表示せず INCOMPLETE＋非0 exit にする。
-    import sys
     import types
 
     output = StringIO()
@@ -144,6 +144,7 @@ async def test_agent_unsuccessful_history_is_incomplete_not_clean():
     browser_use.Browser = _FakeBrowser
 
     scanner = AgentBrowserScanner(target_url="http://fixture.test")
+    monkeypatch.setitem(sys.modules, "browser_use", browser_use)
     with patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, ""),
     ), patch(
@@ -151,7 +152,7 @@ async def test_agent_unsuccessful_history_is_incomplete_not_clean():
     ), patch(
         "wscan.llm_agent_browser.console",
         Console(file=output, force_terminal=False, color_system=None),
-    ), patch.dict(sys.modules, {"browser_use": browser_use}):
+    ):
         result = await scanner.run()
 
     rendered = output.getvalue()
@@ -166,7 +167,7 @@ async def test_agent_unsuccessful_history_is_incomplete_not_clean():
 
 
 @pytest.mark.asyncio
-async def test_monitored_agent_incomplete_empty_returns_before_sleep():
+async def test_monitored_agent_incomplete_empty_returns_before_sleep(monkeypatch):
     # monitored 経路（ダッシュボード有り）でも、incomplete-empty（success=False かつ
     # 0 findings）のとき sleep(3600) に入らず result を返し、_agent_exit_code が非0を
     # 返せることを検証する。early-return 条件を
@@ -227,7 +228,8 @@ async def test_monitored_agent_incomplete_empty_returns_before_sleep():
         header=[],
     )
 
-    with patch.dict("sys.modules", {"uvicorn": fake_uvicorn}), patch(
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    with patch(
         "wscan.monitor.MonitorServer", _FakeMonitor
     ), patch(
         "wscan.agent_engine.AgentEngine", _FakeEngine

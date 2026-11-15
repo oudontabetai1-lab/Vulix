@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
+from tests._module_stubs import install_modules
 from wscan.llm_client import backoff_seconds, complete_text, is_retryable
 from wscan.remediation import generate_fix
 
@@ -485,8 +486,8 @@ class RemediationRoleAndRetryTests(unittest.TestCase):
             return object()
 
         fake_anthropic.Anthropic = _Anthropic
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}, clear=False), \
-             patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}, clear=False):
+            install_modules(self, {"anthropic": fake_anthropic})
             pg._get_anthropic_client()
         self.assertNotIn("max_retries", seen)   # 共有 client では無効化しない
 

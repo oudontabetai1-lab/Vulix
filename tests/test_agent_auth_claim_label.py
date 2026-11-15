@@ -270,7 +270,7 @@ class _History:
 
 
 @pytest.mark.asyncio
-async def test_agent_mode_labels_unverified_login_claim(tmp_path):
+async def test_agent_mode_labels_unverified_login_claim(tmp_path, monkeypatch):
     """When LLM self-asserts 'AUTH COMPLETE' but deterministic ground-truth fails:
 
     - auth_verification_status is 'unverified_auth_claim'
@@ -336,13 +336,14 @@ async def test_agent_mode_labels_unverified_login_claim(tmp_path):
         harness_output_dir=tmp_path,
     )
 
+    monkeypatch.setitem(sys.modules, "browser_use", fake_browser_use)
+    monkeypatch.setitem(
+        sys.modules, "browser_use.browser", types.ModuleType("browser_use.browser")
+    )
+    monkeypatch.setitem(sys.modules, "browser_use.browser.profile", fake_profile)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
-    ), patch.dict(sys.modules, {
-        "browser_use": fake_browser_use,
-        "browser_use.browser": types.ModuleType("browser_use.browser"),
-        "browser_use.browser.profile": fake_profile,
-    }):
+    ):
         result = await scanner.run()
 
     # 1. Auth claim is truthfully labeled unverified
@@ -359,7 +360,7 @@ async def test_agent_mode_labels_unverified_login_claim(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_agent_mode_labels_verified_login_claim(tmp_path):
+async def test_agent_mode_labels_verified_login_claim(tmp_path, monkeypatch):
     """When LLM self-asserts 'AUTH COMPLETE' and deterministic ground-truth succeeds:
 
     - auth_verification_status is 'verified'
@@ -429,13 +430,14 @@ async def test_agent_mode_labels_verified_login_claim(tmp_path):
         harness_output_dir=tmp_path,
     )
 
+    monkeypatch.setitem(sys.modules, "browser_use", fake_browser_use)
+    monkeypatch.setitem(
+        sys.modules, "browser_use.browser", types.ModuleType("browser_use.browser")
+    )
+    monkeypatch.setitem(sys.modules, "browser_use.browser.profile", fake_profile)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
-    ), patch.dict(sys.modules, {
-        "browser_use": fake_browser_use,
-        "browser_use.browser": types.ModuleType("browser_use.browser"),
-        "browser_use.browser.profile": fake_profile,
-    }):
+    ):
         result = await scanner.run()
 
     # 1. Auth claim is verified

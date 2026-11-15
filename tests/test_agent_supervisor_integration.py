@@ -32,7 +32,7 @@ class _History:
 
 
 @pytest.mark.asyncio
-async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_path):
+async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_path, monkeypatch):
     tasks = []
     budgets = []
     late_observed = False
@@ -107,9 +107,10 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
         access_urls=["http://idp.test"],
         harness_output_dir=tmp_path,
     )
+    monkeypatch.setitem(sys.modules, "browser_use", module)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
-    ), patch.dict(sys.modules, {"browser_use": module}):
+    ):
         result = await scanner.run()
 
     assert any("Act only as the Explorer" in task for task in tasks)
@@ -319,7 +320,7 @@ def test_runnable_work_count_excludes_exhausted_retries(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_successful_retry_uses_final_work_state(tmp_path):
+async def test_successful_retry_uses_final_work_state(tmp_path, monkeypatch):
     attempts = {"explorer": 0}
 
     class _RetryHistory(_History):
@@ -358,9 +359,10 @@ async def test_successful_retry_uses_final_work_state(tmp_path):
         "http://fixture.test", checks=["xss"], max_steps=20,
         harness_output_dir=tmp_path,
     )
+    monkeypatch.setitem(sys.modules, "browser_use", module)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
-    ), patch.dict(sys.modules, {"browser_use": module}):
+    ):
         result = await scanner.run()
 
     assert attempts["explorer"] == 2
@@ -369,7 +371,7 @@ async def test_successful_retry_uses_final_work_state(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_later_episode_failure_returns_checkpoint_findings(tmp_path):
+async def test_later_episode_failure_returns_checkpoint_findings(tmp_path, monkeypatch):
     class _Agent:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -406,9 +408,10 @@ async def test_later_episode_failure_returns_checkpoint_findings(tmp_path):
         "http://fixture.test", checks=["xss"], max_steps=20,
         harness_output_dir=tmp_path,
     )
+    monkeypatch.setitem(sys.modules, "browser_use", module)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
-    ), patch.dict(sys.modules, {"browser_use": module}):
+    ):
         result = await scanner.run()
 
     assert result.error == "verifier crashed"
@@ -486,7 +489,7 @@ def test_parse_reviewer_gap_lines():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("resolve", [False, True])
-async def test_reviewer_retry_requires_explicit_gap_resolution(tmp_path, resolve):
+async def test_reviewer_retry_requires_explicit_gap_resolution(tmp_path, resolve, monkeypatch):
     reviewer_attempts = 0
 
     class _Agent:
@@ -523,9 +526,10 @@ async def test_reviewer_retry_requires_explicit_gap_resolution(tmp_path, resolve
         "http://fixture.test", checks=["xss"], max_steps=40,
         harness_output_dir=tmp_path,
     )
+    monkeypatch.setitem(sys.modules, "browser_use", module)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
-    ), patch.dict(sys.modules, {"browser_use": module}):
+    ):
         result = await scanner.run()
 
     assert reviewer_attempts == 2
