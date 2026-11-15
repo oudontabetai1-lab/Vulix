@@ -109,6 +109,16 @@ def test_monitor_three_panes_responsive_smoke(ui_harness: UIHarness, width: int)
         page.wait_for_selector(".main")
         page.wait_for_function("() => typeof handleEvent === 'function'")
 
+        # 0. 初期ライブ状態（スナップショット）の反映を待ってから操作する。
+        #    反映前にイベントを注入すると、後から届くスナップショットで件数が巻き戻る。
+        page.wait_for_function(
+            "() => window.VulixAppBridge && window.VulixAppBridge.getContext().server_id !== ''"
+        )
+        #    単体の /monitor は idle 時に設定フォームを自動で開く（awaiting_config）。
+        #    3ペインを操作するため、埋め込み時と同じ monitor サーフェスを宣言する。
+        assert page.evaluate("() => window.VulixAppBridge.setSurface('monitor')") is True
+        assert not page.locator("#scanConfigOverlay.active").is_visible()
+
         # 1. Navigation rail presence (rail on desktop >= 1280, top nav on <= 1200)
         if width >= 1280:
             assert page.is_visible("#navLiveMonitor")
@@ -237,5 +247,50 @@ def test_setup_tabs_responsive_smoke(ui_harness: UIHarness, width: int):
         screenshot_path, w, h = ui_harness.capture_screenshot(page, "setup_tabs", width)
         assert screenshot_path.is_file()
         assert w == width
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("embedded", [False, True])
+def test_monitor_dismissed_config_stays_closed_after_reconnect(ui_harness: UIHarness, embedded: bool):
+    """A fresh snapshot must preserve the user's workspace selection."""
+    require_browser()
+    page = ui_harness.new_page(width=768, height=900)
+    page.add_init_script("""(() => {
+        const NativeSocket = window.WebSocket;
+        window.__snapshots = 0;
+        window.WebSocket = class extends NativeSocket {
+            constructor(...args) {
+                super(...args);
+                window.__socket = this;
+                this.addEventListener('message', event => {
+                    if (JSON.parse(event.data).type === 'scan_snapshot') window.__snapshots++;
+                });
+            }
+        };
+    })();""")
+    try:
+        page.goto(f"{ui_harness.server_url}/app#/monitor" if embedded else f"{ui_harness.server_url}/monitor")
+        surface = page
+        if embedded:
+            page.wait_for_function("() => document.querySelector('#monitorFrame')?.dataset.ready === 'true'")
+            surface = page.locator('#monitorModule')
+            frame = page.locator('#monitorFrame').element_handle().content_frame()
+        else:
+            frame = page.main_frame
+        frame.wait_for_function("() => window.__snapshots > 0")
+        if embedded:
+            assert not frame.locator('#scanConfigOverlay').is_visible()
+        else:
+            surface.locator('[title="ライブモニターに戻る"]').click()
+        surface.locator('#ctab-browser').click()
+        frame.evaluate("() => { window.__before = window.__snapshots; window.__socket.close(); }")
+        frame.wait_for_function("() => window.__snapshots > window.__before && window.__socket.readyState === WebSocket.OPEN")
+        assert not frame.locator('#scanConfigOverlay').is_visible()
+        surface.locator('#ctab-progress').click()
+        assert 'active' in surface.locator('#ctab-progress').get_attribute('class')
+        if not embedded:
+            surface.locator('.hdr-newscan').click()
+            assert surface.locator('#scanConfigOverlay').is_visible()
     finally:
         page.close()

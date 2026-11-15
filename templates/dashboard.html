@@ -2891,6 +2891,8 @@ const state = {
   scanRunId: null,
   scanId: null,
   appSurface: null,
+  configAutoOpened: false,
+  userInteracted: false,
   lastEventSequence: 0,
   eventCount: 0,
   findingCount: 0,
@@ -4484,6 +4486,10 @@ function applyImportedConfig(cfg) {
 }
 
 function initConfigOverlay() {
+  // 利用者が操作した後は、状態再送で設定画面を自動表示しない。
+  ['pointerdown', 'keydown', 'click'].forEach(type => {
+    document.addEventListener(type, () => { state.userInteracted = true; }, {capture: true, once: true});
+  });
   initCheckGroups();
   wireUpload('upTlsClientCert', 'cfgTlsClientCert', 'upTlsClientCertStatus');
   wireUpload('upTlsClientKey', 'cfgTlsClientKey', 'upTlsClientKeyStatus');
@@ -5818,6 +5824,8 @@ function dispatchLegacyEvent(event) {
       if (state.scanDone) break;
       // 統合画面でモニター表示中は、アイドル状態通知で設定オーバーレイを再表示しない。
       if (state.appSurface === 'monitor') break;
+      if (state.configAutoOpened || state.userInteracted) break;
+      state.configAutoOpened = true;
       document.getElementById('scanConfigOverlay').classList.add('active');
       setStatus('設定フォームに入力してスキャンを開始してください', '');
       break;
