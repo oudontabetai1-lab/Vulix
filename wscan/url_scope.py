@@ -329,6 +329,17 @@ def has_secret_marker(text) -> bool:
     return isinstance(text, str) and _RE_SECRET_MARKER.search(text) is not None
 
 
+def contains_secret_value(text: str) -> bool:
+    """*text* に登録済みの資格情報値が含まれているか（または既に伏字マーカーを含むか）。"""
+    if not isinstance(text, str) or not text:
+        return False
+    if has_secret_marker(text):
+        return True
+    if not _SECRET_VALUES:
+        return False
+    return redact_secret_values(text) != text
+
+
 def redact_url_values(url):
     """URL の userinfo・query・fragment だけ登録済み値を伏せる。path（識別子）は変えない。"""
     if not isinstance(url, str) or not url or not _SECRET_VALUES:
@@ -345,10 +356,11 @@ def redact_url_values(url):
     return head + rest[:cut] + redact_secret_values(rest[cut:])
 
 
-# 証跡として永続化する finding のフィールド。これ以外（check_type/field_name/payload/injection_*/
+# 証跡として永続化する finding のフィールド。これ以外（check_type/field_name/injection_*/
 # 各種 id 等の識別子）は値ベース置換の対象にしない（resume のキー一致・再検証を壊さないため）。
+# payload は埋め込まれたセッション資格情報を伏せるが、送信時の生攻撃バイトは壊さない。
 _EVIDENCE_FIELDS = ("request", "response", "evidence", "response_body_excerpt", "evidence_details",
-                    "reproduction_steps", "verification_note", "dialog_message")
+                    "reproduction_steps", "verification_note", "dialog_message", "payload")
 
 
 def redact_leaves(value, key=""):
