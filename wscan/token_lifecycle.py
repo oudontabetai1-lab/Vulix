@@ -97,6 +97,10 @@ class TokenOutcomeKind(str, Enum):
     BLOCKED = "blocked"            # WAF/認可拒否/IP制限など（トークン再送では解消不能）
     INCONCLUSIVE = "inconclusive"  # 判定不能（ステータスコードのみのヒント、情報不足）
     RETRYABLE = "retryable"        # 一時的ネットワークエラー・上流タイムアウト等
+    AUTH_EXPIRED = "auth_expired"  # 認証セッション失効（401 / ログイン画面リダイレクト / ログイン要求）
+    RATE_LIMITED = "rate_limited"  # レートリミット（429 / Retry-After）
+    FORBIDDEN_POLICY = "forbidden_policy" # WAF/管理ポリシー拒否
+    APP_VALIDATION_ERROR = "app_validation_error" # アプリ入力検証エラー
 
 
 class TokenCarrier(str, Enum):
@@ -554,6 +558,45 @@ _CSRF_MISSING_KEYWORDS: tuple[str, ...] = (
     "csrf token required",
 )
 
+# 認証セッション失効・ログイン要求シグナル
+_AUTH_EXPIRED_KEYWORDS: tuple[str, ...] = (
+    "unauthorized",
+    "unauthenticated",
+    "authentication required",
+    "login required",
+    "please log in",
+    "please sign in",
+    "session expired",
+    "session has expired",
+    "session timed out",
+    "session timeout",
+    "not logged in",
+    "user not logged in",
+    "invalid credentials",
+    "token has been revoked",
+)
+
+# ログイン画面 URL パス判定用ヒント
+_LOGIN_REDIRECT_PATHS: tuple[str, ...] = (
+    "/login",
+    "/signin",
+    "/sign-in",
+    "/auth/login",
+    "/account/login",
+    "login.php",
+    "/users/sign_in",
+    "/session/new",
+)
+
+# レートリミットシグナル
+_RATE_LIMITED_KEYWORDS: tuple[str, ...] = (
+    "rate limit exceeded",
+    "too many requests",
+    "rate limited",
+    "slow down",
+    "request rate",
+)
+
 # WAF / 認可拒否シグナル
 _BLOCKED_KEYWORDS: tuple[str, ...] = (
     "cloudflare",
@@ -566,6 +609,32 @@ _BLOCKED_KEYWORDS: tuple[str, ...] = (
     "forbidden by administrative rules",
     "rate limit exceeded",
     "too many requests",
+)
+
+# WAF ブロック判定用
+_WAF_KEYWORDS: tuple[str, ...] = (
+    "cloudflare",
+    "mod_security",
+    "modsecurity",
+    "blocked by web application firewall",
+)
+
+# セキュリティポリシー / 認可拒否判定用
+_POLICY_KEYWORDS: tuple[str, ...] = (
+    "access denied",
+    "request blocked",
+    "security violation",
+    "forbidden by administrative rules",
+    "permission denied",
+    "forbidden policy",
+)
+
+# アプリケーション入力検証エラー用
+_APP_VALIDATION_KEYWORDS: tuple[str, ...] = (
+    "validation error",
+    "validation failed",
+    "validation_error",
+    "invalid parameter",
 )
 
 
@@ -587,8 +656,11 @@ def classify_token_response(
     2. トークン更新を試行して失敗したプローブ（refresh_attempted=True かつ not refresh_succeeded）は、
        決して確定（positive / confirmed）または安全（negative）と誤認してはならず、
        BLOCKED または INCONCLUSIVE に分類する。
+    3. 認証セッション失効 (auth_expired: 401 / ログイン画面リダイレクト / ログイン要求) を CSRF トークン STALE と
+       厳密に分離し、clean negative や CSRF 再送ループを抑止する。
+    4. レート制限 (rate_limited: 429 / Retry-After) を検知し、盲目的即時再送を防止する。
     """
-    # ── 規則 1: トークン更新失敗時のプローブ結果は確定・陰性に倒さず BLOCKED/INCONCLUSIVE に倒す ──
+    # ── 規則 1: トークン更新失敗時のプローブ結果は確定・陰性に倒さず BLOCKED に倒す ──
     if refresh_attempted and not refresh_succeeded:
         return TokenOutcome(
             outcome=TokenOutcomeKind.BLOCKED,
@@ -601,7 +673,6 @@ def classify_token_response(
 
     # ── 規則 2: 意図的または偶発的なトークン非送信プローブの分類 ──
     if not token_present:
-        # トークン非送信でサーバが受理した場合（2xx / 3xx）: トークン検証が欠如しているシグナル
         if 200 <= status_code < 400:
             return TokenOutcome(
                 outcome=TokenOutcomeKind.MISSING,
@@ -611,7 +682,6 @@ def classify_token_response(
                 is_retryable=False,
                 evidence_metadata={"token_present": False, "status": status_code},
             )
-        # トークン非送信で拒否された場合
         return TokenOutcome(
             outcome=TokenOutcomeKind.MISSING,
             reason_code="token_absent_rejected",
@@ -621,7 +691,29 @@ def classify_token_response(
             evidence_metadata={"token_present": False, "status": status_code},
         )
 
-    # ── 規則 3: 一時的ネットワークエラー・上流障害 ──
+    # 本文テキストおよびヘッダの正規化
+    body_text = ""
+    if body is not None:
+        if isinstance(body, bytes):
+            body_text = body.decode("utf-8", errors="replace").lower()
+        else:
+            body_text = str(body).lower()
+
+    hdr_dict = {str(k).lower(): str(v).lower() for k, v in (headers or {}).items()}
+    csrf_error_header = hdr_dict.get("x-csrf-error", "") or hdr_dict.get("x-action-error", "")
+
+    # ── 規則 3: レートリミット (429 / Retry-After) ──
+    if status_code == 429 or "retry-after" in hdr_dict or any(k in body_text for k in _RATE_LIMITED_KEYWORDS):
+        return TokenOutcome(
+            outcome=TokenOutcomeKind.RATE_LIMITED,
+            reason_code="rate_limited",
+            detail="Rate limit exceeded (429 or Retry-After); blind immediate retry prohibited.",
+            http_status_hint=status_code,
+            is_retryable=False,
+            evidence_metadata={"rate_limited": True, "status": status_code},
+        )
+
+    # ── 規則 4: 一時的ネットワークエラー・上流障害 ──
     if status_code in (408, 502, 503, 504):
         return TokenOutcome(
             outcome=TokenOutcomeKind.RETRYABLE,
@@ -630,18 +722,6 @@ def classify_token_response(
             http_status_hint=status_code,
             is_retryable=True,
         )
-
-    # 本文テキストの正規化
-    body_text = ""
-    if body is not None:
-        if isinstance(body, bytes):
-            body_text = body.decode("utf-8", errors="replace").lower()
-        else:
-            body_text = str(body).lower()
-
-    # ヘッダシグナルの確認
-    hdr_dict = {k.lower(): v.lower() for k, v in (headers or {}).items()}
-    csrf_error_header = hdr_dict.get("x-csrf-error", "") or hdr_dict.get("x-action-error", "")
 
     # ── 規則 4: 明示的ライフサイクルシグナルの適用 ──
     if lifecycle_signal:
@@ -678,10 +758,73 @@ def classify_token_response(
                 http_status_hint=status_code,
                 is_retryable=False,
             )
+        if "auth_expired" in sig:
+            return TokenOutcome(
+                outcome=TokenOutcomeKind.AUTH_EXPIRED,
+                reason_code="auth_expired",
+                detail="Authentication expired; session lost.",
+                http_status_hint=status_code,
+                is_retryable=False,
+                evidence_metadata={"auth_expired": True, "status": status_code},
+            )
+        if "rate_limited" in sig:
+            return TokenOutcome(
+                outcome=TokenOutcomeKind.RATE_LIMITED,
+                reason_code="rate_limited",
+                detail="Rate limit exceeded.",
+                http_status_hint=status_code,
+                is_retryable=False,
+                evidence_metadata={"rate_limited": True, "status": status_code},
+            )
+        if "forbidden_policy" in sig:
+            return TokenOutcome(
+                outcome=TokenOutcomeKind.FORBIDDEN_POLICY,
+                reason_code="forbidden_policy",
+                detail="Forbidden by security policy.",
+                http_status_hint=status_code,
+                is_retryable=False,
+            )
+        if "app_validation_error" in sig:
+            return TokenOutcome(
+                outcome=TokenOutcomeKind.APP_VALIDATION_ERROR,
+                reason_code="app_validation_error",
+                detail="Application input validation error.",
+                http_status_hint=status_code,
+                is_retryable=False,
+            )
 
-    # ── 規則 5: 消費条件（ConsumptionCondition）とエラーの相関 ──
+    # ── 規則 5: レートリミット (429 / Retry-After) ──
+    if status_code == 429 or "retry-after" in hdr_dict or any(k in body_text for k in _RATE_LIMITED_KEYWORDS):
+        return TokenOutcome(
+            outcome=TokenOutcomeKind.RATE_LIMITED,
+            reason_code="rate_limited",
+            detail="Rate limit exceeded (429 or Retry-After); blind immediate retry prohibited.",
+            http_status_hint=status_code,
+            is_retryable=False,
+            evidence_metadata={"rate_limited": True, "status": status_code},
+        )
+
+    # ── 規則 6: 認証セッション失効 (401 / ログイン画面リダイレクト / ログイン要求) ──
+    is_login_redirect = False
+    if status_code in (301, 302, 303, 307, 308):
+        loc = hdr_dict.get("location", "")
+        if loc:
+            loc_path = loc.split("?", 1)[0].rstrip("/").lower()
+            if any(p in loc_path for p in _LOGIN_REDIRECT_PATHS) or "login" in loc_path or "signin" in loc_path:
+                is_login_redirect = True
+
+    if status_code == 401 or is_login_redirect or (status_code != 200 and any(k in body_text for k in _AUTH_EXPIRED_KEYWORDS)):
+        return TokenOutcome(
+            outcome=TokenOutcomeKind.AUTH_EXPIRED,
+            reason_code="auth_expired",
+            detail="Authentication expired or required (401 / login redirect / login required signal).",
+            http_status_hint=status_code,
+            is_retryable=False,
+            evidence_metadata={"auth_expired": True, "status": status_code},
+        )
+
+    # ── 規則 7: STATIC トークンの消費条件と拒否 ──
     if binding and binding.consumption == ConsumptionCondition.STATIC:
-        # STATIC トークンでエラーになった場合、リフレッシュしても変化しないため BLOCKED
         if status_code in (400, 401, 403, 419, 422) and any(k in body_text for k in _CSRF_STALE_KEYWORDS):
             return TokenOutcome(
                 outcome=TokenOutcomeKind.BLOCKED,
@@ -691,18 +834,26 @@ def classify_token_response(
                 is_retryable=False,
             )
 
-    # ── 規則 6: 本文/ヘッダの明示的シグナル検査 ──
-    # WAF ブロック判定
-    if any(k in body_text for k in _BLOCKED_KEYWORDS):
+    # ── 規則 8: WAF / セキュリティポリシーによる拒否 ──
+    if any(k in body_text for k in _WAF_KEYWORDS):
         return TokenOutcome(
             outcome=TokenOutcomeKind.BLOCKED,
             reason_code="blocked_waf_or_policy",
-            detail="Request blocked by WAF, rate limit, or security access policy.",
+            detail="Request blocked by WAF or security policy.",
             http_status_hint=status_code,
             is_retryable=False,
         )
 
-    # 明示的な CSRF 欠落シグナル
+    if any(k in body_text for k in _POLICY_KEYWORDS) or hdr_dict.get("x-policy-forbidden"):
+        return TokenOutcome(
+            outcome=TokenOutcomeKind.FORBIDDEN_POLICY,
+            reason_code="forbidden_policy",
+            detail="Request blocked by security access policy.",
+            http_status_hint=status_code,
+            is_retryable=False,
+        )
+
+    # ── 規則 9: 明示的な CSRF 欠落シグナル ──
     if any(k in body_text for k in _CSRF_MISSING_KEYWORDS):
         return TokenOutcome(
             outcome=TokenOutcomeKind.MISSING,
@@ -712,7 +863,7 @@ def classify_token_response(
             is_retryable=True,
         )
 
-    # 明示的な CSRF 不一致・失効シグナル
+    # ── 規則 10: 明示的な CSRF 不一致・失効シグナル ──
     if csrf_error_header or any(k in body_text for k in _CSRF_STALE_KEYWORDS):
         return TokenOutcome(
             outcome=TokenOutcomeKind.STALE,
@@ -722,7 +873,18 @@ def classify_token_response(
             is_retryable=True,
         )
 
-    # ── 規則 7: HTTP ステータス単体（403/419/422）はヒント扱い（断定せず INCONCLUSIVE） ──
+    # ── 規則 11: アプリケーション入力検証エラー (400/422) ──
+    if status_code in (400, 422):
+        if any(k in body_text for k in _APP_VALIDATION_KEYWORDS) or hdr_dict.get("x-validation-error"):
+            return TokenOutcome(
+                outcome=TokenOutcomeKind.APP_VALIDATION_ERROR,
+                reason_code="app_validation_error",
+                detail="Server reported application input validation error.",
+                http_status_hint=status_code,
+                is_retryable=False,
+            )
+
+    # ── 規則 12: HTTP ステータス単体（403/419/422）はヒント扱い（断定せず INCONCLUSIVE） ──
     if status_code in (403, 419, 422):
         return TokenOutcome(
             outcome=TokenOutcomeKind.INCONCLUSIVE,
@@ -732,7 +894,7 @@ def classify_token_response(
             is_retryable=False,
         )
 
-    # ── 規則 8: 正常受理（2xx / 3xx） ──
+    # ── 規則 13: 正常受理（2xx / 3xx） ──
     if 200 <= status_code < 400:
         return TokenOutcome(
             outcome=TokenOutcomeKind.OK,
@@ -742,7 +904,7 @@ def classify_token_response(
             is_retryable=False,
         )
 
-    # その他未知のエラー
+    # その他の未知のエラー
     return TokenOutcome(
         outcome=TokenOutcomeKind.INCONCLUSIVE,
         reason_code="unclassified_status",
@@ -755,10 +917,17 @@ def classify_token_response(
 def is_probe_conclusive(outcome: TokenOutcome) -> bool:
     """プローブ結果が脆弱性の確定判定 (confirmed / negative) に有効かを判定する純粋関数。
 
-    BLOCKED または INCONCLUSIVE の結果は、プローブ自体が成立していない（WAF阻害、
-    トークン更新失敗、情報不足）ため、確定判定に使用してはならない。
+    BLOCKED, INCONCLUSIVE, AUTH_EXPIRED, RATE_LIMITED, FORBIDDEN_POLICY の結果は、
+    プローブ自体が成立していない（WAF阻害、トークン更新失敗、セッション失効、レート制限、情報不足）
+    ため、確定判定に使用してはならない。
     """
-    return outcome.outcome not in (TokenOutcomeKind.BLOCKED, TokenOutcomeKind.INCONCLUSIVE)
+    return outcome.outcome not in (
+        TokenOutcomeKind.BLOCKED,
+        TokenOutcomeKind.INCONCLUSIVE,
+        TokenOutcomeKind.AUTH_EXPIRED,
+        TokenOutcomeKind.RATE_LIMITED,
+        TokenOutcomeKind.FORBIDDEN_POLICY,
+    )
 
 
 # ── 6. 有界リトライ判定（Bounded Retry Pure Function） ─────────────────────
@@ -769,19 +938,27 @@ def decide_token_retry(
     max_retries: int = 1,
     binding: TokenBinding | None = None,
     refresh_strategy: RefreshStrategy | None = None,
+    method: str | None = None,
+    is_state_changing: bool | None = None,
+    idempotent: bool | None = None,
 ) -> RetryDecision:
     """有界リトライ (bounded retry) の要否を決定する純粋関数。
 
     規則:
     1. attempt_count >= max_retries の場合、上限到達によりリトライ不可（有界性の厳格保証）。
-    2. outcome が BLOCKED または INCONCLUSIVE の場合、トークン再送では解決しないためリトライ不可。
-    3. outcome が OK の場合、すでに成功しているためリトライ不要。
-    4. outcome が STALE の場合:
+    2. outcome が OK の場合、すでに成功しているためリトライ不要。
+    3. outcome が auth_expired の場合、認証セッションが失われており CSRF 再送では回復不能のためリトライ不可。
+    4. outcome が rate_limited の場合、盲目的即時再送を防止するためリトライ不可。
+    5. outcome が forbidden_policy / app_validation_error の場合、トークン問題ではないためリトライ不可。
+    6. outcome が BLOCKED または INCONCLUSIVE の場合、トークン再送では解決しないためリトライ不可。
+    7. outcome が RETRYABLE（一時障害）の場合、上限内であればリトライを許可。
+    8. outcome が STALE の場合:
        - binding が STATIC のときは値が変わらないためリトライ不可。
+       - 状態変更プローブ（POST/PUT/DELETE/PATCH 等）では、サーバが変更適用前に拒否した証拠
+         （明示的 403/419/422 拒否シグナル）がない曖昧な応答（200/500/timeout 等）では安全のため自動再送しない。
        - refresh_strategy が利用可能（strategy != NONE）であれば、リフレッシュ付きリトライを許可。
        - refresh_strategy が NONE または未指定の場合、リフレッシュできないためリトライ不可。
-    5. outcome が RETRYABLE（一時障害）の場合、上限内であればリトライを許可。
-    6. outcome が MISSING かつ refresh_strategy が利用可能な場合、取得を試みるリトライを許可。
+    9. outcome が MISSING かつ refresh_strategy が利用可能な場合、取得を試みるリトライを許可（状態変更安全性に準拠）。
     """
     # 規則 1: 上限到達
     if attempt_count >= max_retries:
@@ -804,7 +981,47 @@ def decide_token_retry(
             requires_refresh=False,
         )
 
-    # 規則 3: BLOCKED / INCONCLUSIVE は再試行不可
+    # 規則 3: 認証セッション失効 (auth_expired)
+    if outcome.outcome in (TokenOutcomeKind.AUTH_EXPIRED, "auth_expired") or outcome.reason_code == "auth_expired":
+        return RetryDecision(
+            should_retry=False,
+            reason="Authentication session expired; CSRF refresh cannot recover lost session",
+            attempt_count=attempt_count,
+            max_retries=max_retries,
+            requires_refresh=False,
+        )
+
+    # 規則 4: レートリミット (rate_limited / 429)
+    if outcome.outcome in (TokenOutcomeKind.RATE_LIMITED, "rate_limited") or outcome.reason_code == "rate_limited" or outcome.http_status_hint == 429:
+        return RetryDecision(
+            should_retry=False,
+            reason="Rate limited (429 / Retry-After); blind immediate retry prohibited",
+            attempt_count=attempt_count,
+            max_retries=max_retries,
+            requires_refresh=False,
+        )
+
+    # 規則 5: セキュリティポリシー拒否
+    if outcome.outcome in (TokenOutcomeKind.FORBIDDEN_POLICY, "forbidden_policy") or outcome.reason_code == "forbidden_policy":
+        return RetryDecision(
+            should_retry=False,
+            reason=f"Forbidden by security policy ({outcome.reason_code}); retry not warranted",
+            attempt_count=attempt_count,
+            max_retries=max_retries,
+            requires_refresh=False,
+        )
+
+    # 規則 6: アプリケーション入力検証エラー
+    if outcome.outcome in (TokenOutcomeKind.APP_VALIDATION_ERROR, "app_validation_error") or outcome.reason_code == "app_validation_error":
+        return RetryDecision(
+            should_retry=False,
+            reason="Application validation error; not a CSRF token issue",
+            attempt_count=attempt_count,
+            max_retries=max_retries,
+            requires_refresh=False,
+        )
+
+    # 規則 7: BLOCKED / INCONCLUSIVE は再試行不可
     if outcome.outcome in (TokenOutcomeKind.BLOCKED, TokenOutcomeKind.INCONCLUSIVE):
         return RetryDecision(
             should_retry=False,
@@ -814,7 +1031,7 @@ def decide_token_retry(
             requires_refresh=False,
         )
 
-    # 規則 4: 一時的エラー（RETRYABLE）
+    # 規則 8: 一時的エラー（RETRYABLE）
     if outcome.outcome == TokenOutcomeKind.RETRYABLE:
         return RetryDecision(
             should_retry=True,
@@ -825,7 +1042,18 @@ def decide_token_retry(
             suggested_strategy=refresh_strategy,
         )
 
-    # 規則 5: STALE（失効・不一致）の場合
+    # 状態変更（非羃等）判定
+    state_changing = False
+    if is_state_changing is True:
+        state_changing = True
+    elif is_state_changing is False:
+        state_changing = False
+    elif method:
+        m = method.strip().upper()
+        if m in ("POST", "PUT", "DELETE", "PATCH"):
+            state_changing = (idempotent is not True)
+
+    # 規則 9: STALE（失効・不一致）の場合
     if outcome.outcome == TokenOutcomeKind.STALE:
         # STATIC トークンはリフレッシュ不可能
         if binding and binding.consumption == ConsumptionCondition.STATIC:
@@ -836,6 +1064,20 @@ def decide_token_retry(
                 max_retries=max_retries,
                 requires_refresh=False,
             )
+
+        # 状態変更プローブにおける安全性検査:
+        # サーバが元操作を適用する前にリクエストを拒否した明確な証拠（403/419/422）がない曖昧な応答では再送しない
+        if state_changing:
+            if outcome.http_status_hint not in (403, 419, 422):
+                return RetryDecision(
+                    should_retry=False,
+                    reason="State-changing probe with ambiguous response status (not in 403/419/422); cannot guarantee operation was rejected before mutation",
+                    attempt_count=attempt_count,
+                    max_retries=max_retries,
+                    requires_refresh=False,
+                    suggested_strategy=refresh_strategy,
+                )
+
         # リフレッシュ戦略の有無を確認
         if refresh_strategy and refresh_strategy.strategy != RefreshKind.NONE:
             return RetryDecision(
@@ -854,8 +1096,17 @@ def decide_token_retry(
             requires_refresh=False,
         )
 
-    # 規則 6: MISSING の場合
+    # 規則 10: MISSING の場合
     if outcome.outcome == TokenOutcomeKind.MISSING:
+        if state_changing and outcome.http_status_hint not in (403, 419, 422):
+            return RetryDecision(
+                should_retry=False,
+                reason="State-changing probe with ambiguous missing token response; cannot guarantee operation was rejected before mutation",
+                attempt_count=attempt_count,
+                max_retries=max_retries,
+                requires_refresh=False,
+                suggested_strategy=refresh_strategy,
+            )
         if refresh_strategy and refresh_strategy.strategy != RefreshKind.NONE:
             return RetryDecision(
                 should_retry=True,
@@ -1180,7 +1431,17 @@ def build_token_capability_matrix(
     )
 
 # Opt-in, write-only lifecycle telemetry. Values are deliberately primitive and secret-free.
-_TOKEN_TELEMETRY_REASONS = frozenset({"stale", "refresh_failed", "retry", "transport_error", "unknown"})
+_TOKEN_TELEMETRY_REASONS = frozenset({
+    "stale",
+    "refresh_failed",
+    "retry",
+    "transport_error",
+    "unknown",
+    "auth_expired",
+    "rate_limited",
+    "forbidden_policy",
+    "app_validation_error",
+})
 
 @dataclass(frozen=True)
 class TokenLifecycleEvent:

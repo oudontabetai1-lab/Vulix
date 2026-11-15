@@ -1398,39 +1398,72 @@ class BaseScanner(ABC):
             outcome = None
             try:
                 outcome = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
-                if outcome.outcome == TokenOutcomeKind.STALE:
-                    refresh_reason = "stale"
-                    retry_body, retry_headers, refreshed = await self._refresh_httpx_token(client, url, body, headers, carrier)
-                    if refreshed:
-                        request_body, request_headers = retry_body, retry_headers
-                        attempt_count += 1
-                        try:
-                            response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
-                        except Exception as retry_error:
-                            if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
-                                try:
-                                    from wscan.token_lifecycle import TokenLifecycleEvent
-                                    self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
-                                        probe_attempt_id=self._transport_error_attempt_id(
-                                            retry_error, getattr(self.engine, "request_logger", None)), evidence_id=None, check=self.CHECK_TYPE,
-                                        carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
-                                        refresh_reason="transport_error", final_status=None,
-                                        final_lifecycle_status="unknown"))
-                                    retry_transport_error_recorded = True
-                                except Exception as exc:
-                                    self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
-                            raise
+                if outcome.outcome in (TokenOutcomeKind.AUTH_EXPIRED, "auth_expired"):
+                    refresh_reason = "auth_expired"
+                    self._record_scan_note(f"token_lifecycle:auth_expired:{self.CHECK_TYPE}")
+                    self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                    try:
+                        self.engine._probe_inconclusive = True
+                    except Exception:
+                        pass
+                    if hasattr(self.engine, "_api_auth_failed"):
+                        self.engine._api_auth_failed = True
+                elif outcome.outcome in (TokenOutcomeKind.RATE_LIMITED, "rate_limited"):
+                    refresh_reason = "rate_limited"
+                    self._record_scan_note(f"token_lifecycle:rate_limited:{self.CHECK_TYPE}")
+                    self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                    try:
+                        self.engine._probe_inconclusive = True
+                    except Exception:
+                        pass
+                elif outcome.outcome == TokenOutcomeKind.STALE:
+                    from wscan.token_lifecycle import RefreshKind, RefreshStrategy, decide_token_retry
+                    retry_dec = decide_token_retry(
+                        outcome,
+                        attempt_count=attempt_count,
+                        max_retries=2,
+                        method=method,
+                        refresh_strategy=RefreshStrategy(strategy=RefreshKind.API_CALL),
+                    )
+                    if retry_dec.should_retry:
+                        refresh_reason = "stale"
+                        retry_body, retry_headers, refreshed = await self._refresh_httpx_token(client, url, body, headers, carrier)
+                        if refreshed:
+                            request_body, request_headers = retry_body, retry_headers
+                            attempt_count += 1
+                            try:
+                                response = await client.request(method, url, content=(json.dumps(retry_body) if carrier == "json" else retry_body), headers=retry_headers)
+                            except Exception as retry_error:
+                                if enabled and self.engine and hasattr(self.engine, "record_token_lifecycle_event"):
+                                    try:
+                                        from wscan.token_lifecycle import TokenLifecycleEvent
+                                        self.engine.record_token_lifecycle_event(TokenLifecycleEvent(
+                                            probe_attempt_id=self._transport_error_attempt_id(
+                                                retry_error, getattr(self.engine, "request_logger", None)), evidence_id=None, check=self.CHECK_TYPE,
+                                            carrier=carrier_enum, transport=transport, attempt_count=attempt_count,
+                                            refresh_reason="transport_error", final_status=None,
+                                            final_lifecycle_status="unknown"))
+                                        retry_transport_error_recorded = True
+                                    except Exception as exc:
+                                        self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
+                                raise
+                        else:
+                            refresh_reason = "refresh_failed"
+                        final = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
+                        if final.outcome in (TokenOutcomeKind.STALE, TokenOutcomeKind.AUTH_EXPIRED, TokenOutcomeKind.RATE_LIMITED):
+                            self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                            try:
+                                self.engine._probe_inconclusive = True
+                            except Exception:
+                                pass
                     else:
-                        refresh_reason = "refresh_failed"
-                    final = classify_token_response(status_code=response.status_code, headers=dict(response.headers), body=response.text)
-                    if final.outcome == TokenOutcomeKind.STALE:
                         self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
                         try:
                             self.engine._probe_inconclusive = True
                         except Exception:
                             pass
             except Exception:
-                if outcome is not None and outcome.outcome == TokenOutcomeKind.STALE:
+                if outcome is not None and outcome.outcome in (TokenOutcomeKind.STALE, TokenOutcomeKind.AUTH_EXPIRED, TokenOutcomeKind.RATE_LIMITED):
                     self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
                     try:
                         self.engine._probe_inconclusive = True
@@ -1455,6 +1488,15 @@ class BaseScanner(ABC):
             except Exception as exc:
                 self._record_scan_note(f"token_lifecycle_event_error:{type(exc).__name__}")
         return response, request_body, request_headers
+
+    _send_httpx_request_with_token_refresh = _send_httpx_token_managed
+
+    def is_probe_inconclusive(self) -> bool:
+        """プローブがトークン失効・認証切れ・レート制限などにより判定不能（inconclusive）となったか。"""
+        return bool(
+            getattr(self, "_probe_inconclusive", False)
+            or getattr(getattr(self, "engine", None), "_probe_inconclusive", False)
+        )
 
     @staticmethod
     def _transport_error_attempt_id(exc, logger):
@@ -1675,11 +1717,28 @@ class BaseScanner(ABC):
                     outcome = classify_token_response(
                         status_code=resp.status_code, headers=dict(resp.headers), body=resp.text,
                     )
-                if outcome.outcome == TokenOutcomeKind.STALE:
+                if outcome.outcome in (TokenOutcomeKind.AUTH_EXPIRED, "auth_expired"):
+                    self._record_scan_note(f"token_lifecycle:auth_expired:{self.CHECK_TYPE}")
+                    self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                    try:
+                        self.engine._probe_inconclusive = True
+                    except Exception:
+                        pass
+                    if hasattr(self.engine, "_api_auth_failed"):
+                        self.engine._api_auth_failed = True
+                elif outcome.outcome in (TokenOutcomeKind.RATE_LIMITED, "rate_limited"):
+                    self._record_scan_note(f"token_lifecycle:rate_limited:{self.CHECK_TYPE}")
+                    self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                    try:
+                        self.engine._probe_inconclusive = True
+                    except Exception:
+                        pass
+                elif outcome.outcome == TokenOutcomeKind.STALE:
                     retry_dec = decide_token_retry(
                         outcome,
                         attempt_count=1,
                         max_retries=2,
+                        method=method,
                         refresh_strategy=RefreshStrategy(strategy=RefreshKind.PAGE_RELOAD),
                     )
                     if retry_dec.should_retry:
@@ -1720,6 +1779,12 @@ class BaseScanner(ABC):
                                     resp = await client.post(action, data=fields2)
                                 resp_time = time.time()
                                 self._record_probe_status(resp)
+                    else:
+                        self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                        try:
+                            self.engine._probe_inconclusive = True
+                        except Exception:
+                            pass
 
                 # token lifecycle: manager classifies the final retry response; flag-off remains legacy.
                 if manager_enabled:
@@ -1734,8 +1799,12 @@ class BaseScanner(ABC):
                             body=resp.text,
                             refreshed="fields2" in locals(),
                         )
-                        if _res.residual_stale:
+                        if _res.residual_stale or _res.outcome.outcome in (TokenOutcomeKind.AUTH_EXPIRED, TokenOutcomeKind.RATE_LIMITED):
                             self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                            try:
+                                self.engine._probe_inconclusive = True
+                            except Exception:
+                                pass
                     except Exception:
                         # The legacy request has already completed; classification failure must not raise.
                         pass
@@ -1947,14 +2016,34 @@ class BaseScanner(ABC):
                         refresh_attempted=False,
                     )
 
-                    # 5. STALE かつリトライ許可（attempt_count=1, max_retries=2）の場合、
-                    # 1 回のみ bounded re-navigation + re-submit
-                    if outcome.outcome == TokenOutcomeKind.STALE:
+                    # 5. 分類と有界リトライ判定
+                    if outcome.outcome in (TokenOutcomeKind.AUTH_EXPIRED, "auth_expired"):
+                        refresh_reason = "auth_expired"
+                        self._record_scan_note(f"token_lifecycle:auth_expired:{self.CHECK_TYPE}")
+                        self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                        try:
+                            self.engine._probe_inconclusive = True
+                        except Exception:
+                            pass
+                        if hasattr(self.engine, "_api_auth_failed"):
+                            self.engine._api_auth_failed = True
+                        self._probe_failure("auth_expired")
+                    elif outcome.outcome in (TokenOutcomeKind.RATE_LIMITED, "rate_limited"):
+                        refresh_reason = "rate_limited"
+                        self._record_scan_note(f"token_lifecycle:rate_limited:{self.CHECK_TYPE}")
+                        self._record_scan_note(f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}")
+                        try:
+                            self.engine._probe_inconclusive = True
+                        except Exception:
+                            pass
+                        self._probe_failure("rate_limited")
+                    elif outcome.outcome == TokenOutcomeKind.STALE:
                         refresh_reason = "stale"
                         retry_dec = decide_token_retry(
                             outcome,
                             attempt_count=1,
                             max_retries=2,
+                            method=(ip.method or "POST"),
                             refresh_strategy=RefreshStrategy(strategy=RefreshKind.PAGE_RELOAD),
                         )
                         if retry_dec.should_retry:
@@ -1974,7 +2063,7 @@ class BaseScanner(ABC):
                                         for (const el of inputs) {
                                             const name = (el.name || el.id || '').trim();
                                             if (!name || name === testedField) continue;
-                                            if (/\bcsrf\b/i.test(name) || /\btoken\b/i.test(name) ||
+                                            if (/\\bcsrf\\b/i.test(name) || /\\btoken\\b/i.test(name) ||
                                                 name === 'form_token' || name === 'nonce' || name === '__RequestVerificationToken') {
                                                 result[name] = (el.value || '').trim();
                                             }
@@ -2032,6 +2121,8 @@ class BaseScanner(ABC):
                                         if final_outcome.outcome in (
                                             TokenOutcomeKind.STALE,
                                             TokenOutcomeKind.BLOCKED,
+                                            TokenOutcomeKind.AUTH_EXPIRED,
+                                            TokenOutcomeKind.RATE_LIMITED,
                                         ):
                                             self._record_scan_note(
                                                 f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}"
@@ -2047,6 +2138,15 @@ class BaseScanner(ABC):
                             except Exception:
                                 # 例外時は握りつぶし、既存の pair のまま継続
                                 pass
+                        else:
+                            self._record_scan_note(
+                                f"token_lifecycle:probe_inconclusive:{self.CHECK_TYPE}"
+                            )
+                            try:
+                                self.engine._probe_inconclusive = True
+                            except Exception:
+                                pass
+                            self._probe_failure("token_stale")
 
                 # Record once after classification so telemetry cannot change the verdict.
                 if (
