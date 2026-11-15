@@ -3458,6 +3458,8 @@ const cfgToggles = {
   auto_register: false,
   interactive_crawl_review: false,
   allow_state_changing_probes: false,
+  header_scope_enforce: true,
+  popup_header_intercept: false,
 };
 
 let currentScanMode = 'normal';
@@ -4335,6 +4337,8 @@ function submitScanConfig() {
     target_urls:    targetUrlsRaw ? targetUrlsRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [],
     access_urls:    accessUrlsRaw ? accessUrlsRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [],
     flows: collectFlows(),
+    header_scope_enforce: Boolean(cfgToggles.header_scope_enforce),
+    popup_header_intercept: Boolean(cfgToggles.popup_header_intercept),
   };
 
   if (!config.checks.length) {
@@ -6982,6 +6986,25 @@ function submitHybridScan() {
     enable_component_intel: cfgToggles.component_intel,
     enable_tls_scan: cfgToggles.tls_scan,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
+    state_profile: (document.getElementById('cfgStateProfile')?.value || 'unrestricted'),
+    allow_state_changing_probes: Boolean(cfgToggles.allow_state_changing_probes),
+    spa_crawl: Boolean(cfgToggles.spa_crawl),
+    auto_spa_crawl: Boolean(cfgToggles.auto_spa_crawl),
+    enable_sitemap_crawl: Boolean(cfgToggles.enable_sitemap_crawl),
+    proxy: (document.getElementById('cfgProxy')?.value || '').trim(),
+    tls_client_cert: (document.getElementById('cfgTlsClientCert')?.value || '').trim(),
+    tls_client_key: (document.getElementById('cfgTlsClientKey')?.value || '').trim(),
+    tls_client_pfx: (document.getElementById('cfgTlsClientPfx')?.value || '').trim(),
+    tls_client_cert_password: (document.getElementById('cfgTlsClientCertPassword')?.value || ''),
+    tls_ca_cert: (document.getElementById('cfgTlsCaCert')?.value || '').trim(),
+    tls_verify: Boolean(cfgToggles.tls_verify),
+    exclude_fields: (document.getElementById('cfgExcludeFields')?.value || '').trim() ? (document.getElementById('cfgExcludeFields')?.value || '').trim().split(',').map(s=>s.trim()).filter(Boolean) : [],
+    exclude_urls: (document.getElementById('cfgExcludeUrls')?.value || '').trim() ? (document.getElementById('cfgExcludeUrls')?.value || '').trim().split('\n').map(s=>s.trim()).filter(Boolean) : [],
+    flows: (typeof collectFlows === 'function') ? collectFlows() : [],
+    auto_register: Boolean(cfgToggles.auto_register),
+    auto_register_count: parseInt(document.getElementById('cfgAutoRegisterCount')?.value) || 2,
+    header_scope_enforce: Boolean(cfgToggles.header_scope_enforce),
+    popup_header_intercept: Boolean(cfgToggles.popup_header_intercept),
   };
   // nonce を刻んで自分の scan_started を識別し、フル config をローカル保持する。
   _markOwnScan(config);
