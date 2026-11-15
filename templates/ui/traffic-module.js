@@ -974,7 +974,15 @@
           options.titleEl.textContent = 'Traffic';
         }
         if (options.contextEl) {
-          options.contextEl.textContent = route && route.scanId ? `Scan ${route.scanId}` : '';
+          if (route && route.scanId) {
+            if (global.VulixAppShell && typeof global.VulixAppShell.renderScanStatus === 'function') {
+              global.VulixAppShell.renderScanStatus({ scan_id: route.scanId, status: 'snapshot', freshness: 'snapshot' });
+            } else {
+              options.contextEl.textContent = `Scan ${route.scanId} · snapshot`;
+            }
+          } else {
+            options.contextEl.textContent = '';
+          }
         }
         if (options.surfaceEl) {
           options.surfaceEl.hidden = false;

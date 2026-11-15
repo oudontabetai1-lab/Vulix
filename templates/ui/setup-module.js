@@ -508,6 +508,23 @@
     'hybrid_ollama_url': 'hybridOllamaUrl',
   };
 
+  const FIELD_HELP_TOPIC_MAP = {
+    'depth': 'crawl_depth_concurrency',
+    'crawl_depth': 'crawl_depth_concurrency',
+    'concurrency': 'crawl_depth_concurrency',
+    'target_urls': 'scope_target_vs_access',
+    'access_urls': 'scope_target_vs_access',
+    'auth_user': 'auth_login_verification',
+    'auth_pass': 'auth_login_verification',
+    'login_user_field': 'auth_login_verification',
+    'login_pass_field': 'auth_login_verification',
+    'mfa_totp_secret': 'mfa_totp_mcp',
+    'mfa_type': 'mfa_totp_mcp',
+    'mfa_field': 'mfa_totp_mcp',
+    'header_scope_enforce': 'credential_redaction',
+    'headers': 'credential_redaction',
+  };
+
   /**
    * Helper: Parse multi-line "Name: Value" headers.
    */
@@ -908,6 +925,7 @@
     const urlLabel = doc.createElement('label');
     urlLabel.setAttribute('for', 'cfgInputUrl');
     urlLabel.textContent = fieldsByKey['url']?.label || '対象 URL (Target URL)';
+    urlRow.setAttribute('data-help-topic', 'scope_target_vs_access');
     const urlInput = doc.createElement('input');
     urlInput.type = 'text';
     urlInput.id = 'cfgInputUrl';
@@ -923,6 +941,10 @@
     urlRow.appendChild(urlLabel);
     urlRow.appendChild(urlInput);
     urlRow.appendChild(urlError);
+    if (CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
+      const scopeHelp = CHECK_HELP.createHelpButton(doc, urlRow, 'scope_target_vs_access', options.checkCatalogLang);
+      urlRow.appendChild(scopeHelp);
+    }
     header.appendChild(urlRow);
 
     // Mode Selector & Presets row
@@ -955,11 +977,22 @@
       btn.setAttribute('aria-checked', m.id === 'normal' ? 'true' : 'false');
       btn.textContent = m.label;
       btn.dataset.mode = m.id;
+      btn.setAttribute('data-help-topic', `mode_${m.id}`);
       modeButtons[m.id] = btn;
       modeGroup.appendChild(btn);
     });
     modeSection.appendChild(modeTitle);
     modeSection.appendChild(modeGroup);
+    if (CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
+      const modeHelpWrap = doc.createElement('span');
+      modeHelpWrap.className = 'setup-mode-help-wrap';
+      modeHelpWrap.style.cssText = 'display:inline-flex;gap:4px;align-items:center;margin-left:6px;';
+      modes.forEach((m) => {
+        const hBtn = CHECK_HELP.createHelpButton(doc, modeSection, `mode_${m.id}`, options.checkCatalogLang);
+        modeHelpWrap.appendChild(hBtn);
+      });
+      modeSection.appendChild(modeHelpWrap);
+    }
     controlsRow.appendChild(modeSection);
 
     // Presets Row
@@ -1031,6 +1064,10 @@
 
     prelaunchTitleGroup.appendChild(prelaunchTitle);
     prelaunchTitleGroup.appendChild(prelaunchBadge);
+    if (CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
+      const pfHelp = CHECK_HELP.createHelpButton(doc, prelaunchSummary, 'preflight_gate', options.checkCatalogLang);
+      prelaunchTitleGroup.appendChild(pfHelp);
+    }
 
     const prelaunchRerunBtn = doc.createElement('button');
     prelaunchRerunBtn.type = 'button';
@@ -1228,6 +1265,9 @@
       fieldWrapper.className = 'setup-field';
       fieldWrapper.dataset.fieldKey = key;
       fieldWrapper.dataset.modes = JSON.stringify(field.applicable_modes || []);
+      if (FIELD_HELP_TOPIC_MAP[key]) {
+        fieldWrapper.setAttribute('data-help-topic', FIELD_HELP_TOPIC_MAP[key]);
+      }
       fieldWrappers.push(fieldWrapper);
 
       const elementId = KEY_TO_ID_MAP[key] || ('field_' + key.replace(/\./g, '_'));
@@ -1247,6 +1287,9 @@
         textSpan.textContent = field.label || key;
         checkLabel.appendChild(checkbox);
         checkLabel.appendChild(textSpan);
+        if (FIELD_HELP_TOPIC_MAP[key] && CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
+          checkLabel.appendChild(CHECK_HELP.createHelpButton(doc, fieldWrapper, FIELD_HELP_TOPIC_MAP[key], options.checkCatalogLang));
+        }
         fieldWrapper.appendChild(checkLabel);
         fieldMap[key] = checkbox;
       } else if (key === 'checks') {
@@ -1343,6 +1386,9 @@
         const label = doc.createElement('label');
         label.setAttribute('for', elementId);
         label.textContent = field.label || key;
+        if (FIELD_HELP_TOPIC_MAP[key] && CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
+          label.appendChild(CHECK_HELP.createHelpButton(doc, fieldWrapper, FIELD_HELP_TOPIC_MAP[key], options.checkCatalogLang));
+        }
         fieldWrapper.appendChild(label);
 
         const isMultiline = [

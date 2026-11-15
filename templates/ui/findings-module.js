@@ -583,6 +583,9 @@
       verifySelect.appendChild(o);
     });
 
+    const verifyHelp = CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function'
+      ? CHECK_HELP.createHelpButton(document, row2, 'verification_confirmed_vs_unconfirmed', 'ja') : null;
+
     // Provenance filter
     const provSelect = document.createElement('select');
     provSelect.id = 'filterProvenance';
@@ -600,6 +603,9 @@
       provSelect.appendChild(o);
     });
 
+    const provHelp = CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function'
+      ? CHECK_HELP.createHelpButton(document, row2, 'provenance_deterministic_vs_agent', 'ja') : null;
+
     // Search input
     const searchInput = document.createElement('input');
     searchInput.type = 'search';
@@ -613,7 +619,11 @@
     urlChip.className = 'crawl-url-filter-badge';
     urlChip.hidden = true;
 
-    row2.append(sevSelect, typeSelect, verifySelect, provSelect, searchInput, urlChip);
+    row2.append(sevSelect, typeSelect, verifySelect);
+    if (verifyHelp) row2.appendChild(verifyHelp);
+    row2.appendChild(provSelect);
+    if (provHelp) row2.appendChild(provHelp);
+    row2.append(searchInput, urlChip);
     toolbar.append(row1, row2);
     root.appendChild(toolbar);
 
@@ -810,6 +820,10 @@
       bProv.textContent = prov.text;
 
       badgesRow.append(bSev, bVerify, bReview, bProv);
+      if (CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
+        const triageHelp = CHECK_HELP.createHelpButton(document, dom.detailContent, 'finding_triage_status', checkCatalogLang);
+        badgesRow.appendChild(triageHelp);
+      }
       header.appendChild(badgesRow);
 
       // Actions row (capability-gated entry points)
@@ -1413,7 +1427,15 @@
           options.titleEl.textContent = 'Findings';
         }
         if (options.contextEl) {
-          options.contextEl.textContent = route && route.scanId ? `Scan ${route.scanId}` : '';
+          if (route && route.scanId) {
+            if (global.VulixAppShell && typeof global.VulixAppShell.renderScanStatus === 'function') {
+              global.VulixAppShell.renderScanStatus({ scan_id: route.scanId, status: 'snapshot', freshness: 'snapshot' });
+            } else {
+              options.contextEl.textContent = `Scan ${route.scanId} · snapshot`;
+            }
+          } else {
+            options.contextEl.textContent = '';
+          }
         }
         if (options.surfaceEl) {
           options.surfaceEl.hidden = false;
