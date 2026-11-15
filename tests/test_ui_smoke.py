@@ -109,6 +109,16 @@ def test_monitor_three_panes_responsive_smoke(ui_harness: UIHarness, width: int)
         page.wait_for_selector(".main")
         page.wait_for_function("() => typeof handleEvent === 'function'")
 
+        # 0. 初期ライブ状態（スナップショット）の反映を待ってから操作する。
+        #    反映前にイベントを注入すると、後から届くスナップショットで件数が巻き戻る。
+        page.wait_for_function(
+            "() => window.VulixAppBridge && window.VulixAppBridge.getContext().server_id !== ''"
+        )
+        #    単体の /monitor は idle 時に設定フォームを自動で開く（awaiting_config）。
+        #    3ペインを操作するため、埋め込み時と同じ monitor サーフェスを宣言する。
+        assert page.evaluate("() => window.VulixAppBridge.setSurface('monitor')") is True
+        assert not page.locator("#scanConfigOverlay.active").is_visible()
+
         # 1. Navigation rail presence (rail on desktop >= 1280, top nav on <= 1200)
         if width >= 1280:
             assert page.is_visible("#navLiveMonitor")
