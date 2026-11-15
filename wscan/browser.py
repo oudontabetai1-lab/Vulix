@@ -14,6 +14,7 @@ from email import policy
 from email.parser import BytesParser
 from functools import wraps
 import urllib.request
+from contextlib import asynccontextmanager
 from collections.abc import Mapping
 from urllib.parse import parse_qs, unquote, urlparse as _urlparse
 from typing import Optional, Callable, Any
@@ -43,10 +44,9 @@ def _playwright_proxy_options(proxy: str) -> dict[str, str] | None:
     return options
 
 
-def form_response_is_quiet(*, pending: int, correlated: bool,
-                           last_activity: float, now: float) -> bool:
-    """相関応答があり、未完了要求がなく、50ms 静止していれば終了できる。"""
-    return correlated and pending == 0 and now - last_activity >= 0.05
+def form_submit_wait_seconds(*, fast: bool, navigated: bool, observed: bool) -> float:
+    """fast でも、文書の置換を確認できない送信は従来どおり観測する。"""
+    return 0.0 if fast and observed and navigated else 0.2
 
 
 def _request_carries_form_value(pair: dict, field: str, payload: str, *, submission=None, since=None) -> bool:
@@ -2165,49 +2165,43 @@ class BrowserManager:
         except Exception:
             return False
 
-    async def _wait_for_form_response(self, fields: dict, submission: dict, since: int):
-        """送信後の通信が静止するまで、最大 200ms 観測する。"""
-        deadline = time.monotonic() + 0.2
-        last_activity = time.monotonic()
-        cursor = 0
-        awaiting_body = []
-        correlated = False
-        requests_seen = since
-        while True:
-            now = time.monotonic()
-            # 初回だけ既存 pair を選別し、以後は追記分と本文未取得分だけを調べる。
-            for pair in self.network.pairs[cursor:]:
-                if pair.get("request", {}).get("_capture_sequence", 0) > since:
-                    awaiting_body.append(pair)
-                    last_activity = now
-            cursor = len(self.network.pairs)
-            request_count = getattr(self.network, "_requests_since_clear", 0)
-            if request_count != requests_seen:
-                last_activity = now
-                requests_seen = request_count
-            pending = sum(
-                req.get("_capture_sequence", 0) > since
-                for req in getattr(self.network, "_pending", {}).values()
-            )
-            incomplete = []
-            for pair in awaiting_body:
-                if not isinstance(pair.get("response", {}).get("body"), str):
-                    incomplete.append(pair)
-                    continue
-                last_activity = now
-                correlated = correlated or all(_request_carries_form_value(
-                    pair, field, payload, submission=submission, since=since
-                ) for field, payload in fields.items())
-            awaiting_body = incomplete
-            if form_response_is_quiet(
-                pending=pending + len(incomplete), correlated=correlated,
-                last_activity=last_activity, now=now,
-            ):
-                return
-            remaining = deadline - now
-            if remaining <= 0:
-                return
-            await asyncio.sleep(min(0.01, remaining))
+    @asynccontextmanager
+    async def _form_submit_wait(self):
+        """同じ document に残る JS 送信と判定不能時は、200ms 観測する。"""
+        fast = self.sleep_factor == 0
+        marker = None
+        if fast:
+            key = f"__vulix_form_{time.monotonic_ns()}"
+            try:
+                marked = await self.page.evaluate(
+                    "(key) => { Object.defineProperty(document, key, "
+                    "{value: true, configurable: true}); return true; }", key)
+                if marked is True:
+                    marker = key
+            except Exception:
+                pass
+        try:
+            yield
+            observed = navigated = False
+            if marker:
+                try:
+                    present = await self.page.evaluate(
+                        "(key) => { const present = Object.prototype.hasOwnProperty.call(document, key); "
+                        "delete document[key]; return present; }", marker)
+                    marker = None
+                    observed = isinstance(present, bool)
+                    navigated = observed and not present
+                except Exception:
+                    pass
+            delay = form_submit_wait_seconds(fast=fast, navigated=navigated, observed=observed)
+            if delay:
+                await asyncio.sleep(delay)
+        finally:
+            if marker:
+                try:
+                    await self.page.evaluate("(key) => delete document[key]", marker)
+                except Exception:
+                    pass
 
     async def _fill_and_submit_form_once(
         self,
@@ -2414,26 +2408,24 @@ class BrowserManager:
             # 見る。fill script の validation XHR や背景 polling を submit のリクエストと取り違えない。
             net_before_submit = self.network.request_count()
             self.network.probe_context = getattr(self.network, "pending_probe_context", None)
-            if submit_btn and await submit_btn.is_visible():
-                if bypass_validation:
+            async with self._form_submit_wait():
+                if submit_btn and await submit_btn.is_visible():
+                    if bypass_validation:
+                        await self.page.evaluate(
+                            f"""() => {{
+                                const form = document.querySelectorAll('form')[{form_index}];
+                                if (form) {{
+                                    const btn = form.querySelector('[type=submit], button');
+                                    if (btn) btn.formNoValidate = true;
+                                }}
+                            }}"""
+                        )
+                    await submit_btn.click()
+                else:
                     await self.page.evaluate(
-                        f"""() => {{
-                            const form = document.querySelectorAll('form')[{form_index}];
-                            if (form) {{
-                                const btn = form.querySelector('[type=submit], button');
-                                if (btn) btn.formNoValidate = true;
-                            }}
-                        }}"""
+                        f"document.querySelectorAll('form')[{form_index}].requestSubmit()"
                     )
-                await submit_btn.click()
-            else:
-                await self.page.evaluate(
-                    f"document.querySelectorAll('form')[{form_index}].requestSubmit()"
-                )
-            await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
-            await self._wait_for_form_response(
-                {result.get("fieldName") or field_name: payload}, result, net_before_submit
-            )
+                await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
@@ -2628,15 +2620,15 @@ class BrowserManager:
             # submit 直前の送信数。送達は「submit 後に送られたリクエストが payload を運んだか」で
             # 判定する（fill script の XHR や背景 polling を結合送信と取り違えない）。
             net_before_submit = self.network.request_count()
-            if submit_btn:
-                await submit_btn.click()
-            else:
-                await self.page.evaluate(
-                    f"document.querySelectorAll('form')[{form_index}].submit()"
-                )
+            async with self._form_submit_wait():
+                if submit_btn:
+                    await submit_btn.click()
+                else:
+                    await self.page.evaluate(
+                        f"document.querySelectorAll('form')[{form_index}].submit()"
+                    )
 
-            await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
-            await self._wait_for_form_response(field_payloads, result, net_before_submit)
+                await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
