@@ -184,9 +184,36 @@ class PayloadLearner:
         # Legacy flat format: {"xss": {...}, "sqli": {...}}
         return {"global": raw, "domains": {}}
 
+    def _sanitize_data(self) -> dict:
+        """永続化前に機密情報を含む payload エントリを除外した辞書を返す（純粋）。"""
+        from wscan import url_scope
+        def _clean_bucket(bucket: dict) -> dict:
+            out = {}
+            for ct, payloads in bucket.items():
+                if not isinstance(payloads, dict):
+                    continue
+                cleaned = {
+                    p: stats for p, stats in payloads.items()
+                    if isinstance(p, str)
+                    and not url_scope.has_secret_marker(p)
+                    and url_scope.redact_secret_values(p) == p
+                }
+                if cleaned:
+                    out[ct] = cleaned
+            return out
+
+        clean_global = _clean_bucket(self._data.get("global", {}))
+        clean_domains = {}
+        for dom, bucket in self._data.get("domains", {}).items():
+            if isinstance(bucket, dict):
+                cleaned = _clean_bucket(bucket)
+                if cleaned:
+                    clean_domains[dom] = cleaned
+        return {"global": clean_global, "domains": clean_domains}
+
     def save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(self._data, ensure_ascii=False, indent=2)
+        payload = json.dumps(self._sanitize_data(), ensure_ascii=False, indent=2)
         # Atomic write: write to a temp file in the same directory then rename,
         # so concurrent saves never leave a partially-written JSON file.
         fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=".payload_learning_")
@@ -218,6 +245,14 @@ class PayloadLearner:
         If *domain* is supplied the result is stored both globally and
         under the domain-specific bucket.
         """
+        from wscan import url_scope
+        if (
+            not isinstance(payload, str)
+            or not payload
+            or url_scope.has_secret_marker(payload)
+            or url_scope.contains_secret_value(payload)
+        ):
+            return
         self._record_in(self._data["global"], check_type, payload, success)
         if domain:
             domain_data = self._data["domains"].setdefault(domain, {})

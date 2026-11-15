@@ -487,7 +487,7 @@ class RequestLogger:
             "url": _redact_url(url),
             "field": field,
             "check_type": check_type,
-            "payload": payload,
+            "payload": url_scope.redact_secret_values(payload),
         }
         if attempt_id:
             record["probe_attempt_id"] = attempt_id

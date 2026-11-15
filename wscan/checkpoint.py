@@ -205,7 +205,36 @@ class CheckpointState:
             or any(not isinstance(item, str) for item in entry["candidates"])
         ):
             raise ValueError(f"checkpoint_candidate_snapshot_invalid:{phase}")
+        from wscan import url_scope
+        if entry.get("secret_redacted") or any(
+            url_scope.has_secret_marker(item) or url_scope.contains_secret_value(item)
+            for item in entry["candidates"]
+        ):
+            return False, None
         return True, list(entry["candidates"])
+
+    def is_candidate_regeneration_required_ip(
+        self, ip: "InjectionPoint", check_type: str, phase: str = "adaptive",
+    ) -> bool:
+        """候補列が機密値を含んでいたため再開時に再生成が必要かを返す。"""
+        if not isinstance(self.candidate_snapshots, dict):
+            return False
+        unit = self.candidate_snapshots.get(self._candidate_unit_key(ip, check_type))
+        if not isinstance(unit, dict) or phase not in unit:
+            return False
+        entry = unit[phase]
+        if not isinstance(entry, dict):
+            return False
+        if entry.get("secret_redacted"):
+            return True
+        candidates = entry.get("candidates")
+        if isinstance(candidates, list):
+            from wscan import url_scope
+            return any(
+                url_scope.has_secret_marker(c) or url_scope.contains_secret_value(c)
+                for c in candidates if isinstance(c, str)
+            )
+        return False
 
     def candidate_phases_ip(self, ip: "InjectionPoint", check_type: str) -> set[str]:
         """保存済み phase を返す。壊れた unit も unresolved として残す。"""
@@ -236,7 +265,15 @@ class CheckpointState:
             return saved or []
         if not isinstance(candidates, list) or any(not isinstance(item, str) for item in candidates):
             raise ValueError("candidate_payloads_invalid")
-        unit[phase] = {"version": 1, "source": source, "candidates": list(candidates)}
+        from wscan import url_scope
+        has_secret = any(
+            url_scope.has_secret_marker(item) or url_scope.contains_secret_value(item)
+            for item in candidates
+        )
+        entry = {"version": 1, "source": source, "candidates": list(candidates)}
+        if has_secret:
+            entry["secret_redacted"] = True
+        unit[phase] = entry
         self.updated_at = time.time()
         return list(candidates)
 
@@ -366,6 +403,34 @@ class CheckpointState:
             state._migrate_v1_adaptive_units()
         if state.source_version < 6:
             state._migrate_v5_normalize_urls()
+        # 機密値を含む候補列を持つ unit は読み込み時にも完了扱いを解除する（再試行・再生成を保証）
+        from wscan import url_scope
+        if isinstance(state.candidate_snapshots, dict):
+            for u_key, unit in list(state.candidate_snapshots.items()):
+                if not isinstance(unit, dict):
+                    continue
+                unit_has_sec = False
+                for phase, entry in unit.items():
+                    if isinstance(entry, dict) and (
+                        entry.get("secret_redacted")
+                        or any(
+                            url_scope.has_secret_marker(c) or url_scope.contains_secret_value(c)
+                            for c in entry.get("candidates", []) if isinstance(c, str)
+                        )
+                    ):
+                        unit_has_sec = True
+                        break
+                if unit_has_sec:
+                    state.completed_units.discard(u_key)
+                    parts = u_key.split("\x1f")
+                    if len(parts) >= 5:
+                        ct = parts[4]
+                        ap = list(parts)
+                        ap[4] = f"(adaptive:{ct})"
+                        state.completed_units.discard("\x1f".join(ap))
+                        lap = list(parts)
+                        lap[4] = "(adaptive)"
+                        state.completed_units.discard("\x1f".join(lap))
         return state
 
     def _migrate_v1_adaptive_units(self) -> None:
@@ -458,10 +523,70 @@ def save_checkpoint(output_dir: str | Path, state: CheckpointState) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     # 永続化の単一出口。finding の証跡だけ構造的に伏せる（unit key 等の識別子と JSON 構造は不変）
-    from wscan.url_scope import redact_finding_dict, redact_url_fields
+    from wscan.url_scope import (
+        redact_finding_dict,
+        redact_url_fields,
+        redact_secret_values,
+        has_secret_marker,
+        contains_secret_value,
+    )
     raw = state.to_dict()
     data = redact_url_fields({**raw, "findings": []})  # reached_urls・scan_matrix[].url 等（鍵は生成時に key_url 済み）
     data["findings"] = [redact_finding_dict(f) for f in raw["findings"]]
+
+    # 候補列に含まれる機密値の永続化防止と、再開時の再試行・再生成の保証
+    sanitized_snapshots = {}
+    secret_bearing_unit_keys: set[str] = set()
+    raw_snapshots = data.get("candidate_snapshots", {})
+    if isinstance(raw_snapshots, dict):
+        for u_key, unit in raw_snapshots.items():
+            if not isinstance(unit, dict):
+                sanitized_snapshots[u_key] = unit
+                continue
+            clean_unit = {}
+            unit_has_secret = False
+            for phase, entry in unit.items():
+                if isinstance(entry, dict) and isinstance(entry.get("candidates"), list):
+                    cands = entry["candidates"]
+                    has_sec = entry.get("secret_redacted", False) or any(
+                        has_secret_marker(c) or contains_secret_value(c)
+                        for c in cands if isinstance(c, str)
+                    )
+                    if has_sec:
+                        unit_has_secret = True
+                        clean_unit[phase] = {
+                            **entry,
+                            "candidates": [redact_secret_values(c) if isinstance(c, str) else c for c in cands],
+                            "secret_redacted": True,
+                        }
+                    else:
+                        clean_unit[phase] = entry
+                else:
+                    clean_unit[phase] = entry
+            sanitized_snapshots[u_key] = clean_unit
+            if unit_has_secret:
+                secret_bearing_unit_keys.add(u_key)
+        data["candidate_snapshots"] = sanitized_snapshots
+
+    # 機密値を含んでいた unit は完了扱いにしない（再開時に暗黙完了としてスキップさせず再試行させる）
+    if secret_bearing_unit_keys and "completed_units" in data:
+        completed = set(data["completed_units"])
+        for u_key in secret_bearing_unit_keys:
+            completed.discard(u_key)
+            state.completed_units.discard(u_key)
+            parts = u_key.split("\x1f")
+            if len(parts) >= 5:
+                ct = parts[4]
+                adaptive_parts = list(parts)
+                adaptive_parts[4] = f"(adaptive:{ct})"
+                completed.discard("\x1f".join(adaptive_parts))
+                state.completed_units.discard("\x1f".join(adaptive_parts))
+                legacy_adaptive_parts = list(parts)
+                legacy_adaptive_parts[4] = "(adaptive)"
+                completed.discard("\x1f".join(legacy_adaptive_parts))
+                state.completed_units.discard("\x1f".join(legacy_adaptive_parts))
+        data["completed_units"] = sorted(completed)
+
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)  # 同一ディレクトリ内 rename は原子的
     return path

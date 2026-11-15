@@ -8155,6 +8155,9 @@ class ScanEngine:
                     )
                     if _found:
                         _saved_adaptive[_cn] = _queue or []
+                    elif _candidate_state.is_candidate_regeneration_required_ip(ip, _cn, "adaptive"):
+                        # 機密値を含んでいた候補列は再利用禁止。再開時に再生成を試みる。
+                        pass
                     elif (
                         not self._checkpoint_is_done_ip(ip, _adaptive_checkpoint_check(_cn))
                         and (
@@ -8197,6 +8200,14 @@ class ScanEngine:
                             f"Adaptive LLM 可用性: {availability}"
                         )
 
+        if self._adaptive_llm_available is False:
+            if _candidate_state is not None:
+                for _cn in check_names:
+                    if _candidate_state.is_candidate_regeneration_required_ip(ip, _cn, "adaptive"):
+                        _candidate_errors.add(_cn)
+                        self.wave_errors.append(
+                            f"secret_candidate_regeneration_unavailable:{_cn}:{url}:{field_name}"
+                        )
         if self._adaptive_llm_available is False and not _saved_adaptive:
             checkpoint_updated = False
             for check_name in check_names:
