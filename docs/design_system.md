@@ -59,6 +59,10 @@ Vulix strictly isolates brand identity, vulnerability severity levels, execution
    - **Failed (`--state-failed` / `--status-fail: #f796ad`)**: Connection timeout, target crash, fatal engine error.
    - **Stale (`--state-stale` / `--status-stale: #e67e22`)**: Checkpoint data or cached finding requiring re-validation. Distinct orange hue (`#e67e22`) matching `.scan-freshness-stale` to avoid visual collision with running/high.
    - **Unverified (`--state-unverified: #8fb9c9`)**: Heuristic or agent-discovered finding pending deterministic confirmation.
+
+   > [!NOTE]
+   > **Execution State Migration & Semantic Separation**:
+   > In live UI (`templates/app.html`), `.scan-state-running` historically references `var(--accent)` (brand purple), and `--status-running` in `tokens.css` is currently `#e4a770` (sharing color value with `--high`). The target design system establishes `--state-running: var(--status-running)` to decouple execution telemetry from brand interaction purple. In current runtime surfaces, running indicators are semantically disambiguated from vulnerability severity by motion/iconography (`⟳` spin glyph) and placement (monitor telemetry bars vs table severity pills). Complete harmonization of live runtime templates to eliminate legacy `--accent` references is planned as part of the phased component-level migration.
 4. **Active Selection & Focus Borders**:
    - `--focus-ring: 0 0 0 2px var(--accent)`: 2px offset solid focus ring providing instant keyboard navigation feedback.
    - `--focus-outline: 2px solid var(--accent)`: High-visibility focus indicator for native browser focus-visible.
