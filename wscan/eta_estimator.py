@@ -110,7 +110,7 @@ class EtaEstimator:
         clock: Callable[[], float] = time.monotonic,
         phase_weights: Optional[dict[str, float]] = None,
         check_weights: Optional[dict[str, float]] = None,
-        ewma_alpha: float = 0.3,
+        ewma_alpha: float = 0.10,
         min_calibration_samples: int = 3,
         min_calibration_seconds: float = 2.0,
     ) -> None:

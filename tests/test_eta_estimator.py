@@ -248,11 +248,54 @@ class TestEtaBenchmarkAccuracy:
             f"{scenario}: estimator had hundred_percent_before_done_violations"
         )
 
+        # Quantitative accuracy improvement: both MAE and P90 must strictly improve
+        assert result["improvement_percent_mae"] > 0, (
+            f"{scenario}: expected positive MAE improvement, got {result['improvement_percent_mae']}%"
+        )
+        assert result["improvement_percent_p90"] > 0, (
+            f"{scenario}: expected positive P90 improvement, got {result['improvement_percent_p90']}%"
+        )
+
         # Baseline naive linear should suffer from invariant violations
         assert (
             baseline["zero_while_running_violations"] > 0
             or baseline["hundred_percent_before_done_violations"] > 0
         ), f"{scenario}: expected naive baseline to suffer from violations"
+
+    def test_timeout_spikes_spike_factor_sensitivity_regression(self):
+        """Regression test ensuring ETA smoothing improvements generalize across different spike intensities."""
+        # Test across multiple spike multipliers (1.5x, 2.0x, 3.0x, 4.0x, 5.0x)
+        for factor in [1.5, 2.0, 3.0, 4.0, 5.0]:
+            events = []
+            t = 100.0
+            step = 2.0
+            tot = 50
+            timeouts = 0
+            for i in range(1, 51):
+                if 15 <= i <= 25:
+                    t += step * factor
+                    timeouts += 1
+                else:
+                    t += step
+                events.append({
+                    "timestamp": t,
+                    "phase": "attack",
+                    "completed_units": i,
+                    "total_units": tot,
+                    "retry_or_timeout_events": timeouts,
+                    "concurrency": 2,
+                })
+            events.append({"timestamp": t + step, "phase": "completed", "completed_units": tot, "total_units": tot})
+
+            res = evaluate_eta_accuracy(events)
+            assert res["estimator"]["zero_while_running_violations"] == 0
+            assert res["estimator"]["hundred_percent_before_done_violations"] == 0
+            assert res["improvement_percent_mae"] > 0, (
+                f"factor {factor}x failed MAE improvement: {res['improvement_percent_mae']}%"
+            )
+            assert res["improvement_percent_p90"] > 0, (
+                f"factor {factor}x failed P90 improvement: {res['improvement_percent_p90']}%"
+            )
 
     def test_overall_benchmark_suite_accuracy_improvement(self):
         scenarios = [
