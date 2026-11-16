@@ -602,6 +602,126 @@
     return v ? { mfa_email_imap_password: v } : {};
   }
 
+  function getAccounts(docOrOptions, env = {}) {
+    let doc = docOrOptions;
+    if (docOrOptions && docOrOptions.document) {
+      doc = docOrOptions.document;
+      env = docOrOptions.env || docOrOptions || env;
+    }
+    if (!doc && typeof document !== 'undefined') doc = document;
+    if (env && Array.isArray(env.accounts)) return env.accounts;
+    if (doc) {
+      const list = typeof doc.querySelector === 'function' ? doc.querySelector('#accountsList') : (typeof doc.getElementById === 'function' ? doc.getElementById('accountsList') : null);
+      if (list && list.children && list.children.length) {
+        const rows = Array.from(list.children).filter((ch) => {
+          if (!ch) return false;
+          const cls = ch.className || '';
+          return cls.includes('setup-account-row') || (typeof ch.querySelector === 'function' && ch.querySelector('.acc-user'));
+        });
+        if (rows.length) {
+          return rows.map((div) => ({
+            username: (div.querySelector('.acc-user')?.value || '').trim(),
+            password: div.querySelector('.acc-pass')?.value || '',
+            role: div.querySelector('.acc-role')?.value || 'user',
+          })).filter((a) => a.username);
+        }
+      }
+      if (typeof doc.querySelectorAll === 'function') {
+        const items = doc.querySelectorAll('#accountsList > div, #accountsList .setup-account-row');
+        if (items.length) {
+          return Array.from(items).map((div) => ({
+            username: (div.querySelector('.acc-user')?.value || '').trim(),
+            password: div.querySelector('.acc-pass')?.value || '',
+            role: div.querySelector('.acc-role')?.value || 'user',
+          })).filter((a) => a.username);
+        }
+      }
+    }
+    return [];
+  }
+
+  function getFlows(docOrOptions, env = {}) {
+    let doc = docOrOptions;
+    if (docOrOptions && docOrOptions.document) {
+      doc = docOrOptions.document;
+      env = docOrOptions.env || docOrOptions || env;
+    }
+    if (!doc && typeof document !== 'undefined') doc = document;
+    if (env && Array.isArray(env.flows)) return env.flows;
+    if (doc) {
+      const list = typeof doc.querySelector === 'function' ? doc.querySelector('#cfgFlowsList') : (typeof doc.getElementById === 'function' ? doc.getElementById('cfgFlowsList') : null);
+      let flowItems = [];
+      if (list && list.children && list.children.length) {
+        flowItems = Array.from(list.children).filter((ch) => {
+          if (!ch) return false;
+          const cls = ch.className || '';
+          return cls.includes('flow-item') || (typeof ch.querySelector === 'function' && ch.querySelector('.flow-name'));
+        });
+      }
+      if (!flowItems.length && typeof doc.querySelectorAll === 'function') {
+        flowItems = Array.from(doc.querySelectorAll('#cfgFlowsList .flow-item, .flow-item'));
+      }
+      if (flowItems.length > 0) {
+        const flows = [];
+        flowItems.forEach((item) => {
+          const nameInput = item.querySelector('.flow-name');
+          const stepsList = item.querySelector('.flow-steps-list') || item;
+          if (nameInput && stepsList) {
+            const steps = [];
+            let stepRows = [];
+            if (stepsList.children && stepsList.children.length) {
+              stepRows = Array.from(stepsList.children).filter((ch) => (ch.className || '').includes('flow-step-row'));
+            }
+            if (!stepRows.length && typeof stepsList.querySelectorAll === 'function') {
+              stepRows = Array.from(stepsList.querySelectorAll('.flow-step-row'));
+            }
+            stepRows.forEach((row) => {
+              const actionSelect = row.querySelector('.flow-step-action');
+              const targetInput = row.querySelector('.flow-step-target');
+              const valueInput = row.querySelector('.flow-step-value');
+              if (actionSelect) {
+                const action = actionSelect.value;
+                const step = { action };
+                const target = targetInput ? (targetInput.value || '').trim() : '';
+                const val = valueInput ? (valueInput.value || '').trim() : '';
+                if (target) {
+                  step.target = target;
+                  if (action === 'navigate') {
+                    step.url = target;
+                  } else if (action === 'fill' || action === 'click' || action === 'submit') {
+                    step.selector = target;
+                    if (action === 'fill') step.field = target;
+                  } else if (action === 'wait') {
+                    const parsed = parseInt(target, 10);
+                    if (!Number.isNaN(parsed)) step.ms = parsed;
+                  }
+                }
+                if (val) {
+                  step.value = val;
+                  if (action === 'wait') {
+                    const parsed = parseInt(val, 10);
+                    if (!Number.isNaN(parsed)) step.ms = parsed;
+                  }
+                }
+                steps.push(step);
+              }
+            });
+            if (steps.length > 0) {
+              flows.push({ name: (nameInput.value || '').trim(), steps });
+            }
+          }
+        });
+        if (flows.length > 0) return flows;
+      }
+    }
+    if (typeof cfgFlows !== 'undefined' && Array.isArray(cfgFlows)) {
+      return cfgFlows
+        .filter((f) => Array.isArray(f.steps) && f.steps.length)
+        .map((f) => ({ name: f.name, steps: f.steps.map((s) => Object.assign({}, s)) }));
+    }
+    return [];
+  }
+
   /**
    * Pure Scan Payload Builder.
    * Produces byte-for-byte equivalent payloads to the legacy form
@@ -623,6 +743,12 @@
         if (el) return el.value != null ? String(el.value) : '';
       }
       return '';
+    };
+
+    const parseIntOrDefault = (raw, fallback) => {
+      if (raw === '' || raw === null || raw === undefined) return fallback;
+      const parsed = parseInt(raw, 10);
+      return Number.isNaN(parsed) ? fallback : parsed;
     };
 
     const getToggles = () => {
@@ -654,30 +780,8 @@
       return [];
     };
 
-    const getAccounts = () => {
-      if (Array.isArray(env.accounts)) return env.accounts;
-      if (doc && typeof doc.querySelectorAll === 'function') {
-        const items = doc.querySelectorAll('#accountsList > div');
-        if (items.length) {
-          return Array.from(items).map((div) => ({
-            username: (div.querySelector('.acc-user')?.value || '').trim(),
-            password: div.querySelector('.acc-pass')?.value || '',
-            role: div.querySelector('.acc-role')?.value || 'user',
-          })).filter((a) => a.username);
-        }
-      }
-      return [];
-    };
-
-    const getFlows = () => {
-      if (Array.isArray(env.flows)) return env.flows;
-      if (typeof cfgFlows !== 'undefined' && Array.isArray(cfgFlows)) {
-        return cfgFlows
-          .filter((f) => Array.isArray(f.steps) && f.steps.length)
-          .map((f) => ({ name: f.name, steps: f.steps.map((s) => Object.assign({}, s)) }));
-      }
-      return [];
-    };
+    const getAccountsLocal = () => getAccounts(doc, env);
+    const getFlowsLocal = () => getFlows(doc, env);
 
     const getRoleModels = () => {
       if (env.role_models && typeof env.role_models === 'object') return env.role_models;
@@ -730,23 +834,23 @@
         hybrid_llm: getVal('hybridLlm') || 'claude',
         agent_vision: getVal('agentVision'),
         hybrid_model: getVal('hybridModel').trim(),
-        hybrid_max_steps: parseInt(getVal('hybridMaxSteps'), 10) || 30,
+        hybrid_max_steps: parseIntOrDefault(getVal('hybridMaxSteps'), 30),
         hybrid_ollama_url: getVal('hybridOllamaUrl').trim() || 'http://localhost:11434',
         checks: checks,
         headless: Boolean(toggles.headless),
-        depth: parseInt(getVal('cfgDepth'), 10) || 2,
-        timeout: parseInt(getVal('cfgTimeoutInput'), 10) || 30,
+        depth: parseIntOrDefault(getVal('cfgDepth'), 2),
+        timeout: parseIntOrDefault(getVal('cfgTimeoutInput'), 30),
         report_lang: getVal('cfgReportLang') || 'ja',
         llm_timeout_seconds: parseFloat(getVal('cfgLlmTimeoutInput')) || 30,
         llm_stream_timeout_seconds: parseFloat(getVal('cfgLlmStreamTimeoutInput')) || 90,
-        concurrency: parseInt(getVal('cfgConcurrency'), 10) || 1,
+        concurrency: parseIntOrDefault(getVal('cfgConcurrency'), 1),
         auth_user: getVal('cfgAuthUser').trim(),
         auth_pass: getVal('cfgAuthPass'),
         login_url: getVal('cfgLoginUrl').trim(),
         login_user_field: getVal('cfgLoginUserField').trim() || 'username',
         login_pass_field: getVal('cfgLoginPassField').trim() || 'password',
         login_success_indicator: getVal('cfgLoginSuccess').trim(),
-        accounts: getAccounts(),
+        accounts: getAccountsLocal(),
         low_priv_cookies: getVal('cfgLowPrivCookies').trim(),
         mfa_type: getVal('cfgMfaType').trim(),
         mfa_field: getVal('cfgMfaField').trim(),
@@ -771,7 +875,26 @@
         enable_community_payloads: Boolean(toggles.community_payloads),
         enable_component_intel: Boolean(toggles.component_intel),
         enable_tls_scan: Boolean(toggles.tls_scan),
-        max_payloads: parseInt(getVal('cfgMaxPayloads'), 10) || 0,
+        max_payloads: parseIntOrDefault(getVal('cfgMaxPayloads'), 0),
+        state_profile: getVal('cfgStateProfile') || 'unrestricted',
+        allow_state_changing_probes: Boolean(toggles.allow_state_changing_probes),
+        spa_crawl: Boolean(toggles.spa_crawl),
+        auto_spa_crawl: Boolean(toggles.auto_spa_crawl),
+        enable_sitemap_crawl: Boolean(toggles.enable_sitemap_crawl),
+        proxy: getVal('cfgProxy').trim(),
+        tls_client_cert: getVal('cfgTlsClientCert').trim(),
+        tls_client_key: getVal('cfgTlsClientKey').trim(),
+        tls_client_pfx: getVal('cfgTlsClientPfx').trim(),
+        tls_client_cert_password: getVal('cfgTlsClientCertPassword'),
+        tls_ca_cert: getVal('cfgTlsCaCert').trim(),
+        tls_verify: Boolean(toggles.tls_verify),
+        exclude_fields: getVal('cfgExcludeFields') ? getVal('cfgExcludeFields').split(',').map((s) => s.trim()).filter(Boolean) : [],
+        exclude_urls: getVal('cfgExcludeUrls') ? getVal('cfgExcludeUrls').split('\n').map((s) => s.trim()).filter(Boolean) : [],
+        flows: getFlowsLocal(),
+        auto_register: Boolean(toggles.auto_register),
+        auto_register_count: parseIntOrDefault(getVal('cfgAutoRegisterCount'), 2),
+        header_scope_enforce: Boolean(toggles.header_scope_enforce),
+        popup_header_intercept: Boolean(toggles.popup_header_intercept),
       };
     }
 
@@ -785,13 +908,13 @@
 
     const config = {
       url: url,
-      depth: parseInt(getVal('cfgDepth'), 10) || 2,
-      timeout: parseInt(getVal('cfgTimeoutInput'), 10) || 30,
+      depth: parseIntOrDefault(getVal('cfgDepth'), 2),
+      timeout: parseIntOrDefault(getVal('cfgTimeoutInput'), 30),
       report_lang: getVal('cfgReportLang') || 'ja',
       llm_timeout_seconds: parseFloat(getVal('cfgLlmTimeoutInput')) || 30,
       llm_stream_timeout_seconds: parseFloat(getVal('cfgLlmStreamTimeoutInput')) || 90,
-      max_forms: parseInt(getVal('cfgMaxForms'), 10) || 50,
-      concurrency: parseInt(getVal('cfgConcurrency'), 10) || 1,
+      max_forms: parseIntOrDefault(getVal('cfgMaxForms'), 50),
+      concurrency: parseIntOrDefault(getVal('cfgConcurrency'), 1),
       proxy: getVal('cfgProxy').trim(),
       tls_client_cert: getVal('cfgTlsClientCert').trim(),
       tls_client_key: getVal('cfgTlsClientKey').trim(),
@@ -844,20 +967,22 @@
       spa_crawl: Boolean(toggles.spa_crawl),
       auto_spa_crawl: Boolean(toggles.auto_spa_crawl),
       fast_mode: Boolean(toggles.fast_mode),
-      max_payloads: parseInt(getVal('cfgMaxPayloads'), 10) || 0,
+      max_payloads: parseIntOrDefault(getVal('cfgMaxPayloads'), 0),
       request_delay: parseFloat(getVal('cfgDelay')) || 0,
-      navigation_retries: parseInt(getVal('cfgNavigationRetries'), 10) || 0,
+      navigation_retries: parseIntOrDefault(getVal('cfgNavigationRetries'), 0),
       output_dir: getVal('cfgOutputDir').trim(),
       payloads_file: getVal('cfgPayloadsFile').trim(),
       manual_crawl_file: getVal('cfgManualCrawlFile').trim(),
-      accounts: getAccounts(),
+      accounts: getAccountsLocal(),
       auto_register: Boolean(toggles.auto_register),
-      auto_register_count: parseInt(getVal('cfgAutoRegisterCount'), 10) || 2,
+      auto_register_count: parseIntOrDefault(getVal('cfgAutoRegisterCount'), 2),
       exclude_fields: excludeFieldsRaw ? excludeFieldsRaw.split(',').map((s) => s.trim()).filter(Boolean) : [],
       exclude_urls: excludeUrlsRaw ? excludeUrlsRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [],
       target_urls: targetUrlsRaw ? targetUrlsRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [],
       access_urls: accessUrlsRaw ? accessUrlsRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [],
-      flows: getFlows(),
+      flows: getFlowsLocal(),
+      header_scope_enforce: Boolean(toggles.header_scope_enforce),
+      popup_header_intercept: Boolean(toggles.popup_header_intercept),
     };
 
     if (!config.checks.length) {
@@ -888,6 +1013,503 @@
       return `${c.exclusiveMinimum} より大きい値を入力してください`;
     }
     return null;
+  }
+
+  /**
+   * Render schema fields into container.
+   */
+  function renderSettingsSchemaForm(container, fields, options = {}) {
+    const doc = options.document || (typeof document !== 'undefined' ? document : null);
+    if (!doc || !container) return [];
+    const currentMode = options.currentMode || 'normal';
+    const handleConfigChange = typeof options.onConfigChange === 'function' ? options.onConfigChange : (() => {});
+    const fieldMap = options.fieldMap || {};
+    const fieldWrappers = options.fieldWrappers || [];
+
+    (fields || []).forEach((field) => {
+      const key = field.key;
+      // Skip top-level persistently placed fields
+      if (key === 'url' || key === 'agent_mode' || key === 'hybrid_mode') return;
+
+      const fieldWrapper = doc.createElement('div');
+      fieldWrapper.className = 'setup-field';
+      fieldWrapper.dataset.fieldKey = key;
+      fieldWrapper.dataset.modes = JSON.stringify(field.applicable_modes || []);
+      if (FIELD_HELP_TOPIC_MAP[key]) {
+        fieldWrapper.setAttribute('data-help-topic', FIELD_HELP_TOPIC_MAP[key]);
+      }
+      fieldWrappers.push(fieldWrapper);
+
+      const elementId = KEY_TO_ID_MAP[key] || ('field_' + key.replace(/\./g, '_'));
+
+      if (field.type === 'boolean') {
+        const checkLabel = doc.createElement('label');
+        checkLabel.className = 'setup-checkbox-label';
+        const checkbox = doc.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = elementId;
+        checkbox.dataset.fieldKey = key;
+        if (key.startsWith('toggles.')) {
+          checkbox.dataset.toggle = key.slice(8);
+        }
+        checkbox.checked = Boolean(field.default);
+        const textSpan = doc.createElement('span');
+        textSpan.textContent = field.label || key;
+        checkLabel.appendChild(checkbox);
+        checkLabel.appendChild(textSpan);
+        if (FIELD_HELP_TOPIC_MAP[key] && CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
+          checkLabel.appendChild(CHECK_HELP.createHelpButton(doc, fieldWrapper, FIELD_HELP_TOPIC_MAP[key], options.checkCatalogLang));
+        }
+        fieldWrapper.appendChild(checkLabel);
+        fieldMap[key] = checkbox;
+      } else if (key === 'checks') {
+        // Scanner check boxes
+        const groupTitle = doc.createElement('label');
+        groupTitle.className = 'setup-field-title';
+        groupTitle.textContent = field.label || '検査項目';
+        fieldWrapper.appendChild(groupTitle);
+
+        const checkList = doc.createElement('div');
+        checkList.className = 'setup-checks-list';
+        checkList.id = 'setupChecks';
+
+        const defaultChecks = Array.isArray(field.default) ? field.default : ['sqli', 'xss', 'os'];
+        const allChecks = [
+          'sqli', 'xss', 'dom_xss', 'stored_xss', 'os', 'ssti', 'path_traversal',
+          'csrf', 'header_injection', 'open_redirect', 'session', 'privesc',
+          'cors', 'security_headers', 'info_disclosure', 'ssrf', 'graphql',
+          'jwt', 'clickjacking',
+        ];
+
+        allChecks.forEach((checkId) => {
+          const item = doc.createElement('div');
+          item.className = 'setup-check-item';
+          item.dataset.checkId = checkId;
+          const checkLabel = doc.createElement('label');
+          const cb = doc.createElement('input');
+          cb.type = 'checkbox';
+          cb.value = checkId;
+          cb.dataset.check = checkId;
+          cb.checked = defaultChecks.includes(checkId);
+          const nameSpan = doc.createElement('span');
+          nameSpan.textContent = checkId;
+          checkLabel.appendChild(cb);
+          checkLabel.appendChild(nameSpan);
+          const info = CHECK_HELP.createButton(doc, checkList, checkId, options.checkCatalog || {}, options.checkCatalogLang);
+          item.appendChild(checkLabel);
+          item.appendChild(info);
+          checkList.appendChild(item);
+        });
+        fieldWrapper.appendChild(checkList);
+        fieldMap[key] = checkList;
+      } else if (key === 'role_models') {
+        const groupTitle = doc.createElement('label');
+        groupTitle.className = 'setup-field-title';
+        groupTitle.textContent = field.label || 'ロール別モデル';
+        fieldWrapper.appendChild(groupTitle);
+
+        const grid = doc.createElement('div');
+        grid.className = 'setup-subgrid';
+        grid.id = 'cfgRoleModelsGrid';
+        ['planner', 'payload', 'adaptive', 'triage'].forEach((role) => {
+          const row = doc.createElement('div');
+          row.className = 'setup-subfield';
+          const inpId = 'cfg' + role.charAt(0).toUpperCase() + role.slice(1) + 'Model';
+          const lbl = doc.createElement('label');
+          lbl.htmlFor = inpId;
+          lbl.textContent = role;
+          const inp = doc.createElement('input');
+          inp.type = 'text';
+          inp.id = inpId;
+          inp.setAttribute('aria-label', `${role} モデル設定`);
+          inp.placeholder = '空=全体設定';
+          row.appendChild(lbl);
+          row.appendChild(inp);
+          grid.appendChild(row);
+        });
+        fieldWrapper.appendChild(grid);
+        fieldMap[key] = grid;
+      } else if (key === 'accounts') {
+        const groupTitle = doc.createElement('label');
+        groupTitle.className = 'setup-field-title';
+        groupTitle.textContent = field.label || '複数アカウント';
+        fieldWrapper.appendChild(groupTitle);
+
+        const list = doc.createElement('div');
+        list.id = 'accountsList';
+        list.className = 'setup-accounts-list';
+
+        const addBtn = doc.createElement('button');
+        addBtn.type = 'button';
+        addBtn.id = 'addAccountRowBtn';
+        addBtn.className = 'btn btn-secondary btn-sm';
+        addBtn.textContent = '＋ アカウントを追加';
+        addBtn.setAttribute('aria-label', 'アカウントを追加（ユーザー名、パスワード、ロールを入力）');
+        addBtn.disabled = currentMode === 'agent';
+        list.appendChild(addBtn);
+
+        fieldWrapper.appendChild(list);
+        fieldMap[key] = list;
+
+        function addAccountRow(initialData = null) {
+          const row = doc.createElement('div');
+          row.className = 'setup-account-row';
+
+          const userInput = doc.createElement('input');
+          userInput.type = 'text';
+          userInput.className = 'acc-user';
+          userInput.placeholder = 'username';
+          userInput.setAttribute('aria-label', 'ユーザー名');
+
+          const passInput = doc.createElement('input');
+          passInput.type = 'password';
+          passInput.className = 'acc-pass';
+          passInput.placeholder = 'password';
+          passInput.autocomplete = 'new-password';
+          passInput.setAttribute('aria-label', 'パスワード');
+
+          const roleSelect = doc.createElement('select');
+          roleSelect.className = 'acc-role';
+          roleSelect.setAttribute('aria-label', 'ロール');
+          ['user', 'admin', 'manager', 'guest'].forEach((role) => {
+            const option = doc.createElement('option');
+            option.value = role;
+            option.textContent = role;
+            if (role === 'user') option.selected = true;
+            roleSelect.appendChild(option);
+          });
+
+          const removeBtn = doc.createElement('button');
+          removeBtn.type = 'button';
+          removeBtn.className = 'acc-remove-btn';
+          removeBtn.textContent = '削除';
+          removeBtn.setAttribute('aria-label', 'アカウントを削除');
+          removeBtn.disabled = currentMode === 'agent';
+
+          removeBtn.addEventListener('click', () => {
+            if (currentMode === 'agent') return;
+            if (typeof row.remove === 'function') {
+              row.remove();
+            } else if (row.parentNode && typeof row.parentNode.removeChild === 'function') {
+              row.parentNode.removeChild(row);
+            }
+            handleConfigChange();
+          });
+
+          if (initialData) {
+            userInput.value = initialData.username || '';
+            passInput.value = initialData.password || '';
+            if (initialData.role) roleSelect.value = initialData.role;
+          }
+
+          [userInput, passInput, roleSelect].forEach((input) => {
+            input.addEventListener('input', () => {
+              if (currentMode !== 'agent') handleConfigChange();
+            });
+            input.addEventListener('change', () => {
+              if (currentMode !== 'agent') handleConfigChange();
+            });
+          });
+
+          row.appendChild(userInput);
+          row.appendChild(passInput);
+          row.appendChild(roleSelect);
+          row.appendChild(removeBtn);
+
+          if (typeof list.insertBefore === 'function') {
+            list.insertBefore(row, addBtn);
+          } else {
+            list.appendChild(row);
+          }
+          handleConfigChange();
+          return row;
+        }
+
+        addBtn.addEventListener('click', () => {
+          if (currentMode === 'agent') return;
+          addAccountRow();
+        });
+
+        if (field.default && Array.isArray(field.default) && field.default.length > 0) {
+          field.default.forEach((account) => {
+            addAccountRow(account);
+          });
+        }
+      } else if (key === 'flows') {
+        const groupTitle = doc.createElement('label');
+        groupTitle.className = 'setup-field-title';
+        groupTitle.textContent = field.label || '複数ステップフロー';
+        fieldWrapper.appendChild(groupTitle);
+
+        const flowsContainer = doc.createElement('div');
+        flowsContainer.id = 'cfgFlowsList';
+        flowsContainer.className = 'setup-flows-container';
+
+        const addFlowBtn = doc.createElement('button');
+        addFlowBtn.type = 'button';
+        addFlowBtn.id = 'addFlowBtn';
+        addFlowBtn.className = 'btn btn-secondary btn-sm';
+        addFlowBtn.textContent = '＋ フローを作成';
+        addFlowBtn.setAttribute('aria-label', 'フローを追加');
+        addFlowBtn.disabled = currentMode === 'agent';
+        flowsContainer.appendChild(addFlowBtn);
+
+        fieldWrapper.appendChild(flowsContainer);
+        fieldMap[key] = flowsContainer;
+
+        function addFlowItem(initialData = null) {
+          const flowItem = doc.createElement('div');
+          flowItem.className = 'flow-item';
+
+          const nameInput = doc.createElement('input');
+          nameInput.type = 'text';
+          nameInput.className = 'flow-name';
+          nameInput.placeholder = 'Checkout flow';
+          nameInput.setAttribute('aria-label', 'フロー名');
+          if (initialData && initialData.name) {
+            nameInput.value = initialData.name;
+          }
+
+          const stepsContainer = doc.createElement('div');
+          stepsContainer.className = 'flow-steps-list';
+
+          const addStepBtn = doc.createElement('button');
+          addStepBtn.type = 'button';
+          addStepBtn.className = 'add-flow-step-btn';
+          addStepBtn.textContent = '＋ ステップを追加';
+          addStepBtn.setAttribute('aria-label', 'ステップを追加');
+          addStepBtn.disabled = currentMode === 'agent';
+          stepsContainer.appendChild(addStepBtn);
+
+          const removeFlowBtn = doc.createElement('button');
+          removeFlowBtn.type = 'button';
+          removeFlowBtn.className = 'remove-flow-btn';
+          removeFlowBtn.textContent = 'フローを削除';
+          removeFlowBtn.setAttribute('aria-label', 'フローを削除');
+          removeFlowBtn.disabled = currentMode === 'agent';
+
+          function addStepRow(stepData = null) {
+            const stepRow = doc.createElement('div');
+            stepRow.className = 'flow-step-row';
+
+            const actionSelect = doc.createElement('select');
+            actionSelect.className = 'flow-step-action';
+            actionSelect.setAttribute('aria-label', 'アクション');
+            ['navigate', 'fill', 'click', 'submit', 'wait'].forEach((action) => {
+              const option = doc.createElement('option');
+              option.value = action;
+              option.textContent = action;
+              if (stepData && stepData.action === action) option.selected = true;
+              actionSelect.appendChild(option);
+            });
+
+            const targetInput = doc.createElement('input');
+            targetInput.type = 'text';
+            targetInput.className = 'flow-step-target';
+            targetInput.placeholder = 'URL or CSS selector';
+            targetInput.setAttribute('aria-label', 'ターゲット');
+            if (stepData) {
+              if (stepData.url) targetInput.value = stepData.url;
+              else if (stepData.selector) targetInput.value = stepData.selector;
+              else if (stepData.field) targetInput.value = stepData.field;
+              else if (stepData.target) targetInput.value = stepData.target;
+            }
+
+            const valueInput = doc.createElement('input');
+            valueInput.type = 'text';
+            valueInput.className = 'flow-step-value';
+            valueInput.placeholder = 'Value / ms';
+            valueInput.setAttribute('aria-label', '値またはミリ秒');
+            if (stepData) {
+              if (stepData.value !== undefined && stepData.value !== null) {
+                valueInput.value = String(stepData.value);
+              } else if (stepData.ms !== undefined && stepData.ms !== null) {
+                valueInput.value = String(stepData.ms);
+              }
+            }
+
+            const removeStepBtn = doc.createElement('button');
+            removeStepBtn.type = 'button';
+            removeStepBtn.className = 'remove-flow-step-btn';
+            removeStepBtn.textContent = '削除';
+            removeStepBtn.setAttribute('aria-label', 'ステップを削除');
+            removeStepBtn.disabled = currentMode === 'agent';
+
+            removeStepBtn.addEventListener('click', () => {
+              if (currentMode === 'agent') return;
+              if (typeof stepRow.remove === 'function') {
+                stepRow.remove();
+              } else if (stepRow.parentNode && typeof stepRow.parentNode.removeChild === 'function') {
+                stepRow.parentNode.removeChild(stepRow);
+              }
+              handleConfigChange();
+            });
+
+            [actionSelect, targetInput, valueInput].forEach((input) => {
+              input.addEventListener('input', () => {
+                if (currentMode !== 'agent') handleConfigChange();
+              });
+              input.addEventListener('change', () => {
+                if (currentMode !== 'agent') handleConfigChange();
+              });
+            });
+
+            stepRow.appendChild(actionSelect);
+            stepRow.appendChild(targetInput);
+            stepRow.appendChild(valueInput);
+            stepRow.appendChild(removeStepBtn);
+
+            if (typeof stepsContainer.insertBefore === 'function') {
+              stepsContainer.insertBefore(stepRow, addStepBtn);
+            } else {
+              stepsContainer.appendChild(stepRow);
+            }
+            handleConfigChange();
+            return stepRow;
+          }
+
+          addStepBtn.addEventListener('click', () => {
+            if (currentMode === 'agent') return;
+            addStepRow();
+          });
+
+          removeFlowBtn.addEventListener('click', () => {
+            if (currentMode === 'agent') return;
+            if (typeof flowItem.remove === 'function') {
+              flowItem.remove();
+            } else if (flowItem.parentNode && typeof flowItem.parentNode.removeChild === 'function') {
+              flowItem.parentNode.removeChild(flowItem);
+            }
+            handleConfigChange();
+          });
+
+          nameInput.addEventListener('input', () => {
+            if (currentMode !== 'agent') handleConfigChange();
+          });
+          nameInput.addEventListener('change', () => {
+            if (currentMode !== 'agent') handleConfigChange();
+          });
+
+          flowItem.appendChild(nameInput);
+          flowItem.appendChild(stepsContainer);
+          flowItem.appendChild(removeFlowBtn);
+
+          if (initialData && Array.isArray(initialData.steps)) {
+            initialData.steps.forEach((step) => {
+              addStepRow(step);
+            });
+          }
+
+          if (typeof flowsContainer.insertBefore === 'function') {
+            flowsContainer.insertBefore(flowItem, addFlowBtn);
+          } else {
+            flowsContainer.appendChild(flowItem);
+          }
+          handleConfigChange();
+          return flowItem;
+        }
+
+        addFlowBtn.addEventListener('click', () => {
+          if (currentMode === 'agent') return;
+          addFlowItem();
+        });
+
+        if (field.default && Array.isArray(field.default) && field.default.length > 0) {
+          field.default.forEach((flow) => {
+            addFlowItem(flow);
+          });
+        }
+      } else {
+        // Standard text, textarea, select, or number input
+        const label = doc.createElement('label');
+        label.setAttribute('for', elementId);
+        label.textContent = field.label || key;
+        if (FIELD_HELP_TOPIC_MAP[key] && CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
+          label.appendChild(CHECK_HELP.createHelpButton(doc, fieldWrapper, FIELD_HELP_TOPIC_MAP[key], options.checkCatalogLang));
+        }
+        fieldWrapper.appendChild(label);
+
+        const isMultiline = [
+          'target_urls', 'access_urls', 'exclude_urls', 'headers',
+          'allowed_hours', 'forbidden_hours',
+        ].includes(key);
+
+        let input;
+        if (field.constraints && Array.isArray(field.constraints.enum)) {
+          input = doc.createElement('select');
+          input.id = elementId;
+          field.constraints.enum.forEach((optVal) => {
+            const opt = doc.createElement('option');
+            opt.value = optVal;
+            opt.textContent = optVal;
+            if (field.default === optVal) opt.selected = true;
+            input.appendChild(opt);
+          });
+        } else if (isMultiline) {
+          input = doc.createElement('textarea');
+          input.id = elementId;
+          input.rows = 3;
+          input.value = field.default ? String(field.default) : '';
+        } else {
+          input = doc.createElement('input');
+          input.id = elementId;
+          if (field.type === 'integer' || field.type === 'number') {
+            input.type = 'number';
+            if (typeof field.constraints?.minimum === 'number') {
+              input.min = String(field.constraints.minimum);
+            }
+            if (field.type === 'integer') {
+              input.step = '1';
+            } else {
+              input.step = 'any';
+            }
+            input.value = field.default != null ? String(field.default) : '';
+          } else if (key.includes('pass') || key.includes('secret')) {
+            input.type = 'password';
+            input.value = field.default ? String(field.default) : '';
+          } else {
+            input.type = 'text';
+            input.value = field.default ? String(field.default) : '';
+          }
+        }
+
+        input.dataset.fieldKey = key;
+        fieldWrapper.appendChild(input);
+
+        // Error message placeholder for validation errors
+        const errorMsg = doc.createElement('span');
+        errorMsg.className = 'setup-field-error';
+        errorMsg.setAttribute('role', 'alert');
+        errorMsg.hidden = true;
+        fieldWrapper.appendChild(errorMsg);
+
+        // Validation listener for numbers
+        if (field.type === 'integer' || field.type === 'number') {
+          const validate = () => {
+            const err = validateFieldConstraint(input.value, field);
+            if (err) {
+              errorMsg.textContent = err;
+              errorMsg.hidden = false;
+              input.setAttribute('aria-invalid', 'true');
+            } else {
+              errorMsg.textContent = '';
+              errorMsg.hidden = true;
+              input.removeAttribute('aria-invalid');
+            }
+          };
+          input.addEventListener('input', validate);
+          input.addEventListener('blur', validate);
+        }
+
+        fieldMap[key] = input;
+      }
+
+      if (typeof container.appendChild === 'function') {
+        container.appendChild(fieldWrapper);
+      }
+    });
+
+    return fieldWrappers;
   }
 
   /**
@@ -1261,212 +1883,15 @@
         ? panelContainers[tabId].advanced
         : panelContainers[tabId].basic;
 
-      const fieldWrapper = doc.createElement('div');
-      fieldWrapper.className = 'setup-field';
-      fieldWrapper.dataset.fieldKey = key;
-      fieldWrapper.dataset.modes = JSON.stringify(field.applicable_modes || []);
-      if (FIELD_HELP_TOPIC_MAP[key]) {
-        fieldWrapper.setAttribute('data-help-topic', FIELD_HELP_TOPIC_MAP[key]);
-      }
-      fieldWrappers.push(fieldWrapper);
-
-      const elementId = KEY_TO_ID_MAP[key] || ('field_' + key.replace(/\./g, '_'));
-
-      if (field.type === 'boolean') {
-        const checkLabel = doc.createElement('label');
-        checkLabel.className = 'setup-checkbox-label';
-        const checkbox = doc.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.id = elementId;
-        checkbox.dataset.fieldKey = key;
-        if (key.startsWith('toggles.')) {
-          checkbox.dataset.toggle = key.slice(8);
-        }
-        checkbox.checked = Boolean(field.default);
-        const textSpan = doc.createElement('span');
-        textSpan.textContent = field.label || key;
-        checkLabel.appendChild(checkbox);
-        checkLabel.appendChild(textSpan);
-        if (FIELD_HELP_TOPIC_MAP[key] && CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
-          checkLabel.appendChild(CHECK_HELP.createHelpButton(doc, fieldWrapper, FIELD_HELP_TOPIC_MAP[key], options.checkCatalogLang));
-        }
-        fieldWrapper.appendChild(checkLabel);
-        fieldMap[key] = checkbox;
-      } else if (key === 'checks') {
-        // Scanner check boxes
-        const groupTitle = doc.createElement('label');
-        groupTitle.className = 'setup-field-title';
-        groupTitle.textContent = field.label || '検査項目';
-        fieldWrapper.appendChild(groupTitle);
-
-        const checkList = doc.createElement('div');
-        checkList.className = 'setup-checks-list';
-        checkList.id = 'setupChecks';
-
-        const defaultChecks = Array.isArray(field.default) ? field.default : ['sqli', 'xss', 'os'];
-        const allChecks = [
-          'sqli', 'xss', 'dom_xss', 'stored_xss', 'os', 'ssti', 'path_traversal',
-          'csrf', 'header_injection', 'open_redirect', 'session', 'privesc',
-          'cors', 'security_headers', 'info_disclosure', 'ssrf', 'graphql',
-          'jwt', 'clickjacking',
-        ];
-
-        allChecks.forEach((checkId) => {
-          const item = doc.createElement('div');
-          item.className = 'setup-check-item';
-          item.dataset.checkId = checkId;
-          const checkLabel = doc.createElement('label');
-          const cb = doc.createElement('input');
-          cb.type = 'checkbox';
-          cb.value = checkId;
-          cb.dataset.check = checkId;
-          cb.checked = defaultChecks.includes(checkId);
-          const nameSpan = doc.createElement('span');
-          nameSpan.textContent = checkId;
-          checkLabel.appendChild(cb);
-          checkLabel.appendChild(nameSpan);
-          const info = CHECK_HELP.createButton(doc, checkList, checkId, options.checkCatalog || {}, options.checkCatalogLang);
-          item.appendChild(checkLabel);
-          item.appendChild(info);
-          checkList.appendChild(item);
-        });
-        fieldWrapper.appendChild(checkList);
-        fieldMap[key] = checkList;
-      } else if (key === 'role_models') {
-        const groupTitle = doc.createElement('label');
-        groupTitle.className = 'setup-field-title';
-        groupTitle.textContent = field.label || 'ロール別モデル';
-        fieldWrapper.appendChild(groupTitle);
-
-        const grid = doc.createElement('div');
-        grid.className = 'setup-subgrid';
-        grid.id = 'cfgRoleModelsGrid';
-        ['planner', 'payload', 'adaptive', 'triage'].forEach((role) => {
-          const row = doc.createElement('div');
-          row.className = 'setup-subfield';
-          const inpId = 'cfg' + role.charAt(0).toUpperCase() + role.slice(1) + 'Model';
-          const lbl = doc.createElement('label');
-          lbl.htmlFor = inpId;
-          lbl.textContent = role;
-          const inp = doc.createElement('input');
-          inp.type = 'text';
-          inp.id = inpId;
-          inp.setAttribute('aria-label', `${role} モデル設定`);
-          inp.placeholder = '空=全体設定';
-          row.appendChild(lbl);
-          row.appendChild(inp);
-          grid.appendChild(row);
-        });
-        fieldWrapper.appendChild(grid);
-        fieldMap[key] = grid;
-      } else if (key === 'accounts') {
-        const groupTitle = doc.createElement('label');
-        groupTitle.className = 'setup-field-title';
-        groupTitle.textContent = field.label || '複数アカウント';
-        fieldWrapper.appendChild(groupTitle);
-
-        const list = doc.createElement('div');
-        list.id = 'accountsList';
-        list.className = 'setup-accounts-list';
-        fieldWrapper.appendChild(list);
-        fieldMap[key] = list;
-      } else if (key === 'flows') {
-        const groupTitle = doc.createElement('label');
-        groupTitle.className = 'setup-field-title';
-        groupTitle.textContent = field.label || '複数ステップフロー';
-        fieldWrapper.appendChild(groupTitle);
-
-        const flowsContainer = doc.createElement('div');
-        flowsContainer.id = 'cfgFlowsList';
-        flowsContainer.className = 'setup-flows-container';
-        fieldWrapper.appendChild(flowsContainer);
-        fieldMap[key] = flowsContainer;
-      } else {
-        // Standard text, textarea, select, or number input
-        const label = doc.createElement('label');
-        label.setAttribute('for', elementId);
-        label.textContent = field.label || key;
-        if (FIELD_HELP_TOPIC_MAP[key] && CHECK_HELP && typeof CHECK_HELP.createHelpButton === 'function') {
-          label.appendChild(CHECK_HELP.createHelpButton(doc, fieldWrapper, FIELD_HELP_TOPIC_MAP[key], options.checkCatalogLang));
-        }
-        fieldWrapper.appendChild(label);
-
-        const isMultiline = [
-          'target_urls', 'access_urls', 'exclude_urls', 'headers',
-          'allowed_hours', 'forbidden_hours',
-        ].includes(key);
-
-        let input;
-        if (field.constraints && Array.isArray(field.constraints.enum)) {
-          input = doc.createElement('select');
-          input.id = elementId;
-          field.constraints.enum.forEach((optVal) => {
-            const opt = doc.createElement('option');
-            opt.value = optVal;
-            opt.textContent = optVal;
-            if (field.default === optVal) opt.selected = true;
-            input.appendChild(opt);
-          });
-        } else if (isMultiline) {
-          input = doc.createElement('textarea');
-          input.id = elementId;
-          input.rows = 3;
-          input.value = field.default ? String(field.default) : '';
-        } else {
-          input = doc.createElement('input');
-          input.id = elementId;
-          if (field.type === 'integer' || field.type === 'number') {
-            input.type = 'number';
-            if (typeof field.constraints?.minimum === 'number') {
-              input.min = String(field.constraints.minimum);
-            }
-            if (field.type === 'integer') {
-              input.step = '1';
-            } else {
-              input.step = 'any';
-            }
-            input.value = field.default != null ? String(field.default) : '';
-          } else if (key.includes('pass') || key.includes('secret')) {
-            input.type = 'password';
-            input.value = field.default ? String(field.default) : '';
-          } else {
-            input.type = 'text';
-            input.value = field.default ? String(field.default) : '';
-          }
-        }
-
-        input.dataset.fieldKey = key;
-        fieldWrapper.appendChild(input);
-
-        // Error message placeholder for validation errors
-        const errorMsg = doc.createElement('span');
-        errorMsg.className = 'setup-field-error';
-        errorMsg.setAttribute('role', 'alert');
-        errorMsg.hidden = true;
-        fieldWrapper.appendChild(errorMsg);
-
-        // Validation listener for numbers
-        if (field.type === 'integer' || field.type === 'number') {
-          const validate = () => {
-            const err = validateFieldConstraint(input.value, field);
-            if (err) {
-              errorMsg.textContent = err;
-              errorMsg.hidden = false;
-              input.setAttribute('aria-invalid', 'true');
-            } else {
-              errorMsg.textContent = '';
-              errorMsg.hidden = true;
-              input.removeAttribute('aria-invalid');
-            }
-          };
-          input.addEventListener('input', validate);
-          input.addEventListener('blur', validate);
-        }
-
-        fieldMap[key] = input;
-      }
-
-      targetGrid.appendChild(fieldWrapper);
+      renderSettingsSchemaForm(targetGrid, [field], {
+        document: doc,
+        currentMode: currentMode,
+        onConfigChange: () => handleConfigChange(),
+        fieldMap: fieldMap,
+        fieldWrappers: fieldWrappers,
+        checkCatalog: options.checkCatalog,
+        checkCatalogLang: options.checkCatalogLang,
+      });
     });
 
     // ─── Search Filtering Logic ──────────────────────────────────
@@ -2360,6 +2785,9 @@
     renderSetupView: renderSetupView,
     loadAndRenderSetup: loadAndRenderSetup,
     createSetupModule: createSetupModule,
+    getAccounts: getAccounts,
+    getFlows: getFlows,
+    renderSettingsSchemaForm: renderSettingsSchemaForm,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

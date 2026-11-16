@@ -1093,6 +1093,7 @@ class ScanEngine:
         self.token_lifecycle_manager = _token_lifecycle_manager_enabled_by_config()
         # account_sessions: resolved at run time — list of {"username":, "cookies":, "role":}
         self.account_sessions: list = []
+        self.account_auth_outcomes: list[dict] = []
         # ①: SPA crawl
         self.spa_crawl = spa_crawl
         self.auto_spa_crawl = auto_spa_crawl
@@ -9685,9 +9686,22 @@ class ScanEngine:
         """
         For each account in self.accounts, log in via the login URL and
         capture the resulting cookies as a cookie string.
-        Populates self.account_sessions.
+        Populates self.account_sessions and self.account_auth_outcomes.
         """
+        if not hasattr(self, "account_auth_outcomes") or self.account_auth_outcomes is None:
+            self.account_auth_outcomes = []
+        if not hasattr(self, "account_sessions") or self.account_sessions is None:
+            self.account_sessions = []
         if not self.login_url:
+            for acct in self.accounts:
+                username = acct.get("username", "")
+                role = acct.get("role", "user")
+                self.account_auth_outcomes.append({
+                    "username": username,
+                    "role": role,
+                    "status": "incomplete",
+                    "reason": "no_login_url",
+                })
             return
         console.print(
             f"  [cyan][A] Setting up {len(self.accounts)} account session(s)…[/cyan]"
@@ -9697,6 +9711,12 @@ class ScanEngine:
             password = acct.get("password", "")
             role = acct.get("role", "user")
             if not username or not password:
+                self.account_auth_outcomes.append({
+                    "username": username or "<unknown>",
+                    "role": role,
+                    "status": "incomplete",
+                    "reason": "missing_credentials",
+                })
                 continue
             cookie_str = await self._browser.create_session_for_account(
                 username=username,
@@ -9713,10 +9733,22 @@ class ScanEngine:
                     "cookies": cookie_str,
                     "role": role,
                 })
+                self.account_auth_outcomes.append({
+                    "username": username,
+                    "role": role,
+                    "status": "authenticated",
+                    "reason": "login_succeeded",
+                })
                 console.print(
                     f"    [green]✓[/green] {username} ({role}) — session captured"
                 )
             else:
+                self.account_auth_outcomes.append({
+                    "username": username,
+                    "role": role,
+                    "status": "incomplete",
+                    "reason": "login_failed",
+                })
                 console.print(
                     f"    [yellow]✗[/yellow] {username} — login failed, skipping"
                 )
@@ -9729,6 +9761,11 @@ class ScanEngine:
         """
         import random
         import string
+
+        if not hasattr(self, "account_auth_outcomes") or self.account_auth_outcomes is None:
+            self.account_auth_outcomes = []
+        if not hasattr(self, "account_sessions") or self.account_sessions is None:
+            self.account_sessions = []
 
         if not self.login_url:
             return
@@ -9828,10 +9865,22 @@ class ScanEngine:
                     "cookies": cookie_str,
                     "role": "registered",
                 })
+                self.account_auth_outcomes.append({
+                    "username": username,
+                    "role": "registered",
+                    "status": "authenticated",
+                    "reason": "registered_and_logged_in",
+                })
                 console.print(
                     f"    [green]✓[/green] {username} registered & logged in"
                 )
             else:
+                self.account_auth_outcomes.append({
+                    "username": username,
+                    "role": "registered",
+                    "status": "incomplete",
+                    "reason": "registration_login_failed",
+                })
                 console.print(
                     f"    [yellow]✗[/yellow] {username} registered but login failed"
                 )
