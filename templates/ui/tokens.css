@@ -1,3 +1,27 @@
+/* ==========================================================================
+   Vulix UI Design System - Semantic Design Tokens
+   --------------------------------------------------------------------------
+   Allowed vs. Prohibited Decoration Rules:
+   - Shadows: PROHIBITED: Large diffuse colorful glows, neon drop-shadows,
+     or unmotivated gradient halos. ALLOWED: Subtle dark elevation shadows
+     (e.g., 0 1px 3px rgba(0,0,0,0.3)) or modal elevation scrims.
+   - Blur: PROHIBITED: Gratuitous backdrop-filter blur on scrollable data
+     tables, code panels, cards, or headers (degrades rendering performance
+     during high-throughput event streams and blurs text). ALLOWED: Dark
+     dialog scrim overlays (rgba(0,0,0,0.6)) for modal focus isolation.
+   - Radius: PROHIBITED: Uniform large 16px-24px border-radii on desktop data
+     grids/tables. ALLOWED: 4px for compact inputs/buttons, 6-8px for cards,
+     and 9999px strictly reserved for status/severity pill badges.
+   - Borders: PROHIBITED: Gradient borders, rainbow borders, or thick borders.
+     ALLOWED: 1px hairline solid borders (using border token #3f424d) to define
+     structural data separation.
+   - Accent: PROHIBITED: Mixing brand purple with severity or status states.
+     ALLOWED: Interactive focus rings, active tab indicators, and primary CTAs.
+   - Animation: PROHIBITED: Looping decorative wobbles, marquee text, or
+     distracting pulsing cards. ALLOWED: 150ms hover/focus color transitions
+     and purposeful scan progress indicators.
+   ========================================================================== */
+
 :root {
   /* Surface & Base */
   --bg: #161826;
@@ -8,6 +32,10 @@
   --text: #e9e9ed;
   --text-muted: #9397ab;
 
+  /* Font family tokens */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+
   /* Semantic typography tokens */
   --font-size-2xs: 0.7rem;
   --font-size-xs: 0.75rem;
@@ -16,6 +44,16 @@
   --font-size-md: 1rem;
   --font-size-lg: 1.15rem;
 
+  /* Type scale aliases */
+  --text-2xs: 0.7rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.15rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+
   /* Line height tokens */
   --line-height-tight: 1.25;
   --line-height-base: 1.5;
@@ -23,6 +61,7 @@
 
   /* Brand (isolated from status) */
   --accent: #9184d9;
+  --accent-primary: #9184d9;
   --accent-glow: rgba(145,132,217,0.18);
 
   /* Severities */
@@ -87,10 +126,24 @@
   --density-spacious-padding: 16px 20px;
   --density-spacious-gap: 16px;
 
-  /* Focus ring */
+  /* Row density tokens */
+  --density-row-compact: 28px;
+  --density-row-standard: 36px;
+
+  /* Focus ring & selection */
   --focus-ring: 0 0 0 2px var(--accent);
   --focus-ring-offset: 2px;
   --focus-outline: 2px solid var(--accent);
+  --selection-bg: rgba(145, 132, 217, 0.16);
+  --selection-border: #9184d9;
+
+  /* Execution / freshness state tokens */
+  --state-running: #d99a63;
+  --state-unverified: #8fb9c9;
+  --state-stale: #d99a63;
+  --state-paused: #c7b96a;
+  --state-completed: #22c55e;
+  --state-failed: #e2708f;
 
   /* State patterns */
   --state-error-text: #e2708f;
