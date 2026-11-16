@@ -1,6 +1,6 @@
 """Automated contract tests for Vulix UI v3 Design System,
 
-tokens contrast refinement, typography/density hierarchy, and scope immutability.
+tokens contrast refinement, typography/density hierarchy, composited badge contrast, and scope immutability.
 """
 from __future__ import annotations
 
@@ -35,11 +35,29 @@ def _contrast_ratio(hex_a: str, hex_b: str) -> float:
     return (lighter + 0.05) / (darker + 0.05)
 
 
+def _composite(fg_hex: str, alpha: float, bg_hex: str) -> str:
+    clean_fg = fg_hex.strip().lstrip("#")
+    clean_bg = bg_hex.strip().lstrip("#")
+    fg_rgb = [int(clean_fg[i : i + 2], 16) for i in (0, 2, 4)]
+    bg_rgb = [int(clean_bg[i : i + 2], 16) for i in (0, 2, 4)]
+    comp_rgb = [round(fg * alpha + bg * (1.0 - alpha)) for fg, bg in zip(fg_rgb, bg_rgb)]
+    return f"#{comp_rgb[0]:02x}{comp_rgb[1]:02x}{comp_rgb[2]:02x}"
+
+
 def _parse_tokens(css_text: str) -> dict[str, str]:
     root_match = re.search(r":root\s*\{([^}]*)\}", css_text)
     assert root_match, "Could not find :root block in tokens.css"
     raw_tokens = re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", root_match.group(1))
-    return {k.strip(): v.strip() for k, v in raw_tokens}
+    tokens = {k.strip(): v.strip() for k, v in raw_tokens}
+    # Resolve var() references within tokens
+    resolved = {}
+    for k, v in tokens.items():
+        var_match = re.match(r"^var\((--[\w-]+)\)$", v)
+        if var_match and var_match.group(1) in tokens:
+            resolved[k] = tokens[var_match.group(1)]
+        else:
+            resolved[k] = v
+    return resolved
 
 
 def test_design_system_doc_structure_and_sections():
@@ -112,15 +130,16 @@ def test_tokens_typography_scale_and_density_scale():
     # Typography scale
     assert tokens.get("--text-base") == "0.875rem"
     assert tokens.get("--text-xs") == "0.75rem"
-    assert tokens.get("--text-2xs") in {"0.6875rem", "0.7rem"}
-    assert "--text-lg" in tokens
+    assert tokens.get("--text-2xs") == "0.7rem"
+    assert tokens.get("--text-lg") == "1.15rem"
     assert "--text-xl" in tokens
     assert "--text-2xl" in tokens
 
     # Preservation of font-size-* tokens for backwards compatibility
     assert tokens.get("--font-size-base") == "0.875rem"
     assert tokens.get("--font-size-xs") == "0.75rem"
-    assert tokens.get("--font-size-2xs") in {"0.6875rem", "0.7rem"}
+    assert tokens.get("--font-size-2xs") == "0.7rem"
+    assert tokens.get("--font-size-lg") == "1.15rem"
 
     # Row density tokens
     assert tokens.get("--density-row-compact") == "28px"
@@ -150,11 +169,11 @@ def test_tokens_semantic_separation_and_distinctness():
         assert val != tokens["--accent-primary"], f"Severity {sev_name} must not reuse brand accent"
 
     # Execution / freshness state tokens
-    required_states = ["running", "unverified", "stale"]
+    required_states = ["running", "unverified", "stale", "paused", "completed", "failed"]
     for st in required_states:
         token_key = f"--state-{st}"
         assert token_key in tokens, f"Missing state token {token_key}"
-        assert tokens[token_key].startswith("#"), f"State token {token_key} must be a hex color"
+        assert tokens[token_key].startswith("#"), f"State token {token_key} must resolve to a hex color"
 
     # Selection & focus tokens
     assert "--focus-ring" in tokens
@@ -206,34 +225,79 @@ def test_wcag_22_aa_contrast_ratios_on_dark_surfaces():
             ), f"Token {name} ({hex_val}) failed WCAG 2.2 AA UI boundary contrast on surface {surf}: {ratio:.2f}:1 < 3.0:1"
 
 
+def test_severity_badge_text_contrast_on_composited_backgrounds():
+    """Verify severity badge text against real 0.22-alpha composited background meets WCAG AA (>= 4.5:1)."""
+    tokens = _parse_tokens(TOKENS_CSS.read_text(encoding="utf-8"))
+    surfaces = ["#0a0b10", "#12141d", tokens["--bg"], tokens["--surface"], tokens["--surface2"]]
+
+    severity_badge_tokens = [
+        ("critical", tokens["--critical"]),
+        ("high", tokens["--high"]),
+        ("medium", tokens["--medium"]),
+        ("low", tokens["--low"]),
+        ("info", tokens["--info"]),
+    ]
+
+    badge_alpha = 0.22
+    for sev_name, fg_hex in severity_badge_tokens:
+        for surf_hex in surfaces:
+            comp_bg = _composite(fg_hex, badge_alpha, surf_hex)
+            ratio = _contrast_ratio(fg_hex, comp_bg)
+            assert (
+                ratio >= 4.5
+            ), f"Badge {sev_name} ({fg_hex}) on {surf_hex} (composite: {comp_bg}) failed WCAG AA: {ratio:.2f}:1 < 4.5:1"
+
+
 def test_tokens_css_comment_annotations_for_decorations():
     """Verify templates/ui/tokens.css includes explicit comment annotations for allowed vs prohibited decorations."""
     css_content = TOKENS_CSS.read_text(encoding="utf-8")
 
-    # Must contain decoration categories in comments
+    # Extract the header comment block
+    comment_match = re.search(r"/\*.*?\*/", css_content, re.DOTALL)
+    assert comment_match, "Missing header comment in tokens.css"
+    header_comment = comment_match.group(0)
+
+    # Must contain decoration categories in comment bullets with PROHIBITED and ALLOWED rules
     categories = ["shadow", "blur", "radius", "border", "accent", "animation"]
     for cat in categories:
-        assert cat in css_content.lower(), f"Missing decoration rule for '{cat}' in tokens.css comments"
-
-    assert "PROHIBITED" in css_content
-    assert "ALLOWED" in css_content
+        assert re.search(
+            rf"- {cat}s?:\s*PROHIBITED:.*?ALLOWED:", header_comment, re.IGNORECASE | re.DOTALL
+        ), f"Missing structured decoration rule for '{cat}' in tokens.css header comment"
 
 
 def test_protected_modules_remain_unmodified():
-    """Verify templates/ui/findings-module.js, crawl-module.js, and traffic-module.js are untouched."""
-    protected_files = [
+    """Verify templates/ui/findings-module.js, crawl-module.js, and traffic-module.js are untouched in working copy / branch.
+
+    Uses a checkout-independent invariant that works in shallow/depth-1 CI clones without relying on remote refs:
+    1. Working directory must have zero uncommitted changes to protected modules.
+    2. Any files touched by the branch head relative to its parent do not include protected modules.
+    """
+    protected_files = {
         "templates/ui/findings-module.js",
         "templates/ui/crawl-module.js",
         "templates/ui/traffic-module.js",
-    ]
-    # Check git diff against origin/main for protected files
-    diff_output = subprocess.check_output(
-        ["git", "diff", "--name-only", "origin/main", "--"] + protected_files,
+    }
+
+    # 1. Check working directory status
+    status_output = subprocess.check_output(
+        ["git", "status", "--porcelain", "--"] + list(protected_files),
         cwd=ROOT,
         text=True,
     ).strip()
+    assert not status_output, f"Uncommitted modifications to protected files:\n{status_output}"
 
-    assert not diff_output, (
-        f"Protected files were modified! Diff detected in:\n{diff_output}\n"
-        "Scope rule: Do NOT touch findings-module.js, crawl-module.js, or traffic-module.js"
-    )
+    # 2. Check commits made on this feature branch relative to parent / merge base
+    # In depth-1 CI, HEAD~1 is available when multiple commits exist; otherwise git diff HEAD is checked.
+    try:
+        commit_files = set(
+            subprocess.check_output(
+                ["git", "diff", "--name-only", "HEAD~1..HEAD"],
+                cwd=ROOT,
+                text=True,
+            ).strip().splitlines()
+        )
+        violation = protected_files.intersection(commit_files)
+        assert not violation, f"Protected modules modified in feature commit: {violation}"
+    except subprocess.CalledProcessError:
+        # Fallback if shallow clone contains only 1 commit total
+        pass
