@@ -413,6 +413,8 @@
           btn.className = 'history-btn traffic-action-btn disabled';
           btn.disabled = true;
           btn.setAttribute('aria-disabled', 'true');
+          btn.setAttribute('aria-label', `${act.label}: ${act.reason || 'not available in this version'}`);
+          btn.tabIndex = 0;
           btn.title = act.reason || 'not available in this version';
 
           const labelSpan = document.createElement('span');

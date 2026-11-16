@@ -449,3 +449,169 @@ def test_browser_cross_links_and_missing_node_ui(ui_harness):
     input_val = page.input_value("#findingsSearchInput")
     assert input_val == filtered_url
     ui_harness.assert_no_errors(page)
+
+
+def test_crawl_action_item_rendering_traffic_link():
+    """Verify crawl action item renders disabled replay button and read-only Traffic deep link."""
+    script = f"""
+    const crawlMod = require('{CRAWL_MODULE_JS}');
+
+    // 1. buildTrafficLink helper
+    const tLink = crawlMod.buildTrafficLink('scan_crawl_01', 'http://example.com/api/submit', 'POST');
+
+    // 2. Mock DOM rendering for node with actions
+    function makeEl(tag) {{
+      const children = [];
+      return {{
+        tagName: tag.toUpperCase(),
+        className: '',
+        children: children,
+        textContent: '',
+        title: '',
+        disabled: false,
+        tabIndex: -1,
+        type: 'button',
+        href: '',
+        dataset: {{}},
+        style: {{}},
+        _attrs: {{}},
+        classList: {{
+          _classes: new Set(),
+          add(c) {{ this._classes.add(c); }},
+          remove(c) {{ this._classes.delete(c); }},
+          contains(c) {{ return this._classes.has(c); }},
+        }},
+        addEventListener(evt, fn) {{
+          this._listeners = this._listeners || {{}};
+          this._listeners[evt] = this._listeners[evt] || [];
+          this._listeners[evt].push(fn);
+        }},
+        setAttribute(k, v) {{
+          this._attrs[k] = v;
+          if (k === 'href') this.href = v;
+          if (k === 'title') this.title = v;
+        }},
+        getAttribute(k) {{ return this._attrs[k]; }},
+        appendChild(c) {{ children.push(c); c.parentNode = this; return c; }},
+        insertBefore(newChild, refChild) {{
+          const idx = refChild ? children.indexOf(refChild) : -1;
+          if (idx >= 0) {{
+            children.splice(idx, 0, newChild);
+          }} else {{
+            children.push(newChild);
+          }}
+          newChild.parentNode = this;
+          return newChild;
+        }},
+        removeChild(c) {{
+          const idx = children.indexOf(c);
+          if (idx >= 0) children.splice(idx, 1);
+          return c;
+        }},
+        get firstChild() {{
+          return children[0] || null;
+        }},
+        get lastChild() {{
+          return children[children.length - 1] || null;
+        }},
+        append(...cs) {{ cs.forEach(c => this.appendChild(c)); }},
+        replaceChildren(...cs) {{ children.length = 0; cs.forEach(c => this.appendChild(c)); }},
+        querySelector(sel) {{
+          return this.querySelectorAll(sel)[0] || null;
+        }},
+        querySelectorAll(sel) {{
+          const results = [];
+          function walk(node) {{
+            if (!node || !node.children) return;
+            for (const c of node.children) {{
+              let match = false;
+              if (sel.startsWith('.')) {{
+                const cls = sel.slice(1);
+                if (c.className && c.className.split(/\\s+/).includes(cls)) match = true;
+              }} else if (sel.startsWith('a.')) {{
+                const cls = sel.slice(2);
+                if (c.tagName === 'A' && c.className && c.className.split(/\\s+/).includes(cls)) match = true;
+              }} else if (sel.startsWith('button.')) {{
+                const cls = sel.slice(7);
+                if (c.tagName === 'BUTTON' && c.className && c.className.split(/\\s+/).includes(cls)) match = true;
+              }}
+              if (match) results.push(c);
+              walk(c);
+            }}
+          }}
+          walk(this);
+          return results;
+        }},
+      }};
+    }}
+
+    global.document = {{
+      createElement: makeEl,
+      createElementNS: (ns, t) => makeEl(t),
+      createTextNode: (t) => ({{ textContent: t }}),
+      addEventListener: () => {{}},
+      removeEventListener: () => {{}},
+    }};
+
+    const container = makeEl('div');
+    const mockApi = {{
+      get: async (url) => {{
+        if (url.includes('crawl-graph')) {{
+          return {{
+            ok: true,
+            data: {{
+              scan_id: 'scan_crawl_01',
+              nodes: [
+                {{
+                  id: 'node_form_1',
+                  kind: 'form',
+                  url: 'http://example.com/form',
+                  label: 'Contact Form',
+                  actions: [
+                    {{ method: 'post', action: 'http://example.com/api/submit' }}
+                  ]
+                }}
+              ],
+              edges: [],
+              metadata: {{ completeness: 'complete' }}
+            }}
+          }};
+        }}
+        if (url === '/api/v1/scans') {{
+          return {{ ok: true, data: {{ scans: [{{ id: 'scan_crawl_01' }}] }} }};
+        }}
+        return {{ ok: false }};
+      }},
+      cancelAll: () => {{}},
+    }};
+
+    const view = crawlMod.renderCrawlView(container, {{ api: mockApi, scanId: 'scan_crawl_01', nodeId: 'node_form_1' }});
+    view.loadCrawlGraph('scan_crawl_01').then(() => {{
+      const replayBtn = container.querySelector('button.crawl-action-btn');
+      const trafficLink = container.querySelector('a.crawl-traffic-link');
+
+      console.log(JSON.stringify({{
+        tLink,
+        hasReplayBtn: !!replayBtn,
+        replayDisabled: replayBtn ? replayBtn.disabled : null,
+        replayAriaDisabled: replayBtn ? replayBtn.getAttribute('aria-disabled') : null,
+        replayAriaLabel: replayBtn ? replayBtn.getAttribute('aria-label') : null,
+        replayTabIndex: replayBtn ? replayBtn.tabIndex : null,
+        replayTitle: replayBtn ? replayBtn.title : null,
+        hasTrafficLink: !!trafficLink,
+        trafficHref: trafficLink ? trafficLink.href : null,
+        trafficText: trafficLink ? trafficLink.textContent : null,
+      }}));
+    }});
+    """
+    res = _run_node(script)
+    assert res["tLink"] == "#/traffic?scan=scan_crawl_01&url=http%3A%2F%2Fexample.com%2Fapi%2Fsubmit&method=POST"
+    assert res["hasReplayBtn"] is True
+    assert res["replayDisabled"] is True
+    assert res["replayAriaDisabled"] == "true"
+    assert "not available in this version" in res["replayAriaLabel"]
+    assert res["replayTabIndex"] == 0
+    assert "not available in this version" in res["replayTitle"]
+    assert res["hasTrafficLink"] is True
+    assert res["trafficHref"] == "#/traffic?scan=scan_crawl_01&url=http%3A%2F%2Fexample.com%2Fapi%2Fsubmit&method=POST"
+    assert "通信履歴を表示" in res["trafficText"]

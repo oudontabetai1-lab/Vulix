@@ -804,6 +804,10 @@
 .findings-notfound-text { margin: 0; }
 .findings-detail-th { width: 25%; }
 .findings-chip-clear { background: transparent; border: none; cursor: pointer; color: var(--text-muted); margin-left: 6px; }
+.findings-filtered-out-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-radius: 6px; background: rgba(199, 185, 106, 0.15); border: 1px solid var(--status-warning-border, #c7b96a); color: var(--text); font-size: 0.82rem; line-height: 1.4; margin-bottom: 12px; }
+.findings-filtered-out-text { flex: 1; min-width: 0; font-weight: 500; }
+.findings-reset-filter-btn { flex-shrink: 0; white-space: nowrap; font-size: 0.78rem; padding: 4px 10px; }
+.crawl-traffic-link { margin-left: 8px; font-size: 0.76rem; padding: 3px 8px; text-decoration: none; display: inline-flex; align-items: center; }
 .setup-search-hidden { display: none !important; }
 .setup-check-item { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .setup-check-item > label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; cursor: pointer; }

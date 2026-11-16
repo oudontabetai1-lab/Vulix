@@ -208,6 +208,25 @@
   }
 
   /**
+   * Pure function to build a deep link to the Traffic view focused on a scan, URL, and optional method.
+   *
+   * @param {string} [scanId]
+   * @param {string} [url]
+   * @param {string} [method]
+   * @returns {string} Hash string e.g. '#/traffic?scan=123&url=http%3A%2F%2F...&method=POST'
+   */
+  function buildTrafficLink(scanId, url, method) {
+    let hash = '#/traffic';
+    const params = new URLSearchParams();
+    if (scanId) params.set('scan', String(scanId).trim());
+    if (url) params.set('url', String(url).trim());
+    if (method) params.set('method', String(method).trim().toUpperCase());
+    const qs = params.toString();
+    if (qs) hash += '?' + qs;
+    return hash;
+  }
+
+  /**
    * Pure function to build URL hash for Crawl view.
    *
    * @param {Object} [options]
@@ -979,6 +998,8 @@
           replayBtn.className = 'history-btn crawl-action-btn disabled';
           replayBtn.disabled = true;
           replayBtn.setAttribute('aria-disabled', 'true');
+          replayBtn.setAttribute('aria-label', 'アクション実行: not available in this version');
+          replayBtn.tabIndex = 0;
           replayBtn.title = 'not available in this version';
           const rText = doc.createElement('span');
           rText.textContent = 'アクション実行';
@@ -987,6 +1008,16 @@
           rReason.textContent = ' (not available in this version)';
           replayBtn.append(rText, rReason);
           item.appendChild(replayBtn);
+
+          const targetUrl = (act && act.action) || formatted.url || '';
+          const currentScanId = (currentData && currentData.scan_id) || initialScanId || null;
+          if (currentScanId && targetUrl) {
+            const trafficLink = doc.createElement('a');
+            trafficLink.className = 'history-btn crawl-traffic-link';
+            trafficLink.href = buildTrafficLink(currentScanId, targetUrl, act.method || 'GET');
+            trafficLink.textContent = '通信履歴を表示';
+            item.appendChild(trafficLink);
+          }
 
           actList.appendChild(item);
         });
@@ -1786,6 +1817,7 @@
     findCrawlNode: findCrawlNode,
     layoutGraph: layoutGraph,
     buildFindingsLink: buildFindingsLink,
+    buildTrafficLink: buildTrafficLink,
     buildCrawlHash: buildCrawlHash,
     parseCrawlHash: parseCrawlHash,
     resolveCrawlNodeActions: resolveCrawlNodeActions,
