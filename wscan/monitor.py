@@ -33,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from wscan.url_scope import redact_event_data
+from wscan.eta_estimator import EtaEstimator, EtaEstimate
 
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
@@ -350,6 +351,7 @@ class MonitorServer:
         self.api_target: str = ""
         self.api_phase: str = ""             # crawl / plan / attack / report
         self.api_progress: dict = {"current": 0, "total": 0, "percent": 0}
+        self.eta_estimator: EtaEstimator = EtaEstimator()
         self.manual_crawl_session = None
         # 出力(output/)の保持ポリシー。0 = 無制限(既定・後方互換)。
         #   retention_days       … 経過日数を超えたスキャンを自動削除
@@ -501,6 +503,23 @@ class MonitorServer:
         """スキャン開始時刻を記録し watchdog をリセットする。"""
         self._scan_started_at = time.time()
         self._watchdog_fired = False
+        if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
+            self.eta_estimator.reset()
+            self.eta_estimator.start()
+
+    def get_eta_estimate(self) -> EtaEstimate:
+        """Return canonical monotonic-clock-based EtaEstimate."""
+        if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
+            return self.eta_estimator.estimate()
+        return EtaEstimate(
+            elapsed_seconds=0.0,
+            eta_seconds=None,
+            eta_range_seconds=None,
+            progress_percent=0.0,
+            confidence="indeterminate",
+            status_label="indeterminate",
+            reason_code="insufficient_samples",
+        )
 
     def watchdog_check(self) -> bool:
         """実行中スキャンが上限時間を超えていたら一度だけ abort を要求する。
@@ -1177,6 +1196,7 @@ class MonitorServer:
             from wscan.scanners.base import finding_dict_confirmed
             total = len(self.api_findings)
             confirmed = sum(1 for f in self.api_findings if finding_dict_confirmed(f))
+            est = self.get_eta_estimate()
             return JSONResponse({
                 "status": self.api_scan_status,
                 "scan_id": self.api_scan_id,
@@ -1190,7 +1210,13 @@ class MonitorServer:
                 "phase": self.api_phase,
                 "progress": self.api_progress,
                 "aborted": self.api_scan_status in ("aborted", "aborting"),
+                "eta": est.to_dict(),
             })
+
+        @app.get("/api/status")
+        async def api_status_alias():
+            """Canonical alias for /api/v1/scan/status with additive ETA information."""
+            return await api_scan_status()
 
         @app.get("/api/v1/scan/findings")
         async def api_scan_findings():
@@ -2613,6 +2639,8 @@ class MonitorServer:
         self._scan_page_graph = {}
         self._scan_crawl_review_pages = []
         self.event_history.clear()
+        if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
+            self.eta_estimator.reset()
 
     def _scan_snapshot_event(self) -> dict:
         """Return the canonical UI state at the latest per-scan event cursor."""
@@ -2636,6 +2664,7 @@ class MonitorServer:
                 "target": self.api_target,
                 "phase": self.api_phase,
                 "progress": copy.deepcopy(self.api_progress),
+                "eta": self.get_eta_estimate().to_dict(),
                 "findings": copy.deepcopy(self.api_findings),
                 "findings_count": total,
                 "total_findings_count": total,
@@ -2674,6 +2703,8 @@ class MonitorServer:
                 else:
                     status = "done"
             self.api_scan_status = status
+            if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
+                self.eta_estimator.record_terminal(status="completed" if status == "done" else "aborted")
             # 終端では最後の phase 文言を残さない（Done なのに "OS injection testing" が
             # snapshot/再接続後も見える回帰を防ぐ）。ここが完了を確定する唯一の場所。
             # error だけは直前の具体的な失敗理由を優先し、無い場合のみ既定文言にする。
@@ -2942,7 +2973,20 @@ class MonitorServer:
         self, current: int, total: int, message: str = "", *,
         phase: str = "", unit: str = "", total_known: bool | None = None,
         eta_current: int | None = None, eta_total: int | None = None,
+        dynamic_units_added: float = 0.0, retry_or_timeout_events: int = 0,
     ):
+        if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
+            self.eta_estimator.record_progress(
+                current=current,
+                total=total,
+                phase=phase or self.api_phase,
+                dynamic_units_added=dynamic_units_added,
+                retry_or_timeout_events=retry_or_timeout_events,
+            )
+            est = self.eta_estimator.estimate()
+        else:
+            est = None
+
         self.api_progress = {
             "current": current,
             "total": total,
@@ -2951,14 +2995,25 @@ class MonitorServer:
             "unit": unit,
             "total_known": total > 0 if total_known is None else total_known,
         }
+        if est is not None:
+            self.api_progress["eta_seconds"] = est.eta_seconds
+            self.api_progress["eta_confidence"] = est.confidence
+            self.api_progress["eta_status"] = est.status_label
+            self.api_progress["progress_percent"] = est.progress_percent
+
         if eta_current is not None and eta_total is not None:
             self.api_progress["eta_current"] = eta_current
             self.api_progress["eta_total"] = eta_total
-        await self.emit("progress", {**self.api_progress, "message": message})
+        event_payload = {**self.api_progress, "message": message}
+        if est is not None:
+            event_payload["eta"] = est.to_dict()
+        await self.emit("progress", event_payload)
 
     async def emit_phase(self, phase: str) -> None:
         """Emit current scan phase: 'crawl' | 'plan' | 'attack' | 'report'"""
         self.api_phase = phase
+        if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
+            self.eta_estimator.record_phase(phase)
         await self.emit("phase", {"phase": phase})
 
     async def emit_url_start(self, url: str, total_urls: int = 0) -> None:
@@ -3023,6 +3078,8 @@ class MonitorServer:
     async def emit_intervention_state(self, paused: bool):
         """Tell the dashboard whether the scan is paused."""
         self._scan_paused = bool(paused)
+        if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
+            self.eta_estimator.set_paused(self._scan_paused)
         await self.emit("intervention_state", {"paused": paused})
 
     # ------------------------------------------------------------------
