@@ -74,6 +74,7 @@ stdlib_imports:
 - shutil
 - socket
 - ssl
+- statistics
 - string
 - struct
 - sys
