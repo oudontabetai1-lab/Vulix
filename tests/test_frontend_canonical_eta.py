@@ -48,6 +48,12 @@ def test_actual_monitor_bridge_eta_and_reconnect(ui_harness: UIHarness, mode: st
         page.wait_for_function("() => document.querySelector('#scanContext .scan-eta-badge')?.textContent === 'ETA: 1分30秒'")
         assert page.locator('#scanContext .scan-progress-badge').inner_text() == '33.3%'
         assert '範囲: 1分10秒〜2分00秒' in page.locator('#scanContext .scan-eta-badge').get_attribute('title')
+        frame.evaluate("() => handleEvent({type: 'intervention_state', data: {paused: true}})")
+        page.wait_for_function("() => document.querySelector('#scanContext .scan-eta-badge')?.textContent === 'ETA: 一時停止'")
+        page.wait_for_timeout(200)
+        assert page.locator('#scanContext .scan-eta-badge').inner_text() == 'ETA: 一時停止'
+        frame.evaluate("() => handleEvent({type: 'intervention_state', data: {paused: false}})")
+        page.wait_for_function("() => document.querySelector('#scanContext .scan-eta-badge')?.textContent === 'ETA: 1分30秒'")
         for paused, label, seconds, expected in [
             (True, 'paused', None, 'ETA: 一時停止'),
             (False, 'calibrating', None, 'ETA: 算出中…'),
@@ -69,7 +75,17 @@ def test_actual_monitor_bridge_eta_and_reconnect(ui_harness: UIHarness, mode: st
             page.wait_for_function("expected => document.querySelector('#scanContext .scan-eta-badge')?.textContent === expected", arg=expected)
             assert page.locator('#scanContext .scan-progress-badge').inner_text() == '44%'
             assert '900' not in page.locator('#scanContext .scan-eta-badge').get_attribute('title')
-        frame.evaluate("() => { resetLiveScanState(); publishAppScanContext(); }")
+            if paused:
+                # A paused snapshot can cache paused ETA; live resume must clear it.
+                frame.evaluate("() => handleEvent({type: 'intervention_state', data: {paused: false}})")
+                page.wait_for_function("() => document.querySelector('#scanContext .scan-eta-badge')?.textContent === 'ETA: 算出中…'")
+                frame.evaluate("""() => handleEvent({type: 'progress', timestamp: 1100, data: {
+                  current: 2, total: 10, eta: {eta_seconds: 25, progress_percent: 45,
+                    confidence: 'high', status_label: 'estimating'}
+                }})""")
+                page.wait_for_function("() => document.querySelector('#scanContext .scan-eta-badge')?.textContent === 'ETA: 25秒'")
+        frame.evaluate("() => { handleEvent({type: 'intervention_state', data: {paused: true}}); resetLiveScanState(); publishAppScanContext(); }")
+        assert frame.evaluate("() => state.paused") is False
         page.wait_for_function("() => !document.querySelector('#scanContext .scan-eta-badge')")
         assert page.locator('#scanContext .scan-progress-badge').count() == 0
     finally:

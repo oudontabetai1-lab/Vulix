@@ -3003,7 +3003,7 @@ function publishAppScanContext() {
     server_id: typeof state.serverInstanceId === 'string' ? state.serverInstanceId : '',
     run_id: typeof state.scanRunId === 'string' ? state.scanRunId : '',
     scan_id: typeof state.scanId === 'string' ? state.scanId : '',
-    status: typeof state.status === 'string' ? state.status : 'unavailable',
+    status: state.paused && !state.scanDone ? 'paused' : (typeof state.status === 'string' ? state.status : 'unavailable'),
   };
   if (state.serverEta) {
     context.eta = {
@@ -6257,6 +6257,7 @@ function resetLiveScanState() {
   state.testCount = 0;
   state.scanStartTime = null;
   state.scanDone = false;
+  state.paused = false;
   state.etaSeries = null;
   state.serverEta = null;
   state.hasServerEta = false;
@@ -6829,6 +6830,10 @@ function confirmAbort() {
 }
 
 function setPauseState(paused) {
+  // Resume invalidates a cached paused estimate until fresh server progress arrives.
+  if (!paused && state.serverEta && (state.serverEta.statusLabel === "paused" || state.serverEta.reasonCode === "paused")) {
+    state.serverEta = {...state.serverEta, etaSeconds: null, statusLabel: "calibrating", reasonCode: null, range: null};
+  }
   state.paused = paused;
   document.getElementById('ibPause').style.display  = paused ? 'none'         : 'flex';
   document.getElementById('ibResume').style.display = paused ? 'flex'         : 'none';
