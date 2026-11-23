@@ -136,6 +136,26 @@ def test_contract_tokens_css_semantic_state_tokens_and_contrast():
                 ratio >= 4.5
             ), f"State token {token_key} ({hex_val}) failed WCAG 2.2 AA text contrast on {surf}: {ratio:.2f}:1 < 4.5:1"
 
+    # Composited background contrast checks across all dark surfaces (direct text on composited badge container)
+    state_bg_map = {
+        "--state-running": tokens["--status-running-bg"],
+        "--state-paused": tokens["--status-warning-bg"],
+        "--state-completed": tokens["--status-pass-bg"],
+        "--state-failed": tokens["--status-fail-bg"],
+        "--state-stale": tokens["--status-stale-bg"],
+        "--state-unverified": "rgba(143, 185, 201, 0.12)",
+    }
+    for state_tok, bg_tok_val in state_bg_map.items():
+        fg_hex = tokens[state_tok]
+        alpha_match = re.search(r"rgba?\([^,]+,[^,]+,[^,]+,\s*([0-9.]+)\)", bg_tok_val)
+        alpha = float(alpha_match.group(1)) if alpha_match else 0.1
+        for surf in surfaces:
+            comp = _composite(fg_hex, alpha, surf)
+            comp_ratio = _contrast_ratio(fg_hex, comp)
+            assert (
+                comp_ratio >= 4.5
+            ), f"State token {state_tok} composited over {surf} ({comp}) failed WCAG 2.2 AA contrast: {comp_ratio:.2f}:1 < 4.5:1"
+
 
 def test_contract_app_html_scan_state_badges_consume_semantic_tokens():
     """Verify templates/app.html .scan-state-* badges consume semantic state tokens without legacy hardcoded colors."""
@@ -240,7 +260,7 @@ def test_reviewer_counterexample_stale_badge(ui_harness: UIHarness):
         text = b.inner_text()
 
         assert color == "rgb(230, 126, 34)", f"Expected semantic stale rgb(230, 126, 34), got {color}"
-        assert bg_color == "rgba(230, 126, 34, 0.12)", f"Expected status-stale-bg rgba(230, 126, 34, 0.12), got {bg_color}"
+        assert bg_color == "rgba(230, 126, 34, 0.1)", f"Expected status-stale-bg rgba(230, 126, 34, 0.1), got {bg_color}"
         assert "scan-state-stale" in (b.get_attribute("class") or "")
         assert text == "⟲ stale"
         assert len(ui_harness.get_errors(p)) == 0
@@ -274,8 +294,8 @@ def test_runtime_scan_state_computed_styles_and_tokens(ui_harness: UIHarness):
             ("done", "scan-state-done", "rgb(34, 197, 94)", "rgba(34, 197, 94, 0.12)", "rgb(143, 185, 201)", "✓"),
             ("failed", "scan-state-error", "rgb(247, 150, 173)", "rgba(247, 150, 173, 0.12)", "rgb(226, 112, 143)", "✗"),
             ("error", "scan-state-error", "rgb(247, 150, 173)", "rgba(247, 150, 173, 0.12)", "rgb(226, 112, 143)", "✗"),
-            ("partial", "scan-state-partial", "rgb(230, 126, 34)", "rgba(230, 126, 34, 0.12)", "rgb(217, 154, 99)", "⟲"),
-            ("stale", "scan-state-stale", "rgb(230, 126, 34)", "rgba(230, 126, 34, 0.12)", "rgb(147, 151, 171)", "⟲"),
+            ("partial", "scan-state-partial", "rgb(230, 126, 34)", "rgba(230, 126, 34, 0.1)", "rgb(217, 154, 99)", "⟲"),
+            ("stale", "scan-state-stale", "rgb(230, 126, 34)", "rgba(230, 126, 34, 0.1)", "rgb(147, 151, 171)", "⟲"),
             ("unverified", "scan-state-unverified", "rgb(143, 185, 201)", "rgba(143, 185, 201, 0.12)", "rgb(145, 132, 217)", "?"),
         ]
 
@@ -441,8 +461,8 @@ def test_cross_mode_transitions_and_screen_smoke(ui_harness: UIHarness):
         page.close()
 
 
-def test_event_stream_wire_events_dom_computed_styles_transitions(ui_harness: UIHarness):
-    """Verify event-driven message dispatch drives actual DOM computed style transitions across modes."""
+def test_unit_render_scan_status_computed_styles(ui_harness: UIHarness):
+    """Unit test: Verify renderScanStatus helper applies expected DOM computed styles and classes."""
     require_browser()
     page = ui_harness.new_page(**STANDARD_VIEWPORTS[1280])
 
@@ -601,6 +621,118 @@ def test_event_stream_wire_events_dom_computed_styles_transitions(ui_harness: UI
                 prog = page.locator(".scan-progress-badge")
                 assert prog.is_visible()
                 assert prog.inner_text() == step["expected_progress"]
+
+        assert len(ui_harness.get_errors(page)) == 0
+    finally:
+        page.close()
+
+
+def test_actual_wire_and_bridge_event_stream_dom_transitions(ui_harness: UIHarness):
+    """Integration test: Verify actual monitor bridge wire events and snapshot projection drive host /app DOM."""
+    require_browser()
+    page = ui_harness.new_page(**STANDARD_VIEWPORTS[1280])
+
+    try:
+        page.goto(f"{ui_harness.server_url}/app#/monitor", wait_until="domcontentloaded")
+        page.wait_for_function("() => Boolean(document.querySelector('#monitorModule')?.shadowRoot?.querySelector('#statRemain'))")
+        frame = next(f for f in page.frames if f != page.main_frame and "/monitor" in f.url)
+        # Isolate injected wire traffic from server polling
+        frame.evaluate("() => initEventStream().stop()")
+        page.wait_for_timeout(150)
+
+        modes = ["normal", "agent", "hybrid"]
+        for mode in modes:
+            # 1. Wire event / snapshot: start running with progress ETA
+            frame.evaluate(
+                """mode => {
+                  applyScanSnapshot({
+                    server_id: "test",
+                    run_id: mode,
+                    scan_id: "wire_scan_01",
+                    sequence: 1,
+                    data: {
+                      status: "running",
+                      url: "https://test.local",
+                      eta: {eta_seconds: 120, progress_percent: 25.0, confidence: "high", status_label: "estimating"}
+                    }
+                  });
+                  state.mode = mode;
+                  publishAppScanContext();
+                }""",
+                mode,
+            )
+            page.wait_for_function('() => document.querySelector(".scan-state-badge")?.textContent.includes("running")')
+            badge = page.locator(".scan-state-badge")
+            assert "scan-state-running" in (badge.get_attribute("class") or "")
+            assert badge.evaluate("el => getComputedStyle(el).color") == "rgb(228, 167, 112)"
+            assert "⟳" in badge.inner_text()
+            prog = page.locator(".scan-progress-badge")
+            assert prog.is_visible()
+            assert prog.inner_text() == "25%"
+
+            # 2. Wire event: intervention_state (pause)
+            frame.evaluate(
+                """() => {
+                  handleEvent({type: 'intervention_state', data: {paused: true}});
+                  publishAppScanContext();
+                }"""
+            )
+            page.wait_for_function('() => document.querySelector(".scan-state-badge")?.textContent.includes("paused")')
+            assert "scan-state-paused" in (badge.get_attribute("class") or "")
+            assert badge.evaluate("el => getComputedStyle(el).color") == "rgb(199, 185, 106)"
+            assert "⏸" in badge.inner_text()
+
+            # 3. Wire event: intervention_state (resume)
+            frame.evaluate(
+                """() => {
+                  handleEvent({type: 'intervention_state', data: {paused: false}});
+                  publishAppScanContext();
+                }"""
+            )
+            page.wait_for_function('() => document.querySelector(".scan-state-badge")?.textContent.includes("running")')
+            assert "scan-state-running" in (badge.get_attribute("class") or "")
+            assert badge.evaluate("el => getComputedStyle(el).color") == "rgb(228, 167, 112)"
+
+            # 4. Wire event: scan_complete (done)
+            frame.evaluate(
+                """() => {
+                  handleEvent({type: 'scan_complete', timestamp: 1003, data: {status: 'done'}});
+                  publishAppScanContext();
+                }"""
+            )
+            page.wait_for_function('() => document.querySelector(".scan-state-badge")?.textContent.includes("done")')
+            assert "scan-state-done" in (badge.get_attribute("class") or "")
+            assert badge.evaluate("el => getComputedStyle(el).color") == "rgb(34, 197, 94)"
+            assert "✓" in badge.inner_text()
+
+            # 5. Bridge projection: stale
+            frame.evaluate(
+                """mode => {
+                  applyScanSnapshot({server_id: "test", run_id: mode, scan_id: "scan_stale", sequence: 2, data: {status: "stale"}});
+                  state.mode = mode;
+                  publishAppScanContext();
+                }""",
+                mode,
+            )
+            page.wait_for_function('() => document.querySelector(".scan-state-badge")?.textContent.includes("stale")')
+            assert "scan-state-stale" in (badge.get_attribute("class") or "")
+            assert badge.evaluate("el => getComputedStyle(el).color") == "rgb(230, 126, 34)"
+            assert badge.evaluate("el => getComputedStyle(el).backgroundColor") == "rgba(230, 126, 34, 0.1)"
+            assert "⟲" in badge.inner_text()
+
+            # 6. Bridge projection: unverified
+            frame.evaluate(
+                """mode => {
+                  applyScanSnapshot({server_id: "test", run_id: mode, scan_id: "scan_unverified", sequence: 3, data: {status: "unverified"}});
+                  state.mode = mode;
+                  publishAppScanContext();
+                }""",
+                mode,
+            )
+            page.wait_for_function('() => document.querySelector(".scan-state-badge")?.textContent.includes("unverified")')
+            assert "scan-state-unverified" in (badge.get_attribute("class") or "")
+            assert badge.evaluate("el => getComputedStyle(el).color") == "rgb(143, 185, 201)"
+            assert "?" in badge.inner_text()
 
         assert len(ui_harness.get_errors(page)) == 0
     finally:
