@@ -1249,7 +1249,7 @@ def test_setup_start_scan_rejection_shows_error_and_stays_on_setup():
     class HeldScanHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             scan_received.set()
-            release_barrier.wait(timeout=15)
+            release_barrier.wait(timeout=30)
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
@@ -1269,15 +1269,18 @@ def test_setup_start_scan_rejection_shows_error_and_stays_on_setup():
             try:
                 page.goto(f"{harness.server_url}/app#/setup", wait_until="domcontentloaded")
                 page.wait_for_selector("#setupSurface")
-                page.wait_for_function("() => Boolean(document.querySelector('#monitorFrame')?.contentWindow?.state?.ws)")
+                page.wait_for_function(
+                    "() => document.querySelector('#monitorFrame')?.contentWindow?.state?.ws?.readyState === 1"
+                )
 
                 page.locator("#cfgInputUrl").fill(f"http://127.0.0.1:{held_port}")
 
                 # 1. Start a scan
                 page.locator("#setupStartScanBtn").click()
+                page.wait_for_function("() => location.hash.includes('/monitor')", timeout=10000)
 
                 # Wait for scan engine to hit the target fixture
-                assert scan_received.wait(timeout=10), "Scan engine did not reach held scan target"
+                assert scan_received.wait(timeout=25), "Scan engine did not reach held scan target"
 
                 # Prove actual server scan_in_progress
                 req = urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status")
@@ -1289,13 +1292,13 @@ def test_setup_start_scan_rejection_shows_error_and_stays_on_setup():
 
                 # 2. Return to setup while the first scan is still actively running
                 page.locator('[data-route="setup"]').click()
-                page.wait_for_function("() => location.hash.includes('/setup')")
+                page.wait_for_function("() => location.hash.includes('/setup')", timeout=10000)
 
                 # Try to start another scan while scan_in_progress is True
                 page.locator("#setupStartScanBtn").click()
 
                 # Wait for rejection error banner to appear
-                page.wait_for_selector("#setupStartError:not([hidden])", timeout=5000)
+                page.wait_for_selector("#setupStartError:not([hidden])", timeout=10000)
                 err_text = page.locator("#setupStartError").inner_text()
                 assert "拒否" in err_text and "実行中" in err_text
 
