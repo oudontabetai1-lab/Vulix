@@ -167,6 +167,8 @@
     else if (/aborted|cancelled|canceled/.test(rawStatus)) execState = 'aborted';
     else if (/error|failed/.test(rawStatus)) execState = 'error';
     else if (/partial/.test(rawStatus)) execState = 'partial';
+    else if (/stale/.test(rawStatus)) execState = 'stale';
+    else if (/unverified/.test(rawStatus)) execState = 'unverified';
     else if (/unknown/.test(rawStatus)) execState = 'unknown';
     else if (rawStatus) execState = rawStatus;
 
@@ -261,6 +263,29 @@
     freshBadge.dataset.freshness = freshness;
     freshBadge.textContent = freshnessLabel;
     meta.appendChild(freshBadge);
+
+    // State badge
+    const stateBadge = document.createElement('span');
+    stateBadge.className = `scan-state-badge scan-state-${execState}`;
+    stateBadge.setAttribute('data-testid', 'scan-state-badge');
+    stateBadge.setAttribute('data-state', execState);
+    const stateIcons = {
+      running: '⟳',
+      paused: '⏸',
+      done: '✓',
+      completed: '✓',
+      aborted: '⏹',
+      error: '✗',
+      failed: '✗',
+      partial: '⟲',
+      stale: '⟲',
+      unverified: '?',
+      idle: '—',
+      unknown: '—'
+    };
+    const stateGlyph = stateIcons[execState] || '';
+    stateBadge.textContent = stateGlyph ? `${stateGlyph} ${execState}` : execState;
+    meta.appendChild(stateBadge);
 
     // Canonical ETA and Progress rendering if present
     const etaData = state.eta || (state.eta_seconds !== undefined ? state : null);

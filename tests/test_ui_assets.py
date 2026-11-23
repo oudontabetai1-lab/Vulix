@@ -67,7 +67,7 @@ EXPECTED_TOKENS = {
     "--status-unavailable-bg": "rgba(247, 150, 173, 0.12)",
     "--status-unavailable-border": "rgba(247, 150, 173, 0.3)",
     "--status-stale": "#e67e22",
-    "--status-stale-bg": "rgba(230, 126, 34, 0.12)",
+    "--status-stale-bg": "rgba(230, 126, 34, 0.1)",
     "--status-stale-border": "rgba(230, 126, 34, 0.3)",
     "--status-running": "#e4a770",
     "--status-running-bg": "rgba(228, 167, 112, 0.12)",

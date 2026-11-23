@@ -62,7 +62,14 @@ Vulix strictly isolates brand identity, vulnerability severity levels, execution
 
    > [!NOTE]
    > **Execution State Migration & Semantic Separation**:
-   > In live UI (`templates/app.html`), `.scan-state-running` historically references `var(--accent)` (brand purple), and `--status-running` in `tokens.css` is currently `#e4a770` (sharing color value with `--high`). The target design system establishes `--state-running: var(--status-running)` to decouple execution telemetry from brand interaction purple. In current runtime surfaces, running indicators are semantically disambiguated from vulnerability severity by motion/iconography (`⟳` spin glyph) and placement (monitor telemetry bars vs table severity pills). Complete harmonization of live runtime templates to eliminate legacy `--accent` references is planned as part of the phased component-level migration.
+   > Live runtime scan-state presentation across operational and app components (`templates/app.html`, `templates/dashboard.html`, `templates/ui/app-entry.js`) has been migrated from legacy `var(--accent)` (brand purple) and vulnerability severity colors (`var(--high)`, `var(--critical)`, `var(--low)`) to canonical semantic state tokens:
+   > - Running: `--state-running: var(--status-running)` (`#e4a770`) with container background `--status-running-bg` / border `--status-running-border`, disambiguated from High severity by placement and glyph (`⟳`).
+   > - Paused / Aborted: `--state-paused: var(--status-warning)` (`#c7b96a`) with container background `--status-warning-bg` / border `--status-warning-border`, disambiguated by glyph (`⏸` / `⏹`).
+   > - Completed / Done: `--state-completed: var(--status-pass)` (`#22c55e`) with container background `--status-pass-bg` / border `--status-pass-border`, disambiguated by glyph (`✓`).
+   > - Failed / Error: `--state-failed: var(--status-fail)` (`#f796ad`) with container background `--status-fail-bg` / border `--status-fail-border`, disambiguated by glyph (`✗`).
+   > - Stale / Partial: `--state-stale: var(--status-stale)` (`#e67e22`) with container background `--status-stale-bg` / border `--status-stale-border`, disambiguated by glyph (`⟲`).
+   > - Unverified: `--state-unverified: var(--low)` (`#8fb9c9`) with container background `rgba(143, 185, 201, 0.12)` / border `rgba(143, 185, 201, 0.3)`, disambiguated by glyph (`?`).
+   > Overall UI v3 component library unification, remaining dialog/table refactoring, and official logo deployment remain in-progress per Section 3 (D6 migration notes) and will continue in targeted component-level follow-ups.
 4. **Active Selection & Focus Borders**:
    - `--focus-ring: 0 0 0 2px var(--accent)`: 2px offset solid focus ring providing instant keyboard navigation feedback.
    - `--focus-outline: 2px solid var(--accent)`: High-visibility focus indicator for native browser focus-visible.
