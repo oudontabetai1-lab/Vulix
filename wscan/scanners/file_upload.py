@@ -168,7 +168,12 @@ class FileUploadScanner(BaseScanner):
         }
         logger = getattr(self.engine, "request_logger", None)
         if evidence and callable(getattr(logger, "log_httpx_submission", None)):
-            client_kwargs["event_hooks"] = {"request": [logger.log_httpx_submission]}
+            hooks = dict(client_kwargs.get("event_hooks") or {})
+            req_hooks = list(hooks.get("request") or [])
+            if logger.log_httpx_submission not in req_hooks:
+                req_hooks.append(logger.log_httpx_submission)
+            hooks["request"] = req_hooks
+            client_kwargs["event_hooks"] = hooks
         scope = (logger.probe_scope(None, self.CHECK_TYPE, role="attack", transport=Transport.HTTPX)
                  if evidence and callable(getattr(logger, "probe_scope", None)) else nullcontext({"requests": []}))
         if evidence and (logger is None or not getattr(logger, "enabled", False)):

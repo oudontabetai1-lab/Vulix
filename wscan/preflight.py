@@ -255,7 +255,13 @@ def _probe_login_page(
         from .tls_config import TLSConfig
 
         scope_target = target_url or login_url
-        engine = SimpleNamespace(proxy=proxy, tls_config=TLSConfig.from_values())
+        engine = SimpleNamespace(
+            proxy=proxy,
+            tls_config=TLSConfig.from_values(),
+            target_urls=[scope_target] if scope_target else [],
+            login_url=login_url,
+            access_urls=list(scope_urls or []),
+        )
         options = ScanEngine.httpx_client_kwargs(
             engine, verify=verify, timeout=10, follow_redirects=False, trust_env=False
         )
@@ -346,7 +352,11 @@ def _http_check(url: str, proxy: str, verify: bool) -> tuple[dict, dict, dict]:
             from .engine import ScanEngine
             from .tls_config import TLSConfig
 
-            engine = SimpleNamespace(proxy=configured_proxy, tls_config=TLSConfig.from_values())
+            engine = SimpleNamespace(
+                proxy=configured_proxy,
+                tls_config=TLSConfig.from_values(),
+                target_urls=[url] if url else [],
+            )
             options = ScanEngine.httpx_client_kwargs(engine, verify=verify, timeout=10,
                                                      follow_redirects=False, trust_env=False)
             client = httpx.Client(**options)

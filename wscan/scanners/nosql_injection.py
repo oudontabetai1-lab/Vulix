@@ -21,6 +21,7 @@ import httpx
 
 from wscan.injection_point import InjectionPoint
 from wscan.json_body_detect import boolean_expansion, nosql_json_verdict, response_of
+from wscan.runtime_scope_guard import OutOfScopeUrlError
 
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
@@ -402,7 +403,9 @@ class NoSQLInjectionScanner(BaseScanner):
             "follow_redirects": True,
             "headers": hdrs,
         }
-        if proxy:
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
             kwargs["proxy"] = proxy
 
         for op_payload in _JSON_BODY_PAYLOADS:
@@ -434,6 +437,8 @@ class NoSQLInjectionScanner(BaseScanner):
                     )
                     findings.append(finding)
                     break
+            except OutOfScopeUrlError:
+                raise
             except Exception as exc:
                 self._record_scan_note(
                     f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
@@ -545,7 +550,9 @@ class NoSQLInjectionScanner(BaseScanner):
             "follow_redirects": True,
             "headers": hdrs,
         }
-        if proxy:
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
             kwargs["proxy"] = proxy
 
         try:

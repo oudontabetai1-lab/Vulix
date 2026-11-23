@@ -248,7 +248,12 @@ class CachePoisoningScanner(BaseScanner):
             kwargs["proxy"] = self.engine.proxy
         logger = getattr(self.engine, "request_logger", None)
         if getattr(logger, "enabled", False) and callable(getattr(logger, "log_httpx_submission", None)):
-            kwargs["event_hooks"] = {"request": [logger.log_httpx_submission]}
+            hooks = dict(kwargs.get("event_hooks") or {})
+            req_hooks = list(hooks.get("request") or [])
+            if logger.log_httpx_submission not in req_hooks:
+                req_hooks.append(logger.log_httpx_submission)
+            hooks["request"] = req_hooks
+            kwargs["event_hooks"] = hooks
         return kwargs
 
     def _evidence_gap(self, reason: str) -> None:
