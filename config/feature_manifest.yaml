@@ -277,6 +277,7 @@ import_sources:
   - wscan/scanners/request_smuggling.py
   - wscan/scanners/transport_security.py
   - wscan/scanners/xxe.py
+  - wscan/runtime_scope_guard.py
   - wscan/waf_detector.py
   laya:
   - wscan/laya_client.py

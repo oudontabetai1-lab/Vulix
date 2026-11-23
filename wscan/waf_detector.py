@@ -95,6 +95,7 @@ class WAFDetector:
         headers_provider=None,
         tls_options_provider=None,
         record_status: Optional[Callable[[int, object], None]] = None,
+        client_kwargs_provider: Optional[Callable[..., dict]] = None,
     ):
         self.payload_gen = payload_gen
         self.proxy = normalize_proxy_server(proxy) if proxy else ""
@@ -103,6 +104,7 @@ class WAFDetector:
         self.headers_provider = headers_provider
         self.tls_options_provider = tls_options_provider
         self._record_status = record_status
+        self.client_kwargs_provider = client_kwargs_provider
         self._detected: Optional[str] = None
         # follow_redirects=True で probe するため、判定は最終到達 origin を表す。
         # planner fingerprint を origin 別に出す際、WAF を実際に probe した origin にだけ
@@ -131,16 +133,23 @@ class WAFDetector:
                     extra_headers = self.headers_provider() or {}
                 except Exception:
                     extra_headers = {}
-            tls_kwargs = self.tls_options_provider() if self.tls_options_provider else {"verify": False}
-            client_kwargs: dict = {
-                **tls_kwargs,
-                "timeout": timeout,
-                "follow_redirects": True,
-                "proxy": self.proxy or None,
-                "headers": extra_headers,
-            }
-            if self.proxy:
-                client_kwargs["trust_env"] = False
+            if self.client_kwargs_provider is not None:
+                client_kwargs = self.client_kwargs_provider(
+                    timeout=timeout,
+                    follow_redirects=True,
+                    headers=extra_headers,
+                )
+            else:
+                tls_kwargs = self.tls_options_provider() if self.tls_options_provider else {"verify": False}
+                client_kwargs: dict = {
+                    **tls_kwargs,
+                    "timeout": timeout,
+                    "follow_redirects": True,
+                    "proxy": self.proxy or None,
+                    "headers": extra_headers,
+                }
+                if self.proxy:
+                    client_kwargs["trust_env"] = False
             async with httpx.AsyncClient(**client_kwargs) as client:
                 # First: normal request (collect always-present WAF headers)
                 resp = await client.get(url)

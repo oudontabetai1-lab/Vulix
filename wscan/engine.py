@@ -897,6 +897,70 @@ def _default_llm_concurrency(provider: str) -> int:
     return 3
 
 
+def is_url_excluded(url: str, exclude_urls) -> bool:
+    """Return True if *url* matches any entry in the exclude_urls set.
+
+    Matching rules:
+      - Full URL exact match
+      - Full URL prefix match (e.g. 'https://host/admin' excludes /admin/*)
+      - Path-only patterns starting with '/' (e.g. '/logout', '/admin/')
+        match against the URL's path on any host. Useful for excluding
+        destructive endpoints regardless of scheme/host normalisation.
+      - Wildcard patterns using '*' (full-width '＊' is also accepted),
+        e.g. '/dontScan/*' excludes the path and everything beneath it,
+        'https://host/admin/*' excludes that whole sub-tree, and
+        '*/preview' matches any path ending in '/preview'. Matching is
+        glob-style via fnmatch.
+      - Patterns are matched case-insensitively for paths so that
+        '/Logout' and '/logout' are treated the same.
+    """
+    if not url or not exclude_urls:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        parsed = None
+    url_path = (parsed.path or "") if parsed else ""
+    url_lower = url.lower()
+    path_lower = url_path.lower()
+    for pattern in exclude_urls:
+        if not pattern:
+            continue
+        # Normalise the full-width asterisk that Japanese input often
+        # produces ('＊' -> '*') and lower-case for case-insensitivity.
+        p = pattern.strip().replace("＊", "*")
+        if not p:
+            continue
+        pl = p.lower()
+        is_full_url = pl.startswith(("http://", "https://"))
+        target = url_lower if is_full_url else path_lower
+
+        # Wildcard pattern: glob-style match.
+        if "*" in pl:
+            if fnmatch.fnmatch(target, pl):
+                return True
+            # Treat a trailing '/*' as also matching the base path itself
+            # so that '/dontScan/*' excludes '/dontScan' (no trailing slash).
+            if pl.endswith("/*") and target == pl[:-2]:
+                return True
+            continue
+
+        # Full-URL match (exact or prefix), case-insensitive
+        if is_full_url:
+            if url_lower == pl or url_lower.startswith(pl):
+                return True
+            continue
+        # Path-only pattern: match against the URL path
+        if pl.startswith("/"):
+            if path_lower == pl or path_lower.startswith(pl):
+                return True
+            continue
+        # Bare token: substring match on the path (defensive, lower-cased)
+        if pl in path_lower:
+            return True
+    return False
+
+
 class ScanEngine:
     """Main scanning engine — 4-phase pipeline."""
 
@@ -1535,6 +1599,7 @@ class ScanEngine:
             headers_provider=lambda url="": self.auth_headers(url=url),
             tls_options_provider=lambda: self.tls_config.httpx_options(),
             record_status=self.record_probe_status,
+            client_kwargs_provider=self.httpx_client_kwargs,
         )
         # A-3: Payload continuous learning
         self.payload_learner = PayloadLearner(learning_file=learning_file)
@@ -2149,6 +2214,39 @@ class ScanEngine:
             response_hook = getattr(logger, "log_httpx_response", None)
             if callable(response_hook):
                 hooks["response"] = [*(hooks.get("response") or []), response_hook]
+
+        # Scope Guard Hook: pre-send destination check for direct and redirect hops
+        from .runtime_scope_guard import ScopePolicy, RuntimeScopeGuardHook
+        scope_policy = ScopePolicy.from_engine(self, **overrides)
+        if scope_policy.is_configured:
+            def _on_scope_block(request, decision):
+                raw_dest = str(request.url)
+                dest = url_scope.redact_url(raw_dest, drop_userinfo=True)
+                if hasattr(self, "wave_errors") and isinstance(self.wave_errors, list):
+                    try:
+                        self.wave_errors.append(f"scope_guard_blocked:{dest}:{decision.reason}")
+                    except Exception:
+                        pass
+                if logger is not None:
+                    ledger = getattr(logger, "probe_ledger", None)
+                    if ledger is not None:
+                        try:
+                            ledger.manifest.note_gap(f"scope_blocked:{dest}")
+                        except Exception:
+                            pass
+
+            request_hooks.insert(0, RuntimeScopeGuardHook(scope_policy, on_block=_on_scope_block))
+
+        # Remove Scope-guard-only overrides before passing to httpx.Client/AsyncClient
+        for key in (
+            "allow_external",
+            "scope_policy",
+            "target_urls",
+            "access_urls",
+            "exclude_urls",
+            "allowed_external_origins",
+        ):
+            kwargs.pop(key, None)
 
         if request_hooks:
             hooks["request"] = request_hooks
@@ -8587,67 +8685,8 @@ class ScanEngine:
         return body
 
     def _is_url_excluded(self, url: str) -> bool:
-        """Return True if *url* matches any entry in the exclude_urls set.
+        return is_url_excluded(url, self.exclude_urls)
 
-        Matching rules:
-          - Full URL exact match
-          - Full URL prefix match (e.g. 'https://host/admin' excludes /admin/*)
-          - Path-only patterns starting with '/' (e.g. '/logout', '/admin/')
-            match against the URL's path on any host. Useful for excluding
-            destructive endpoints regardless of scheme/host normalisation.
-          - Wildcard patterns using '*' (full-width '＊' is also accepted),
-            e.g. '/dontScan/*' excludes the path and everything beneath it,
-            'https://host/admin/*' excludes that whole sub-tree, and
-            '*/preview' matches any path ending in '/preview'. Matching is
-            glob-style via fnmatch.
-          - Patterns are matched case-insensitively for paths so that
-            '/Logout' and '/logout' are treated the same.
-        """
-        if not url or not self.exclude_urls:
-            return False
-        try:
-            parsed = urlparse(url)
-        except Exception:
-            parsed = None
-        url_path = (parsed.path or "") if parsed else ""
-        url_lower = url.lower()
-        path_lower = url_path.lower()
-        for pattern in self.exclude_urls:
-            if not pattern:
-                continue
-            # Normalise the full-width asterisk that Japanese input often
-            # produces ('＊' -> '*') and lower-case for case-insensitivity.
-            p = pattern.strip().replace("＊", "*")
-            if not p:
-                continue
-            pl = p.lower()
-            is_full_url = pl.startswith(("http://", "https://"))
-            target = url_lower if is_full_url else path_lower
-
-            # Wildcard pattern: glob-style match.
-            if "*" in pl:
-                if fnmatch.fnmatch(target, pl):
-                    return True
-                # Treat a trailing '/*' as also matching the base path itself
-                # so that '/dontScan/*' excludes '/dontScan' (no trailing slash).
-                if pl.endswith("/*") and target == pl[:-2]:
-                    return True
-                continue
-
-            # Full-URL match (exact or prefix), case-insensitive
-            if is_full_url:
-                if url_lower == pl or url_lower.startswith(pl):
-                    return True
-                continue
-            # Path-only pattern: match against the URL path
-            if pl.startswith("/"):
-                if path_lower == pl or path_lower.startswith(pl):
-                    return True
-                continue
-            # Bare token: substring match on the path (defensive, lower-cased)
-            if pl in path_lower:
-                return True
-        return False
 
     def _form_action_url(self, form: dict, page_url: str) -> str:
         """Return the resolved (absolute) action URL of a form, or page_url."""

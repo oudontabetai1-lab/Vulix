@@ -24,6 +24,7 @@ from wscan.scanner_contract import (
     ValueKind,
 )
 
+from wscan.runtime_scope_guard import OutOfScopeUrlError
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -190,6 +191,8 @@ class HostHeaderScanner(BaseScanner):
                     findings.append(finding)
                     break  # One confirmed finding is enough
 
+            except OutOfScopeUrlError:
+                raise
             except Exception as exc:
                 if self.monitor:
                     await self.monitor.emit_status(
@@ -203,7 +206,9 @@ class HostHeaderScanner(BaseScanner):
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
         client_kwargs: dict = {"timeout": timeout, "follow_redirects": True}
-        if proxy:
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            client_kwargs = self.engine.httpx_client_kwargs(**client_kwargs)
+        elif proxy:
             client_kwargs["proxy"] = proxy
         # Merge engine-level auth headers (custom --header, Cookie, refreshed
         # bearer) underneath the probe-specific headers so the host-header
