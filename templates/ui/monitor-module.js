@@ -426,7 +426,7 @@
       layoutToolbar.className = 'monitor-layout-toolbar';
       layoutToolbar.setAttribute('role', 'toolbar');
       layoutToolbar.setAttribute('aria-label', 'レイアウトプリセット');
-      layoutToolbar.innerHTML = '<button type="button" class="layout-preset-btn active" data-preset="standard" title="標準レイアウト">標準</button><button type="button" class="layout-preset-btn" data-preset="browser-focused" title="ブラウザ優先レイアウト">ブラウザ</button><button type="button" class="layout-preset-btn" data-preset="log-focused" title="ログ優先レイアウト">ログ</button>';
+      layoutToolbar.innerHTML = '<button type="button" class="layout-preset-btn active" data-preset="standard" title="標準レイアウト" aria-pressed="true">標準</button><button type="button" class="layout-preset-btn" data-preset="browser-focused" title="ブラウザ優先レイアウト" aria-pressed="false">ブラウザ</button><button type="button" class="layout-preset-btn" data-preset="log-focused" title="ログ優先レイアウト" aria-pressed="false">ログ</button>';
 
       const headerTitle = shadowRoot.querySelector('#headerTitle');
       if (headerTitle && headerTitle.parentNode) {
@@ -438,7 +438,9 @@
         const dims = computePaneDimensions(layout, containerW);
 
         for (const btn of layoutToolbar.querySelectorAll('.layout-preset-btn')) {
-          btn.classList.toggle('active', btn.dataset.preset === layout.preset);
+          const isActive = btn.dataset.preset === layout.preset;
+          btn.classList.toggle('active', isActive);
+          btn.setAttribute('aria-pressed', String(isActive));
         }
 
         if (dims.left.maximized) {
@@ -821,10 +823,10 @@
 .panel.is-collapsed .pane-collapsed-bar {
   display: flex !important;
 }
-.pane-collapsed-bar:hover, .pane-collapsed-bar:focus-visible {
+.pane-collapsed-bar:hover, .pane-collapsed-bar:focus, .pane-collapsed-bar:focus-visible {
   background: var(--surface2);
 }
-.pane-collapsed-bar:focus-visible {
+.pane-collapsed-bar:focus, .pane-collapsed-bar:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -906,6 +908,7 @@
   color: var(--text);
   border-color: var(--border);
 }
+.pane-header-btn:focus,
 .pane-header-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -943,11 +946,21 @@
   color: var(--text);
   box-shadow: 0 1px 2px rgba(0,0,0,0.25);
 }
+.layout-preset-btn:focus,
 .layout-preset-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 @media (max-width: 767px) {
+  .header {
+    flex-wrap: wrap !important;
+    gap: 6px 10px !important;
+  }
+  .monitor-layout-toolbar {
+    display: inline-flex !important;
+    margin-left: 6px !important;
+    flex-shrink: 0 !important;
+  }
   .main {
     flex-direction: column !important;
     overflow-y: auto !important;
@@ -963,8 +976,39 @@
     border-right: none !important;
     border-bottom: 1px solid var(--border) !important;
   }
+  .panel:not(.is-collapsed) {
+    min-height: 240px;
+  }
   .panel.is-collapsed {
-    display: none !important;
+    display: flex !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 36px !important;
+    flex: 0 0 auto !important;
+    border-right: none !important;
+    border-bottom: 1px solid var(--border) !important;
+  }
+  .panel.is-collapsed .pane-collapsed-bar {
+    display: flex !important;
+    width: 100% !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    padding: 0 10px !important;
+    border-right: none !important;
+    gap: 8px !important;
+    box-sizing: border-box !important;
+  }
+  .panel.is-collapsed .pane-collapsed-title {
+    writing-mode: horizontal-tb !important;
+    transform: none !important;
+    margin-top: 0 !important;
+    margin-left: 4px !important;
+    font-size: 0.76rem !important;
   }
   .panel.is-maximized {
     width: 100% !important;
@@ -972,10 +1016,7 @@
     flex: none !important;
   }
   .pane-header-actions {
-    display: none !important;
-  }
-  .monitor-layout-toolbar {
-    display: none !important;
+    display: inline-flex !important;
   }
 }
 `;
