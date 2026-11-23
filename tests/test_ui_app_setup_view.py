@@ -1264,13 +1264,16 @@ def test_setup_start_scan_rejection_shows_error_and_stays_on_setup():
             # Wait for rejection error banner to appear
             page.wait_for_selector("#setupStartError:not([hidden])", timeout=5000)
             err_text = page.locator("#setupStartError").inner_text()
-            assert "拒否" in err_text and "実行中" in err_text
+            assert "拒否" in err_text and "実行中" in err_text, (
+                f"Expected rejection and in-progress keywords in error banner, got: {err_text!r}"
+            )
 
             # Hash must still be #/setup
-            assert "#/setup" in page.evaluate("() => location.hash")
+            current_hash = page.evaluate("() => location.hash")
+            assert "#/setup" in current_hash, f"Expected '#/setup' in URL hash, got: {current_hash!r}"
 
             # Button should be re-enabled
-            assert page.locator("#setupStartScanBtn").is_enabled()
+            assert page.locator("#setupStartScanBtn").is_enabled(), "Start scan button should be re-enabled after rejection"
         finally:
             page.close()
 

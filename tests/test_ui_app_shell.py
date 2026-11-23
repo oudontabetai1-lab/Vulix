@@ -439,11 +439,12 @@ def test_stale_monitor_load_after_navigation_does_not_unhide(ui_harness: UIHarne
 
     assert page.locator("#monitorFrame").is_hidden(), "stale monitor load un-hid the iframe under /portal"
     assert page.locator("#summarySurface").is_visible()
+    assert page.locator("#setupSurface").is_hidden(), "stale monitor load exposed setupSurface under /portal"
     assert page.locator('[data-route="portal"]').get_attribute("aria-current") == "page"
-    overlay_active = page.frame_locator("#monitorFrame").locator("#scanConfigOverlay").evaluate(
-        "el => el.classList.contains('active')"
+    assert page.url.endswith("#/portal")
+    assert page.frame_locator("#monitorFrame").locator("#scanConfigOverlay").is_hidden(), (
+        "stale monitor load exposed scanConfigOverlay to user"
     )
-    assert overlay_active is False, "stale load applied the setup surface after navigating away"
     ui_harness.assert_no_errors(page)
 
 
