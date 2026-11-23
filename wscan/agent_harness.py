@@ -13,7 +13,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import Iterable
@@ -25,8 +25,23 @@ from wscan.url_normalize import normalize_proxy_endpoint
 STATE_FILENAME = "agent_state.json"
 TRACE_FILENAME = "agent_steps.jsonl"
 MANIFEST_FILENAME = "agent_manifest.json"
+LLM_CALLS_FILENAME = "llm_calls.jsonl"
+PROBE_ATTEMPTS_FILENAME = "probe_attempts.jsonl"
+VERIFICATION_RESULTS_FILENAME = "verification_results.jsonl"
 SCHEMA_VERSION = 1
-_INTERNAL_ID_KEYS = frozenset({"candidate_id"})
+_INTERNAL_ID_KEYS = frozenset({
+    "candidate_id",
+    "work_id",
+    "call_id",
+    "probe_id",
+    "verification_id",
+    "correlation_id",
+    "step_id",
+    "episode_id",
+    "run_id",
+    "parent_step_id",
+    "parent_hypothesis_id",
+})
 
 # 1000 字超で切り詰めた文字列に付す番兵。切り詰めた候補 URL/payload は元の実行値と異なるため、
 # resume 時に「要再発見」と判定して originating probe を再キューさせ、truncated prefix を実行
@@ -61,8 +76,57 @@ class AgentPhase(str, Enum):
     INITIALIZING = "initializing"
     AUTHENTICATING = "authenticating"
     RECONNING = "reconning"
+    SCHEDULING = "scheduling"
     EXECUTING = "executing"
+    VERIFYING = "verifying"
+    CHECKPOINTING = "checkpointing"
     FINALIZING = "finalizing"
+
+
+VALID_PHASE_TRANSITIONS: dict[AgentPhase, frozenset[AgentPhase]] = {
+    AgentPhase.INITIALIZING: frozenset({
+        AgentPhase.AUTHENTICATING,
+        AgentPhase.RECONNING,
+        AgentPhase.SCHEDULING,
+        AgentPhase.EXECUTING,
+        AgentPhase.FINALIZING,
+    }),
+    AgentPhase.AUTHENTICATING: frozenset({
+        AgentPhase.RECONNING,
+        AgentPhase.SCHEDULING,
+        AgentPhase.EXECUTING,
+        AgentPhase.FINALIZING,
+    }),
+    AgentPhase.RECONNING: frozenset({
+        AgentPhase.SCHEDULING,
+        AgentPhase.EXECUTING,
+        AgentPhase.FINALIZING,
+    }),
+    AgentPhase.SCHEDULING: frozenset({
+        AgentPhase.EXECUTING,
+        AgentPhase.VERIFYING,
+        AgentPhase.FINALIZING,
+    }),
+    AgentPhase.EXECUTING: frozenset({
+        AgentPhase.VERIFYING,
+        AgentPhase.CHECKPOINTING,
+        AgentPhase.SCHEDULING,
+        AgentPhase.FINALIZING,
+    }),
+    AgentPhase.VERIFYING: frozenset({
+        AgentPhase.CHECKPOINTING,
+        AgentPhase.SCHEDULING,
+        AgentPhase.EXECUTING,
+        AgentPhase.FINALIZING,
+    }),
+    AgentPhase.CHECKPOINTING: frozenset({
+        AgentPhase.SCHEDULING,
+        AgentPhase.EXECUTING,
+        AgentPhase.VERIFYING,
+        AgentPhase.FINALIZING,
+    }),
+    AgentPhase.FINALIZING: frozenset(),
+}
 
 
 class AgentRole(str, Enum):
@@ -76,10 +140,108 @@ class AgentRole(str, Enum):
 class WorkStatus(str, Enum):
     PLANNED = "planned"
     RUNNING = "running"
-    COMPLETE = "complete"
+    ATTEMPTED = "attempted"
+    CANDIDATE = "candidate"
+    VERIFY_PENDING = "verify_pending"
+    REPRODUCED = "reproduced"
+    REJECTED = "rejected"
     INCONCLUSIVE = "inconclusive"
+    TRANSIENT_FAILURE = "transient_failure"
+    SCOPE_BLOCKED = "scope_blocked"
+    UNREACHABLE = "unreachable"
+    CANCELLED = "cancelled"
+    COMPLETE = "complete"
     BLOCKED = "blocked"
     FAILED = "failed"
+
+
+TERMINAL_WORK_STATUSES: frozenset[WorkStatus] = frozenset({
+    WorkStatus.REPRODUCED,
+    WorkStatus.REJECTED,
+    WorkStatus.INCONCLUSIVE,
+    WorkStatus.SCOPE_BLOCKED,
+    WorkStatus.UNREACHABLE,
+    WorkStatus.CANCELLED,
+    WorkStatus.COMPLETE,
+    WorkStatus.BLOCKED,
+    WorkStatus.FAILED,
+})
+
+
+VALID_WORK_STATUS_TRANSITIONS: dict[WorkStatus, frozenset[WorkStatus]] = {
+    WorkStatus.PLANNED: frozenset({
+        WorkStatus.RUNNING,
+        WorkStatus.INCONCLUSIVE,
+        WorkStatus.FAILED,
+        WorkStatus.SCOPE_BLOCKED,
+        WorkStatus.BLOCKED,
+        WorkStatus.UNREACHABLE,
+        WorkStatus.CANCELLED,
+    }),
+    WorkStatus.RUNNING: frozenset({
+        WorkStatus.PLANNED,
+        WorkStatus.ATTEMPTED,
+        WorkStatus.CANDIDATE,
+        WorkStatus.VERIFY_PENDING,
+        WorkStatus.REPRODUCED,
+        WorkStatus.REJECTED,
+        WorkStatus.INCONCLUSIVE,
+        WorkStatus.TRANSIENT_FAILURE,
+        WorkStatus.SCOPE_BLOCKED,
+        WorkStatus.BLOCKED,
+        WorkStatus.UNREACHABLE,
+        WorkStatus.CANCELLED,
+        WorkStatus.COMPLETE,
+        WorkStatus.FAILED,
+    }),
+    WorkStatus.ATTEMPTED: frozenset({
+        WorkStatus.CANDIDATE,
+        WorkStatus.VERIFY_PENDING,
+        WorkStatus.REPRODUCED,
+        WorkStatus.REJECTED,
+        WorkStatus.INCONCLUSIVE,
+        WorkStatus.TRANSIENT_FAILURE,
+        WorkStatus.CANCELLED,
+        WorkStatus.COMPLETE,
+    }),
+    WorkStatus.CANDIDATE: frozenset({
+        WorkStatus.VERIFY_PENDING,
+        WorkStatus.REPRODUCED,
+        WorkStatus.REJECTED,
+        WorkStatus.INCONCLUSIVE,
+        WorkStatus.CANCELLED,
+        WorkStatus.COMPLETE,
+    }),
+    WorkStatus.VERIFY_PENDING: frozenset({
+        WorkStatus.RUNNING,
+        WorkStatus.REPRODUCED,
+        WorkStatus.REJECTED,
+        WorkStatus.INCONCLUSIVE,
+        WorkStatus.TRANSIENT_FAILURE,
+        WorkStatus.CANCELLED,
+        WorkStatus.COMPLETE,
+    }),
+    WorkStatus.TRANSIENT_FAILURE: frozenset({
+        WorkStatus.PLANNED,
+        WorkStatus.RUNNING,
+        WorkStatus.FAILED,
+        WorkStatus.CANCELLED,
+    }),
+    WorkStatus.INCONCLUSIVE: frozenset({
+        WorkStatus.PLANNED,
+        WorkStatus.RUNNING,
+        WorkStatus.COMPLETE,
+        WorkStatus.CANCELLED,
+    }),
+    WorkStatus.REPRODUCED: frozenset(),
+    WorkStatus.REJECTED: frozenset(),
+    WorkStatus.SCOPE_BLOCKED: frozenset(),
+    WorkStatus.UNREACHABLE: frozenset(),
+    WorkStatus.CANCELLED: frozenset(),
+    WorkStatus.COMPLETE: frozenset(),
+    WorkStatus.BLOCKED: frozenset(),
+    WorkStatus.FAILED: frozenset(),
+}
 
 
 @dataclass
@@ -91,19 +253,67 @@ class AgentWorkItem:
     status: WorkStatus = WorkStatus.PLANNED
     attempts: int = 0
     summary: str = ""
+    rejection_reason: str = ""
+    evidence_ids: tuple[str, ...] = ()
+    parent_hypothesis_id: str = ""
+    correlation_id: str = ""
+
+    def transition_to(
+        self,
+        new_status: WorkStatus | str,
+        *,
+        force: bool = False,
+        summary: str = "",
+        rejection_reason: str = "",
+    ) -> None:
+        target = WorkStatus(new_status)
+        if target == self.status:
+            if summary:
+                self.summary = summary
+            if rejection_reason:
+                self.rejection_reason = rejection_reason
+            return
+        if not force:
+            allowed = VALID_WORK_STATUS_TRANSITIONS.get(self.status, frozenset())
+            if target not in allowed:
+                raise ValueError(
+                    f"Invalid work status transition: {self.status.value} -> {target.value}"
+                )
+        self.status = target
+        if summary:
+            self.summary = summary
+        if rejection_reason:
+            self.rejection_reason = rejection_reason
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["role"] = self.role.value
         data["status"] = self.status.value
+        data["evidence_ids"] = list(self.evidence_ids)
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentWorkItem":
         values = dict(data)
-        values["role"] = AgentRole(values["role"])
-        values["status"] = WorkStatus(values.get("status", "planned"))
-        return cls(**values)
+        role = values.get("role", "explorer")
+        if isinstance(role, str):
+            try:
+                values["role"] = AgentRole(role)
+            except ValueError:
+                values["role"] = AgentRole.EXPLORER
+        status = values.get("status", "planned")
+        if isinstance(status, str):
+            try:
+                values["status"] = WorkStatus(status)
+            except ValueError:
+                values["status"] = WorkStatus.PLANNED
+        evidence_ids = values.get("evidence_ids", ())
+        if isinstance(evidence_ids, (list, tuple)):
+            values["evidence_ids"] = tuple(str(x) for x in evidence_ids)
+        else:
+            values["evidence_ids"] = ()
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in values.items() if k in known})
 
 
 def _auth_fingerprint(material: str, salt: str) -> str:
@@ -198,7 +408,8 @@ class AgentRunState:
         values["work_queue"] = [
             AgentWorkItem.from_dict(item) for item in values.get("work_queue", [])
         ]
-        return cls(**values)
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in values.items() if k in known})
 
 
 @dataclass(frozen=True)
@@ -216,9 +427,114 @@ class AgentStepRecord:
     repeated: bool
     timestamp: float
     execution_status: str = "unconfirmed"
+    work_id: str = ""
+    correlation_id: str = ""
+    parent_step_id: str = ""
+    llm_call_ids: tuple[str, ...] = ()
+    probe_attempt_ids: tuple[str, ...] = ()
+    hypothesis_ids: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["llm_call_ids"] = list(self.llm_call_ids)
+        data["probe_attempt_ids"] = list(self.probe_attempt_ids)
+        data["hypothesis_ids"] = list(self.hypothesis_ids)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentStepRecord":
+        values = dict(data)
+        for k in ("proposed_actions", "executed_actions", "llm_call_ids", "probe_attempt_ids", "hypothesis_ids"):
+            if k in values and isinstance(values[k], (list, tuple)):
+                values[k] = tuple(values[k])
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in values.items() if k in known})
+
+
+@dataclass(frozen=True)
+class AgentLLMCallRecord:
+    call_id: str
+    run_id: str
+    episode_id: str = ""
+    step_id: str = ""
+    work_id: str = ""
+    correlation_id: str = ""
+    role: str = ""
+    provider: str = ""
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    latency_seconds: float = 0.0
+    status: str = "ok"
+    error: str = ""
+    timestamp: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentLLMCallRecord":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass(frozen=True)
+class AgentProbeAttemptRecord:
+    probe_id: str
+    run_id: str
+    episode_id: str = ""
+    step_id: str = ""
+    work_id: str = ""
+    correlation_id: str = ""
+    target_url: str = ""
+    check_type: str = ""
+    payload: str = ""
+    status: str = "sent"
+    response_status: int = 0
+    evidence_id: str = ""
+    timestamp: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentProbeAttemptRecord":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass(frozen=True)
+class AgentVerificationRecord:
+    verification_id: str
+    run_id: str
+    candidate_id: str
+    episode_id: str = ""
+    step_id: str = ""
+    work_id: str = ""
+    correlation_id: str = ""
+    reproduced: bool = False
+    status: str = "inconclusive"
+    method: str = "dynamic_replay"
+    evidence_ids: tuple[str, ...] = ()
+    rejection_reason: str = ""
+    deterministic_confirmed: bool = False
+    timestamp: float = 0.0
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["evidence_ids"] = list(self.evidence_ids)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentVerificationRecord":
+        values = dict(data)
+        evidence_ids = values.get("evidence_ids", ())
+        if isinstance(evidence_ids, (list, tuple)):
+            values["evidence_ids"] = tuple(str(x) for x in evidence_ids)
+        else:
+            values["evidence_ids"] = ()
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in values.items() if k in known})
 
 
 def _unique(values: Iterable[str]) -> list[str]:
@@ -279,6 +595,9 @@ class AgentHarness:
         self.state_path = self.output_dir / STATE_FILENAME
         self.trace_path = self.output_dir / TRACE_FILENAME
         self.manifest_path = self.output_dir / MANIFEST_FILENAME
+        self.llm_calls_path = self.output_dir / LLM_CALLS_FILENAME
+        self.probe_attempts_path = self.output_dir / PROBE_ATTEMPTS_FILENAME
+        self.verification_results_path = self.output_dir / VERIFICATION_RESULTS_FILENAME
         self._base_consumed = 0
         self._last_signature = None
         self._last_episode_id = None
@@ -335,8 +654,17 @@ class AgentHarness:
     def should_stop(self) -> bool:
         return bool(self.state.stop_reason) or self.remaining_steps <= 0
 
-    def set_phase(self, phase: AgentPhase) -> None:
-        self.state.phase = phase
+    def set_phase(self, phase: AgentPhase | str, *, force: bool = False) -> None:
+        target_phase = AgentPhase(phase)
+        if target_phase == self.state.phase:
+            return
+        if not force:
+            allowed = VALID_PHASE_TRANSITIONS.get(self.state.phase, frozenset())
+            if target_phase not in allowed:
+                raise ValueError(
+                    f"Invalid phase transition: {self.state.phase.value} -> {target_phase.value}"
+                )
+        self.state.phase = target_phase
         self.checkpoint()
 
     def resume_context(self) -> str:
@@ -365,6 +693,9 @@ class AgentHarness:
         target: str,
         *,
         check_type: str = "",
+        parent_hypothesis_id: str = "",
+        evidence_ids: Iterable[str] = (),
+        correlation_id: str = "",
     ) -> AgentWorkItem:
         """同じ役割・対象・検査の work item を重複なしで永続化する。"""
         raw_key = f"{role.value}\0{target}\0{check_type}"
@@ -372,11 +703,17 @@ class AgentHarness:
         for item in self.state.work_queue:
             if item.work_id == work_id:
                 return item
+        safe_evidence = tuple(dict.fromkeys(
+            self._redact_runtime(str(e)) for e in evidence_ids if str(e)
+        ))
         item = AgentWorkItem(
             work_id=work_id,
             role=role,
             target=self._redact_runtime(redact_url(str(target))),
             check_type=str(check_type),
+            parent_hypothesis_id=str(parent_hypothesis_id or ""),
+            evidence_ids=safe_evidence,
+            correlation_id=str(correlation_id or work_id),
         )
         self.state.work_queue.append(item)
         self.checkpoint()
@@ -393,7 +730,7 @@ class AgentHarness:
         if not candidates:
             return None
         item = min(candidates, key=lambda value: (priority[value.role], value.work_id))
-        item.status = WorkStatus.RUNNING
+        item.transition_to(WorkStatus.RUNNING)
         item.attempts += 1
         self.checkpoint()
         return item
@@ -403,9 +740,10 @@ class AgentHarness:
         count = 0
         for item in self.state.work_queue:
             if item.role == role and item.status != WorkStatus.PLANNED:
-                item.status = WorkStatus.PLANNED
+                item.transition_to(WorkStatus.PLANNED, force=True)
                 item.attempts = 0
                 item.summary = ""
+                item.rejection_reason = ""
                 count += 1
         if count:
             self.checkpoint()
@@ -417,13 +755,25 @@ class AgentHarness:
         status: WorkStatus,
         *,
         summary: str = "",
+        rejection_reason: str = "",
+        evidence_ids: Iterable[str] = (),
     ) -> None:
-        if status in {WorkStatus.PLANNED, WorkStatus.RUNNING}:
+        target_status = WorkStatus(status)
+        if target_status in {WorkStatus.PLANNED, WorkStatus.RUNNING}:
             raise ValueError("finish_work requires a terminal work status")
         for item in self.state.work_queue:
             if item.work_id == work_id:
-                item.status = status
-                item.summary = _redact_bounded(self._redact_runtime(str(summary)))
+                safe_summary = _redact_bounded(self._redact_runtime(str(summary)))
+                safe_reason = _redact_bounded(self._redact_runtime(str(rejection_reason)))
+                item.transition_to(
+                    target_status,
+                    summary=safe_summary,
+                    rejection_reason=safe_reason,
+                )
+                if evidence_ids:
+                    item.evidence_ids = tuple(dict.fromkeys(
+                        item.evidence_ids + tuple(self._redact_runtime(str(e)) for e in evidence_ids if str(e))
+                    ))
                 self.checkpoint()
                 return
         raise KeyError(work_id)
@@ -435,7 +785,7 @@ class AgentHarness:
             bool(self.state.work_queue)
             and not self.state.coverage_gaps
             and not self.state.reviewer_gaps
-            and all(item.status == WorkStatus.COMPLETE for item in self.state.work_queue)
+            and all(item.status in {WorkStatus.COMPLETE, WorkStatus.REPRODUCED} for item in self.state.work_queue)
         )
 
     def record_step(
@@ -448,6 +798,12 @@ class AgentHarness:
         executed_actions: Iterable,
         blocked_count: int = 0,
         page_state: str = "",
+        work_id: str = "",
+        correlation_id: str = "",
+        parent_step_id: str = "",
+        llm_call_ids: Iterable[str] = (),
+        probe_attempt_ids: Iterable[str] = (),
+        hypothesis_ids: Iterable[str] = (),
     ) -> AgentStepRecord:
         if episode_id != self._last_episode_id:
             self._same_signature_count = 0
@@ -476,10 +832,12 @@ class AgentHarness:
             self.state.stop_reason = "loop_detected"
         if safe_url.startswith(("http://", "https://")):
             self.state.visited_urls = _unique([*self.state.visited_urls, safe_url])
+        step_id = f"{episode_id}:{global_step:06d}"
+        corr_id = str(correlation_id or step_id)
         record = AgentStepRecord(
             run_id=self.state.run_id,
             episode_id=episode_id,
-            step_id=f"{episode_id}:{global_step:06d}",
+            step_id=step_id,
             global_step=global_step,
             phase=self.state.phase.value,
             current_url=safe_url,
@@ -490,6 +848,12 @@ class AgentHarness:
             repeated=repeated,
             timestamp=time.time(),
             execution_status="confirmed" if executed else "unconfirmed",
+            work_id=str(work_id or ""),
+            correlation_id=corr_id,
+            parent_step_id=str(parent_step_id or ""),
+            llm_call_ids=tuple(str(x) for x in llm_call_ids if str(x)),
+            probe_attempt_ids=tuple(str(x) for x in probe_attempt_ids if str(x)),
+            hypothesis_ids=tuple(str(x) for x in hypothesis_ids if str(x)),
         )
         self._append_trace(record)
         self.checkpoint()
@@ -564,18 +928,220 @@ class AgentHarness:
             safe = self._sanitize_value(dict(hypothesis))
             candidate_id = str(safe.get("candidate_id", ""))
             if candidate_id:
-                existing[candidate_id] = safe
+                base = existing.get(candidate_id, {})
+                merged = dict(base)
+                merged.update(safe)
+                existing[candidate_id] = merged
         self.state.hypotheses = list(existing.values())
         self.state.hypotheses_count = len(self.state.hypotheses)
         self.checkpoint()
 
-    def mark_dynamic_verification(self, candidate_id: str, reproduced: bool) -> None:
+    def update_hypothesis(
+        self,
+        candidate_id: str,
+        *,
+        status: str | None = None,
+        rejection_reason: str = "",
+        evidence_ids: Iterable[str] = (),
+        dynamic_verified: bool | None = None,
+        deterministic_confirmed: bool | None = None,
+        source_label: str = "",
+    ) -> dict:
+        for item in self.state.hypotheses:
+            if item.get("candidate_id") == candidate_id:
+                if status is not None:
+                    item["status"] = str(status)
+                if rejection_reason:
+                    safe_reason = _redact_bounded(self._redact_runtime(str(rejection_reason)))
+                    item["rejection_reason"] = safe_reason
+                if evidence_ids:
+                    safe_ev = [self._redact_runtime(str(e)) for e in evidence_ids if str(e)]
+                    current_ev = list(item.get("evidence_ids", []))
+                    item["evidence_ids"] = _unique(current_ev + safe_ev)
+                if dynamic_verified is not None:
+                    item["dynamic_verified"] = bool(dynamic_verified)
+                if deterministic_confirmed is not None:
+                    item["deterministic_confirmed"] = bool(deterministic_confirmed)
+                if source_label:
+                    item["source_label"] = str(source_label)
+                elif item.get("deterministic_confirmed"):
+                    item["source_label"] = "agent_deterministic_confirmed"
+                elif item.get("dynamic_verified"):
+                    item["source_label"] = "agent_dynamic_verified"
+                self.checkpoint()
+                return item
+        raise KeyError(candidate_id)
+
+    def mark_dynamic_verification(
+        self,
+        candidate_id: str,
+        reproduced: bool,
+        *,
+        evidence_ids: Iterable[str] = (),
+        rejection_reason: str = "",
+    ) -> None:
+        """Agent による dynamic replay 検証結果を記録する（未再現でも候補は削除しない）。"""
         for item in self.state.hypotheses:
             if item.get("candidate_id") == candidate_id:
                 item["dynamic_verified"] = bool(reproduced)
+                if reproduced:
+                    if item.get("status") in {"proposed", "inconclusive", None}:
+                        item["status"] = "accepted"
+                    item["source_label"] = "agent_dynamic_verified"
+                else:
+                    if item.get("status") in {"proposed", None}:
+                        item["status"] = "inconclusive"
+                    item.setdefault("source_label", "agent_unverified")
+                if rejection_reason:
+                    item["rejection_reason"] = _redact_bounded(self._redact_runtime(str(rejection_reason)))
+                if evidence_ids:
+                    current_ev = list(item.get("evidence_ids", []))
+                    safe_ev = [self._redact_runtime(str(e)) for e in evidence_ids if str(e)]
+                    item["evidence_ids"] = _unique(current_ev + safe_ev)
                 self.checkpoint()
                 return
         raise KeyError(candidate_id)
+
+    def record_llm_call(
+        self,
+        *,
+        episode_id: str = "",
+        step_id: str = "",
+        work_id: str = "",
+        correlation_id: str = "",
+        role: str = "",
+        provider: str = "",
+        model: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        latency_seconds: float = 0.0,
+        status: str = "ok",
+        error: str = "",
+    ) -> AgentLLMCallRecord:
+        call_id = f"llm-{secrets.token_hex(8)}"
+        corr_id = str(correlation_id or step_id or call_id)
+        safe_error = _redact_bounded(self._redact_runtime(str(error))) if error else ""
+        record = AgentLLMCallRecord(
+            call_id=call_id,
+            run_id=self.state.run_id,
+            episode_id=str(episode_id or ""),
+            step_id=str(step_id or ""),
+            work_id=str(work_id or ""),
+            correlation_id=corr_id,
+            role=str(role or ""),
+            provider=str(provider or self.spec.provider),
+            model=str(model or self.spec.model),
+            prompt_tokens=max(0, int(prompt_tokens)),
+            completion_tokens=max(0, int(completion_tokens)),
+            latency_seconds=max(0.0, float(latency_seconds)),
+            status=str(status or "ok"),
+            error=safe_error,
+            timestamp=time.time(),
+        )
+        self._append_jsonl(self.llm_calls_path, record.to_dict())
+        return record
+
+    def record_probe_attempt(
+        self,
+        *,
+        target_url: str,
+        check_type: str = "",
+        payload: str = "",
+        episode_id: str = "",
+        step_id: str = "",
+        work_id: str = "",
+        correlation_id: str = "",
+        status: str = "sent",
+        response_status: int = 0,
+        evidence_id: str = "",
+    ) -> AgentProbeAttemptRecord:
+        probe_id = f"probe-{secrets.token_hex(8)}"
+        corr_id = str(correlation_id or step_id or probe_id)
+        safe_url = self._redact_runtime(redact_url(str(target_url or "")))
+        safe_payload = _redact_bounded(self._redact_runtime(str(payload or "")))
+        record = AgentProbeAttemptRecord(
+            probe_id=probe_id,
+            run_id=self.state.run_id,
+            episode_id=str(episode_id or ""),
+            step_id=str(step_id or ""),
+            work_id=str(work_id or ""),
+            correlation_id=corr_id,
+            target_url=safe_url,
+            check_type=str(check_type or ""),
+            payload=safe_payload,
+            status=str(status or "sent"),
+            response_status=int(response_status),
+            evidence_id=str(evidence_id or ""),
+            timestamp=time.time(),
+        )
+        self._append_jsonl(self.probe_attempts_path, record.to_dict())
+        return record
+
+    def record_verification(
+        self,
+        candidate_id: str,
+        *,
+        reproduced: bool,
+        status: str = "",
+        method: str = "dynamic_replay",
+        episode_id: str = "",
+        step_id: str = "",
+        work_id: str = "",
+        correlation_id: str = "",
+        evidence_ids: Iterable[str] = (),
+        rejection_reason: str = "",
+        deterministic_confirmed: bool = False,
+    ) -> AgentVerificationRecord:
+        verification_id = f"verify-{secrets.token_hex(8)}"
+        corr_id = str(correlation_id or step_id or verification_id)
+        ver_status = str(status) if status else ("reproduced" if reproduced else "inconclusive")
+        safe_reason = _redact_bounded(self._redact_runtime(str(rejection_reason))) if rejection_reason else ""
+        safe_evidence = tuple(dict.fromkeys(
+            self._redact_runtime(str(e)) for e in evidence_ids if str(e)
+        ))
+        record = AgentVerificationRecord(
+            verification_id=verification_id,
+            run_id=self.state.run_id,
+            candidate_id=str(candidate_id),
+            episode_id=str(episode_id or ""),
+            step_id=str(step_id or ""),
+            work_id=str(work_id or ""),
+            correlation_id=corr_id,
+            reproduced=bool(reproduced),
+            status=ver_status,
+            method=str(method or "dynamic_replay"),
+            evidence_ids=safe_evidence,
+            rejection_reason=safe_reason,
+            deterministic_confirmed=bool(deterministic_confirmed),
+            timestamp=time.time(),
+        )
+        self._append_jsonl(self.verification_results_path, record.to_dict())
+        try:
+            self.update_hypothesis(
+                candidate_id,
+                status=ver_status,
+                rejection_reason=safe_reason,
+                evidence_ids=safe_evidence,
+                dynamic_verified=bool(reproduced) if method == "dynamic_replay" else None,
+                deterministic_confirmed=bool(deterministic_confirmed) or (method == "deterministic" and reproduced),
+            )
+        except KeyError:
+            pass
+        return record
+
+    def _append_jsonl(self, path: Path, data: dict) -> None:
+        if self._evidence_failed:
+            return
+        try:
+            line = json.dumps(
+                data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            with open(path, "a", encoding="utf-8") as stream:
+                stream.write(line + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._note_evidence_error(f"{path.stem}_write:{type(exc).__name__}")
 
     def _sanitize_value(self, value, _key=None):
         if isinstance(value, dict):
@@ -721,5 +1287,8 @@ class AgentHarness:
             "work_items": [item.to_dict() for item in self.state.work_queue],
             "trace": TRACE_FILENAME,
             "checkpoint": STATE_FILENAME,
+            "llm_calls": LLM_CALLS_FILENAME,
+            "probe_attempts": PROBE_ATTEMPTS_FILENAME,
+            "verification_results": VERIFICATION_RESULTS_FILENAME,
         }
         return self._atomic_write_json(self.manifest_path, payload)

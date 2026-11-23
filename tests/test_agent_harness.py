@@ -371,3 +371,283 @@ def test_loop_detection_considers_page_state(tmp_path):
         )
         assert not record.repeated
     assert harness.state.stop_reason != "loop_detected"
+
+
+def test_phase_transitions_valid_and_invalid(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+    assert harness.state.phase == AgentPhase.INITIALIZING
+
+    # 正例シーケンス
+    harness.set_phase(AgentPhase.AUTHENTICATING)
+    assert harness.state.phase == AgentPhase.AUTHENTICATING
+    harness.set_phase(AgentPhase.RECONNING)
+    assert harness.state.phase == AgentPhase.RECONNING
+    harness.set_phase(AgentPhase.SCHEDULING)
+    assert harness.state.phase == AgentPhase.SCHEDULING
+    harness.set_phase(AgentPhase.EXECUTING)
+    assert harness.state.phase == AgentPhase.EXECUTING
+    harness.set_phase(AgentPhase.VERIFYING)
+    assert harness.state.phase == AgentPhase.VERIFYING
+    harness.set_phase(AgentPhase.CHECKPOINTING)
+    assert harness.state.phase == AgentPhase.CHECKPOINTING
+    harness.set_phase(AgentPhase.SCHEDULING)
+    assert harness.state.phase == AgentPhase.SCHEDULING
+    harness.set_phase(AgentPhase.FINALIZING)
+    assert harness.state.phase == AgentPhase.FINALIZING
+
+    # 同一フェーズへの再遷移は許容（no-op）
+    harness.set_phase(AgentPhase.FINALIZING)
+    assert harness.state.phase == AgentPhase.FINALIZING
+
+    # 負例: FINALIZING からの再遷移は不正
+    with pytest.raises(ValueError, match="Invalid phase transition"):
+        harness.set_phase(AgentPhase.EXECUTING)
+
+    with pytest.raises(ValueError, match="Invalid phase transition"):
+        harness.set_phase(AgentPhase.INITIALIZING)
+
+
+def test_work_status_transitions_valid_and_invalid(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+    item = harness.enqueue(AgentRole.PROBE_SPECIALIST, "http://fixture.test/search", check_type="xss")
+    assert item.status == WorkStatus.PLANNED
+
+    # 正常な遷移ステップ
+    item.transition_to(WorkStatus.RUNNING)
+    assert item.status == WorkStatus.RUNNING
+    item.transition_to(WorkStatus.CANDIDATE)
+    assert item.status == WorkStatus.CANDIDATE
+    item.transition_to(WorkStatus.VERIFY_PENDING)
+    assert item.status == WorkStatus.VERIFY_PENDING
+    item.transition_to(WorkStatus.REPRODUCED)
+    assert item.status == WorkStatus.REPRODUCED
+
+    # 不正遷移: 終端状態からの通常遷移は拒否
+    with pytest.raises(ValueError, match="Invalid work status transition"):
+        item.transition_to(WorkStatus.RUNNING)
+
+    # 不正遷移: PLANNED から直接 REPRODUCED
+    item2 = harness.enqueue(AgentRole.PROBE_SPECIALIST, "http://fixture.test/login", check_type="sqli")
+    with pytest.raises(ValueError, match="Invalid work status transition"):
+        item2.transition_to(WorkStatus.REPRODUCED)
+
+    # 不正遷移: finish_work で非終端ステータスを指定
+    with pytest.raises(ValueError, match="requires a terminal work status"):
+        harness.finish_work(item2.work_id, WorkStatus.RUNNING)
+
+
+def test_candidate_ledger_retains_rejected_inconclusive_agent_only_with_evidence(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+    harness.note_hypotheses([
+        {
+            "candidate_id": "cand-xss-1",
+            "check_type": "xss",
+            "url": "http://fixture.test/reflect",
+            "status": "proposed",
+        },
+        {
+            "candidate_id": "cand-sqli-2",
+            "check_type": "sqli",
+            "url": "http://fixture.test/items",
+            "status": "proposed",
+        },
+    ])
+
+    # 1. 候補を rejected に更新（理由と証拠参照つき、削除しない）
+    harness.update_hypothesis(
+        "cand-xss-1",
+        status="rejected",
+        rejection_reason="WAF filter sanitized payload",
+        evidence_ids=["evidence-waf-drop"],
+    )
+
+    # 2. 候補を inconclusive / agent-only に更新（独自性の保持、削除しない）
+    harness.update_hypothesis(
+        "cand-sqli-2",
+        status="agent_only",
+        source_label="agent_unverified",
+        evidence_ids=["evidence-timing-heuristic"],
+    )
+
+    # 3. mark_dynamic_verification で未再現でも候補は削除されず保持
+    harness.mark_dynamic_verification("cand-sqli-2", reproduced=False, rejection_reason="timeout on replay")
+
+    state = json.loads(harness.state_path.read_text())
+    hypotheses = {h["candidate_id"]: h for h in state["hypotheses"]}
+    assert len(hypotheses) == 2
+
+    xss = hypotheses["cand-xss-1"]
+    assert xss["status"] == "rejected"
+    assert xss["rejection_reason"] == "WAF filter sanitized payload"
+    assert xss["evidence_ids"] == ["evidence-waf-drop"]
+
+    sqli = hypotheses["cand-sqli-2"]
+    assert sqli["dynamic_verified"] is False
+    assert sqli["rejection_reason"] == "timeout on replay"
+    assert sqli["source_label"] == "agent_unverified"
+    assert "evidence-timing-heuristic" in sqli["evidence_ids"]
+
+    # manifest にも全件残っていること
+    harness.finalize(success=False, coverage_complete=False)
+    manifest = json.loads(harness.manifest_path.read_text())
+    assert manifest["hypotheses_count"] == 2
+
+
+def test_correlation_ids_trace_through_step_llm_probe_and_verification(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+    item = harness.enqueue(
+        AgentRole.PROBE_SPECIALIST,
+        "http://fixture.test/comments",
+        check_type="xss",
+        correlation_id="corr-flow-1",
+    )
+
+    # Step 記録
+    step = harness.record_step(
+        episode_id="ep-1",
+        local_step=1,
+        url="http://fixture.test/comments",
+        proposed_actions=[{"type": "input"}],
+        executed_actions=[{"type": "input"}],
+        work_id=item.work_id,
+        correlation_id="corr-flow-1",
+        llm_call_ids=["llm-test-1"],
+        probe_attempt_ids=["probe-test-1"],
+        hypothesis_ids=["cand-1"],
+    )
+    assert step.correlation_id == "corr-flow-1"
+    assert step.work_id == item.work_id
+    assert step.llm_call_ids == ("llm-test-1",)
+
+    # LLM 呼び出し記録
+    llm_call = harness.record_llm_call(
+        episode_id="ep-1",
+        step_id=step.step_id,
+        work_id=item.work_id,
+        correlation_id="corr-flow-1",
+        role="probe_specialist",
+        prompt_tokens=120,
+        completion_tokens=40,
+        status="ok",
+    )
+    assert llm_call.correlation_id == "corr-flow-1"
+    assert llm_call.step_id == step.step_id
+    assert (tmp_path / "llm_calls.jsonl").exists()
+
+    # Probe 試行記録
+    probe = harness.record_probe_attempt(
+        target_url="http://fixture.test/comments",
+        check_type="xss",
+        payload="<script>alert(1)</script>",
+        episode_id="ep-1",
+        step_id=step.step_id,
+        work_id=item.work_id,
+        correlation_id="corr-flow-1",
+        status="reflected",
+        response_status=200,
+        evidence_id="ev-dom-1",
+    )
+    assert probe.correlation_id == "corr-flow-1"
+    assert probe.step_id == step.step_id
+    assert (tmp_path / "probe_attempts.jsonl").exists()
+
+    # 仮説台帳登録と検証結果記録
+    harness.note_hypotheses([{
+        "candidate_id": "cand-1",
+        "check_type": "xss",
+        "url": "http://fixture.test/comments",
+    }])
+    verification = harness.record_verification(
+        "cand-1",
+        reproduced=True,
+        method="deterministic",
+        deterministic_confirmed=True,
+        episode_id="ep-1",
+        step_id=step.step_id,
+        work_id=item.work_id,
+        correlation_id="corr-flow-1",
+        evidence_ids=["ev-dom-1"],
+    )
+    assert verification.correlation_id == "corr-flow-1"
+    assert verification.reproduced is True
+    assert (tmp_path / "verification_results.jsonl").exists()
+
+    # 候補台帳が同期更新され、決定論確証ラベルが付与されていること
+    cand = [h for h in harness.state.hypotheses if h["candidate_id"] == "cand-1"][0]
+    assert cand["deterministic_confirmed"] is True
+    assert cand["source_label"] == "agent_deterministic_confirmed"
+
+
+def test_resume_backward_compatibility_with_legacy_and_unknown_keys(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+    item = harness.enqueue(AgentRole.EXPLORER, "http://fixture.test/home")
+    harness.next_work()
+    harness.finish_work(item.work_id, WorkStatus.COMPLETE)
+
+    # 古い形式（新キーがなく、未知のキーが含まれる）の JSON を作成
+    data = json.loads(harness.state_path.read_text())
+    # 未知キーの挿入
+    data["unknown_future_field"] = "unexpected_value"
+    data["work_queue"][0]["unknown_worker_flag"] = True
+    # 新キーを除去（古い checkpoint を模倣）
+    data["work_queue"][0].pop("rejection_reason", None)
+    data["work_queue"][0].pop("evidence_ids", None)
+    data["work_queue"][0].pop("parent_hypothesis_id", None)
+    data["work_queue"][0].pop("correlation_id", None)
+    harness.state_path.write_text(json.dumps(data))
+
+    # resume で例外なくロードでき、未知キーを無視して正常起動すること
+    resumed = AgentHarness(tmp_path, spec(), resume=True)
+    assert not hasattr(resumed.state, "unknown_future_field")
+    resumed_item = resumed.state.work_queue[0]
+    assert resumed_item.work_id == item.work_id
+    assert resumed_item.rejection_reason == ""
+    assert resumed_item.evidence_ids == ()
+
+
+def test_new_contract_fields_redact_secrets_everywhere(tmp_path):
+    secret = "secret-token-xyz"
+    password = "super-password-123"
+    harness = AgentHarness(tmp_path, spec(), secret_values=[secret, password])
+
+    # 1. finish_work の rejection_reason
+    item = harness.enqueue(AgentRole.PROBE_SPECIALIST, "http://fixture.test/auth", check_type="sqli")
+    harness.next_work()
+    harness.finish_work(
+        item.work_id,
+        WorkStatus.REJECTED,
+        summary=f"failed with {password}",
+        rejection_reason=f"blocked auth {secret}",
+        evidence_ids=[f"ev-{secret}"],
+    )
+
+    # 2. record_llm_call の error
+    harness.record_llm_call(
+        episode_id="ep-1",
+        error=f"call failed token={secret}",
+    )
+
+    # 3. record_probe_attempt の target_url と payload
+    harness.record_probe_attempt(
+        target_url=f"http://fixture.test/api?token={secret}",
+        payload=f"admin' AND password='{password}'",
+    )
+
+    # 4. record_verification の rejection_reason
+    harness.note_hypotheses([{"candidate_id": "cand-sec", "url": "http://fixture.test"}])
+    harness.record_verification(
+        "cand-sec",
+        reproduced=False,
+        rejection_reason=f"auth leak check {secret}",
+    )
+
+    # すべてのアーティファクトで秘密値が平文で保存されていないことを検証
+    all_content = (
+        (tmp_path / "agent_state.json").read_text()
+        + (tmp_path / "llm_calls.jsonl").read_text()
+        + (tmp_path / "probe_attempts.jsonl").read_text()
+        + (tmp_path / "verification_results.jsonl").read_text()
+    )
+    assert secret not in all_content
+    assert password not in all_content
+    assert "<redacted>" in all_content
