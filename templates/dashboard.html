@@ -60,6 +60,51 @@ body {
 .header-stat { text-align: center; }
 .header-stat .num { font-size: 1.1rem; font-weight: 700; }
 .header-stat .lbl { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; }
+.header-stat .eta-meta {
+  display: inline-block;
+  font-size: 0.62rem;
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-left: 4px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  vertical-align: middle;
+}
+.header-stat .eta-meta.eta-low {
+  background: rgba(217, 154, 99, 0.2);
+  color: var(--high);
+  border: 1px solid rgba(217, 154, 99, 0.4);
+}
+.header-stat .eta-meta.eta-medium {
+  background: rgba(199, 185, 106, 0.2);
+  color: var(--medium);
+  border: 1px solid rgba(199, 185, 106, 0.4);
+}
+.header-stat .eta-meta.eta-high {
+  background: rgba(34, 197, 94, 0.15);
+  color: #2ecc71;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.header-stat .eta-meta.eta-calibrating, .header-stat .eta-meta.eta-indeterminate {
+  background: var(--surface2);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.header-stat .eta-meta.eta-paused {
+  background: rgba(241, 196, 15, 0.15);
+  color: #f1c40f;
+  border: 1px solid rgba(241, 196, 15, 0.3);
+}
+.header-stat .eta-range {
+  display: inline-block;
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  margin-left: 4px;
+  letter-spacing: 0;
+  text-transform: none;
+  vertical-align: middle;
+}
 .ws-badge {
   font-size: 0.7rem;
   padding: 3px 8px;
@@ -2310,11 +2355,11 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
     </div>
     <div class="header-stat" id="remainBlock" style="display:none">
       <div class="num" style="font-size:0.9rem;letter-spacing:0" id="statRemain">—</div>
-      <div class="lbl">残り推定</div>
+      <div class="lbl">残り推定<span id="statEtaMeta" class="eta-meta" style="display:none"></span></div>
     </div>
     <div class="header-stat" id="etaTimeBlock" style="display:none">
       <div class="num" style="font-size:0.9rem;letter-spacing:0" id="statETA">—</div>
-      <div class="lbl">完了予定</div>
+      <div class="lbl">完了予定<span id="statEtaRange" class="eta-range" style="display:none"></span></div>
     </div>
   </div>
   <div class="ws-badge" id="wsBadge">WS: ―</div><button type="button" class="hdr-newscan" onclick="document.getElementById('scanConfigOverlay').classList.add('active')" title="新規スキャン">＋ 新規スキャン</button>
@@ -2960,6 +3005,12 @@ function publishAppScanContext() {
     scan_id: typeof state.scanId === 'string' ? state.scanId : '',
     status: typeof state.status === 'string' ? state.status : 'unavailable',
   };
+  if (state.serverEta) {
+    context.eta = state.serverEta;
+  }
+  if (state.mode) context.mode = state.mode;
+  if (state.target) context.target = state.target;
+  if (state.phase) context.phase = state.phase;
   monitorModule.updateContext();
   window.parent.postMessage({ type: 'vulix:scan-context', context }, window.location.origin);
 }
@@ -5388,31 +5439,278 @@ function formatDuration(secs) {
   return h + '時間' + (m % 60) + '分';
 }
 
-function updateETA(current, total, evTimestampSec, phase = '', unit = '', totalKnown = true) {
+function extractServerEta(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const etaObj = payload.eta && typeof payload.eta === 'object' ? payload.eta : null;
+  const progressObj = payload.progress && typeof payload.progress === 'object' ? payload.progress : null;
+
+  const candidates = [
+    etaObj,
+    progressObj && progressObj.eta && typeof progressObj.eta === 'object' ? progressObj.eta : null,
+    progressObj,
+    payload,
+  ].filter(Boolean);
+
+  let etaSeconds = null;
+  let progressPercent = null;
+  let confidence = null;
+  let statusLabel = null;
+  let reasonCode = null;
+  let range = null;
+  let elapsedSeconds = null;
+  let hasServerEta = false;
+
+  for (const c of candidates) {
+    if (c.eta_seconds !== undefined && c.eta_seconds !== null) {
+      etaSeconds = Number(c.eta_seconds);
+      hasServerEta = true;
+    }
+    if (c.progress_percent !== undefined && c.progress_percent !== null) {
+      progressPercent = Number(c.progress_percent);
+      hasServerEta = true;
+    }
+    if (c.confidence !== undefined && c.confidence !== null) {
+      confidence = String(c.confidence);
+      hasServerEta = true;
+    } else if (c.eta_confidence !== undefined && c.eta_confidence !== null) {
+      confidence = String(c.eta_confidence);
+      hasServerEta = true;
+    }
+    if (c.status_label !== undefined && c.status_label !== null) {
+      statusLabel = String(c.status_label);
+      hasServerEta = true;
+    } else if (c.eta_status !== undefined && c.eta_status !== null) {
+      statusLabel = String(c.eta_status);
+      hasServerEta = true;
+    }
+    if (c.reason_code !== undefined && c.reason_code !== null) {
+      reasonCode = String(c.reason_code);
+      hasServerEta = true;
+    }
+    if (c.eta_range_seconds !== undefined && c.eta_range_seconds !== null && Array.isArray(c.eta_range_seconds)) {
+      range = c.eta_range_seconds;
+      hasServerEta = true;
+    }
+    if (c.elapsed_seconds !== undefined && c.elapsed_seconds !== null) {
+      elapsedSeconds = Number(c.elapsed_seconds);
+      hasServerEta = true;
+    }
+  }
+
+  if (!hasServerEta) return null;
+  return {
+    etaSeconds,
+    progressPercent,
+    confidence,
+    statusLabel,
+    reasonCode,
+    range,
+    elapsedSeconds,
+  };
+}
+
+function updateETA(current, total, evTimestampSec, phase = '', unit = '', totalKnown = true, serverEta = null) {
   if (state.scanDone) return;
-  const nowMs = evTimestampSec * 1000;
+  const nowMs = (evTimestampSec != null && Number.isFinite(evTimestampSec) ? evTimestampSec : Date.now() / 1000) * 1000;
   if (!state.scanStartTime) state.scanStartTime = nowMs;
 
-  // 全体経過（スキャン開始からの累計）は素直に表示する。
-  const elapsedSec = (nowMs - state.scanStartTime) / 1000;
-  document.getElementById('statElapsed').textContent = formatDuration(elapsedSec);
+  const statElapsed = document.getElementById('statElapsed');
+  const statRemain = document.getElementById('statRemain');
+  const statETA = document.getElementById('statETA');
+  const statEtaMeta = document.getElementById('statEtaMeta');
+  const statEtaRange = document.getElementById('statEtaRange');
 
   const s = state.etaSeries;
-  if (!s || s.phase !== phase || s.unit !== unit || s.totalKnown !== totalKnown || current < s.lastCurrent) {
+  const isSeriesReset = !s || s.phase !== phase || s.unit !== unit || s.totalKnown !== totalKnown || current < s.lastCurrent;
+  if (isSeriesReset) {
     state.etaSeries = { startMs: nowMs, startCurrent: current, lastCurrent: current, phase, unit, totalKnown };
-    if (!totalKnown) {
-      document.getElementById('statRemain').textContent = '残量未確定';
-      document.getElementById('statETA').textContent = '—';
+  } else {
+    s.lastCurrent = current;
+  }
+
+  if (serverEta) {
+    state.serverEta = serverEta;
+    state.hasServerEta = true;
+
+    const elapsedSecs = serverEta.elapsedSeconds != null ? Number(serverEta.elapsedSeconds) : (serverEta.elapsed_seconds != null ? Number(serverEta.elapsed_seconds) : null);
+    if (elapsedSecs != null && Number.isFinite(elapsedSecs)) {
+      if (statElapsed) statElapsed.textContent = formatDuration(elapsedSecs);
+      state.scanStartTime = nowMs - (elapsedSecs * 1000);
+    } else {
+      const elapsedSec = (nowMs - state.scanStartTime) / 1000;
+      if (statElapsed) statElapsed.textContent = formatDuration(elapsedSec);
+    }
+
+    const isPaused = Boolean(state.paused || serverEta.statusLabel === 'paused' || serverEta.status_label === 'paused' || serverEta.reasonCode === 'paused' || serverEta.reason_code === 'paused');
+    const statusLabel = serverEta.statusLabel || serverEta.status_label || '';
+    const confidence = serverEta.confidence || serverEta.eta_confidence || '';
+    const reasonCode = serverEta.reasonCode || serverEta.reason_code || '';
+    const etaSec = serverEta.etaSeconds != null ? Number(serverEta.etaSeconds) : (serverEta.eta_seconds != null ? Number(serverEta.eta_seconds) : null);
+    const range = serverEta.range || serverEta.eta_range_seconds;
+
+    if (isPaused) {
+      if (statRemain) {
+        statRemain.textContent = '一時停止';
+        statRemain.title = 'スキャン一時停止中 (再開後に推定を継続)';
+      }
+      if (statETA) {
+        statETA.textContent = '—';
+        statETA.title = '';
+      }
+      if (statEtaMeta) {
+        statEtaMeta.textContent = '一時停止';
+        statEtaMeta.className = 'eta-meta eta-paused';
+        statEtaMeta.style.display = 'inline-block';
+      }
+      if (statEtaRange) statEtaRange.style.display = 'none';
       return;
     }
-    document.getElementById('statRemain').textContent = '計測中…';
-    document.getElementById('statETA').textContent = '—';
+
+    if (statusLabel === 'completed') {
+      if (statRemain) { statRemain.textContent = '完了'; statRemain.title = ''; }
+      if (statETA) { statETA.textContent = '—'; statETA.title = ''; }
+      if (statEtaMeta) statEtaMeta.style.display = 'none';
+      if (statEtaRange) statEtaRange.style.display = 'none';
+      return;
+    }
+
+    if (statusLabel === 'aborted') {
+      if (statRemain) { statRemain.textContent = '中断'; statRemain.title = ''; }
+      if (statETA) { statETA.textContent = '—'; statETA.title = ''; }
+      if (statEtaMeta) {
+        statEtaMeta.textContent = '中断';
+        statEtaMeta.className = 'eta-meta eta-low';
+        statEtaMeta.style.display = 'inline-block';
+      }
+      if (statEtaRange) statEtaRange.style.display = 'none';
+      return;
+    }
+
+    if (!totalKnown || statusLabel === 'indeterminate' || confidence === 'indeterminate') {
+      if (statRemain) {
+        statRemain.textContent = '残量未確定';
+        statRemain.title = reasonCode ? `残量未確定 (${reasonCode})` : '残量未確定';
+      }
+      if (statETA) { statETA.textContent = '—'; statETA.title = ''; }
+      if (statEtaMeta) {
+        statEtaMeta.textContent = '残量未確定';
+        statEtaMeta.className = 'eta-meta eta-indeterminate';
+        statEtaMeta.title = reasonCode ? `理由: ${reasonCode}` : '';
+        statEtaMeta.style.display = 'inline-block';
+      }
+      if (statEtaRange) statEtaRange.style.display = 'none';
+      return;
+    }
+
+    if (statusLabel === 'calibrating' || confidence === 'calibrating' || reasonCode === 'insufficient_samples') {
+      if (statRemain) {
+        statRemain.textContent = '計測中…';
+        statRemain.title = 'ETA算出中 (十分なサンプルを収集中)';
+      }
+      if (statETA) { statETA.textContent = '—'; statETA.title = ''; }
+      if (statEtaMeta) {
+        statEtaMeta.textContent = '算出中…';
+        statEtaMeta.className = 'eta-meta eta-calibrating';
+        statEtaMeta.title = '十分なサンプルを収集中です';
+        statEtaMeta.style.display = 'inline-block';
+      }
+      if (statEtaRange) statEtaRange.style.display = 'none';
+      return;
+    }
+
+    // Normal active estimating state: eta_seconds is strictly >= 1 while running
+    if (etaSec != null && Number.isFinite(etaSec) && etaSec >= 1) {
+      if (statRemain) statRemain.textContent = formatDuration(etaSec);
+      const etaStr = new Date(Date.now() + etaSec * 1000).toTimeString().slice(0, 5);
+      if (statETA) {
+        statETA.textContent = etaStr;
+        statETA.title = `完了予定時刻: ${etaStr}`;
+      }
+
+      let reasonLabel = '';
+      if (reasonCode === 'dynamic_queue_growth') reasonLabel = '動的キュー増加';
+      else if (reasonCode === 'high_timeout_variance') reasonLabel = 'タイムアウト高分散';
+      else if (reasonCode === 'steady_rate') reasonLabel = '安定推移';
+      else if (reasonCode) reasonLabel = reasonCode;
+
+      let rangeStr = '';
+      if (range && Array.isArray(range) && range.length === 2) {
+        rangeStr = `${formatDuration(range[0])}〜${formatDuration(range[1])}`;
+        if (statEtaRange) {
+          statEtaRange.textContent = `(${rangeStr})`;
+          statEtaRange.title = `推定範囲 (P10〜P90): ${rangeStr}`;
+          statEtaRange.style.display = 'inline-block';
+        }
+        if (statETA) statETA.title += ` (予想範囲: ${rangeStr})`;
+      } else if (statEtaRange) {
+        statEtaRange.style.display = 'none';
+      }
+
+      let remainTitle = `残り推定: ${formatDuration(etaSec)}`;
+      if (rangeStr) remainTitle += ` (予想範囲: ${rangeStr})`;
+
+      if (confidence === 'low' || reasonCode === 'dynamic_queue_growth' || reasonCode === 'high_timeout_variance') {
+        remainTitle += ` [推定困難: ${reasonLabel || '低信頼度'}]`;
+        if (statEtaMeta) {
+          statEtaMeta.textContent = '推定困難';
+          statEtaMeta.className = 'eta-meta eta-low';
+          statEtaMeta.title = `信頼度: 低 (${reasonLabel || '不確実性高'})${rangeStr ? ' / 範囲: ' + rangeStr : ''}`;
+          statEtaMeta.style.display = 'inline-block';
+        }
+      } else if (confidence === 'medium') {
+        remainTitle += ` (信頼度: 中)`;
+        if (statEtaMeta) {
+          statEtaMeta.textContent = '中信頼度';
+          statEtaMeta.className = 'eta-meta eta-medium';
+          statEtaMeta.title = `信頼度: 中${reasonLabel ? ' (' + reasonLabel + ')' : ''}`;
+          statEtaMeta.style.display = 'inline-block';
+        }
+      } else if (confidence === 'high') {
+        remainTitle += ` (信頼度: 高)`;
+        if (statEtaMeta) {
+          statEtaMeta.textContent = '高信頼度';
+          statEtaMeta.className = 'eta-meta eta-high';
+          statEtaMeta.title = `信頼度: 高 (安定推移)`;
+          statEtaMeta.style.display = 'inline-block';
+        }
+      } else if (statEtaMeta) {
+        statEtaMeta.style.display = 'none';
+      }
+
+      if (statRemain) statRemain.title = remainTitle;
+      return;
+    }
+
+    // Default fallback within server ETA if etaSec is not yet computed
+    if (statRemain) {
+      statRemain.textContent = '計測中…';
+      statRemain.title = 'ETA算出中…';
+    }
+    if (statETA) { statETA.textContent = '—'; statETA.title = ''; }
+    if (statEtaMeta) statEtaMeta.style.display = 'none';
+    if (statEtaRange) statEtaRange.style.display = 'none';
     return;
   }
-  s.lastCurrent = current;
+
+  // ─── Legacy local fallback (when canonical server ETA payload is absent) ─────
+  const elapsedSec = (nowMs - state.scanStartTime) / 1000;
+  if (statElapsed) statElapsed.textContent = formatDuration(elapsedSec);
+  if (statEtaMeta) statEtaMeta.style.display = 'none';
+  if (statEtaRange) statEtaRange.style.display = 'none';
+
+  if (isSeriesReset) {
+    if (!totalKnown) {
+      if (statRemain) statRemain.textContent = '残量未確定';
+      if (statETA) statETA.textContent = '—';
+      return;
+    }
+    if (statRemain) statRemain.textContent = '計測中…';
+    if (statETA) statETA.textContent = '—';
+    return;
+  }
   if (!totalKnown) {
-    document.getElementById('statRemain').textContent = '残量未確定';
-    document.getElementById('statETA').textContent = '—';
+    if (statRemain) statRemain.textContent = '残量未確定';
+    if (statETA) statETA.textContent = '—';
     return;
   }
 
@@ -5421,12 +5719,12 @@ function updateETA(current, total, evTimestampSec, phase = '', unit = '', totalK
   if (current < total && done >= 1 && seriesElapsedSec > 0) {
     const rate = done / seriesElapsedSec;          // items/sec（系列内の実測ペース）
     const remainSec = (total - current) / rate;
-    document.getElementById('statRemain').textContent = formatDuration(remainSec);
+    if (statRemain) statRemain.textContent = formatDuration(remainSec);
     const etaStr = new Date(Date.now() + remainSec * 1000).toTimeString().slice(0, 5);
-    document.getElementById('statETA').textContent = etaStr;
+    if (statETA) statETA.textContent = etaStr;
   } else if (current >= total) {
-    document.getElementById('statRemain').textContent = '計測中…';
-    document.getElementById('statETA').textContent = '—';
+    if (statRemain) statRemain.textContent = '計測中…';
+    if (statETA) statETA.textContent = '—';
   }
 }
 
@@ -5753,9 +6051,25 @@ function dispatchLegacyEvent(event) {
       break;
 
     case 'progress': {
-      const pct = data.percent || 0;
+      const serverEta = extractServerEta(data);
+      if (serverEta) {
+        state.serverEta = serverEta;
+        state.hasServerEta = true;
+      }
+      state.lastProgress = {
+        current: data.current,
+        total: data.total,
+        percent: data.percent,
+        progress_percent: serverEta ? serverEta.progressPercent : null,
+      };
+
+      let pct = data.percent || 0;
+      if (serverEta && serverEta.progressPercent != null && Number.isFinite(serverEta.progressPercent)) {
+        pct = state.scanDone ? 100 : Math.min(99.9, serverEta.progressPercent);
+      }
+      const pctDisplay = (pct % 1 === 0 ? pct.toFixed(0) : pct.toFixed(1)) + '%';
       document.getElementById('progressBar').style.width = pct + '%';
-      document.getElementById('statPct').textContent = pct + '%';
+      document.getElementById('statPct').textContent = pctDisplay;
       const curEl = document.getElementById('statCurrent');
       if (curEl) curEl.textContent = data.current;
       if (data.total > 0) {
@@ -5765,10 +6079,11 @@ function dispatchLegacyEvent(event) {
       document.getElementById('progressStripe').style.display = pct < 100 ? 'block' : 'none';
       // ETA
       updateETA(data.eta_current ?? data.current, data.eta_total ?? data.total, timestamp,
-        data.phase || '', data.unit || '', data.total_known !== false);
-      ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id =>
-        document.getElementById(id).style.display = ''
-      );
+        data.phase || '', data.unit || '', data.total_known !== false, serverEta);
+      ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = '';
+      });
       break;
     }
 
@@ -5964,6 +6279,9 @@ function resetLiveScanState() {
   state.scanStartTime = null;
   state.scanDone = false;
   state.etaSeries = null;
+  state.serverEta = null;
+  state.hasServerEta = false;
+  state.lastProgress = null;
   state.phase = null;
   state.urlStatuses = {};
   state.urlOrder = [];
@@ -6011,6 +6329,14 @@ function resetLiveScanState() {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
   });
+  const statRemain = document.getElementById('statRemain');
+  if (statRemain) statRemain.title = '';
+  const statETA = document.getElementById('statETA');
+  if (statETA) statETA.title = '';
+  const statEtaMeta = document.getElementById('statEtaMeta');
+  if (statEtaMeta) { statEtaMeta.textContent = ''; statEtaMeta.style.display = 'none'; }
+  const statEtaRange = document.getElementById('statEtaRange');
+  if (statEtaRange) { statEtaRange.textContent = ''; statEtaRange.style.display = 'none'; }
 
   const findingsPanel = document.getElementById('findingsPanel');
   if (findingsPanel) findingsPanel.innerHTML = '<div class="no-findings-msg">No vulnerabilities detected yet.</div>';
@@ -6094,19 +6420,32 @@ function applyScanSnapshot(event) {
   if (state.phase) updatePhaseBar(state.phase);
 
   const progress = data.progress || {};
+  const serverEta = extractServerEta(data);
+  if (serverEta) {
+    state.serverEta = serverEta;
+    state.hasServerEta = true;
+  }
+  state.lastProgress = progress;
+
   let pct = Number(progress.percent) || 0;
-  if (status === 'done') pct = 100;
+  if (status === 'done') {
+    pct = 100;
+  } else if (serverEta && serverEta.progressPercent != null && Number.isFinite(serverEta.progressPercent)) {
+    pct = Math.min(99.9, serverEta.progressPercent);
+  }
+  const pctDisplay = (pct % 1 === 0 ? pct.toFixed(0) : pct.toFixed(1)) + '%';
   document.getElementById('progressBar').style.width = pct + '%';
-  document.getElementById('statPct').textContent = pct + '%';
+  document.getElementById('statPct').textContent = pctDisplay;
   document.getElementById('statCurrent').textContent = progress.current ?? 0;
   document.getElementById('statTotal').textContent = progress.total > 0 ? '/' + progress.total : '';
   document.getElementById('progressStripe').style.display = (['done', 'aborted', 'incomplete'].includes(status)) ? 'none' : (pct < 100 ? 'block' : 'none');
   if (status === 'scanning' || status === 'aborting') {
     updateETA(progress.eta_current ?? progress.current ?? 0, progress.eta_total ?? progress.total ?? 0, event.timestamp,
-      progress.phase || '', progress.unit || '', progress.total_known !== false);
-    ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id =>
-      document.getElementById(id).style.display = ''
-    );
+      progress.phase || '', progress.unit || '', progress.total_known !== false, serverEta);
+    ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = '';
+    });
   }
 
   if (status === 'done') {
@@ -6516,6 +6855,28 @@ function setPauseState(paused) {
   document.getElementById('ibResume').style.display = paused ? 'flex'         : 'none';
   const badge = document.getElementById('ibPauseState');
   badge.className = 'ib-pause-state' + (paused ? ' visible' : '');
+  if (!state.scanDone) {
+    if (paused) {
+      const statRemain = document.getElementById('statRemain');
+      if (statRemain) {
+        statRemain.textContent = '一時停止';
+        statRemain.title = 'スキャン一時停止中 (再開後に推定を継続)';
+      }
+      const statETA = document.getElementById('statETA');
+      if (statETA) {
+        statETA.textContent = '—';
+        statETA.title = '';
+      }
+      const statEtaMeta = document.getElementById('statEtaMeta');
+      if (statEtaMeta) {
+        statEtaMeta.textContent = '一時停止';
+        statEtaMeta.className = 'eta-meta eta-paused';
+        statEtaMeta.style.display = 'inline-block';
+      }
+    } else if (state.serverEta) {
+      updateETA(0, 0, null, '', '', true, state.serverEta);
+    }
+  }
 }
 
 // ─── Plan Review Modal ──────────────────────────────────────────
@@ -8328,7 +8689,7 @@ async function bootDashboard() {
 }
 
 Object.assign(window, {
-  _clearStartScanAck, publishAppScanContext, _markOwnScan, isSecretKeyName, sanitizeUrlForExport, sanitizeUrlListForExport, recursiveSanitizeNonsecret, hasCredentialsInConfig, _createNonsecretDescriptor, _sanitizeConfigForExport, containsRedactedValues, _discardRejectedPendingScan, _promotePendingScan, findingKey, computeVerification, isFindingConfirmed, updateFindingCounters, renderCheckGroups, initCheckGroups, loadScannerCapabilities, setScanMode, getSelectedChecks, selectAllChecks, setSelectedChecks, setCfgToggle, toggleCfg, showCfgTab, applyScanProfile, updateLlmModelField, collectRoleModels, restoreRoleModels, mfaImapFields, mfaImapPassword, applyMfaImap, mfaTotpFields, parseHeaderText, authHeaderFields, timeWindowFields, applyTimeWindows, applyMfaTotp, applyAuthHeaders, validateTotpReadiness, wireTotpQrPreview, uploadFile, wireUpload, renderManualCrawlStatus, startManualCrawl, stopManualCrawl, importManualCrawl, _wsSend, startRemoteBrowser, remoteNavigate, hasRemoteTotpConfig, armMfaFieldSelection, selectRemoteMfaField, fillRemoteTotp, bindRemoteScreen, useManualCrawlOutput, showPostScanActions, rerunLastScan, openManualCrawlAfterScan, submitScanConfig, _collectFullConfigForExport, _downloadJson, _filenameForConfig, exportConfigToFile, importConfigFromFile, applyImportedConfig, initConfigOverlay, updateAgentModelPlaceholder, submitAgentScan, hasSensitiveMatrixParam, safeUrlForStorage, safeUrlListForStorage, safeExcludeUrl, safeExcludeUrlsForStorage, saveConfigToStorage, loadConfigFromStorage, loadDefaultConfigFromServer, _esc, openScenarioBuilder, scnCloseBuilder, scnDefaultStep, scnAddStep, scnInsertStep, scnDeleteStep, scnDuplicateStep, scnMoveStep, scnChangeAction, scnSetField, scnLoadLoginTemplate, scnRender, scnStepSummary, scnRenderPreview, scnRenderPalette, scnPalNavigate, scnPalFill, scnPalAddForm, scnState_push, scnSaveBuilder, _scnSummaryCard, scnDeleteFlow, renderCfgFlows, renderReviewFlows, addAccount, collectAccounts, collectFlows, restoreFlows, formatDuration, updateETA, _onEventStreamStatusChange, _onEventStreamAuthRequired, _onEventStreamWireStale, initEventStream, connect, handleEvent, dispatchLegacyEvent, resetLiveScanState, applyScanSnapshot, updatePhaseBar, renderUrlList, renderCheckCounters, updatePayloadDisplay, togglePayloadExpand, setStatus, timeStr, addEventLog, updateScreenshot, addFinding, replaceFindings, updateRequest, updateResponse, showNetTab, openLightbox, escapeHtml, sendIntervention, confirmAbort, setPauseState, showPlanModal, confirmPlan, filterFindings, closeInteractiveModals, beginCrawlReview, resetCrawlReviewDetailState, openCrawlReviewDetails, showCrawlReviewModal, renderCrawlReviewList, sendCrawlReview, openManualCrawlFromReview, toggleManualPayload, sendManualPayload, showAiAnalysis, runAutoConfig, applyAutoConfig, submitHybridScan, handleWafDetected, switchCenterTab, loadD3, initSiteMapD3, _smEl, _smShort, _smNorm, _smModel, _sitemapRerender, _smArrowDefs, _smApplyView, _smRenderCompact, _smRenderShots, _smHash, _smRenderExplorer, _smShowPopover, _smHidePopover, smSetMode, smOnSearch, smExpandAll, smZoom, smResetView, _smWirePan, _smNodeColor, addSiteMapNode, markSiteMapVuln, showSiteMapFallback, _updateSiteMapFallback, _showSmTooltip, _hideSmTooltip, updatePhaseTimingStrip, _showSubphase, renderCheckProgressBars, switchMainView, onHistorySearchInput, onHistoryFilterChange, isSensitiveKey, maskPathSecrets, hasUnmaskedSensitivePath, maskNestedKv, maskKv, redactDisplayUrl, formatHistoryBytes, formatHistoryDate, setHistoryViewState, cancelScanHistory, loadScanHistory, renderHistoryTable, getAuditActionMeta, onAuditSearchInput, onAuditFilterChange, formatAuditTimestamp, validateAndSanitizeClientIp, formatSafeAuditDetail, setAuditViewState, loadAuditLog, renderAuditTable, bootDashboard
+  _clearStartScanAck, publishAppScanContext, _markOwnScan, isSecretKeyName, sanitizeUrlForExport, sanitizeUrlListForExport, recursiveSanitizeNonsecret, hasCredentialsInConfig, _createNonsecretDescriptor, _sanitizeConfigForExport, containsRedactedValues, _discardRejectedPendingScan, _promotePendingScan, findingKey, computeVerification, isFindingConfirmed, updateFindingCounters, renderCheckGroups, initCheckGroups, loadScannerCapabilities, setScanMode, getSelectedChecks, selectAllChecks, setSelectedChecks, setCfgToggle, toggleCfg, showCfgTab, applyScanProfile, updateLlmModelField, collectRoleModels, restoreRoleModels, mfaImapFields, mfaImapPassword, applyMfaImap, mfaTotpFields, parseHeaderText, authHeaderFields, timeWindowFields, applyTimeWindows, applyMfaTotp, applyAuthHeaders, validateTotpReadiness, wireTotpQrPreview, uploadFile, wireUpload, renderManualCrawlStatus, startManualCrawl, stopManualCrawl, importManualCrawl, _wsSend, startRemoteBrowser, remoteNavigate, hasRemoteTotpConfig, armMfaFieldSelection, selectRemoteMfaField, fillRemoteTotp, bindRemoteScreen, useManualCrawlOutput, showPostScanActions, rerunLastScan, openManualCrawlAfterScan, submitScanConfig, _collectFullConfigForExport, _downloadJson, _filenameForConfig, exportConfigToFile, importConfigFromFile, applyImportedConfig, initConfigOverlay, updateAgentModelPlaceholder, submitAgentScan, hasSensitiveMatrixParam, safeUrlForStorage, safeUrlListForStorage, safeExcludeUrl, safeExcludeUrlsForStorage, saveConfigToStorage, loadConfigFromStorage, loadDefaultConfigFromServer, _esc, openScenarioBuilder, scnCloseBuilder, scnDefaultStep, scnAddStep, scnInsertStep, scnDeleteStep, scnDuplicateStep, scnMoveStep, scnChangeAction, scnSetField, scnLoadLoginTemplate, scnRender, scnStepSummary, scnRenderPreview, scnRenderPalette, scnPalNavigate, scnPalFill, scnPalAddForm, scnState_push, scnSaveBuilder, _scnSummaryCard, scnDeleteFlow, renderCfgFlows, renderReviewFlows, addAccount, collectAccounts, collectFlows, restoreFlows, formatDuration, extractServerEta, updateETA, _onEventStreamStatusChange, _onEventStreamAuthRequired, _onEventStreamWireStale, initEventStream, connect, handleEvent, dispatchLegacyEvent, resetLiveScanState, applyScanSnapshot, updatePhaseBar, renderUrlList, renderCheckCounters, updatePayloadDisplay, togglePayloadExpand, setStatus, timeStr, addEventLog, updateScreenshot, addFinding, replaceFindings, updateRequest, updateResponse, showNetTab, openLightbox, escapeHtml, sendIntervention, confirmAbort, setPauseState, showPlanModal, confirmPlan, filterFindings, closeInteractiveModals, beginCrawlReview, resetCrawlReviewDetailState, openCrawlReviewDetails, showCrawlReviewModal, renderCrawlReviewList, sendCrawlReview, openManualCrawlFromReview, toggleManualPayload, sendManualPayload, showAiAnalysis, runAutoConfig, applyAutoConfig, submitHybridScan, handleWafDetected, switchCenterTab, loadD3, initSiteMapD3, _smEl, _smShort, _smNorm, _smModel, _sitemapRerender, _smArrowDefs, _smApplyView, _smRenderCompact, _smRenderShots, _smHash, _smRenderExplorer, _smShowPopover, _smHidePopover, smSetMode, smOnSearch, smExpandAll, smZoom, smResetView, _smWirePan, _smNodeColor, addSiteMapNode, markSiteMapVuln, showSiteMapFallback, _updateSiteMapFallback, _showSmTooltip, _hideSmTooltip, updatePhaseTimingStrip, _showSubphase, renderCheckProgressBars, switchMainView, onHistorySearchInput, onHistoryFilterChange, isSensitiveKey, maskPathSecrets, hasUnmaskedSensitivePath, maskNestedKv, maskKv, redactDisplayUrl, formatHistoryBytes, formatHistoryDate, setHistoryViewState, cancelScanHistory, loadScanHistory, renderHistoryTable, getAuditActionMeta, onAuditSearchInput, onAuditFilterChange, formatAuditTimestamp, validateAndSanitizeClientIp, formatSafeAuditDetail, setAuditViewState, loadAuditLog, renderAuditTable, bootDashboard
 });
 Object.assign(window, { _eventLogEntries });
 Object.defineProperty(window, '_eventLogWindowStart', { configurable: true, get: () => _eventLogWindowStart });

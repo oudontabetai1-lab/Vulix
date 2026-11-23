@@ -103,8 +103,21 @@
         ['field', 'payload', 'check_type'].some((key) => typeof data[key] !== 'string')) return false;
     if (type === 'page_graph_update' && data.depth !== undefined && !Number.isFinite(data.depth)) return false;
     if (type === 'phase_timing' && data.elapsed_sec !== undefined && !Number.isFinite(data.elapsed_sec)) return false;
-    if (type === 'progress' && ['percent', 'current', 'total'].some((key) =>
-      data[key] !== undefined && !Number.isFinite(data[key]))) return false;
+    if (type === 'progress') {
+      if (['percent', 'current', 'total', 'eta_seconds', 'progress_percent'].some((key) =>
+        data[key] !== undefined && data[key] !== null && !Number.isFinite(data[key]))) return false;
+      if (data.eta !== undefined && data.eta !== null) {
+        if (!_isRecord(data.eta)) return false;
+        if (['elapsed_seconds', 'eta_seconds', 'progress_percent'].some((key) =>
+          data.eta[key] !== undefined && data.eta[key] !== null && !Number.isFinite(data.eta[key]))) return false;
+        if (['confidence', 'status_label', 'reason_code'].some((key) =>
+          data.eta[key] !== undefined && data.eta[key] !== null && typeof data.eta[key] !== 'string')) return false;
+        if (data.eta.eta_range_seconds !== undefined && data.eta.eta_range_seconds !== null) {
+          if (!Array.isArray(data.eta.eta_range_seconds) ||
+              data.eta.eta_range_seconds.some((item) => typeof item !== 'number' || !Number.isFinite(item))) return false;
+        }
+      }
+    }
     if (type === 'scan_complete' && (typeof data.status !== 'string' ||
         !Number.isSafeInteger(data.total_findings) || !Array.isArray(data.findings))) return false;
     if (type === 'intervention_state' && typeof data.paused !== 'boolean') return false;
