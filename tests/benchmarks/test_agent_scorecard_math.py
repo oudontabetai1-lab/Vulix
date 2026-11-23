@@ -84,6 +84,27 @@ def test_distribution_large_n():
     assert dist.ci_lower < dist.mean < dist.ci_upper
 
 
+def test_distribution_confidence_level_changes_interval():
+    vals = [10.0, 20.0, 30.0]
+    ci90 = compute_distribution(vals, confidence_level=0.90)
+    ci99 = compute_distribution(vals, confidence_level=0.99)
+    assert ci90.confidence_level == 0.90
+    assert ci99.confidence_level == 0.99
+    assert ci90.ci_upper < ci99.ci_upper
+    assert ci90.ci_lower > ci99.ci_lower
+
+
+@pytest.mark.parametrize("values", [[float("nan")], [float("inf")], [-float("inf")]])
+def test_distribution_rejects_nonfinite_values(values):
+    with pytest.raises(ValueError, match="finite"):
+        compute_distribution(values)
+
+
+def test_distribution_rejects_invalid_confidence_level():
+    with pytest.raises(ValueError, match="confidence_level"):
+        compute_distribution([1.0, 2.0], confidence_level=1.0)
+
+
 def test_metadata_serialization():
     """AgentRunMetadata の to_dict / from_dict ラウンドトリップ。"""
     meta = AgentRunMetadata(

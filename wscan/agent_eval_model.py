@@ -394,13 +394,15 @@ def compute_distribution(
     values: Sequence[float | int],
     confidence_level: float = 0.95,
 ) -> MetricDistribution:
-    """数値系列から平均・標準偏差・信頼区間（95%）を計算する（純粋）。
+    """数値系列から平均・標準偏差・指定信頼水準の信頼区間を計算する（純粋）。
 
     N=0: 全て 0.0
     N=1: mean=min=max=ci_lower=ci_upper=val, stddev=variance=0.0
     分散0（全値一致）: stddev=variance=0.0, ci_lower=ci_upper=mean
     N>=2: t分布または正規分布による両側 95% 信頼区間
     """
+    if not math.isfinite(confidence_level) or not 0.0 < confidence_level < 1.0:
+        raise ValueError("confidence_level must be finite and between 0 and 1")
     n = len(values)
     if n == 0:
         return MetricDistribution(
@@ -416,6 +418,8 @@ def compute_distribution(
         )
 
     float_values = [float(v) for v in values]
+    if any(not math.isfinite(v) for v in float_values):
+        raise ValueError("values must be finite")
     mean_val = float(statistics.mean(float_values))
     min_val = float(min(float_values))
     max_val = float(max(float_values))
@@ -451,7 +455,13 @@ def compute_distribution(
         )
 
     df = n - 1
-    t_val = _get_t_critical_95(df)
+    if confidence_level == 0.95:
+        t_val = _get_t_critical_95(df)
+    else:
+        # Cornish-Fisher expansion of the Student-t quantile around the
+        # normal quantile; it supports arbitrary confidence levels without a dependency.
+        z = statistics.NormalDist().inv_cdf((1.0 + confidence_level) / 2.0)
+        t_val = z + (z**3 + z) / (4 * df) + (5*z**5 + 16*z**3 + 3*z) / (96 * df**2)
     standard_error = stdev_val / math.sqrt(n)
     margin_of_error = t_val * standard_error
 
@@ -513,6 +523,7 @@ class AgentAggregateScorecard:
 def build_agent_scorecard(
     runs: Sequence[AgentRunScorecard | Mapping[str, Any]],
     config_name: str = "",
+    confidence_level: float = 0.95,
 ) -> AgentAggregateScorecard:
     """複数回（N回）の実行記録から統計集計を行い、Aggregate Scorecard を構築する（純粋）。
 
@@ -547,21 +558,21 @@ def build_agent_scorecard(
     costs = [r.metrics.estimated_cost_usd for r in normalized_runs]
 
     distributions: dict[str, MetricDistribution] = {
-        "input_tokens": compute_distribution(token_inputs),
-        "output_tokens": compute_distribution(token_outputs),
-        "total_tokens": compute_distribution(token_totals),
-        "duration_seconds": compute_distribution(durations),
-        "llm_calls": compute_distribution(llm_calls),
-        "duplicate_probes": compute_distribution(duplicate_probes),
-        "coverage_rate": compute_distribution(coverage_rates),
-        "total_findings": compute_distribution(total_findings),
-        "verified_findings": compute_distribution(verified_findings),
-        "unverified_findings": compute_distribution(unverified_findings),
-        "safe_twin_fp": compute_distribution(safe_twin_fps),
-        "estimated_cost_usd": compute_distribution(costs),
+        "input_tokens": compute_distribution(token_inputs, confidence_level),
+        "output_tokens": compute_distribution(token_outputs, confidence_level),
+        "total_tokens": compute_distribution(token_totals, confidence_level),
+        "duration_seconds": compute_distribution(durations, confidence_level),
+        "llm_calls": compute_distribution(llm_calls, confidence_level),
+        "duplicate_probes": compute_distribution(duplicate_probes, confidence_level),
+        "coverage_rate": compute_distribution(coverage_rates, confidence_level),
+        "total_findings": compute_distribution(total_findings, confidence_level),
+        "verified_findings": compute_distribution(verified_findings, confidence_level),
+        "unverified_findings": compute_distribution(unverified_findings, confidence_level),
+        "safe_twin_fp": compute_distribution(safe_twin_fps, confidence_level),
+        "estimated_cost_usd": compute_distribution(costs, confidence_level),
     }
     if recalls:
-        distributions["recall"] = compute_distribution(recalls)
+        distributions["recall"] = compute_distribution(recalls, confidence_level)
 
     # ステータス別集計
     status_counts: dict[str, int] = {}

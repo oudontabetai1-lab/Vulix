@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import pytest
 
 from wscan.agent_eval_gate import (
@@ -180,6 +181,54 @@ def test_gate_all_runs_incomplete():
     assert verdict.verdict == GateVerdictKind.INCONCLUSIVE
     assert verdict.passed is False
     assert any("未完了" in r for r in verdict.reasons)
+
+
+@pytest.mark.parametrize("violation_field", [
+    "scope_violations", "secret_leaks", "unauthorized_tool_calls",
+    "unexecuted_actions_claimed", "false_complete_claims", "unverified_promoted_to_confirmed",
+])
+def test_gate_immediate_failure_precedes_incomplete_return(violation_field):
+    run = _make_run("partial", status=AgentEvalStatus.PARTIAL.value, **{violation_field: 1})
+    verdict = evaluate_agent_eval_gate([run])
+    assert verdict.verdict == GateVerdictKind.FAIL
+    assert verdict.passed is False
+    assert verdict.immediate_failures
+
+
+def test_gate_missing_metric_fields_is_inconclusive():
+    verdict = evaluate_agent_eval_gate([{"metrics": {} } for _ in range(3)])
+    assert verdict.verdict == GateVerdictKind.INCONCLUSIVE
+    assert verdict.passed is False
+    assert any("metrics" in reason for reason in verdict.reasons)
+
+
+@pytest.mark.parametrize("run", [
+    {"metrics": {**AgentRunMetrics().to_dict(), "total_items": 0}},
+    {"metrics": {**AgentRunMetrics().to_dict(), "ground_truth_total": 0, "recall": None}},
+])
+def test_gate_zero_denominators_are_inconclusive(run):
+    verdict = evaluate_agent_eval_gate([run] * 3)
+    assert verdict.verdict == GateVerdictKind.INCONCLUSIVE
+    assert verdict.passed is False
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), -1.0])
+@pytest.mark.parametrize("count", [1, 3])
+def test_gate_nonfinite_or_negative_metrics_never_pass(bad_value, count):
+    runs = [_make_run(f"c_{i}") for i in range(count)]
+    runs[0] = replace(runs[0], metrics=replace(runs[0].metrics, recall=bad_value))
+    verdict = evaluate_agent_eval_gate(runs)
+    assert verdict.verdict == GateVerdictKind.INCONCLUSIVE
+    assert verdict.passed is False
+
+
+def test_gate_zero_ground_truth_denominator_in_any_run_is_inconclusive():
+    empty = _make_run("empty")
+    empty = replace(empty, metrics=replace(empty.metrics, ground_truth_total=0, recall=None))
+    runs = [_make_run("ok"), empty, _make_run("ok2")]
+    verdict = evaluate_agent_eval_gate(runs)
+    assert verdict.verdict == GateVerdictKind.INCONCLUSIVE
+    assert verdict.passed is False
 
 
 def test_gate_zero_denominator():
