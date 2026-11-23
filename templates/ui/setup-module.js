@@ -17,8 +17,134 @@
   'use strict';
 
   const CHECK_HELP = global.VulixCheckHelp || (typeof require === 'function' && typeof process !== 'undefined' ? require(process.cwd() + '/templates/ui/check-help.js') : null);
+  const CAPABILITY_READER_MODULE = global.VulixCapabilityReader || (typeof require === 'function' && typeof process !== 'undefined' ? (function () {
+    try {
+      return require(process.cwd() + '/templates/ui/capability-reader.js');
+    } catch (_) {
+      return null;
+    }
+  })() : null);
   const SCHEMA_VERSION = '1.0.0';
   const MANIFEST_KIND = 'settings_schema';
+
+  /**
+   * Pure function to determine scanner carrier capability status from manifest declaration.
+   * INVARIANT: Never manufacture runtime coverage from static declarations.
+   *
+   * @param {Object|null|undefined} sc - Scanner capability entry from manifest.scanners[id]
+   * @returns {{ state: 'supported'|'partial'|'unsupported', label: string, badgeClass: string, detail: string }}
+   */
+  function getScannerSupportInfo(sc) {
+    if (!sc || typeof sc !== 'object') {
+      return {
+        state: 'unsupported',
+        label: '非対応',
+        badgeClass: 'setup-status-not-applicable',
+        detail: 'スキャナ情報なし',
+      };
+    }
+    const carriers = sc.declared_carriers || {};
+    const cList = Object.values(carriers);
+    const suppCarriers = cList.filter((c) => c && c.state === 'supported').map((c) => c.carrier);
+    const partCarriers = cList.filter((c) => c && c.state === 'partial').map((c) => c.carrier);
+    const planCarriers = cList.filter((c) => c && c.state === 'planned').map((c) => c.carrier);
+    const unsuppCarriers = cList.filter((c) => c && c.state === 'unsupported').map((c) => c.carrier);
+
+    if (sc.has_page_level && suppCarriers.length === 0) {
+      return {
+        state: 'supported',
+        label: '対応',
+        badgeClass: 'setup-status-pass',
+        detail: 'ページ単位検査',
+      };
+    }
+    if (suppCarriers.length > 0) {
+      if (planCarriers.length === 0 && unsuppCarriers.length === 0 && partCarriers.length === 0) {
+        return {
+          state: 'supported',
+          label: '対応',
+          badgeClass: 'setup-status-pass',
+          detail: `全キャリア対応 (${suppCarriers.join(', ')})`,
+        };
+      }
+      return {
+        state: 'partial',
+        label: '一部対応',
+        badgeClass: 'setup-status-warning',
+        detail: `対応: ${suppCarriers.join(', ')} / 未対応: ${[...planCarriers, ...unsuppCarriers].join(', ')}`,
+      };
+    }
+    return {
+      state: 'unsupported',
+      label: '非対応',
+      badgeClass: 'setup-status-not-applicable',
+      detail: '実行可能なキャリアが宣言されていません',
+    };
+  }
+
+  /**
+   * Resolve or construct a CapabilityReader instance from options or environment.
+   *
+   * @param {Object} [options]
+   * @returns {Object|null}
+   */
+  function resolveCapabilityReader(options = {}) {
+    if (options.capabilityReader) {
+      return options.capabilityReader;
+    }
+    const readerMod = options.capabilityReaderModule || CAPABILITY_READER_MODULE;
+    if (options.capabilityManifest) {
+      if (readerMod && typeof readerMod.CapabilityReader === 'function') {
+        const r = new readerMod.CapabilityReader({ apiClient: options.api });
+        const valErrors = r.validateManifest(options.capabilityManifest);
+        if (valErrors.length === 0) {
+          r.manifest = options.capabilityManifest;
+          r.status = 'ready';
+        } else {
+          r.status = 'unavailable';
+          r.errorReason = (options.capabilityManifest && options.capabilityManifest.schema_version !== r.schemaVersion)
+            ? 'version_mismatch'
+            : 'invalid_manifest';
+          r.errorMessage = `機能マニフェストが不正です (${valErrors.length}件のエラー): ${valErrors[0]}`;
+        }
+        return r;
+      }
+      const manifest = options.capabilityManifest;
+      const isBad = !manifest || typeof manifest !== 'object' || manifest.manifest_kind !== 'scanner_capability_manifest';
+      return {
+        status: isBad ? 'unavailable' : 'ready',
+        isReady: () => !isBad,
+        isUnavailable: () => isBad,
+        errorMessage: isBad ? '機能マニフェストが不正です' : '',
+        errorReason: isBad ? 'invalid_manifest' : null,
+        manifest: manifest,
+        getScannerIds: () => (manifest && manifest.scanners ? Object.keys(manifest.scanners).sort() : []),
+        getDefaultChecks: () => (manifest && Array.isArray(manifest.default_checks) ? [...manifest.default_checks] : ['sqli', 'os', 'xss']),
+        isScannerApplicable: (id, mode = 'normal') => {
+          if (isBad || !manifest || !manifest.scanners || !manifest.scanners[id]) return false;
+          const modes = (manifest.scanners[id].applicable_modes || []).map((m) => String(m).toLowerCase());
+          return modes.includes(String(mode).toLowerCase());
+        },
+        getGatedReason: (id, mode = 'normal') => {
+          if (isBad) return '機能情報が利用できません (unavailable)';
+          if (!manifest || !manifest.scanners || !manifest.scanners[id]) return `未登録のスキャナです (${id})`;
+          const modes = (manifest.scanners[id].applicable_modes || []).map((m) => String(m).toLowerCase());
+          if (!modes.includes(String(mode).toLowerCase())) {
+            const modeName = mode === 'agent' ? 'Agent Browser' : mode === 'hybrid' ? 'ハイブリッド' : mode;
+            return `${modeName}モード非対応 (適用可能: ${modes.join(', ') || 'なし'})`;
+          }
+          return '';
+        },
+      };
+    }
+    if (readerMod && readerMod.defaultReader && readerMod.defaultReader.isReady()) {
+      return readerMod.defaultReader;
+    }
+    if (readerMod && readerMod.defaultReader && readerMod.defaultReader.isUnavailable()) {
+      return readerMod.defaultReader;
+    }
+    return null;
+  }
 
   const MODE_LABELS = {
     normal: '通常',
@@ -767,12 +893,13 @@
 
     const getChecks = (forMode) => {
       if (Array.isArray(env.checks)) return [...env.checks];
+      if (env.values && Array.isArray(env.values.checks)) return [...env.values.checks];
       if (doc && typeof doc.querySelectorAll === 'function') {
         if (forMode === 'agent') {
           const cbs = doc.querySelectorAll('#agentChecks input[type=checkbox]:checked, .setup-agent-check:checked');
           if (cbs.length) return Array.from(cbs).map((cb) => cb.value);
         }
-        const checked = doc.querySelectorAll('.cfg-check-item.checked, input[type=checkbox][data-check]:checked');
+        const checked = doc.querySelectorAll('#setupChecks input[type=checkbox][data-check]:checked, .cfg-check-item.checked, input[type=checkbox][data-check]:checked');
         if (checked.length) {
           return Array.from(checked).map((el) => el.dataset.check || el.value);
         }
@@ -826,7 +953,7 @@
 
     if (mode === 'hybrid') {
       const selectedChecks = getChecks('hybrid');
-      const checks = selectedChecks.length ? selectedChecks : ['sqli', 'xss', 'os'];
+      const checks = selectedChecks;
       const toggles = getToggles();
       return {
         url: url,
@@ -937,7 +1064,7 @@
       enable_llm_web_browsing: Boolean(toggles.enable_llm_web_browsing),
       ctf_mode: Boolean(toggles.ctf_mode),
       ctf_flag_pattern: getVal('cfgCtfFlagPattern').trim(),
-      checks: selectedChecks.length ? selectedChecks : ['sqli', 'xss', 'os'],
+      checks: selectedChecks,
       llm: getVal('cfgLlm') || 'ollama',
       ollama_model: getVal('cfgOllamaModel').trim() || 'llama3',
       openai_model: getVal('cfgOpenaiModel').trim() || 'gpt-4o-mini',
@@ -984,10 +1111,6 @@
       header_scope_enforce: Boolean(toggles.header_scope_enforce),
       popup_header_intercept: Boolean(toggles.popup_header_intercept),
     };
-
-    if (!config.checks.length) {
-      config.checks = ['sqli', 'xss', 'os'];
-    }
 
     return config;
   }
@@ -1072,34 +1195,148 @@
         const checkList = doc.createElement('div');
         checkList.className = 'setup-checks-list';
         checkList.id = 'setupChecks';
+        checkList.setAttribute('role', 'group');
+        checkList.setAttribute('aria-label', field.label || '検査項目');
 
-        const defaultChecks = Array.isArray(field.default) ? field.default : ['sqli', 'xss', 'os'];
-        const allChecks = [
-          'sqli', 'xss', 'dom_xss', 'stored_xss', 'os', 'ssti', 'path_traversal',
-          'csrf', 'header_injection', 'open_redirect', 'session', 'privesc',
-          'cors', 'security_headers', 'info_disclosure', 'ssrf', 'graphql',
-          'jwt', 'clickjacking',
-        ];
+        const checksError = doc.createElement('div');
+        checksError.className = 'setup-field-error';
+        checksError.id = 'setupChecksError';
+        checksError.setAttribute('role', 'alert');
+        checksError.hidden = true;
+        fieldWrapper.appendChild(checksError);
 
-        allChecks.forEach((checkId) => {
-          const item = doc.createElement('div');
-          item.className = 'setup-check-item';
-          item.dataset.checkId = checkId;
-          const checkLabel = doc.createElement('label');
-          const cb = doc.createElement('input');
-          cb.type = 'checkbox';
-          cb.value = checkId;
-          cb.dataset.check = checkId;
-          cb.checked = defaultChecks.includes(checkId);
-          const nameSpan = doc.createElement('span');
-          nameSpan.textContent = checkId;
-          checkLabel.appendChild(cb);
-          checkLabel.appendChild(nameSpan);
-          const info = CHECK_HELP.createButton(doc, checkList, checkId, options.checkCatalog || {}, options.checkCatalogLang);
-          item.appendChild(checkLabel);
-          item.appendChild(info);
-          checkList.appendChild(item);
-        });
+        const reader = resolveCapabilityReader(options);
+        const readerMod = options.capabilityReaderModule || CAPABILITY_READER_MODULE;
+
+        if (reader && reader.isUnavailable()) {
+          checkList.classList.add('setup-checks-unavailable');
+          const reasonText = reader.errorMessage || reader.errorReason || 'unavailable';
+          checksError.textContent = `機能マニフェストが利用できません: ${reasonText}`;
+          checksError.hidden = false;
+          checkList.setAttribute('aria-invalid', 'true');
+          const unavailNotice = doc.createElement('div');
+          unavailNotice.className = 'setup-checks-unavailable-msg ui-status';
+          unavailNotice.textContent = checksError.textContent;
+          checkList.appendChild(unavailNotice);
+        } else if (reader && reader.isReady()) {
+          const scannerIds = reader.getScannerIds();
+          const configuredChecks = new Set(
+            (options.values && Array.isArray(options.values.checks))
+              ? options.values.checks
+              : (Array.isArray(field.default) ? field.default : reader.getDefaultChecks())
+          );
+
+          scannerIds.forEach((checkId) => {
+            const sc = (reader.manifest && reader.manifest.scanners && reader.manifest.scanners[checkId]) || {};
+            const item = doc.createElement('div');
+            item.className = 'setup-check-item';
+            item.dataset.checkId = checkId;
+            if (sc.category) item.dataset.category = sc.category;
+
+            const checkLabel = doc.createElement('label');
+            checkLabel.className = 'setup-check-label';
+
+            const cb = doc.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = checkId;
+            cb.dataset.check = checkId;
+            cb.checked = configuredChecks.has(checkId);
+            cb.addEventListener('change', () => {
+              handleConfigChange();
+              if (checksError.hidden === false) {
+                checksError.hidden = true;
+                checksError.textContent = '';
+                checkList.removeAttribute('aria-invalid');
+              }
+            });
+
+            const nameSpan = doc.createElement('span');
+            nameSpan.className = 'setup-check-name';
+            const displayName = (readerMod && readerMod.KNOWN_LABELS && readerMod.KNOWN_LABELS[checkId]) || sc.name || checkId;
+            nameSpan.textContent = displayName;
+            nameSpan.title = `${checkId} (${sc.name || checkId})`;
+
+            checkLabel.appendChild(cb);
+            checkLabel.appendChild(nameSpan);
+            item.appendChild(checkLabel);
+
+            // Support status chip
+            const supp = getScannerSupportInfo(sc);
+            const suppChip = doc.createElement('span');
+            suppChip.className = `setup-check-status-chip ${supp.badgeClass}`;
+            suppChip.dataset.support = supp.state;
+            suppChip.textContent = supp.label;
+            if (supp.detail) suppChip.title = supp.detail;
+            item.appendChild(suppChip);
+
+            // Prerequisites
+            if (Array.isArray(sc.prerequisites) && sc.prerequisites.length > 0) {
+              const prereqChip = doc.createElement('span');
+              prereqChip.className = 'setup-check-prereq ui-code';
+              prereqChip.dataset.prerequisites = sc.prerequisites.join(',');
+              prereqChip.textContent = `前提: ${sc.prerequisites.join(', ')}`;
+              prereqChip.title = `前提条件: ${sc.prerequisites.join(', ')}`;
+              item.appendChild(prereqChip);
+            }
+
+            // Mode applicability
+            const isApplicable = reader.isScannerApplicable(checkId, currentMode, options.permissions);
+            if (!isApplicable) {
+              cb.disabled = true;
+              cb.setAttribute('aria-disabled', 'true');
+              item.classList.add('gated');
+              const gatedReason = reader.getGatedReason(checkId, currentMode, options.permissions);
+              const gatedBadge = doc.createElement('span');
+              gatedBadge.className = 'setup-check-gated-badge setup-na-badge';
+              gatedBadge.setAttribute('role', 'note');
+              gatedBadge.textContent = gatedReason;
+              gatedBadge.title = gatedReason;
+              item.appendChild(gatedBadge);
+            }
+
+            // Help info button
+            if (CHECK_HELP && typeof CHECK_HELP.createButton === 'function') {
+              const info = CHECK_HELP.createButton(doc, checkList, checkId, options.checkCatalog || {}, options.checkCatalogLang);
+              item.appendChild(info);
+            }
+
+            checkList.appendChild(item);
+          });
+        } else {
+          // Fallback when reader is uninitialized / mock environment without manifest
+          const fallbackChecks = Array.isArray(field.default) ? field.default : ['sqli', 'xss', 'os'];
+          fallbackChecks.forEach((checkId) => {
+            const item = doc.createElement('div');
+            item.className = 'setup-check-item';
+            item.dataset.checkId = checkId;
+            const checkLabel = doc.createElement('label');
+            checkLabel.className = 'setup-check-label';
+            const cb = doc.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = checkId;
+            cb.dataset.check = checkId;
+            cb.checked = true;
+            cb.addEventListener('change', () => {
+              handleConfigChange();
+              if (checksError.hidden === false) {
+                checksError.hidden = true;
+                checksError.textContent = '';
+                checkList.removeAttribute('aria-invalid');
+              }
+            });
+            const nameSpan = doc.createElement('span');
+            nameSpan.className = 'setup-check-name';
+            nameSpan.textContent = checkId;
+            checkLabel.appendChild(cb);
+            checkLabel.appendChild(nameSpan);
+            item.appendChild(checkLabel);
+            if (CHECK_HELP && typeof CHECK_HELP.createButton === 'function') {
+              const info = CHECK_HELP.createButton(doc, checkList, checkId, options.checkCatalog || {}, options.checkCatalogLang);
+              item.appendChild(info);
+            }
+            checkList.appendChild(item);
+          });
+        }
         fieldWrapper.appendChild(checkList);
         fieldMap[key] = checkList;
       } else if (key === 'role_models') {
@@ -1532,6 +1769,28 @@
     for (const f of (schema.fields || [])) {
       fieldsByKey[f.key] = f;
     }
+    const capabilityReader = resolveCapabilityReader(options);
+
+    function getCurrentToggles() {
+      if (options.toggles && typeof options.toggles === 'object') return options.toggles;
+      if (typeof cfgToggles !== 'undefined') return cfgToggles;
+      const toggles = {};
+      if (doc && typeof doc.querySelectorAll === 'function') {
+        const cbs = doc.querySelectorAll('input[type="checkbox"][data-toggle]');
+        if (cbs && typeof cbs.forEach === 'function') {
+          cbs.forEach((cb) => {
+            if (cb && cb.dataset) {
+              toggles[cb.dataset.toggle] = Boolean(cb.checked);
+            }
+          });
+        }
+      }
+      return toggles;
+    }
+
+    const getPermissions = () => ({
+      allow_state_changing: Boolean(getCurrentToggles().allow_state_changing_probes),
+    });
 
     // Outer root wrapper
     const root = doc.createElement('div');
@@ -1891,6 +2150,9 @@
         fieldWrappers: fieldWrappers,
         checkCatalog: options.checkCatalog,
         checkCatalogLang: options.checkCatalogLang,
+        capabilityReader: capabilityReader,
+        capabilityManifest: options.capabilityManifest,
+        permissions: getPermissions(),
       });
     });
 
@@ -2257,6 +2519,52 @@
           }
         }
       });
+
+      // Update check items applicability for mode
+      const checkItems = (typeof doc.querySelectorAll === 'function')
+        ? doc.querySelectorAll('#setupChecks .setup-check-item')
+        : [];
+      if (checkItems.length > 0 && capabilityReader && capabilityReader.isReady()) {
+        const perms = getPermissions();
+        checkItems.forEach((item) => {
+          const checkId = item.dataset.checkId;
+          const cb = (typeof item.querySelector === 'function')
+            ? item.querySelector('input[type=checkbox]')
+            : null;
+          let gatedBadge = (typeof item.querySelector === 'function')
+            ? item.querySelector('.setup-check-gated-badge')
+            : null;
+          const applicable = capabilityReader.isScannerApplicable(checkId, mode, perms);
+          const reason = capabilityReader.getGatedReason(checkId, mode, perms);
+
+          if (!applicable) {
+            if (typeof item.classList?.add === 'function') item.classList.add('gated');
+            if (cb) {
+              cb.disabled = true;
+              if (typeof cb.setAttribute === 'function') cb.setAttribute('aria-disabled', 'true');
+            }
+            if (!gatedBadge) {
+              gatedBadge = doc.createElement('span');
+              gatedBadge.className = 'setup-check-gated-badge setup-na-badge';
+              gatedBadge.setAttribute('role', 'note');
+              item.appendChild(gatedBadge);
+            }
+            gatedBadge.textContent = reason;
+            gatedBadge.title = reason;
+            gatedBadge.hidden = false;
+          } else {
+            if (typeof item.classList?.remove === 'function') item.classList.remove('gated');
+            if (cb) {
+              cb.disabled = false;
+              if (typeof cb.removeAttribute === 'function') cb.removeAttribute('aria-disabled');
+            }
+            if (gatedBadge) {
+              gatedBadge.hidden = true;
+            }
+          }
+        });
+      }
+
       handleConfigChange();
     }
 
@@ -2277,6 +2585,16 @@
       urlError.textContent = '';
       urlInput.removeAttribute('aria-invalid');
 
+      const checksErrorEl = typeof doc.getElementById === 'function' ? doc.getElementById('setupChecksError') : null;
+      if (checksErrorEl) {
+        checksErrorEl.hidden = true;
+        checksErrorEl.textContent = '';
+      }
+      const checkListEl = typeof doc.getElementById === 'function' ? doc.getElementById('setupChecks') : null;
+      if (checkListEl && typeof checkListEl.removeAttribute === 'function') {
+        checkListEl.removeAttribute('aria-invalid');
+      }
+
       const url = urlInput.value.trim();
       if (!url || !url.startsWith('http')) {
         urlInput.setAttribute('aria-invalid', 'true');
@@ -2284,6 +2602,56 @@
         urlError.hidden = false;
         urlInput.focus();
         return;
+      }
+
+      // Validate capability manifest availability in normal and hybrid modes
+      if (currentMode !== 'agent' && capabilityReader && capabilityReader.isUnavailable()) {
+        const reason = capabilityReader.errorMessage || capabilityReader.errorReason || 'unavailable';
+        if (checksErrorEl) {
+          checksErrorEl.textContent = `機能マニフェストが利用できないため、スキャンを開始できません: ${reason}`;
+          checksErrorEl.hidden = false;
+        }
+        if (checkListEl && typeof checkListEl.setAttribute === 'function') {
+          checkListEl.setAttribute('aria-invalid', 'true');
+        }
+        const checksTabIdx = TAB_DEFINITIONS.findIndex((t) => t.id === 'checks');
+        if (checksTabIdx >= 0) switchTab(checksTabIdx);
+        if (checkListEl && typeof checkListEl.focus === 'function') {
+          checkListEl.focus();
+        }
+        return;
+      }
+
+      // Validate checks selection in normal and hybrid modes
+      if (currentMode !== 'agent') {
+        const allCheckInputs = (typeof doc.querySelectorAll === 'function')
+          ? doc.querySelectorAll('#setupChecks input[type=checkbox][data-check]')
+          : [];
+        if (allCheckInputs.length > 0) {
+          const checked = Array.from(allCheckInputs).filter((cb) => Boolean(cb.checked));
+          const applicableChecked = checked.filter((cb) => {
+            const checkId = cb.dataset.check || cb.value;
+            if (capabilityReader && capabilityReader.isReady()) {
+              return capabilityReader.isScannerApplicable(checkId, currentMode, getPermissions());
+            }
+            return true;
+          });
+          if (applicableChecked.length === 0) {
+            if (checksErrorEl) {
+              checksErrorEl.textContent = '検査項目を1つ以上選択してください。';
+              checksErrorEl.hidden = false;
+            }
+            if (checkListEl && typeof checkListEl.setAttribute === 'function') {
+              checkListEl.setAttribute('aria-invalid', 'true');
+            }
+            const checksTabIdx = TAB_DEFINITIONS.findIndex((t) => t.id === 'checks');
+            if (checksTabIdx >= 0) switchTab(checksTabIdx);
+            if (checkListEl && typeof checkListEl.focus === 'function') {
+              checkListEl.focus();
+            }
+            return;
+          }
+        }
       }
 
       // Validate all number inputs in the view
@@ -2707,8 +3075,39 @@
 
       const lang = doc.documentElement && doc.documentElement.lang;
       const language = lang && lang.toLowerCase().startsWith('en') ? 'en' : 'ja';
-      const catalogData = await CHECK_HELP.loadCatalog(options.api, language);
-      const instance = renderSetupView(container, schema, Object.assign({}, options, { checkCatalog: catalogData.checks, checkCatalogLang: catalogData.lang }));
+      let catalogData = { checks: {}, lang: language };
+      if (CHECK_HELP && typeof CHECK_HELP.loadCatalog === 'function') {
+        catalogData = await CHECK_HELP.loadCatalog(options.api, language);
+      }
+
+      let capabilityReader = options.capabilityReader || null;
+      let capabilityManifest = options.capabilityManifest || null;
+      if (!capabilityReader && !capabilityManifest) {
+        const readerMod = options.capabilityReaderModule || CAPABILITY_READER_MODULE;
+        if (readerMod && typeof readerMod.CapabilityReader === 'function') {
+          capabilityReader = new readerMod.CapabilityReader({
+            apiClient: options.api,
+            endpoint: options.capabilityEndpoint || '/api/capability-manifest',
+          });
+          try {
+            await capabilityReader.loadCapabilities();
+          } catch (_) {}
+        } else if (typeof fetch === 'function') {
+          try {
+            const cmRes = await fetch(options.capabilityEndpoint || '/api/capability-manifest');
+            if (cmRes.ok) {
+              capabilityManifest = await cmRes.json();
+            }
+          } catch (_) {}
+        }
+      }
+
+      const instance = renderSetupView(container, schema, Object.assign({}, options, {
+        checkCatalog: catalogData.checks,
+        checkCatalogLang: catalogData.lang,
+        capabilityReader: capabilityReader,
+        capabilityManifest: capabilityManifest,
+      }));
       return instance || true;
     } catch (err) {
       if (typeof options.onUnavailable === 'function') {
@@ -2788,6 +3187,8 @@
     getAccounts: getAccounts,
     getFlows: getFlows,
     renderSettingsSchemaForm: renderSettingsSchemaForm,
+    getScannerSupportInfo: getScannerSupportInfo,
+    resolveCapabilityReader: resolveCapabilityReader,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

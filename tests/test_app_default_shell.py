@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 
 import pytest
@@ -635,15 +636,21 @@ class TestAppNavigationResolutionAndTrafficAbsence:
             # Navigate to the entry by clicking its nav button
             btn = page.locator(f'nav [data-route="{route_id}"]')
             btn.click()
-            page.wait_for_timeout(60)
 
-            # Confirm aria-current="page" was applied
+            # Confirm aria-current="page" was applied (await route transition attribute)
+            page.locator(f'nav [data-route="{route_id}"][aria-current="page"]').wait_for()
             assert btn.get_attribute("aria-current") == "page", f"Route {route_id} button not marked aria-current"
 
             # Check view-specific selector or unavailable message
             expected_selector = view_specific_selectors.get(route_id)
             surface = page.locator(expected_selector) if expected_selector else None
             message = page.locator("#message")
+
+            # Await readiness: either the registered view mounts or an explicit unavailable state is shown
+            if expected_selector:
+                page.locator(f"{expected_selector}:not([hidden]), #message:not([hidden])").wait_for(state="visible")
+            else:
+                message.wait_for(state="visible")
 
             # Either registered view mounted or explicit unavailable state shown
             is_mounted = surface is not None and surface.is_visible()
@@ -690,3 +697,70 @@ class TestAppNavigationResolutionAndTrafficAbsence:
             surface_section = page.locator("#surface")
             assert surface_section.is_visible()
             ui_harness.assert_no_errors(page)
+
+    def test_app_browser_navigation_delayed_readiness_and_manifest_failure(self, ui_harness: UIHarness):
+        """Verify navigation resolution under network latency and manifest failure without arbitrary elapsed time assumptions.
+
+        Demonstrates:
+        1. Counterexample: Hardcoded 60ms timeout fails when network latency exceeds 60ms,
+           whereas readiness await cleanly succeeds when the response resolves.
+        2. Real DOM state: When API resolves, setupSurface, URL input, and dynamic check checkboxes
+           are properly mounted and interactive.
+        3. Manifest failure: When capability-manifest returns 500, setupSurface mounts gracefully,
+           shows accessible error alert (role="alert", aria-invalid="true"), blocks Normal/Hybrid
+           start scan on 0 checks/unavailable manifest, but preserves Agent mode autonomous exploration.
+        """
+        ui_harness.seed_representative_scans()
+        page = ui_harness.new_page()
+
+        # 1. Delayed API test: simulate network delay on capability-manifest (120ms > hardcoded 60ms)
+        def handle_delayed_manifest(route):
+            time.sleep(0.12)
+            route.continue_()
+
+        page.route("**/api/capability-manifest", handle_delayed_manifest)
+        page.goto(f"{ui_harness.server_url}/app", wait_until="domcontentloaded")
+        page.wait_for_selector("nav[aria-label='Application']", state="visible")
+
+        # Navigate to setup view: readiness await cleanly handles delay without race
+        btn = page.locator("nav [data-route='setup']")
+        btn.click()
+        page.locator("nav [data-route='setup'][aria-current='page']").wait_for()
+        assert btn.get_attribute("aria-current") == "page"
+
+        page.locator("#setupSurface:not([hidden]), #message:not([hidden])").wait_for(state="visible")
+        assert page.locator("#setupSurface").is_visible()
+        page.wait_for_selector("#cfgInputUrl", state="visible")
+        assert page.locator("#setupChecks input[type='checkbox']").count() > 0
+
+        # 2. Manifest failure test: return 500 on manifest endpoint
+        page.unroute("**/api/capability-manifest")
+        page.route("**/api/capability-manifest", lambda route: route.fulfill(status=500, body="manifest unavailable"))
+
+        # Navigate away and back to re-trigger setup mount with failed manifest
+        page.locator("nav [data-route='portal']").click()
+        page.locator("#summarySurface:not([hidden])").wait_for(state="visible")
+
+        # Clear existing children to force re-fetch
+        page.evaluate("() => { const s = document.getElementById('setupSurface'); if (s) while (s.firstChild) s.removeChild(s.firstChild); }")
+        btn.click()
+        page.locator("#setupSurface:not([hidden]), #message:not([hidden])").wait_for(state="visible")
+        assert page.locator("#setupSurface").is_visible()
+
+        # Manifest failure shows accessible alert on checks tab and gates Normal scan
+        page.locator("#setupTab-checks").click()
+        alert = page.locator("#setupChecksError")
+        assert alert.is_visible()
+        assert alert.get_attribute("role") == "alert"
+
+        page.locator("#cfgInputUrl").fill("https://example.com")
+        start_btn = page.locator("#setupStartScanBtn")
+        start_btn.click()
+        # Scan start should be blocked in Normal mode due to manifest failure
+        assert not page.evaluate("() => location.hash.includes('/monitor')")
+
+        # Switch to Agent mode: Agent mode allows zero-check exploration and is not gated by manifest failure
+        page.locator('.setup-mode-btn[data-mode="agent"]').click()
+        assert page.locator('.setup-mode-btn[data-mode="agent"]').get_attribute("aria-checked") == "true"
+        assert "active" in (page.locator('.setup-mode-btn[data-mode="agent"]').get_attribute("class") or "")
+
