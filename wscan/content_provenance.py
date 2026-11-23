@@ -208,8 +208,13 @@ def wrap_untrusted_observation(
     max_len: int | None = None,
 ) -> ProvenanceEnvelope:
     """Wrap untrusted observation content into a ProvenanceEnvelope with sanitization."""
-    raw_text = str(content or "")
-    signals = detect_prompt_injection(raw_text)
+    source_text = str(content or "")
+    signals = detect_prompt_injection(source_text)
+    from . import url_scope
+    from .request_logger import redact_text
+
+    raw_text = redact_text(source_text)
+    safe_origin = url_scope.redact_url(str(origin or ""), drop_userinfo=True)
 
     # Length truncation (preserve observation up to max_len)
     if max_len is not None and max_len > 0:
@@ -252,7 +257,7 @@ def wrap_untrusted_observation(
     return ProvenanceEnvelope(
         content=raw_text,
         source=str(source),
-        origin=str(origin),
+        origin=str(safe_origin or ""),
         trust=TrustLevel.UNTRUSTED_TARGET.value,
         content_type=str(content_type),
         correlation_id=str(correlation_id),
