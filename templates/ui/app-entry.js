@@ -167,6 +167,8 @@
     else if (/aborted|cancelled|canceled/.test(rawStatus)) execState = 'aborted';
     else if (/error|failed/.test(rawStatus)) execState = 'error';
     else if (/partial/.test(rawStatus)) execState = 'partial';
+    else if (/stale/.test(rawStatus)) execState = 'stale';
+    else if (/unverified/.test(rawStatus)) execState = 'unverified';
     else if (/unknown/.test(rawStatus)) execState = 'unknown';
     else if (rawStatus) execState = rawStatus;
 

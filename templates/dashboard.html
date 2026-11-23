@@ -50,6 +50,7 @@ body {
 .status-dot.done { background: var(--state-completed); }
 .status-dot.error { background: var(--state-failed); }
 .status-dot.aborted { background: var(--state-paused); }
+.status-dot.stale, .status-dot.partial { background: var(--state-stale); }
 .status-dot.incomplete { background: var(--status-not-checked); }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 .status-text { color: var(--text-muted); font-size: 0.85rem; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.status-bar{min-width:0}
@@ -1141,6 +1142,12 @@ body { padding-left: 212px; }
   color: var(--state-failed);
   border-color: var(--status-fail-border);
 }
+.history-status-partial,
+.history-status-stale {
+  background: var(--status-stale-bg);
+  color: var(--state-stale);
+  border-color: var(--status-stale-border);
+}
 
 .history-sev-badges {
   display: inline-flex;
@@ -1441,7 +1448,7 @@ body { padding-left: 212px; }
 
 .ws-rail .ws-cur{padding:12px 12px 2px}
 .ws-rail .ws-eyebrow{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px}
-.ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--text-muted)}.ws-rail .pulse.running{background:var(--state-running);animation:wsPulseRail 1.8s ease-in-out infinite}.ws-rail .pulse.done{background:var(--state-completed)}.ws-rail .pulse.error{background:var(--state-failed)}.ws-rail .pulse.aborted{background:var(--state-paused)}
+.ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--text-muted)}.ws-rail .pulse.running{background:var(--state-running);animation:wsPulseRail 1.8s ease-in-out infinite}.ws-rail .pulse.done{background:var(--state-completed)}.ws-rail .pulse.error{background:var(--state-failed)}.ws-rail .pulse.aborted{background:var(--state-paused)}.ws-rail .pulse.stale{background:var(--state-stale)}
 @keyframes wsPulseRail{0%,100%{opacity:1}50%{opacity:.35}}
 .ws-rail .ws-cur-status{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ws-rail .foot{margin-top:auto;padding:0 18px;display:flex;flex-direction:column;gap:8px;font-size:11.5px;color:var(--text-muted)}

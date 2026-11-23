@@ -63,12 +63,12 @@ Vulix strictly isolates brand identity, vulnerability severity levels, execution
    > [!NOTE]
    > **Execution State Migration & Semantic Separation**:
    > Live runtime scan-state presentation across operational and app components (`templates/app.html`, `templates/dashboard.html`, `templates/ui/app-entry.js`) has been migrated from legacy `var(--accent)` (brand purple) and vulnerability severity colors (`var(--high)`, `var(--critical)`, `var(--low)`) to canonical semantic state tokens:
-   > - Running: `--state-running: var(--status-running)` (`#e4a770`) with `--state-running-bg` / `--state-running-border`, disambiguated from High severity by placement and glyph (`⟳`).
-   > - Paused / Aborted: `--state-paused: var(--status-warning)` (`#c7b96a`) with `--state-paused-bg` / `--state-paused-border`, disambiguated by glyph (`⏸` / `⏹`).
-   > - Completed / Done: `--state-completed: var(--status-pass)` (`#22c55e`) with `--state-completed-bg` / `--state-completed-border`, disambiguated by glyph (`✓`).
-   > - Failed / Error: `--state-failed: var(--status-fail)` (`#f796ad`) with `--state-failed-bg` / `--state-failed-border`, disambiguated by glyph (`✗`).
-   > - Stale / Partial: `--state-stale: var(--status-stale)` (`#e67e22`) with `--state-stale-bg` / `--state-stale-border`, disambiguated by glyph (`⟲`).
-   > - Unverified: `--state-unverified: var(--low)` (`#8fb9c9`) with `--state-unverified-bg` / `--state-unverified-border`, disambiguated by glyph (`?`).
+   > - Running: `--state-running: var(--status-running)` (`#e4a770`) with container background `--status-running-bg` / border `--status-running-border`, disambiguated from High severity by placement and glyph (`⟳`).
+   > - Paused / Aborted: `--state-paused: var(--status-warning)` (`#c7b96a`) with container background `--status-warning-bg` / border `--status-warning-border`, disambiguated by glyph (`⏸` / `⏹`).
+   > - Completed / Done: `--state-completed: var(--status-pass)` (`#22c55e`) with container background `--status-pass-bg` / border `--status-pass-border`, disambiguated by glyph (`✓`).
+   > - Failed / Error: `--state-failed: var(--status-fail)` (`#f796ad`) with container background `--status-fail-bg` / border `--status-fail-border`, disambiguated by glyph (`✗`).
+   > - Stale / Partial: `--state-stale: var(--status-stale)` (`#e67e22`) with container background `--status-stale-bg` / border `--status-stale-border`, disambiguated by glyph (`⟲`).
+   > - Unverified: `--state-unverified: var(--low)` (`#8fb9c9`) with container background `rgba(143, 185, 201, 0.12)` / border `rgba(143, 185, 201, 0.3)`, disambiguated by glyph (`?`).
    > Overall UI v3 component library unification, remaining dialog/table refactoring, and official logo deployment remain in-progress per Section 3 (D6 migration notes) and will continue in targeted component-level follow-ups.
 4. **Active Selection & Focus Borders**:
    - `--focus-ring: 0 0 0 2px var(--accent)`: 2px offset solid focus ring providing instant keyboard navigation feedback.

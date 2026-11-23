@@ -166,10 +166,11 @@ def test_contract_app_html_scan_state_badges_consume_semantic_tokens():
     assert error_match
     assert "var(--state-failed)" in error_match.group(1)
 
-    # Verify partial uses var(--state-stale)
+    # Verify partial uses var(--state-stale) and includes .scan-state-stale
     partial_match = re.search(r"(\.scan-state-partial[^{]*\{[^}]*\})", app_html)
     assert partial_match
     assert "var(--state-stale)" in partial_match.group(1)
+    assert ".scan-state-stale" in partial_match.group(1)
 
     # Verify unverified rule presence
     assert ".scan-state-unverified" in app_html
@@ -222,6 +223,31 @@ def test_contract_dashboard_html_status_indicators_consume_semantic_tokens():
     assert ".ib-pause-state.visible { display: inline-block; background: var(--status-warning-bg); color: var(--state-paused)" in dash_html
 
 
+def test_reviewer_counterexample_stale_badge(ui_harness: UIHarness):
+    """Direct regression for independent reviewer counterexample (hybrid mode, stale status)."""
+    require_browser()
+    p = ui_harness.new_page()
+    try:
+        p.goto(f"{ui_harness.server_url}/app#/portal", wait_until="domcontentloaded")
+        p.locator("#viewTitle").wait_for(state="visible")
+        p.evaluate("s => window.VulixAppShell.renderScanStatus(s)", {"scan_id": "review", "status": "stale", "mode": "hybrid"})
+        b = p.locator(".scan-state-badge")
+        b.wait_for(state="visible")
+
+        color = b.evaluate("el => getComputedStyle(el).color")
+        bg_color = b.evaluate("el => getComputedStyle(el).backgroundColor")
+        border_color = b.evaluate("el => getComputedStyle(el).borderColor")
+        text = b.inner_text()
+
+        assert color == "rgb(230, 126, 34)", f"Expected semantic stale rgb(230, 126, 34), got {color}"
+        assert bg_color == "rgba(230, 126, 34, 0.12)", f"Expected status-stale-bg rgba(230, 126, 34, 0.12), got {bg_color}"
+        assert "scan-state-stale" in (b.get_attribute("class") or "")
+        assert text == "⟲ stale"
+        assert len(ui_harness.get_errors(p)) == 0
+    finally:
+        p.close()
+
+
 def test_runtime_scan_state_computed_styles_and_tokens(ui_harness: UIHarness):
     """Verify live computed styles of .scan-state-badge resolve to semantic state tokens in real browser."""
     require_browser()
@@ -231,22 +257,29 @@ def test_runtime_scan_state_computed_styles_and_tokens(ui_harness: UIHarness):
         page.goto(f"{ui_harness.server_url}/app#/portal", wait_until="domcontentloaded")
         page.locator("#viewTitle").wait_for(state="visible")
 
-        # Test state mapping matrix: (raw_status, expected_class, expected_hex, forbidden_hex)
+        # Test state mapping matrix: (raw_status, expected_class, expected_rgb, expected_bg, forbidden_rgb, expected_glyph)
         # --state-running: #e4a770 -> rgb(228, 167, 112)
         # --state-paused:  #c7b96a -> rgb(199, 185, 106)
         # --state-completed: #22c55e -> rgb(34, 197, 94)
         # --state-failed:  #f796ad -> rgb(247, 150, 173)
         # --state-stale:   #e67e22 -> rgb(230, 126, 34)
+        # --state-unverified: #8fb9c9 -> rgb(143, 185, 201)
         # --accent:        #9184d9 -> rgb(145, 132, 217)
         states_to_test = [
-            ("scanning", "scan-state-running", "rgb(228, 167, 112)", "rgb(145, 132, 217)", "⟳"),
-            ("paused", "scan-state-paused", "rgb(199, 185, 106)", "rgb(228, 167, 112)", "⏸"),
-            ("completed", "scan-state-done", "rgb(34, 197, 94)", "rgb(143, 185, 201)", "✓"),
-            ("failed", "scan-state-error", "rgb(247, 150, 173)", "rgb(226, 112, 143)", "✗"),
-            ("partial", "scan-state-partial", "rgb(230, 126, 34)", "rgb(217, 154, 99)", "⟲"),
+            ("scanning", "scan-state-running", "rgb(228, 167, 112)", "rgba(228, 167, 112, 0.12)", "rgb(145, 132, 217)", "⟳"),
+            ("running", "scan-state-running", "rgb(228, 167, 112)", "rgba(228, 167, 112, 0.12)", "rgb(145, 132, 217)", "⟳"),
+            ("paused", "scan-state-paused", "rgb(199, 185, 106)", "rgba(199, 185, 106, 0.12)", "rgb(228, 167, 112)", "⏸"),
+            ("aborted", "scan-state-aborted", "rgb(199, 185, 106)", "rgba(199, 185, 106, 0.12)", "rgb(228, 167, 112)", "⏹"),
+            ("completed", "scan-state-done", "rgb(34, 197, 94)", "rgba(34, 197, 94, 0.12)", "rgb(143, 185, 201)", "✓"),
+            ("done", "scan-state-done", "rgb(34, 197, 94)", "rgba(34, 197, 94, 0.12)", "rgb(143, 185, 201)", "✓"),
+            ("failed", "scan-state-error", "rgb(247, 150, 173)", "rgba(247, 150, 173, 0.12)", "rgb(226, 112, 143)", "✗"),
+            ("error", "scan-state-error", "rgb(247, 150, 173)", "rgba(247, 150, 173, 0.12)", "rgb(226, 112, 143)", "✗"),
+            ("partial", "scan-state-partial", "rgb(230, 126, 34)", "rgba(230, 126, 34, 0.12)", "rgb(217, 154, 99)", "⟲"),
+            ("stale", "scan-state-stale", "rgb(230, 126, 34)", "rgba(230, 126, 34, 0.12)", "rgb(147, 151, 171)", "⟲"),
+            ("unverified", "scan-state-unverified", "rgb(143, 185, 201)", "rgba(143, 185, 201, 0.12)", "rgb(145, 132, 217)", "?"),
         ]
 
-        for raw_status, expected_class, expected_rgb, forbidden_rgb, expected_glyph in states_to_test:
+        for raw_status, expected_class, expected_rgb, expected_bg, forbidden_rgb, expected_glyph in states_to_test:
             page.evaluate(
                 f"""() => {{
                   if (window.VulixAppShell && window.VulixAppShell.renderScanStatus) {{
@@ -277,6 +310,12 @@ def test_runtime_scan_state_computed_styles_and_tokens(ui_harness: UIHarness):
             assert (
                 computed_color != forbidden_rgb
             ), f"Status {raw_status}: computed color reused forbidden color {forbidden_rgb}"
+
+            # Verify background color matches semantic background
+            computed_bg = badge.evaluate("el => getComputedStyle(el).backgroundColor")
+            assert (
+                computed_bg == expected_bg
+            ), f"Status {raw_status}: computed background {computed_bg} != expected {expected_bg}"
 
             # Verify text contains expected glyph
             badge_text = badge.inner_text()
@@ -397,6 +436,172 @@ def test_cross_mode_transitions_and_screen_smoke(ui_harness: UIHarness):
         page.locator("#viewTitle").wait_for(state="visible")
 
         # Zero console errors throughout the entire transition workflow
+        assert len(ui_harness.get_errors(page)) == 0
+    finally:
+        page.close()
+
+
+def test_event_stream_wire_events_dom_computed_styles_transitions(ui_harness: UIHarness):
+    """Verify event-driven message dispatch drives actual DOM computed style transitions across modes."""
+    require_browser()
+    page = ui_harness.new_page(**STANDARD_VIEWPORTS[1280])
+
+    try:
+        page.goto(f"{ui_harness.server_url}/app#/portal", wait_until="domcontentloaded")
+        page.locator("#viewTitle").wait_for(state="visible")
+
+        # Define sequence of lifecycle state events across modes
+        event_sequence = [
+            # 1. Normal mode scan starts running
+            {
+                "context": {
+                    "scan_id": "scan_evt_01",
+                    "status": "running",
+                    "mode": "normal",
+                    "target": "https://normal.target.test",
+                    "phase": "crawl",
+                    "connection": "connected",
+                    "freshness": "fresh",
+                    "eta": {"eta_seconds": 120, "progress_percent": 15.0, "confidence": "high", "status_label": "estimating"}
+                },
+                "expected_class": "scan-state-running",
+                "expected_rgb": "rgb(228, 167, 112)",
+                "expected_glyph": "⟳",
+                "expected_progress": "15%",
+            },
+            # 2. Paused via user/schedule
+            {
+                "context": {
+                    "scan_id": "scan_evt_01",
+                    "status": "paused",
+                    "mode": "normal",
+                    "target": "https://normal.target.test",
+                    "phase": "crawl",
+                    "connection": "connected",
+                    "freshness": "fresh",
+                    "eta": {"eta_seconds": 120, "progress_percent": 15.0, "confidence": "medium", "status_label": "paused"}
+                },
+                "expected_class": "scan-state-paused",
+                "expected_rgb": "rgb(199, 185, 106)",
+                "expected_glyph": "⏸",
+                "expected_progress": "15%",
+            },
+            # 3. Agent mode running
+            {
+                "context": {
+                    "scan_id": "scan_evt_02",
+                    "status": "running",
+                    "mode": "agent",
+                    "target": "https://agent.target.test",
+                    "phase": "attack",
+                    "connection": "connected",
+                    "freshness": "fresh",
+                    "eta": {"eta_seconds": 60, "progress_percent": 65.0, "confidence": "high", "status_label": "estimating"}
+                },
+                "expected_class": "scan-state-running",
+                "expected_rgb": "rgb(228, 167, 112)",
+                "expected_glyph": "⟳",
+                "expected_progress": "65%",
+            },
+            # 4. Completed
+            {
+                "context": {
+                    "scan_id": "scan_evt_02",
+                    "status": "completed",
+                    "mode": "agent",
+                    "target": "https://agent.target.test",
+                    "phase": "report",
+                    "connection": "connected",
+                    "freshness": "snapshot",
+                    "eta": {"eta_seconds": 0, "progress_percent": 100.0, "confidence": "high", "status_label": "done"}
+                },
+                "expected_class": "scan-state-done",
+                "expected_rgb": "rgb(34, 197, 94)",
+                "expected_glyph": "✓",
+                "expected_progress": "100%",
+            },
+            # 5. Hybrid mode stale checkpoint
+            {
+                "context": {
+                    "scan_id": "scan_evt_03",
+                    "status": "stale",
+                    "mode": "hybrid",
+                    "target": "https://hybrid.target.test",
+                    "phase": "recon",
+                    "connection": "reconnecting",
+                    "freshness": "stale",
+                },
+                "expected_class": "scan-state-stale",
+                "expected_rgb": "rgb(230, 126, 34)",
+                "expected_glyph": "⟲",
+                "expected_progress": None,
+            },
+            # 6. Unverified hypothesis
+            {
+                "context": {
+                    "scan_id": "scan_evt_03",
+                    "status": "unverified",
+                    "mode": "hybrid",
+                    "target": "https://hybrid.target.test",
+                    "phase": "recon",
+                    "connection": "connected",
+                    "freshness": "fresh",
+                },
+                "expected_class": "scan-state-unverified",
+                "expected_rgb": "rgb(143, 185, 201)",
+                "expected_glyph": "?",
+                "expected_progress": None,
+            },
+            # 7. Engine failure
+            {
+                "context": {
+                    "scan_id": "scan_evt_04",
+                    "status": "failed",
+                    "mode": "normal",
+                    "target": "https://normal.target.test",
+                    "phase": "attack",
+                    "connection": "disconnected",
+                    "freshness": "snapshot",
+                },
+                "expected_class": "scan-state-error",
+                "expected_rgb": "rgb(247, 150, 173)",
+                "expected_glyph": "✗",
+                "expected_progress": None,
+            },
+        ]
+
+        badge = page.locator(".scan-state-badge")
+
+        for step in event_sequence:
+            # Dispatch event via VulixAppShell
+            page.evaluate(
+                """ctx => {
+                  window.VulixAppShell.renderScanStatus(ctx);
+                }""",
+                step["context"],
+            )
+
+            badge.wait_for(state="visible")
+            class_attr = badge.get_attribute("class") or ""
+            assert step["expected_class"] in class_attr, (
+                f"Step {step['context']['status']}: expected class {step['expected_class']} in {class_attr}"
+            )
+
+            color = badge.evaluate("el => getComputedStyle(el).color")
+            assert color == step["expected_rgb"], (
+                f"Step {step['context']['status']}: computed color {color} != {step['expected_rgb']}"
+            )
+
+            text = badge.inner_text()
+            assert step["expected_glyph"] in text, (
+                f"Step {step['context']['status']}: missing glyph {step['expected_glyph']} in {text}"
+            )
+
+            if step["expected_progress"]:
+                prog = page.locator(".scan-progress-badge")
+                assert prog.is_visible()
+                assert prog.inner_text() == step["expected_progress"]
+
         assert len(ui_harness.get_errors(page)) == 0
     finally:
         page.close()
