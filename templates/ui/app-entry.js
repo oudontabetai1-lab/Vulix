@@ -128,6 +128,16 @@
     return null;
   }
 
+  function formatDuration(secs) {
+    if (!Number.isFinite(secs) || secs < 0) return '—';
+    if (secs < 60) return Math.round(secs) + '秒';
+    const m = Math.floor(secs / 60);
+    const s = Math.round(secs % 60).toString().padStart(2, '0');
+    if (m < 60) return m + '分' + s + '秒';
+    const h = Math.floor(m / 60);
+    return h + '時間' + (m % 60) + '分';
+  }
+
   function renderScanStatusBar(state) {
     if (!state || (!state.scan_id && !state.scanId && !state.status)) {
       currentScanStatus = null;
@@ -251,6 +261,65 @@
     freshBadge.dataset.freshness = freshness;
     freshBadge.textContent = freshnessLabel;
     meta.appendChild(freshBadge);
+
+    // Canonical ETA and Progress rendering if present
+    const etaData = state.eta || (state.eta_seconds !== undefined ? state : null);
+    if (etaData && typeof etaData === 'object') {
+      const etaSeconds = etaData.eta_seconds != null ? Number(etaData.eta_seconds) : null;
+      const progressPercent = etaData.progress_percent != null ? Number(etaData.progress_percent) : (state.progress && state.progress.percent != null ? Number(state.progress.percent) : null);
+      const confidence = etaData.confidence || etaData.eta_confidence || '';
+      const statusLabel = etaData.status_label || etaData.eta_status || '';
+      const reasonCode = etaData.reason_code || '';
+      const range = Array.isArray(etaData.eta_range_seconds) ? etaData.eta_range_seconds : null;
+
+      if (progressPercent != null && Number.isFinite(progressPercent)) {
+        const progBadge = document.createElement('span');
+        progBadge.className = 'scan-progress-badge';
+        progBadge.setAttribute('data-testid', 'scan-progress-badge');
+        const dispProg = execState === 'done' ? 100 : Math.min(99.9, progressPercent);
+        progBadge.textContent = `${dispProg % 1 === 0 ? dispProg.toFixed(0) : dispProg.toFixed(1)}%`;
+        meta.appendChild(progBadge);
+      }
+
+      const etaBadge = document.createElement('span');
+      etaBadge.className = 'scan-eta-badge';
+      etaBadge.setAttribute('data-testid', 'scan-eta-badge');
+      if (confidence) etaBadge.setAttribute('data-confidence', confidence);
+      if (statusLabel) etaBadge.setAttribute('data-status-label', statusLabel);
+      if (reasonCode) etaBadge.setAttribute('data-reason-code', reasonCode);
+
+      let etaText = '';
+      if (execState === 'paused' || statusLabel === 'paused') {
+        etaText = 'ETA: 一時停止';
+      } else if (execState === 'done' || statusLabel === 'completed') {
+        etaText = 'ETA: 完了';
+      } else if (execState === 'aborted' || statusLabel === 'aborted') {
+        etaText = 'ETA: 中断';
+      } else if (execState === 'error' || execState === 'failed') {
+        etaText = 'ETA: エラー';
+      } else if (statusLabel === 'calibrating' || confidence === 'calibrating' || reasonCode === 'insufficient_samples') {
+        etaText = 'ETA: 算出中…';
+      } else if (statusLabel === 'indeterminate' || confidence === 'indeterminate') {
+        etaText = 'ETA: 推定困難';
+      } else if (etaSeconds != null && Number.isFinite(etaSeconds) && etaSeconds >= 1) {
+        etaText = `ETA: ${formatDuration(etaSeconds)}`;
+        if (confidence === 'low' || reasonCode === 'dynamic_queue_growth') {
+          etaText += ' (推定困難)';
+        }
+      }
+
+      if (etaText) {
+        etaBadge.textContent = etaText;
+        const titleParts = [etaText];
+        if (range && range.length === 2) {
+          titleParts.push(`範囲: ${formatDuration(range[0])}〜${formatDuration(range[1])}`);
+        }
+        if (confidence) titleParts.push(`信頼度: ${confidence}`);
+        if (reasonCode) titleParts.push(`理由: ${reasonCode}`);
+        etaBadge.title = titleParts.join(' | ');
+        meta.appendChild(etaBadge);
+      }
+    }
 
     // Help button for status_execution_vs_connection
     const checkHelp = global.VulixCheckHelp || (typeof require === 'function' && typeof process !== 'undefined' ? require(process.cwd() + '/templates/ui/check-help.js') : null);
