@@ -98,28 +98,37 @@ VALID_PHASE_TRANSITIONS: dict[AgentPhase, frozenset[AgentPhase]] = {
         AgentPhase.FINALIZING,
     }),
     AgentPhase.RECONNING: frozenset({
+        AgentPhase.AUTHENTICATING,
         AgentPhase.SCHEDULING,
         AgentPhase.EXECUTING,
         AgentPhase.FINALIZING,
     }),
     AgentPhase.SCHEDULING: frozenset({
+        AgentPhase.AUTHENTICATING,
+        AgentPhase.RECONNING,
         AgentPhase.EXECUTING,
         AgentPhase.VERIFYING,
         AgentPhase.FINALIZING,
     }),
     AgentPhase.EXECUTING: frozenset({
+        AgentPhase.AUTHENTICATING,
+        AgentPhase.RECONNING,
         AgentPhase.VERIFYING,
         AgentPhase.CHECKPOINTING,
         AgentPhase.SCHEDULING,
         AgentPhase.FINALIZING,
     }),
     AgentPhase.VERIFYING: frozenset({
+        AgentPhase.AUTHENTICATING,
+        AgentPhase.RECONNING,
         AgentPhase.CHECKPOINTING,
         AgentPhase.SCHEDULING,
         AgentPhase.EXECUTING,
         AgentPhase.FINALIZING,
     }),
     AgentPhase.CHECKPOINTING: frozenset({
+        AgentPhase.AUTHENTICATING,
+        AgentPhase.RECONNING,
         AgentPhase.SCHEDULING,
         AgentPhase.EXECUTING,
         AgentPhase.VERIFYING,
@@ -626,6 +635,7 @@ class AgentHarness:
             self.state.status = AgentRunStatus.RUNNING
             self.state.stop_reason = ""
             self.state.last_error = ""
+            self.state.phase = AgentPhase.INITIALIZING
             for item in self.state.work_queue:
                 if item.status == WorkStatus.RUNNING:
                     item.status = WorkStatus.PLANNED

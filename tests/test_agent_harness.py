@@ -651,3 +651,106 @@ def test_new_contract_fields_redact_secrets_everywhere(tmp_path):
     assert secret not in all_content
     assert password not in all_content
     assert "<redacted>" in all_content
+
+
+def test_resume_from_finalized_checkpoint_resets_phase_and_allows_continuation(tmp_path):
+    # 終了処理済み (finalize 済み) の checkpoint から resume しても phase がリセットされ再開できる
+    harness = AgentHarness(tmp_path, spec(max_steps=10))
+    w = harness.enqueue(AgentRole.EXPLORER, "http://fixture.test")
+    harness.next_work()
+    harness.set_phase(AgentPhase.EXECUTING)
+    harness.finish_work(w.work_id, WorkStatus.COMPLETE)
+    harness.enqueue(AgentRole.PROBE_SPECIALIST, "http://fixture.test/search", check_type="xss")
+    harness.finalize(success=False, coverage_complete=False)
+
+    state_before = json.loads(harness.state_path.read_text())
+    assert state_before["phase"] == "finalizing"
+
+    resumed = AgentHarness(tmp_path, spec(max_steps=10), resume=True)
+    assert resumed.state.phase == AgentPhase.INITIALIZING
+    assert resumed.state.status == AgentRunStatus.RUNNING
+
+    # 再開後の set_phase が正常に成功すること
+    resumed.set_phase(AgentPhase.EXECUTING)
+    assert resumed.state.phase == AgentPhase.EXECUTING
+
+
+def test_resume_from_interrupted_executing_checkpoint_resets_phase(tmp_path):
+    # 実行中 (EXECUTING) で中断された checkpoint から再開した場合に初期化状態へ戻る
+    harness = AgentHarness(tmp_path, spec(max_steps=10))
+    w = harness.enqueue(AgentRole.PROBE_SPECIALIST, "http://fixture.test/items", check_type="sqli")
+    harness.next_work()
+    harness.set_phase(AgentPhase.EXECUTING)
+    # 中断保存 (RUNNING のまま checkpoint)
+    harness.checkpoint()
+
+    state_before = json.loads(harness.state_path.read_text())
+    assert state_before["phase"] == "executing"
+
+    resumed = AgentHarness(tmp_path, spec(max_steps=10), resume=True)
+    assert resumed.state.phase == AgentPhase.INITIALIZING
+    # 中断されていた work item が PLANNED に戻ること
+    assert resumed.state.work_queue[0].status == WorkStatus.PLANNED
+
+    # 再認証への遷移や直接実行への遷移が正常に成功すること
+    resumed.set_phase(AgentPhase.AUTHENTICATING)
+    assert resumed.state.phase == AgentPhase.AUTHENTICATING
+
+
+def test_resume_from_budget_exhausted_checkpoint(tmp_path):
+    # 1. 予算残ゼロの checkpoint からの resume は拒否される
+    harness = AgentHarness(tmp_path, spec(max_steps=2))
+    harness.record_step(
+        episode_id="ep-1", local_step=2, url="http://fixture.test",
+        proposed_actions=[], executed_actions=[],
+    )
+    harness.finalize(success=False, coverage_complete=False)
+    with pytest.raises(ValueError, match="no remaining step budget"):
+        AgentHarness(tmp_path, spec(max_steps=2), resume=True)
+
+    # 2. 予算残があり stop_reason で finalize された checkpoint からは stop_reason と phase がクリアされて再開できる
+    harness2 = AgentHarness(tmp_path / "sub", spec(max_steps=10))
+    harness2.record_step(
+        episode_id="ep-1", local_step=2, url="http://fixture.test",
+        proposed_actions=[], executed_actions=[],
+    )
+    harness2.finalize(success=False, coverage_complete=False)
+    assert harness2.state.stop_reason == "agent_incomplete"
+    assert harness2.state.phase == AgentPhase.FINALIZING
+
+    resumed = AgentHarness(tmp_path / "sub", spec(max_steps=10), resume=True)
+    assert resumed.state.stop_reason == ""
+    assert resumed.state.phase == AgentPhase.INITIALIZING
+    assert resumed.remaining_steps == 8
+
+
+def test_resume_from_legacy_checkpoint_without_phase_field(tmp_path):
+    # phase キーが存在しない古い checkpoint を模倣
+    harness = AgentHarness(tmp_path, spec(max_steps=5))
+    data = json.loads(harness.state_path.read_text())
+    data.pop("phase", None)
+    harness.state_path.write_text(json.dumps(data))
+
+    resumed = AgentHarness(tmp_path, spec(max_steps=5), resume=True)
+    assert resumed.state.phase == AgentPhase.INITIALIZING
+    resumed.set_phase(AgentPhase.RECONNING)
+    assert resumed.state.phase == AgentPhase.RECONNING
+
+
+def test_phase_transitions_allow_dynamic_replan_and_reject_invalid(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+
+    # EXECUTING から再認証 (AUTHENTICATING) や再探索 (RECONNING) へのリプラン遷移が可能
+    harness.set_phase(AgentPhase.EXECUTING)
+    harness.set_phase(AgentPhase.AUTHENTICATING)
+    assert harness.state.phase == AgentPhase.AUTHENTICATING
+    harness.set_phase(AgentPhase.RECONNING)
+    assert harness.state.phase == AgentPhase.RECONNING
+    harness.set_phase(AgentPhase.EXECUTING)
+    assert harness.state.phase == AgentPhase.EXECUTING
+    harness.set_phase(AgentPhase.RECONNING)
+    assert harness.state.phase == AgentPhase.RECONNING
+
+    # 通常実行中の INITIALIZING への逆行は拒否
+    with pytest.raises(ValueError, match="Invalid phase transition"):
+        harness.set_phase(AgentPhase.INITIALIZING)
