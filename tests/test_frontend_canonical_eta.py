@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import pytest
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,58 @@ from tests.ui_harness import UIHarness, require_browser, ui_harness
 
 ROOT = Path(__file__).resolve().parents[1]
 EVENT_STREAM_JS = ROOT / "templates" / "ui" / "event-stream.js"
+
+
+@pytest.mark.parametrize("mode", ["normal", "agent", "hybrid"])
+def test_actual_monitor_bridge_eta_and_reconnect(ui_harness: UIHarness, mode: str):
+    """Wire events and contradictory snapshots cross the real iframe message boundary."""
+    require_browser()
+    page = ui_harness.new_page()
+    try:
+        page.goto(f"{ui_harness.server_url}/app#/monitor", wait_until="domcontentloaded")
+        page.wait_for_function("() => Boolean(document.querySelector('#monitorModule')?.shadowRoot?.querySelector('#statRemain'))")
+        frame = next(f for f in page.frames if f != page.main_frame and '/monitor' in f.url)
+        # Isolate injected wire traffic from the harness server's idle snapshots.
+        frame.evaluate("() => initEventStream().stop()")
+        page.wait_for_timeout(100)
+        frame.evaluate("""mode => {
+          resetLiveScanState();
+          state.mode = mode;
+          handleEvent({type: 'progress', timestamp: 1000, data: {
+            current: 1, total: 10, percent: 10,
+            eta: {eta_seconds: 90, progress_percent: 33.3, confidence: 'medium',
+              status_label: 'estimating', reason_code: 'steady_rate', eta_range_seconds: [70, 120]}
+          }});
+        }""", mode)
+        page.wait_for_function("() => document.querySelector('#scanContext .scan-eta-badge')?.textContent === 'ETA: 1分30秒'")
+        assert page.locator('#scanContext .scan-progress-badge').inner_text() == '33.3%'
+        assert '範囲: 1分10秒〜2分00秒' in page.locator('#scanContext .scan-eta-badge').get_attribute('title')
+        for paused, label, seconds, expected in [
+            (True, 'paused', None, 'ETA: 一時停止'),
+            (False, 'calibrating', None, 'ETA: 算出中…'),
+            (False, 'estimating', 12, 'ETA: 12秒'),
+        ]:
+            result = frame.evaluate("""args => {
+              const [paused, label, seconds] = args;
+              applyScanSnapshot({server_id: 'bridge-server', run_id: 'bridge-run', sequence: 20,
+                data: {status: 'scanning', paused,
+                  progress: {current: 1, total: 10, percent: 10, eta_seconds: 999,
+                    progress_percent: 10, eta_confidence: 'low', eta_status: 'estimating',
+                    reason_code: 'stale', eta_range_seconds: [900, 1000], elapsed_seconds: 1},
+                  eta: {eta_seconds: seconds, progress_percent: 44, confidence: 'high',
+                    status_label: label, reason_code: null, eta_range_seconds: null, elapsed_seconds: 50}}});
+              return state.serverEta;
+            }""", [paused, label, seconds])
+            assert result == dict(etaSeconds=seconds, progressPercent=44, confidence='high',
+                                 statusLabel=label, reasonCode=None, range=None, elapsedSeconds=50)
+            page.wait_for_function("expected => document.querySelector('#scanContext .scan-eta-badge')?.textContent === expected", arg=expected)
+            assert page.locator('#scanContext .scan-progress-badge').inner_text() == '44%'
+            assert '900' not in page.locator('#scanContext .scan-eta-badge').get_attribute('title')
+        frame.evaluate("() => { resetLiveScanState(); publishAppScanContext(); }")
+        page.wait_for_function("() => !document.querySelector('#scanContext .scan-eta-badge')")
+        assert page.locator('#scanContext .scan-progress-badge').count() == 0
+    finally:
+        page.close()
 
 
 def _run_node_script(script: str) -> dict[str, Any]:
@@ -34,6 +87,26 @@ def _run_node_script(script: str) -> dict[str, Any]:
         input=script,
     )
     return json.loads(res.stdout)
+
+
+def test_snapshot_eta_present_fields_override_cached_aliases():
+    source = (ROOT / 'templates/dashboard.html').read_text()
+    helper = source.split('function extractServerEta(payload) {', 1)[1].split('\nfunction updateETA(', 1)[0]
+    result = _run_node_script('function extractServerEta(payload) {' + helper + """
+      const stale = {eta_seconds: 999, progress_percent: 1, eta_confidence: 'low',
+        eta_status: 'estimating', reason_code: 'stale', eta_range_seconds: [900,1000], elapsed_seconds: 1};
+      const fresh = {eta_seconds: null, progress_percent: null, confidence: null,
+        status_label: 'paused', reason_code: null, eta_range_seconds: null, elapsed_seconds: null};
+      console.log(JSON.stringify({fresh: extractServerEta({eta: fresh, progress: stale}),
+        fallback: extractServerEta({progress: stale}),
+        nested: extractServerEta({progress: {...stale, eta: fresh}})}));
+    """)
+    expected = dict(etaSeconds=None, progressPercent=None, confidence=None,
+                    statusLabel='paused', reasonCode=None, range=None, elapsedSeconds=None)
+    assert result['fresh'] == expected
+    assert result['nested'] == expected
+    assert result['fallback']['etaSeconds'] == 999
+    assert result['fallback']['confidence'] == 'low'
 
 
 def test_event_stream_wire_validation_accepts_canonical_eta():

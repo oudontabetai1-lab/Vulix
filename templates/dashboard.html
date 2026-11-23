@@ -3006,7 +3006,15 @@ function publishAppScanContext() {
     status: typeof state.status === 'string' ? state.status : 'unavailable',
   };
   if (state.serverEta) {
-    context.eta = state.serverEta;
+    context.eta = {
+      eta_seconds: state.serverEta.etaSeconds,
+      progress_percent: state.serverEta.progressPercent,
+      confidence: state.serverEta.confidence,
+      status_label: state.serverEta.statusLabel,
+      reason_code: state.serverEta.reasonCode,
+      eta_range_seconds: state.serverEta.range,
+      elapsed_seconds: state.serverEta.elapsedSeconds,
+    };
   }
   if (state.mode) context.mode = state.mode;
   if (state.target) context.target = state.target;
@@ -5451,61 +5459,32 @@ function extractServerEta(payload) {
     payload,
   ].filter(Boolean);
 
-  let etaSeconds = null;
-  let progressPercent = null;
-  let confidence = null;
-  let statusLabel = null;
-  let reasonCode = null;
-  let range = null;
-  let elapsedSeconds = null;
-  let hasServerEta = false;
-
-  for (const c of candidates) {
-    if (c.eta_seconds !== undefined && c.eta_seconds !== null) {
-      etaSeconds = Number(c.eta_seconds);
-      hasServerEta = true;
+  // Fresh nested snapshots own present fields, including explicit null clears.
+  const pick = (...keys) => {
+    for (const c of candidates) {
+      for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(c, key)) return c[key];
+      }
     }
-    if (c.progress_percent !== undefined && c.progress_percent !== null) {
-      progressPercent = Number(c.progress_percent);
-      hasServerEta = true;
-    }
-    if (c.confidence !== undefined && c.confidence !== null) {
-      confidence = String(c.confidence);
-      hasServerEta = true;
-    } else if (c.eta_confidence !== undefined && c.eta_confidence !== null) {
-      confidence = String(c.eta_confidence);
-      hasServerEta = true;
-    }
-    if (c.status_label !== undefined && c.status_label !== null) {
-      statusLabel = String(c.status_label);
-      hasServerEta = true;
-    } else if (c.eta_status !== undefined && c.eta_status !== null) {
-      statusLabel = String(c.eta_status);
-      hasServerEta = true;
-    }
-    if (c.reason_code !== undefined && c.reason_code !== null) {
-      reasonCode = String(c.reason_code);
-      hasServerEta = true;
-    }
-    if (c.eta_range_seconds !== undefined && c.eta_range_seconds !== null && Array.isArray(c.eta_range_seconds)) {
-      range = c.eta_range_seconds;
-      hasServerEta = true;
-    }
-    if (c.elapsed_seconds !== undefined && c.elapsed_seconds !== null) {
-      elapsedSeconds = Number(c.elapsed_seconds);
-      hasServerEta = true;
-    }
-  }
-
-  if (!hasServerEta) return null;
+    return undefined;
+  };
+  const rawEtaSeconds = pick('eta_seconds');
+  const rawProgressPercent = pick('progress_percent');
+  const rawConfidence = pick('confidence', 'eta_confidence');
+  const rawStatusLabel = pick('status_label', 'eta_status');
+  const rawReasonCode = pick('reason_code');
+  const rawRange = pick('eta_range_seconds');
+  const rawElapsedSeconds = pick('elapsed_seconds');
+  if ([rawEtaSeconds, rawProgressPercent, rawConfidence, rawStatusLabel,
+       rawReasonCode, rawRange, rawElapsedSeconds].every(value => value === undefined)) return null;
   return {
-    etaSeconds,
-    progressPercent,
-    confidence,
-    statusLabel,
-    reasonCode,
-    range,
-    elapsedSeconds,
+    etaSeconds: rawEtaSeconds == null ? null : Number(rawEtaSeconds),
+    progressPercent: rawProgressPercent == null ? null : Number(rawProgressPercent),
+    confidence: rawConfidence == null ? null : String(rawConfidence),
+    statusLabel: rawStatusLabel == null ? null : String(rawStatusLabel),
+    reasonCode: rawReasonCode == null ? null : String(rawReasonCode),
+    range: Array.isArray(rawRange) ? rawRange : null,
+    elapsedSeconds: rawElapsedSeconds == null ? null : Number(rawElapsedSeconds),
   };
 }
 
