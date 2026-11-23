@@ -1599,8 +1599,10 @@ class DetectionEvidenceTests(unittest.TestCase):
             url="http://fixture.test/tools",
         )
 
-        self.assertIn('"host"', rendered)
-        self.assertIn('"http://fixture.test/tools"', rendered)
+        self.assertIn('<untrusted_target_data source="dom"', rendered)
+        self.assertIn("\nhost\n</untrusted_target_data>", rendered)
+        self.assertIn('<untrusted_target_data source="http"', rendered)
+        self.assertIn("\nhttp://fixture.test/tools\n</untrusted_target_data>", rendered)
         self.assertIn(";${IFS}id", rendered)
         self.assertIn(";{cat,/etc/passwd}", rendered)
 

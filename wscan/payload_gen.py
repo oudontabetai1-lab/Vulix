@@ -42,10 +42,24 @@ def _order_deterministic_first(defaults: list, llm: list, ratio: int = _DETERMIN
 
 def _format_prompt_template(template: str, *, field_name: str, url: str) -> str:
     """Fill only WScan placeholders, leaving payload syntax such as ${IFS} intact."""
+    from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
+    clean_field = wrap_untrusted_observation(
+        field_name or "",
+        source=ContentSource.DOM.value,
+        origin=url or "",
+        content_type=ContentType.OBSERVATION.value,
+    ).format_tagged_block()
+    clean_url = wrap_untrusted_observation(
+        url or "",
+        source=ContentSource.HTTP.value,
+        origin=url or "",
+        content_type=ContentType.OBSERVATION.value,
+    ).format_tagged_block()
     return (
         template
-        .replace("{field_name}", field_name)
-        .replace("{url}", url)
+        .replace("{field_name}", clean_field)
+        .replace("{url}", clean_url)
     )
 
 
@@ -474,8 +488,15 @@ class PayloadGenerator:
         str  : LLM の分析テキスト (100 語以内)
         None : ビジョン未対応 / API キー未設定 / エラー時
         """
+        from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+        clean_page_url = wrap_untrusted_observation(
+            page_url or "",
+            source=ContentSource.HTTP.value,
+            origin=page_url or "",
+            content_type=ContentType.OBSERVATION.value,
+        ).format_tagged_block()
         vision_prompt = (
-            f"This is a screenshot of the web page at {page_url}.\n"
+            f"This is a screenshot of the web page at {clean_page_url}.\n"
             "As a web security tester, identify any VISIBLE security issues:\n"
             "- Error messages leaking stack traces, file paths, or DB info\n"
             "- Unescaped HTML or <script> tags rendered in the page\n"

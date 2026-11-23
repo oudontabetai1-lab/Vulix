@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from html import escape as escape_html
 import re
 from typing import Any
 
@@ -22,6 +23,7 @@ class ContentSource(str, Enum):
     CONSOLE = "console"
     USER_CONFIG = "user_config"
     VULIX_POLICY = "vulix_policy"
+    WEB = "web"
 
 
 class TrustLevel(str, Enum):
@@ -48,6 +50,7 @@ _CONTROL_COMPLETION_TOKENS: tuple[str, ...] = (
 )
 
 _IGNORE_PREVIOUS_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"<\s*/?\s*(?:system|instructions?|assistant|user)\b[^>]*>", re.IGNORECASE),
     re.compile(r"(?i)\bignore\s+(?:all\s+)?(?:previous|prior|above|earlier|initial)\s+(?:instructions?|directions?|context|prompts?|rules?|guidelines?)\b"),
     re.compile(r"(?i)\bdisregard\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s*(?:instructions?|directions?|context|prompts?|rules?|guidelines?)?\b"),
     re.compile(r"(?i)\bforget\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|directions?|context|prompts?|rules?)\b"),
@@ -89,13 +92,27 @@ _SCOPE_OVERRIDE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _FAKE_COMPLETION_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?i)\bVULNERABILITY\s+FOUND\s*:"),
+    re.compile(r"(?i)\bVULNERABILITY\s+(?:FOUND|CONFIRMED)\b"),
     re.compile(r"(?i)\bWSCAN-NONCE\s*:"),
     re.compile(r"(?i)\bAUTH\s+COMPLETE\b"),
     re.compile(r"(?i)\bEXPLORATION\s+COMPLETE\b"),
     re.compile(r"(?i)\bPROBE\s+COMPLETE\b"),
     re.compile(r"(?i)\bVERIFICATION\s+COMPLETE\b"),
     re.compile(r"(?i)\bREVIEW\s+COMPLETE\b"),
+    re.compile(r"(?i)\b(?:BEGIN|END)_UNTRUSTED(?:_PAGE)?\b"),
+)
+
+_PROMPT_INJECTION_NEUTRALIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"<\s*/?\s*(?:system|instructions?|assistant|user)\b[^>]*>", re.IGNORECASE),
+    re.compile(r"(?i)\bignore\s+(?:all\s+)?(?:previous|prior|above|earlier|initial)\s+(?:instructions?|directions?|context|prompts?|rules?|guidelines?)\b"),
+    re.compile(r"(?i)\bdisregard\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s*(?:instructions?|directions?|context|prompts?|rules?|guidelines?)?\b"),
+    re.compile(r"(?i)\bforget\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|directions?|context|prompts?|rules?)\b"),
+    re.compile(r"(?i)\byou\s+are\s+now\s+(?:a|an)\b"),
+    re.compile(r"(?i)\b(?:system|new)\s+(?:prompt|instructions?)\s*[:\s]"),
+    re.compile(r"(?i)\bVULNERABILITY\s+(?:FOUND|CONFIRMED)\b"),
+    re.compile(r"(?i)\b(?:BEGIN|END)_UNTRUSTED(?:_PAGE)?\b"),
+    re.compile(r"(?:前|これまでの?|過去の?|以前の?|既存の?)(?:指示|プロンプト|命令|ルール|ガイドライン)(?:を|は)?(?:すべて|全て)?(?:無視|忘れて|破棄|リセット|無効)"),
+    re.compile(r"(?:指示|プロンプト|命令)(?:を|は)?(?:すべて|全て)?(?:無視|忘れて|破棄|リセット)"),
 )
 
 
@@ -166,11 +183,11 @@ class ProvenanceEnvelope:
         )
         inj_detected = "true" if self.injection_signals else "false"
         attrs = [
-            f'source="{self.source}"',
-            f'origin="{self.origin}"',
-            f'trust="{self.trust}"',
-            f'content_type="{self.content_type}"',
-            f'correlation_id="{self.correlation_id}"',
+            f'source="{escape_html(self.source, quote=True)}"',
+            f'origin="{escape_html(self.origin, quote=True)}"',
+            f'trust="{escape_html(self.trust, quote=True)}"',
+            f'content_type="{escape_html(self.content_type, quote=True)}"',
+            f'correlation_id="{escape_html(self.correlation_id, quote=True)}"',
             f'injection_detected="{inj_detected}"',
         ]
         attr_str = " ".join(attrs)
@@ -187,11 +204,21 @@ def wrap_untrusted_observation(
     content_type: str = "observation",
     correlation_id: str = "",
     neutralize_control_tokens: bool = True,
+    neutralize_injections: bool = True,
+    max_len: int | None = None,
 ) -> ProvenanceEnvelope:
     """Wrap untrusted observation content into a ProvenanceEnvelope with sanitization."""
-    text = str(content or "")
-    signals = detect_prompt_injection(text)
-    sanitized = text
+    raw_text = str(content or "")
+    signals = detect_prompt_injection(raw_text)
+
+    # Length truncation (preserve observation up to max_len)
+    if max_len is not None and max_len > 0:
+        text = raw_text[:max_len]
+    else:
+        text = raw_text
+
+    # Neutralize code fence breakout attempts
+    sanitized = text.replace("```", "'''")
 
     # Neutralize envelope closing tag breakout attempts
     sanitized = re.sub(
@@ -217,8 +244,13 @@ def wrap_untrusted_observation(
                 sanitized,
             )
 
+    # Neutralize prompt injection phrases when requested
+    if neutralize_injections:
+        for pat in _PROMPT_INJECTION_NEUTRALIZE_PATTERNS:
+            sanitized = pat.sub("[REDACTED]", sanitized)
+
     return ProvenanceEnvelope(
-        content=text,
+        content=raw_text,
         source=str(source),
         origin=str(origin),
         trust=TrustLevel.UNTRUSTED_TARGET.value,

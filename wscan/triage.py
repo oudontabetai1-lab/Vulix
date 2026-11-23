@@ -535,6 +535,8 @@ class TriageEngine:
             if not await pg._check_llm_available():
                 return ""
 
+            from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
             # Summarize findings for the LLM
             summary_parts = []
             for fr in self.report.field_risks[:20]:  # limit to 20
@@ -548,10 +550,23 @@ class TriageEngine:
                         f"URL={pr.url} header_issues={'; '.join(pr.header_issues[:3])}"
                     )
 
+            target_url = (
+                getattr(self, "target_url", "")
+                or getattr(getattr(self, "report", None), "target_url", "")
+                or ""
+            )
+            raw_summary = "\n".join(summary_parts)
+            wrapped_summary = wrap_untrusted_observation(
+                raw_summary,
+                source=ContentSource.DOM.value,
+                origin=target_url,
+                content_type=ContentType.OBSERVATION.value,
+            ).format_tagged_block()
+
             prompt = (
                 "You are a web security expert. I ran a triage (no payload sending) "
                 "on a web application and collected this structural analysis:\n\n"
-                + "\n".join(summary_parts)
+                + wrapped_summary
                 + "\n\nBased on this, give a brief (5-8 bullet points) prioritized "
                 "attack strategy. Focus on the highest impact attack paths. "
                 "Mention which specific fields to target first and why."
