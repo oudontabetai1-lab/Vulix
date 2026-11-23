@@ -46,11 +46,11 @@ body {
   background: var(--text-muted);
   flex-shrink: 0;
 }
-.status-dot.running { background: var(--running); animation: pulse 1.5s infinite; }
-.status-dot.done { background: var(--success); }
-.status-dot.error { background: var(--critical); }
-.status-dot.aborted { background: var(--high); }
-.status-dot.incomplete { background: var(--medium); }
+.status-dot.running { background: var(--state-running); animation: pulse 1.5s infinite; }
+.status-dot.done { background: var(--state-completed); }
+.status-dot.error { background: var(--state-failed); }
+.status-dot.aborted { background: var(--state-paused); }
+.status-dot.incomplete { background: var(--status-not-checked); }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 .status-text { color: var(--text-muted); font-size: 0.85rem; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.status-bar{min-width:0}
 .header-stats {
@@ -82,9 +82,9 @@ body {
   border: 1px solid rgba(199, 185, 106, 0.4);
 }
 .header-stat .eta-meta.eta-high {
-  background: rgba(34, 197, 94, 0.15);
-  color: #2ecc71;
-  border: 1px solid rgba(34, 197, 94, 0.3);
+  background: var(--status-pass-bg);
+  color: var(--state-completed);
+  border: 1px solid var(--status-pass-border);
 }
 .header-stat .eta-meta.eta-calibrating, .header-stat .eta-meta.eta-indeterminate {
   background: var(--surface2);
@@ -92,9 +92,9 @@ body {
   border: 1px solid var(--border);
 }
 .header-stat .eta-meta.eta-paused {
-  background: rgba(241, 196, 15, 0.15);
-  color: #f1c40f;
-  border: 1px solid rgba(241, 196, 15, 0.3);
+  background: var(--status-warning-bg);
+  color: var(--state-paused);
+  border: 1px solid var(--status-warning-border);
 }
 .header-stat .eta-range {
   display: inline-block;
@@ -519,8 +519,8 @@ body {
 .net-key { color: #79c0ff; }
 .net-val { color: #b5abfc; }
 .net-body { color: #e9e9ed; }
-.net-status-ok { color: var(--low); }
-.net-status-err { color: var(--critical); }
+.net-status-ok { color: var(--status-pass); }
+.net-status-err { color: var(--status-fail); }
 
 /* ─── Intervention Toolbar ───────────────────────────────────── */
 .intervention-bar {
@@ -555,11 +555,11 @@ body {
   gap: 5px;
 }
 .ib-btn:hover { background: var(--surface); border-color: var(--accent); }
-.ib-btn.pause  { color: var(--high); border-color: var(--high); }
-.ib-btn.resume { color: var(--success); border-color: var(--success); }
+.ib-btn.pause  { color: var(--state-paused); border-color: var(--status-warning-border); }
+.ib-btn.resume { color: var(--state-completed); border-color: var(--status-pass-border); }
 .ib-btn.skip-f { color: var(--info); }
 .ib-btn.skip-p { color: var(--accent); }
-.ib-btn.abort  { color: var(--critical); border-color: var(--critical); }
+.ib-btn.abort  { color: var(--state-failed); border-color: var(--status-fail-border); }
 .ib-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .ib-pause-state {
   font-size: 0.7rem;
@@ -568,7 +568,7 @@ body {
   margin-left: 4px;
   display: none;
 }
-.ib-pause-state.visible { display: inline-block; background: rgba(217,154,99,.18); color: var(--high); font-weight: 700; }
+.ib-pause-state.visible { display: inline-block; background: var(--status-warning-bg); color: var(--state-paused); font-weight: 700; border: 1px solid var(--status-warning-border); }
 
 /* ─── Plan Review Modal ──────────────────────────────────────── */
 .plan-modal-overlay {
@@ -1117,29 +1117,29 @@ body { padding-left: 212px; }
   border: 1px solid transparent;
 }
 .history-status-done {
-  background: rgba(143,185,201,0.15);
-  color: var(--low);
-  border-color: rgba(143,185,201,0.3);
+  background: var(--status-pass-bg);
+  color: var(--state-completed);
+  border-color: var(--status-pass-border);
 }
 .history-status-scanning {
-  background: rgba(217,154,99,0.15);
-  color: var(--running);
-  border-color: rgba(217,154,99,0.3);
+  background: var(--status-running-bg);
+  color: var(--state-running);
+  border-color: var(--status-running-border);
 }
 .history-status-aborted {
-  background: rgba(217,154,99,0.18);
-  color: var(--high);
-  border-color: rgba(217,154,99,0.35);
+  background: var(--status-warning-bg);
+  color: var(--state-paused);
+  border-color: var(--status-warning-border);
 }
 .history-status-incomplete {
-  background: rgba(147,151,171,0.15);
+  background: var(--surface2);
   color: var(--text-muted);
-  border-color: rgba(147,151,171,0.3);
+  border-color: var(--border);
 }
 .history-status-error {
-  background: rgba(226,112,143,0.15);
-  color: var(--critical);
-  border-color: rgba(226,112,143,0.3);
+  background: var(--status-fail-bg);
+  color: var(--state-failed);
+  border-color: var(--status-fail-border);
 }
 
 .history-sev-badges {
@@ -1441,7 +1441,7 @@ body { padding-left: 212px; }
 
 .ws-rail .ws-cur{padding:12px 12px 2px}
 .ws-rail .ws-eyebrow{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px}
-.ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--text-muted)}.ws-rail .pulse.running{background:var(--running);animation:wsPulseRail 1.8s ease-in-out infinite}.ws-rail .pulse.done{background:var(--success)}.ws-rail .pulse.error{background:var(--critical)}.ws-rail .pulse.aborted{background:var(--high)}
+.ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--text-muted)}.ws-rail .pulse.running{background:var(--state-running);animation:wsPulseRail 1.8s ease-in-out infinite}.ws-rail .pulse.done{background:var(--state-completed)}.ws-rail .pulse.error{background:var(--state-failed)}.ws-rail .pulse.aborted{background:var(--state-paused)}
 @keyframes wsPulseRail{0%,100%{opacity:1}50%{opacity:.35}}
 .ws-rail .ws-cur-status{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ws-rail .foot{margin-top:auto;padding:0 18px;display:flex;flex-direction:column;gap:8px;font-size:11.5px;color:var(--text-muted)}

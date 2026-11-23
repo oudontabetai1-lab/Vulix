@@ -174,6 +174,17 @@ def test_tokens_semantic_separation_and_distinctness():
         assert token_key in tokens, f"Missing state token {token_key}"
         assert tokens[token_key].startswith("#"), f"State token {token_key} must resolve to a hex color"
 
+    # Operational state running must not reuse brand accent
+    assert tokens["--state-running"] != tokens["--accent-primary"]
+    assert tokens["--state-running"] != tokens["--accent"]
+
+    # Verify templates/app.html does not reuse brand accent for running scan-state
+    app_html = (ROOT / "templates" / "app.html").read_text(encoding="utf-8")
+    running_rule_match = re.search(r"\.scan-state-running[^{]*\{([^}]*)\}", app_html)
+    assert running_rule_match, "Could not find .scan-state-running in templates/app.html"
+    assert "var(--accent)" not in running_rule_match.group(1), ".scan-state-running must not reuse var(--accent)"
+    assert "var(--state-running)" in running_rule_match.group(1), ".scan-state-running must use var(--state-running)"
+
     # Selection & focus tokens
     assert "--focus-ring" in tokens
     assert "--focus-outline" in tokens
