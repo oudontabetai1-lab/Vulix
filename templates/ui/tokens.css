@@ -1,3 +1,29 @@
+/* ==========================================================================
+   Vulix UI Design System - Semantic Design Tokens
+   --------------------------------------------------------------------------
+   Allowed vs. Prohibited Decoration Rules:
+   - Shadows: PROHIBITED: Large diffuse colorful glows, neon drop-shadows,
+     or unmotivated gradient halos across operational triage screens.
+     ALLOWED: Subtle dark elevation shadows (e.g., 0 1px 3px rgba(0,0,0,0.3))
+     or modal elevation scrims. Scoped legacy exception: portal splash hero.
+   - Blur: PROHIBITED: Gratuitous backdrop-filter blur on scrollable data
+     tables, code panels, cards, or headers (degrades rendering performance
+     during high-throughput event streams and blurs text). ALLOWED: Dark
+     dialog scrim overlays (rgba(0,0,0,0.6)) for modal focus isolation.
+     Scoped legacy exception: static portal.html welcome cards.
+   - Radius: PROHIBITED: Uniform large 16px-24px border-radii on desktop data
+     grids/tables. ALLOWED: 4px for compact inputs/buttons, 6-8px for cards,
+     and 9999px strictly reserved for status/severity pill badges.
+   - Borders: PROHIBITED: Gradient borders, rainbow borders, or thick borders.
+     ALLOWED: 1px hairline solid borders (using border token #3f424d) to define
+     structural data separation.
+   - Accent: PROHIBITED: Mixing brand purple with severity or status states.
+     ALLOWED: Interactive focus rings, active tab indicators, and primary CTAs.
+   - Animation: PROHIBITED: Looping decorative wobbles, marquee text, or
+     distracting pulsing cards. ALLOWED: 150ms hover/focus color transitions
+     and purposeful scan progress indicators.
+   ========================================================================== */
+
 :root {
   /* Surface & Base */
   --bg: #161826;
@@ -8,6 +34,10 @@
   --text: #e9e9ed;
   --text-muted: #9397ab;
 
+  /* Font family tokens */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+
   /* Semantic typography tokens */
   --font-size-2xs: 0.7rem;
   --font-size-xs: 0.75rem;
@@ -16,6 +46,16 @@
   --font-size-md: 1rem;
   --font-size-lg: 1.15rem;
 
+  /* Type scale aliases */
+  --text-2xs: 0.7rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.15rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+
   /* Line height tokens */
   --line-height-tight: 1.25;
   --line-height-base: 1.5;
@@ -23,11 +63,12 @@
 
   /* Brand (isolated from status) */
   --accent: #9184d9;
+  --accent-primary: #9184d9;
   --accent-glow: rgba(145,132,217,0.18);
 
   /* Severities */
-  --critical: #e2708f;
-  --high: #d99a63;
+  --critical: #f796ad;
+  --high: #e4a770;
   --medium: #c7b96a;
   --low: #8fb9c9;
   --info: #b5abfc;
@@ -37,9 +78,9 @@
   --status-pass-bg: rgba(34, 197, 94, 0.12);
   --status-pass-border: rgba(34, 197, 94, 0.3);
 
-  --status-fail: #e2708f;
-  --status-fail-bg: rgba(226, 112, 143, 0.12);
-  --status-fail-border: rgba(226, 112, 143, 0.3);
+  --status-fail: #f796ad;
+  --status-fail-bg: rgba(247, 150, 173, 0.12);
+  --status-fail-border: rgba(247, 150, 173, 0.3);
 
   --status-warning: #c7b96a;
   --status-warning-bg: rgba(199, 185, 106, 0.12);
@@ -53,17 +94,17 @@
   --status-unknown-bg: #232532;
   --status-unknown-border: #3f424d;
 
-  --status-unavailable: #e2708f;
-  --status-unavailable-bg: rgba(226, 112, 143, 0.12);
-  --status-unavailable-border: rgba(226, 112, 143, 0.3);
+  --status-unavailable: #f796ad;
+  --status-unavailable-bg: rgba(247, 150, 173, 0.12);
+  --status-unavailable-border: rgba(247, 150, 173, 0.3);
 
-  --status-stale: #d99a63;
-  --status-stale-bg: rgba(217, 154, 99, 0.12);
-  --status-stale-border: rgba(217, 154, 99, 0.3);
+  --status-stale: #e67e22;
+  --status-stale-bg: rgba(230, 126, 34, 0.12);
+  --status-stale-border: rgba(230, 126, 34, 0.3);
 
-  --status-running: #d99a63;
-  --status-running-bg: rgba(217, 154, 99, 0.12);
-  --status-running-border: rgba(217, 154, 99, 0.3);
+  --status-running: #e4a770;
+  --status-running-bg: rgba(228, 167, 112, 0.12);
+  --status-running-border: rgba(228, 167, 112, 0.3);
 
   /* Legacy aliases: same computed values as --status-*, no second copy of the colour */
   --success: var(--status-pass);
@@ -87,25 +128,39 @@
   --density-spacious-padding: 16px 20px;
   --density-spacious-gap: 16px;
 
-  /* Focus ring */
+  /* Row density tokens */
+  --density-row-compact: 28px;
+  --density-row-standard: 36px;
+
+  /* Focus ring & selection */
   --focus-ring: 0 0 0 2px var(--accent);
   --focus-ring-offset: 2px;
   --focus-outline: 2px solid var(--accent);
+  --selection-bg: rgba(145, 132, 217, 0.16);
+  --selection-border: var(--accent-primary);
+
+  /* Execution / freshness state tokens */
+  --state-running: var(--status-running);
+  --state-unverified: var(--low);
+  --state-stale: var(--status-stale);
+  --state-paused: var(--status-warning);
+  --state-completed: var(--status-pass);
+  --state-failed: var(--status-fail);
 
   /* State patterns */
-  --state-error-text: #e2708f;
-  --state-error-bg: rgba(226, 112, 143, 0.12);
-  --state-error-border: rgba(226, 112, 143, 0.3);
+  --state-error-text: var(--status-fail);
+  --state-error-bg: var(--status-fail-bg);
+  --state-error-border: var(--status-fail-border);
   --state-loading-text: #9397ab;
   --state-empty-text: #9397ab;
 
   /* Crawl graph palette (separate from status colors) */
   --graph-node-page: #9184d9;
-  --graph-node-form: #d99a63;
+  --graph-node-form: #e4a770;
   --graph-node-param: #8fb9c9;
   --graph-node-unknown: #9397ab;
   --graph-node-bg: #1c1e2c;
-  --graph-node-findings: #e2708f;
+  --graph-node-findings: #f796ad;
   --graph-node-text: #e9e9ed;
   --graph-node-subtext: #9397ab;
   --graph-edge: #4a5568;
