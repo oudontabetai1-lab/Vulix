@@ -191,6 +191,7 @@ class AgentEngine:
         self.totp_secret = str(totp_secret or "")
         self.storage_state = str(storage_state or "")
         self.resume = bool(resume)
+        self.wave_errors: list[str] = []
         self.proxy = normalize_proxy_server(proxy)
         import math as _math
         try:
@@ -288,6 +289,14 @@ class AgentEngine:
         )
 
         result: AgentScanResult = await scanner.run()
+        result.network_guard_errors = list(getattr(scanner, "_network_guard_errors", ()))
+        self.wave_errors.extend(result.network_guard_errors)
+        if result.network_guard_errors:
+            result.success = False
+            result.coverage_gaps = list(dict.fromkeys([
+                *result.coverage_gaps,
+                "network_scope_blocked: one or more browser requests were blocked",
+            ]))
 
         if getattr(result, "preserve_existing_artifacts", False) or (
             self.resume and self._existing_run_dir and result.error
@@ -335,6 +344,7 @@ class AgentEngine:
                 "final_summary": safe_summary,
                 "harness_status": getattr(result, "harness_status", ""),
                 "coverage_gaps": getattr(result, "coverage_gaps", []),
+                "network_guard_errors": getattr(result, "network_guard_errors", []),
                 "auth_verification_status": getattr(result, "auth_verification_status", None),
                 "auth_verification_reasons": getattr(result, "auth_verification_reasons", []),
                 "findings": [f.to_dict() for f in findings],

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import hashlib
+import ipaddress
 import json
 import inspect
 import os
@@ -30,7 +31,7 @@ import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
 from rich.console import Console
 from rich.rule import Rule
@@ -65,6 +66,8 @@ from .content_provenance import (
     ContentType,
     wrap_untrusted_observation,
 )
+from .runtime_scope_guard import ScopePolicy, evaluate_scope
+from .request_logger import redact_url
 
 if TYPE_CHECKING:
     from wscan.monitor import MonitorServer
@@ -72,6 +75,69 @@ if TYPE_CHECKING:
 console = Console()
 
 _TARGET_HANDLER_TIMEOUT_SECONDS = 3.0
+
+
+def _agent_network_block_reason(request: dict, policy: ScopePolicy, *, auth_phase=False,
+                                login_url="", exclude_fields=()) -> str:
+    """CDP request pause 時の scope/mutation 判定。理由コードだけを返す純粋関数。"""
+    url = str(request.get("url") or "")
+    decision = evaluate_scope(url, policy)
+    if not decision.allowed:
+        return decision.reason
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        ip = ipaddress.ip_address(host.strip("[]"))
+        if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_unspecified:
+            explicitly_scoped = decision.reason.startswith((
+                "target_url", "access_url", "login_url",
+            ))
+            if not explicitly_scoped:
+                return "private_address"
+    except ValueError:
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
+        if host in {"localhost", "metadata.google.internal"} and not decision.reason.startswith((
+            "target_url", "access_url", "login_url",
+        )):
+            return "private_address"
+    method = str(request.get("method") or "GET").upper()
+    if method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return ""
+    if login_url and evaluate_scope(url, ScopePolicy(target_urls=(login_url,))).allowed:
+        return ""
+    initiator_url = str((request.get("initiator") or {}).get("url") or "")
+    if auth_phase and (
+        not login_url or (
+            initiator_url and evaluate_scope(
+                initiator_url, ScopePolicy(target_urls=(login_url,))
+            ).allowed
+        )
+    ):
+        return ""
+    # Body fields can be detected for urlencoded and JSON form submissions.
+    body = str(request.get("postData") or request.get("post_data") or "")
+    names = {
+        name.casefold()
+        for name, _ in parse_qsl(parsed.query, keep_blank_values=True)
+    }
+    names.update(name.casefold() for name, _ in parse_qsl(body, keep_blank_values=True))
+    try:
+        parsed_body = json.loads(body)
+        if isinstance(parsed_body, dict):
+            names.update(str(name).casefold() for name in parsed_body)
+    except (TypeError, ValueError):
+        pass
+    excluded = {str(name).strip().casefold() for name in exclude_fields if str(name).strip()}
+    if names & excluded:
+        return "excluded_field"
+    # This evaluator's target/access classification is shared with the HTTP guard.
+    if decision.reason.startswith("access_url") or decision.reason == "login_url":
+        return "access_only_mutation"
+    return ""
+
+
+def _agent_network_safe_url(url: str) -> str:
+    return redact_url(str(url or ""))
 
 
 def parse_reviewer_gap_lines(text: str) -> tuple[list[str], list[str]]:
@@ -452,6 +518,7 @@ class AgentScanResult:
     auth_verification_status: Optional[str] = None
     auth_verification_reasons: list[str] = field(default_factory=list)
     preserve_existing_artifacts: bool = False
+    network_guard_errors: list[str] = field(default_factory=list)
 
 
 # ── LLM ファクトリ ──────────────────────────────────────────────────────────
@@ -785,6 +852,11 @@ class AgentBrowserScanner:
         self._auth_verification = None
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
+        self._network_guard_errors: list[str] = []
+        self._network_guard_policy = ScopePolicy(
+            target_urls=tuple(self.target_urls), access_urls=tuple(self.access_urls),
+            exclude_urls=tuple(self.exclude_urls), login_url=self.login_url,
+        )
 
     def _warn_missing_header_url_api(self) -> None:
         """現在 URL を安全に判定できない browser-use 版を一度だけ警告する。"""
@@ -934,6 +1006,45 @@ class AgentBrowserScanner:
 
                     request = event.get("request") or {}
                     request_url = request.get("url") or ""
+                    auth_phase = bool(
+                        self._active_role == AgentRole.AUTHENTICATOR
+                        or (
+                            self._harness
+                            and self._harness.state.phase == AgentPhase.AUTHENTICATING
+                        )
+                    )
+                    block_reason = _agent_network_block_reason(
+                        request, self._network_guard_policy,
+                        auth_phase=auth_phase, login_url=self.login_url,
+                        exclude_fields=self.exclude_fields,
+                    )
+                    if block_reason:
+                        safe_url = _agent_network_safe_url(request_url)
+                        message = f"network_scope_blocked:{block_reason}:{safe_url}"
+                        self._network_guard_errors.append(message)
+                        if self._harness:
+                            try:
+                                self._harness.record_reviewer_gaps((message,))
+                            except Exception:
+                                pass
+                        if self.monitor:
+                            try:
+                                await self.monitor.emit_status(
+                                    f"Agent network guard blocked {block_reason} at {safe_url}",
+                                    "warning",
+                                )
+                            except Exception:
+                                pass
+                        # failRequest が失敗しても continueRequest に倒して通信を
+                        # 通さない。request は未解決のまま browser 側 timeout に任せる。
+                        continued = True
+                        await asyncio.wait_for(
+                            fetch_commands.failRequest(
+                                params={"requestId": request_id, "errorReason": "BlockedByClient"},
+                                session_id=continue_session_id,
+                            ), timeout=3.0,
+                        )
+                        return
                     params = {"requestId": request_id}
                     if headers_allowed_for_url(request_url, self._header_origins):
                         existing_headers = request.get("headers") or {}

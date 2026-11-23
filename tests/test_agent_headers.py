@@ -12,10 +12,13 @@ from unittest import mock
 from unittest.mock import AsyncMock, patch
 
 import main
+from wscan.runtime_scope_guard import ScopePolicy
 from wscan.agent_engine import AgentEngine
 from wscan.header_manager import apply_bearer, parse_header_args
 from wscan.llm_agent_browser import (
     AgentBrowserScanner,
+    _agent_network_block_reason,
+    _agent_network_safe_url,
     allowed_header_origins,
     effective_origin_url,
     expand_scheme_variants,
@@ -97,6 +100,9 @@ class _FetchCommands:
         self.calls.append(("continueRequest", params, session_id))
         if self.fail_header_continue and "headers" in params:
             raise RuntimeError("Fetch continue failed")
+
+    async def failRequest(self, params=None, session_id=None):
+        self.calls.append(("failRequest", params, session_id))
 
     async def continueWithAuth(self, params, session_id=None):
         self.calls.append(("continueWithAuth", params, session_id))
@@ -584,7 +590,7 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    async def test_request_scoped_headers_omits_headers_for_disallowed_origin(self):
+    async def test_request_scoped_headers_blocks_out_of_scope_origin(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",
             extra_headers={"Authorization": "Bearer test-token"},
@@ -607,8 +613,8 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             session.fetch_commands.calls[-1],
             (
-                "continueRequest",
-                {"requestId": "disallowed-request"},
+                "failRequest",
+                {"requestId": "disallowed-request", "errorReason": "BlockedByClient"},
                 "target-session",
             ),
         )
@@ -1321,6 +1327,74 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             "対象外ページへ認証情報が送信される可能性があります。",
             "running",
         )
+
+
+class AgentNetworkScopeGuardTests(unittest.IsolatedAsyncioTestCase):
+    def test_network_guard_blocks_scope_access_mutation_and_metadata(self):
+        policy = ScopePolicy(
+            target_urls=("https://target.test", "http://127.0.0.1:8000"),
+            access_urls=("https://login.test",),
+            exclude_urls=("*logout*",),
+            login_url="https://login.test/sign-in",
+        )
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "https://outside.test/", "method": "GET"}, policy),
+            "out_of_scope_destination")
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "https://login.test/profile", "method": "POST"}, policy),
+            "access_only_mutation")
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "http://169.254.169.254/latest/meta-data", "method": "GET"}, policy),
+            "out_of_scope_destination")
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "https://target.test/logout", "method": "GET"}, policy),
+            "excluded_url")
+
+    def test_network_guard_allows_scoped_reads_localhost_target_and_login_posts(self):
+        policy = ScopePolicy(
+            target_urls=("https://target.test", "http://127.0.0.1:8000"),
+            access_urls=("https://login.test",),
+            login_url="https://login.test/sign-in",
+        )
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "https://target.test/assets/app.js", "method": "GET"}, policy), "")
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "http://127.0.0.1:8000/", "method": "GET"}, policy), "")
+        local_access_policy = ScopePolicy(access_urls=("http://localhost:9000/login",))
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "http://localhost:9000/login", "method": "GET"}, local_access_policy), "")
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "https://login.test/sign-in", "method": "POST"}, policy,
+            login_url=policy.login_url), "")
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "https://login.test/otp", "method": "POST",
+             "initiator": {"url": "https://login.test/sign-in"}},
+            policy, auth_phase=True, login_url=policy.login_url), "")
+
+    def test_network_guard_blocks_excluded_field_and_redacts_userinfo(self):
+        policy = ScopePolicy(target_urls=("https://target.test",))
+        self.assertEqual(_agent_network_block_reason(
+            {"url": "https://target.test/update", "method": "POST",
+             "postData": "profile=ok&secret_note=private"}, policy,
+            exclude_fields=("secret_note",)), "excluded_field")
+        self.assertNotIn("user:password", _agent_network_safe_url(
+            "https://user:password@target.test/update"))
+
+    async def test_cdp_callback_fails_blocked_request_without_continuing(self):
+        scanner = AgentBrowserScanner("https://target.test")
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_fetch_for_cdp_target(
+            session.cdp_session.cdp_client, "target-session", "target-1")
+        await session.fetch_registration.callback({
+            "requestId": "request-1",
+            "request": {"url": "https://user:pass@outside.test/private", "method": "GET"},
+        }, "target-session")
+        self.assertIn(("failRequest", {
+            "requestId": "request-1", "errorReason": "BlockedByClient",
+        }, "target-session"), session.fetch_commands.calls)
+        self.assertFalse(any(call[0] == "continueRequest" for call in session.fetch_commands.calls))
+        self.assertIn("network_scope_blocked:out_of_scope_destination", scanner._network_guard_errors[0])
+        self.assertNotIn("user:pass", scanner._network_guard_errors[0])
 
 
 class AgentAuthenticatedProxyFetchTests(unittest.IsolatedAsyncioTestCase):
