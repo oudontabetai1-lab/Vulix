@@ -10,10 +10,12 @@ Verifies:
 """
 from __future__ import annotations
 
+import http.server
 import json
 from pathlib import Path
 import re
 import subprocess
+import threading
 import time
 import urllib.request
 
@@ -1241,38 +1243,74 @@ def test_setup_start_scan_duplicate_click_prevention():
 def test_setup_start_scan_rejection_shows_error_and_stays_on_setup():
     """Verify that scan rejection retains #/setup, displays the rejection reason, and re-enables the button."""
     require_browser()
-    with UIHarness(seed_fixtures=False) as harness:
-        page = harness.new_page()
-        try:
-            page.goto(f"{harness.server_url}/app#/setup", wait_until="domcontentloaded")
-            page.wait_for_selector("#setupSurface")
-            page.wait_for_function("() => Boolean(document.querySelector('#monitorFrame')?.contentWindow?.state?.ws)")
+    scan_received = threading.Event()
+    release_barrier = threading.Event()
 
-            page.locator("#cfgInputUrl").fill("http://127.0.0.1:18080")
+    class HeldScanHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            scan_received.set()
+            release_barrier.wait(timeout=15)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<!doctype html><html><body><h1>held scan target</h1></body></html>")
 
-            # 1. Start a scan
-            page.locator("#setupStartScanBtn").click()
-            page.wait_for_function("() => location.hash.includes('/monitor')")
+        def log_message(self, format, *args):
+            pass
 
-            # 2. Return to setup immediately while the first scan is still scanning
-            page.locator('[data-route="setup"]').click()
-            page.wait_for_function("() => location.hash.includes('/setup')")
+    held_server = http.server.HTTPServer(("127.0.0.1", 0), HeldScanHandler)
+    held_port = held_server.server_address[1]
+    server_thread = threading.Thread(target=held_server.serve_forever, daemon=True)
+    server_thread.start()
 
-            # Try to start another scan
-            page.locator("#setupStartScanBtn").click()
+    try:
+        with UIHarness(seed_fixtures=False) as harness:
+            page = harness.new_page()
+            try:
+                page.goto(f"{harness.server_url}/app#/setup", wait_until="domcontentloaded")
+                page.wait_for_selector("#setupSurface")
+                page.wait_for_function("() => Boolean(document.querySelector('#monitorFrame')?.contentWindow?.state?.ws)")
 
-            # Wait for rejection error banner to appear
-            page.wait_for_selector("#setupStartError:not([hidden])", timeout=5000)
-            err_text = page.locator("#setupStartError").inner_text()
-            assert "拒否" in err_text and "実行中" in err_text
+                page.locator("#cfgInputUrl").fill(f"http://127.0.0.1:{held_port}")
 
-            # Hash must still be #/setup
-            assert "#/setup" in page.evaluate("() => location.hash")
+                # 1. Start a scan
+                page.locator("#setupStartScanBtn").click()
 
-            # Button should be re-enabled
-            assert page.locator("#setupStartScanBtn").is_enabled()
-        finally:
-            page.close()
+                # Wait for scan engine to hit the target fixture
+                assert scan_received.wait(timeout=10), "Scan engine did not reach held scan target"
+
+                # Prove actual server scan_in_progress
+                req = urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status")
+                try:
+                    status_payload = json.loads(req.read().decode())
+                    assert status_payload.get("status") == "scanning", f"Server scan status expected 'scanning', got: {status_payload}"
+                finally:
+                    req.close()
+
+                # 2. Return to setup while the first scan is still actively running
+                page.locator('[data-route="setup"]').click()
+                page.wait_for_function("() => location.hash.includes('/setup')")
+
+                # Try to start another scan while scan_in_progress is True
+                page.locator("#setupStartScanBtn").click()
+
+                # Wait for rejection error banner to appear
+                page.wait_for_selector("#setupStartError:not([hidden])", timeout=5000)
+                err_text = page.locator("#setupStartError").inner_text()
+                assert "拒否" in err_text and "実行中" in err_text
+
+                # Hash must still be #/setup
+                assert "#/setup" in page.evaluate("() => location.hash")
+
+                # Button should be re-enabled
+                assert page.locator("#setupStartScanBtn").is_enabled()
+            finally:
+                page.close()
+    finally:
+        release_barrier.set()
+        held_server.shutdown()
+        held_server.server_close()
+        server_thread.join(timeout=3.0)
 
 
 def test_setup_start_scan_accepted_navigates_and_updates_context():
