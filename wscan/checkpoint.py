@@ -40,7 +40,8 @@ if TYPE_CHECKING:
 # v9: field/check ごとの phase 別 payload 候補スナップショットと legacy unknown を保存。
 # v10: baseline LLM 一時失敗の未回収単位を保存。
 # v11: 送信済み payload 指紋と完全性を保存。
-CHECKPOINT_VERSION = 11
+# v12: 指紋の完全性を baseline/adaptive 等の route ごとに分離。
+CHECKPOINT_VERSION = 12
 CHECKPOINT_FILENAME = "checkpoint.json"
 MAX_PAYLOAD_FINGERPRINTS_PER_UNIT = 4096
 _PAYLOAD_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -175,65 +176,106 @@ class CheckpointState:
         return self._candidate_unit_key(ip, check_type) in self.payload_fingerprints
 
     def get_payload_fingerprints_ip(
-        self, ip: "InjectionPoint", check_type: str,
+        self, ip: "InjectionPoint", check_type: str, route: str = "baseline",
     ) -> tuple[bool, set[str], str]:
-        """完全な指紋列のみ信用する。不在・旧形式・破損・上限超過は理由付きで失敗。"""
+        """対象 route の完全性を返し、全 route の指紋を dedup 用に合併する。"""
         if not isinstance(self.payload_fingerprints, dict):
             return False, set(), "fingerprints_invalid"
         key = self._candidate_unit_key(ip, check_type)
         entry = self.payload_fingerprints.get(key)
         if entry is None:
             return False, set(), "fingerprints_missing"
-        if not isinstance(entry, dict) or entry.get("version") != 1:
+        if not isinstance(entry, dict):
             return False, set(), "fingerprints_legacy_or_invalid"
-        values = entry.get("fingerprints")
-        if (
-            not isinstance(values, list)
-            or any(not isinstance(value, str) or not _PAYLOAD_FINGERPRINT_RE.fullmatch(value) for value in values)
-        ):
+        # v1 was a single shared set. Continue reading it as the baseline history;
+        # this also lets a subsequent write migrate it without losing old hashes.
+        if entry.get("version") == 1:
+            routes = {"baseline": entry}
+        elif entry.get("version") == 2 and isinstance(entry.get("routes"), dict):
+            routes = entry["routes"]
+        else:
             return False, set(), "fingerprints_invalid"
-        if entry.get("truncated") is True or len(values) > MAX_PAYLOAD_FINGERPRINTS_PER_UNIT:
-            return False, set(), "fingerprints_truncated"
-        if entry.get("complete") is not True:
-            return False, set(), "fingerprints_incomplete"
-        return True, set(values), ""
+        fingerprints: set[str] = set()
+        selected_complete = False
+        selected_reason = "fingerprints_missing"
+        for route_name, route_entry in routes.items():
+            if not isinstance(route_name, str) or not isinstance(route_entry, dict):
+                return False, set(), "fingerprints_invalid"
+            values = route_entry.get("fingerprints")
+            if (
+                not isinstance(values, list)
+                or any(not isinstance(value, str) or not _PAYLOAD_FINGERPRINT_RE.fullmatch(value) for value in values)
+            ):
+                return False, set(), "fingerprints_invalid"
+            fingerprints.update(values)
+            if route_entry.get("truncated") is True or len(values) > MAX_PAYLOAD_FINGERPRINTS_PER_UNIT:
+                if route_name == route:
+                    selected_reason = "fingerprints_truncated"
+                continue
+            if route_name == route:
+                selected_complete = route_entry.get("complete") is True
+                selected_reason = "" if selected_complete else "fingerprints_incomplete"
+        return selected_complete, fingerprints, selected_reason
+
+    def _fingerprint_routes(self, key: str, *, migrate: bool = False) -> dict | None:
+        """Return route entries and optionally migrate the prior shared-set format."""
+        if not isinstance(self.payload_fingerprints, dict):
+            return None
+        entry = self.payload_fingerprints.get(key)
+        if entry is None:
+            entry = {"version": 2, "routes": {}}
+            self.payload_fingerprints[key] = entry
+        elif isinstance(entry, dict) and entry.get("version") == 1:
+            if not migrate:
+                return {"baseline": entry}
+            entry = {"version": 2, "routes": {"baseline": entry}}
+            self.payload_fingerprints[key] = entry
+        if not isinstance(entry, dict) or entry.get("version") != 2:
+            return None
+        routes = entry.get("routes")
+        if not isinstance(routes, dict):
+            return None
+        return routes
 
     def begin_payload_fingerprints_ip(
-        self, ip: "InjectionPoint", check_type: str,
+        self, ip: "InjectionPoint", check_type: str, route: str = "baseline",
     ) -> bool:
-        """初回掃射前に未完の指紋記録を作る。既存記録は上書きしない。"""
+        """指定 route の初回掃射前に未完の指紋記録を作る。"""
         if not isinstance(self.payload_fingerprints, dict):
             return False
         key = self._candidate_unit_key(ip, check_type)
-        if key not in self.payload_fingerprints:
-            self.payload_fingerprints[key] = {
-                "version": 1, "fingerprints": [], "complete": False, "truncated": False,
-            }
+        routes = self._fingerprint_routes(key, migrate=True)
+        if routes is None:
+            return False
+        if route not in routes:
+            routes[route] = {"fingerprints": [], "complete": False, "truncated": False}
             self.updated_at = time.time()
         return True
 
     def mark_payload_fingerprints_incomplete_ip(
-        self, ip: "InjectionPoint", check_type: str,
+        self, ip: "InjectionPoint", check_type: str, route: str = "baseline",
     ) -> bool:
-        """resume probe の前に未完状態を永続化し、途中クラッシュを fail closed にする。"""
-        if not isinstance(self.payload_fingerprints, dict):
+        """指定 route の送信直前に未完状態を永続化する。"""
+        key = self._candidate_unit_key(ip, check_type)
+        routes = self._fingerprint_routes(key, migrate=True)
+        if routes is None or not isinstance(routes.get(route), dict):
             return False
-        entry = self.payload_fingerprints.get(self._candidate_unit_key(ip, check_type))
-        if not isinstance(entry, dict) or entry.get("version") != 1:
-            return False
-        entry["complete"] = False
+        routes[route]["complete"] = False
         self.updated_at = time.time()
         return True
 
     def record_payload_fingerprint_ip(
-        self, ip: "InjectionPoint", check_type: str, payload,
+        self, ip: "InjectionPoint", check_type: str, payload, route: str = "baseline",
     ) -> bool:
-        """送信直後に本文を保持せず指紋を追記。上限到達なら不完全を固定する。"""
-        if not self.begin_payload_fingerprints_ip(ip, check_type):
+        """送信本文を保持せず route 別に指紋を追記する。"""
+        if not self.begin_payload_fingerprints_ip(ip, check_type, route):
             return False
         key = self._candidate_unit_key(ip, check_type)
-        entry = self.payload_fingerprints.get(key)
-        if not isinstance(entry, dict) or entry.get("version") != 1:
+        routes = self._fingerprint_routes(key, migrate=True)
+        if routes is None:
+            return False
+        entry = routes.get(route)
+        if not isinstance(entry, dict):
             return False
         values = entry.get("fingerprints")
         if not isinstance(values, list) or any(
@@ -254,14 +296,15 @@ class CheckpointState:
         return True
 
     def mark_payload_fingerprints_complete_ip(
-        self, ip: "InjectionPoint", check_type: str,
+        self, ip: "InjectionPoint", check_type: str, route: str = "baseline",
     ) -> bool:
-        """正常に終了した掃射だけを complete にできる（truncated は復旧不能）。"""
-        if not isinstance(self.payload_fingerprints, dict):
-            return False
+        """正常に終了した route だけ complete にする（truncated は復旧不能）。"""
         key = self._candidate_unit_key(ip, check_type)
-        entry = self.payload_fingerprints.get(key)
-        if not isinstance(entry, dict) or entry.get("version") != 1:
+        routes = self._fingerprint_routes(key, migrate=True)
+        if routes is None:
+            return False
+        entry = routes.get(route)
+        if not isinstance(entry, dict):
             return False
         values = entry.get("fingerprints")
         if (

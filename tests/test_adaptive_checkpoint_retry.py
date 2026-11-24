@@ -174,7 +174,7 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.checkpoint.findings, [existing_finding])
         self.assertEqual(engine.checkpoint.source_version, 8)
         restored = CheckpointState.from_dict(engine.checkpoint.to_dict())
-        self.assertEqual(restored.source_version, 11)
+        self.assertEqual(restored.source_version, 12)
         self.assertEqual(restored.findings, [existing_finding])
 
     async def test_legacy_adaptive_with_prior_truncation_stays_unknown(self):
@@ -205,7 +205,7 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             engine._checkpoint_mark_done.call_args_list,
         )
         restored = CheckpointState.from_dict(engine.checkpoint.to_dict())
-        self.assertEqual(restored.source_version, 11)
+        self.assertEqual(restored.source_version, 12)
         self.assertTrue(restored.is_legacy_candidate_unknown_ip(ip, "xss", "adaptive"))
         self.assertEqual(restored.findings, [existing_finding])
         self.assertEqual(

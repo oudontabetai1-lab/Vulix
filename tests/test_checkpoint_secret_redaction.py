@@ -79,7 +79,10 @@ def test_checkpoint_redacts_credentials_from_attempt_ledger_and_fingerprints(eng
     assert "[REDACTED:auth_password]" in stored_payload
     stored_fingerprints = json.dumps(data["payload_fingerprints"])
     assert "[REDACTED" not in stored_fingerprints
-    assert len(data["payload_fingerprints"][engine.checkpoint._candidate_unit_key(ip, "sqli")]["fingerprints"][0]) == 64
+    assert len(
+        data["payload_fingerprints"][engine.checkpoint._candidate_unit_key(ip, "sqli")]
+        ["routes"]["baseline"]["fingerprints"][0]
+    ) == 64
 
 
 def test_evidence_json_has_no_configured_secret(engine, tmp_path):

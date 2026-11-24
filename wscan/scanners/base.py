@@ -1124,11 +1124,13 @@ class BaseScanner(ABC):
         # would leave the same crash window as the observational attempt ledger.
         checkpoint = getattr(getattr(self, "engine", None), "checkpoint", None)
         engine = getattr(self, "engine", None)
+        from wscan.engine import _FIELD_PAYLOAD_STAGE
+        route = _FIELD_PAYLOAD_STAGE.get() or "baseline"
         if checkpoint is not None and getattr(engine, "enable_checkpoint", True):
             try:
-                if not checkpoint.record_payload_fingerprint_ip(ip, self.CHECK_TYPE, payload):
+                if not checkpoint.record_payload_fingerprint_ip(ip, self.CHECK_TYPE, payload, route):
                     raise RuntimeError("payload fingerprint could not be recorded")
-                if not checkpoint.mark_payload_fingerprints_incomplete_ip(ip, self.CHECK_TYPE):
+                if not checkpoint.mark_payload_fingerprints_incomplete_ip(ip, self.CHECK_TYPE, route):
                     raise RuntimeError("payload fingerprint state is invalid")
                 save = getattr(engine, "_save_checkpoint", None)
                 if not callable(save) or save() is not True:
@@ -2394,7 +2396,9 @@ class BaseScanner(ABC):
         checkpoint = getattr(engine, "checkpoint", None)
         if checkpoint is not None and getattr(engine, "enable_checkpoint", True):
             try:
-                checkpoint.record_payload_fingerprint_ip(ip, self.CHECK_TYPE, payload)
+                from wscan.engine import _FIELD_PAYLOAD_STAGE
+                route = _FIELD_PAYLOAD_STAGE.get() or "baseline"
+                checkpoint.record_payload_fingerprint_ip(ip, self.CHECK_TYPE, payload, route)
             except Exception:
                 # 指紋保存不能は complete 判定に反映され、後続 resume が fail closed になる。
                 pass
@@ -2624,9 +2628,31 @@ class BaseScanner(ABC):
                 raise BaselineRecoveryBlocked(
                     "baseline recovery blocked: sent-payload history is incomplete"
                 )
+
+        def _exclude_payloads_sent_on_any_route(candidates: list[str]) -> list[str]:
+            if phase != "adaptive" or ip is None or checkpoint is None:
+                return candidates
+            if not checkpoint.has_payload_fingerprint_record_ip(ip, self.CHECK_TYPE):
+                return candidates
+            complete, sent_fingerprints, reason = checkpoint.get_payload_fingerprints_ip(
+                ip, self.CHECK_TYPE, "baseline"
+            )
+            if not complete:
+                errors = getattr(self.engine, "wave_errors", None)
+                if isinstance(errors, list):
+                    errors.append(
+                        f"baseline_llm_recovery_blocked:{self.CHECK_TYPE}:adaptive_dedup_{reason}"
+                    )
+                raise BaselineRecoveryBlocked(
+                    "adaptive dispatch blocked because sent-payload history is incomplete"
+                )
+            from wscan.attempt_ledger import untried_payloads
+            unit_key = checkpoint._candidate_unit_key(ip, self.CHECK_TYPE)
+            return untried_payloads(candidates, sent_fingerprints, unit_key, self.CHECK_TYPE)
+
         found, saved = self._candidate_snapshot(ip, phase)
         if found and not recovering_baseline:
-            return saved or []
+            return _exclude_payloads_sent_on_any_route(saved or [])
         # 試行台帳から当該注入点の履歴を取り出し、生成へ戻す（evaluator-optimizer）。
         attempt_history = None
         if ip is not None:
@@ -2707,6 +2733,7 @@ class BaseScanner(ABC):
         # A-3 / ⑩: re-order by historical success rate (domain-aware)
         if _learning_on:
             payloads = learner.sort_payloads(self.CHECK_TYPE, payloads, domain=_domain)
+        payloads = _exclude_payloads_sent_on_any_route(payloads)
         # Fast mode: cap payload count (highest-priority payloads are already first)
         cap = getattr(self.engine, "max_payloads", 0)
         if cap > 0:

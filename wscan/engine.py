@@ -8708,6 +8708,9 @@ class ScanEngine:
                 else:
                     if _candidate_state is not None:
                         _candidate_state.clear_candidate_snapshots_ip(ip, check_name, {"adaptive"})
+                        _candidate_state.mark_payload_fingerprints_complete_ip(
+                            ip, check_name, "adaptive"
+                        )
                     self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
                     # 後続 check の失敗やプロセス中断でも部分成功を保持する。
                     self._save_checkpoint()

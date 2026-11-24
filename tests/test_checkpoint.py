@@ -97,7 +97,7 @@ class StateTests(unittest.TestCase):
         state.save_candidate_snapshot_ip(json_name, "sqli", "baseline", ["name"], "payload_generator")
 
         restored = CheckpointState.from_dict(state.to_dict())
-        self.assertEqual(restored.source_version, 11)
+        self.assertEqual(restored.source_version, 12)
         self.assertEqual(restored.get_candidate_snapshot_ip(first, "xss", "baseline"), (True, ["a", "b"]))
         self.assertEqual(restored.get_candidate_snapshot_ip(first, "xss", "adaptive"), (True, []))
         self.assertEqual(restored.get_candidate_snapshot_ip(other, "xss", "baseline"), (True, ["other"]))
@@ -767,6 +767,33 @@ class IoTests(unittest.TestCase):
             complete, _, reason = truncated.get_payload_fingerprints_ip(ip, "xss")
             self.assertFalse(complete)
             self.assertEqual(reason, "fingerprints_truncated")
+
+    def test_route_fingerprints_preserve_v1_and_union_for_dedup(self):
+        from wscan.attempt_ledger import payload_fingerprint
+
+        ip = InjectionPoint.for_form("http://h/a", "q", 0)
+        key = CheckpointState._candidate_unit_key(ip, "xss")
+        old = CheckpointState()
+        old.payload_fingerprints[key] = {
+            "version": 1,
+            "fingerprints": [payload_fingerprint("baseline-sent", key, "xss")],
+            "complete": True,
+            "truncated": False,
+        }
+        # A checkpoint saved in the previous schema remains readable.
+        old_dict = old.to_dict()
+        old_dict["version"] = 11
+        restored = CheckpointState.from_dict(old_dict)
+        self.assertTrue(restored.get_payload_fingerprints_ip(ip, "xss")[0])
+
+        # Adaptive work changes only its route marker; baseline stays complete.
+        restored.record_payload_fingerprint_ip(ip, "xss", "adaptive-shared", "adaptive")
+        self.assertTrue(restored.mark_payload_fingerprints_complete_ip(ip, "xss", "adaptive"))
+        complete, fingerprints, reason = restored.get_payload_fingerprints_ip(ip, "xss", "baseline")
+        self.assertTrue(complete, reason)
+        self.assertIn(payload_fingerprint("baseline-sent", key, "xss"), fingerprints)
+        self.assertIn(payload_fingerprint("adaptive-shared", key, "xss"), fingerprints)
+        self.assertEqual(restored.payload_fingerprints[key]["version"], 2)
 
     def test_unrecovered_baseline_roundtrip_remains_incomplete(self):
         from wscan.injection_point import InjectionPoint

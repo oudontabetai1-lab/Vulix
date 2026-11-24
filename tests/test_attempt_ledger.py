@@ -499,6 +499,59 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(engine.checkpoint.get_payload_fingerprints_ip(ip, "xss")[0])
 
+    async def test_adaptive_probe_does_not_strand_baseline_recovery_or_resend(self):
+        class _QueueGen:
+            default_payloads = {"xss": []}
+
+            async def generate(self, **kwargs):
+                return ["adaptive-shared", "already-baseline", "new-baseline"]
+
+        engine = _GenEngine()
+        engine.enable_checkpoint = True
+        engine.checkpoint = CheckpointState()
+        engine._save_checkpoint = lambda: True
+        engine.wave_errors = []
+        engine.payload_gen = _QueueGen()
+        ip = InjectionPoint.for_form("http://fixture.test/p", "q")
+        state = engine.checkpoint
+        state.begin_payload_fingerprints_ip(ip, "xss", "baseline")
+        state.record_payload_fingerprint_ip(ip, "xss", "already-baseline", "baseline")
+        state.mark_payload_fingerprints_complete_ip(ip, "xss", "baseline")
+        state.mark_baseline_unrecovered_ip(ip, "xss")  # transient baseline LLM result
+        scanner = _PlainScanner(engine)
+
+        async def adaptive_send(_ip, _send, **kwargs):
+            return "ok", {"response": {"status": 200}}
+
+        scanner._send_probe = adaptive_send
+        stage = _FIELD_PAYLOAD_STAGE.set("adaptive")
+        try:
+            await scanner._apply_ip(ip, "adaptive-shared")
+        finally:
+            _FIELD_PAYLOAD_STAGE.reset(stage)
+
+        engine.checkpoint = CheckpointState.from_dict(state.to_dict())
+        state = engine.checkpoint
+
+        complete, all_routes, reason = state.get_payload_fingerprints_ip(ip, "xss", "baseline")
+        self.assertTrue(complete, reason)
+        self.assertIn(payload_fingerprint("adaptive-shared", state._candidate_unit_key(ip, "xss"), "xss"), all_routes)
+        # Even while the adaptive route is incomplete, its durably recorded hash
+        # participates in baseline de-duplication without changing baseline completeness.
+        self.assertFalse(state.get_payload_fingerprints_ip(ip, "xss", "adaptive")[0])
+        adaptive_stage = _FIELD_PAYLOAD_STAGE.set("adaptive")
+        try:
+            self.assertEqual(
+                await scanner.get_payloads("q", ip.url, ip=ip),
+                ["new-baseline"],
+            )
+        finally:
+            _FIELD_PAYLOAD_STAGE.reset(adaptive_stage)
+        self.assertEqual(
+            await scanner.get_payloads("q", ip.url, ip=ip),
+            ["new-baseline"],
+        )
+
     async def test_no_ip_means_no_history(self):
         engine = _GenEngine()
         engine.payload_gen = _CapturingPayloadGen()
