@@ -324,6 +324,32 @@ def test_monitor_emits_one_terminal_status_event_for_repeated_abort_calls():
     assert monitor.api_scan_status == "aborted"
 
 
+def test_monitor_allows_terminal_events_again_for_the_next_scan_lifecycle():
+    import asyncio
+
+    monitor = MonitorServer()
+
+    async def publish_lifecycle(status):
+        monitor._begin_scan_snapshot()
+        await monitor.emit_status(f"terminal {status}", status)
+        await monitor.emit(
+            "scan_complete",
+            {"status": status, "report_path": f"/tmp/{status}.html"},
+        )
+        return [
+            (event["type"], (event["data"].get("terminal_outcome") or {}).get("status"))
+            for event in monitor.event_history
+            if event["type"] in {"status", "scan_complete"}
+            and event["data"].get("terminal_outcome")
+        ]
+
+    first = asyncio.run(publish_lifecycle("done"))
+    second = asyncio.run(publish_lifecycle("failed"))
+
+    assert first == [("status", "done"), ("scan_complete", "done")]
+    assert second == [("status", "failed"), ("scan_complete", "failed")]
+
+
 @pytest.mark.parametrize(
     ("status", "expected_exit"),
     [("done", 0), ("incomplete", 2), ("failed", 1), ("aborted", 2)],

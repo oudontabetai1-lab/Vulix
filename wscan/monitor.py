@@ -342,6 +342,7 @@ class MonitorServer:
         self._api_scan_status: str = "idle"
         self._final_scan_status: Optional[str] = None
         self._terminal_status_event_emitted = False
+        self._scan_complete_event_emitted = False
         self._terminal_status_conflicts: list[dict] = []
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
@@ -2709,6 +2710,7 @@ class MonitorServer:
         # 次の lifecycle への移行を許可する。
         self._final_scan_status = None
         self._terminal_status_event_emitted = False
+        self._scan_complete_event_emitted = False
         self._terminal_status_conflicts = []
         self._api_scan_status = "scanning"
         self._clear_pending_interactive()
@@ -2855,6 +2857,8 @@ class MonitorServer:
             )
             if not self._transition_scan_status(status, status_reason):
                 return
+            if self._scan_complete_event_emitted:
+                return
             self._clear_pending_interactive()
             self._scan_status_reason = status_reason
             event_data["terminal_outcome"] = self._terminal_outcome(status, status_reason)
@@ -2949,6 +2953,8 @@ class MonitorServer:
             "data": event_data,
         }
         self.event_history.append(event)
+        if event_type == "scan_complete":
+            self._scan_complete_event_emitted = True
         dead = set()
         for client in list(self.clients):
             sync_buffer = self._ws_sync_buffers.get(client)

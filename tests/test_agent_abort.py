@@ -286,52 +286,110 @@ async def test_hybrid_abort_wins_at_time_window_boundary(race_order):
     assert monitor.statuses[-1][1] == "aborted"
 
 
-@pytest.mark.parametrize("mode", ["agent", "scan", "hybrid"])
-def test_each_mode_publishes_aborted_once(mode):
+@pytest.mark.parametrize("mode", ["scan", "agent", "hybrid"])
+@pytest.mark.parametrize("terminal_status", ["done", "incomplete", "failed", "aborted"])
+def test_each_mode_publishes_terminal_status_and_scan_complete_once(
+    mode, terminal_status
+):
     async def exercise():
         monitor = MonitorServer()
         monitor._begin_scan_snapshot()
 
-        if mode == "scan":
-            # Ordinary ScanEngine publishes its terminal state with scan_complete.
-            await monitor.emit(
-                "scan_complete", {"status": "aborted", "aborted": True}
-            )
-        else:
+        if mode == "scan" and terminal_status == "failed":
+            # ScanEngine's exception path emits error, then its finally emits failed.
+            try:
+                raise RuntimeError("synthetic scan failure")
+            except RuntimeError as exc:
+                await monitor.emit_status(f"Scan error: {exc}", "error")
+        elif mode == "agent" and terminal_status == "aborted":
             started = asyncio.Event()
 
             async def operation():
                 started.set()
                 await asyncio.Event().wait()
 
-            if mode == "agent":
-                task = asyncio.create_task(
-                    main._run_with_abort_monitor(
-                        operation, monitor, phase_label="Agent"
-                    )
-                )
-            else:
-                task = asyncio.create_task(
-                    main._run_hybrid_recon_with_retries(operation, monitor)
-                )
+            task = asyncio.create_task(
+                main._run_with_abort_monitor(operation, monitor, phase_label="Agent")
+            )
             await started.wait()
             monitor.command_queue.put_nowait("abort")
             await asyncio.wait_for(task, timeout=1)
+        elif mode == "hybrid" and terminal_status == "aborted":
+            started = asyncio.Event()
+
+            async def operation():
+                started.set()
+                await asyncio.Event().wait()
+
+            task = asyncio.create_task(
+                main._run_hybrid_recon_with_retries(operation, monitor)
+            )
+            await started.wait()
+            monitor.command_queue.put_nowait("abort")
+            handoff, continue_to_phase2 = await asyncio.wait_for(task, timeout=1)
+            assert handoff.incomplete_reason == "recon_aborted"
+            assert continue_to_phase2 is False
+        elif mode == "hybrid" and terminal_status == "incomplete":
+            from datetime import datetime
+
+            async def interrupted_by_window():
+                await asyncio.Event().wait()
+
+            handoff, continue_to_phase2 = await main._run_hybrid_recon_with_retries(
+                interrupted_by_window,
+                monitor,
+                ["Mon 10:00-12:00"],
+                now_fn=lambda: datetime(2024, 1, 1, 12, 1),
+                max_retries=0,
+            )
+            assert handoff.incomplete_reason == "retry_limit"
+            assert continue_to_phase2 is True
+        else:
+            await monitor.emit_status(
+                f"{mode} terminal status {terminal_status}", terminal_status
+            )
+
+        # Some mode wrappers return an incomplete handoff before the final
+        # scan result is published. Exercise that shared publication
+        # step explicitly for every mode/state pair.
+        await monitor.emit_status(
+            f"{mode} final outcome {terminal_status}", terminal_status
+        )
+
+        completion = {
+            "status": terminal_status,
+            "aborted": terminal_status == "aborted",
+            "total_findings": 3,
+            "report_path": "/tmp/terminal-report.html",
+        }
+        await monitor.emit("scan_complete", completion)
+        # Duplicate producers and a conflicting late producer must not add a second
+        # terminal event or mutate the first canonical outcome.
+        await monitor.emit_status("duplicate terminal status", terminal_status)
+        rejected_status = "failed" if terminal_status != "failed" else "done"
+        await monitor.emit_status("late conflicting status", rejected_status)
+        await monitor.emit(
+            "scan_complete", {**completion, "status": rejected_status}
+        )
 
         aborted_events = []
         for event in monitor.event_history:
             data = event.get("data") or {}
-            state = (
-                data.get("state")
-                if event.get("type") == "status"
-                else data.get("status")
-                if event.get("type") == "scan_complete"
-                else None
-            )
-            if state == "aborted":
-                aborted_events.append((event["type"], data["terminal_outcome"]["status"]))
-        return aborted_events
+            if event.get("type") == "status" and data.get("terminal_outcome"):
+                aborted_events.append(
+                    ("status", data["terminal_outcome"]["status"])
+                )
+            elif event.get("type") == "scan_complete":
+                aborted_events.append(
+                    ("scan_complete", data["terminal_outcome"]["status"])
+                )
+        return monitor, aborted_events
 
-    events = asyncio.run(exercise())
-    expected_event = "scan_complete" if mode == "scan" else "status"
-    assert events == [(expected_event, "aborted")], mode
+    monitor, events = asyncio.run(exercise())
+    assert events == [
+        ("status", terminal_status),
+        ("scan_complete", terminal_status),
+    ], (mode, terminal_status)
+    assert monitor._terminal_outcome()["status"] == terminal_status
+    assert monitor._scan_complete_data["status"] == terminal_status
+    assert monitor._scan_complete_data["report_path"] == "/tmp/terminal-report.html"
