@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 import main
 from wscan.intervention import ScanController
-from wscan.monitor import MonitorServer
+from wscan.monitor import ABORT_IDLE_MESSAGE, MonitorServer
 
 
 def test_idle_websocket_abort_is_rejected_and_next_agent_run_completes():
@@ -19,7 +19,7 @@ def test_idle_websocket_abort_is_rejected_and_next_agent_run_completes():
 
     assert response["type"] == "status"
     assert response["data"]["state"] == "warning"
-    assert "実行中のスキャンがありません" in response["data"]["message"]
+    assert response["data"]["message"] == ABORT_IDLE_MESSAGE
     assert monitor.command_queue.empty()
     assert not monitor.scan_abort_event.is_set()
 

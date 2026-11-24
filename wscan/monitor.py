@@ -51,6 +51,7 @@ _UPLOAD_ALLOWED_EXT = {
 # OUTPUT_BASE 直下だが「スキャン成果物」ではない予約ディレクトリ。scan_id として
 # 解決させず、artifact 配信/削除ルートから隔離する（アップロードした秘匿ファイル保護）。
 _RESERVED_OUTPUT_NAMES = {"uploads"}
+ABORT_IDLE_MESSAGE = "実行中のスキャンはありません。"
 
 # Name of the session cookie set after a successful token login.
 SESSION_COOKIE = "wscan_session"
@@ -1519,7 +1520,7 @@ class MonitorServer:
             """Request an accepted scan to stop (saves a partial report)."""
             if not self.abort_is_accepted():
                 return JSONResponse(
-                    {"error": "実行中のスキャンはありません。"}, status_code=409
+                    {"error": ABORT_IDLE_MESSAGE}, status_code=409
                 )
             self.request_abort()
             self.api_scan_status = "aborting"
@@ -2513,7 +2514,7 @@ class MonitorServer:
             if cmd:
                 if str(cmd).lower().strip() in ("abort", "q"):
                     if not self.abort_is_accepted():
-                        return "実行中のスキャンがありません。中断要求は受け付けませんでした。"
+                        return ABORT_IDLE_MESSAGE
                     self.request_abort()
                 else:
                     self.command_queue.put_nowait(cmd)

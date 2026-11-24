@@ -123,6 +123,7 @@ class PortalEndpointTests(PortalTestBase):
     def test_abort_idle_returns_409(self):
         response = self.client.post("/api/v1/scan/abort")
         self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"], monitor_mod.ABORT_IDLE_MESSAGE)
         self.assertFalse(self.srv.scan_abort_event.is_set())
         self.assertTrue(self.srv.command_queue.empty())
 
