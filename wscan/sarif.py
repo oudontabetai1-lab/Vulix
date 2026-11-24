@@ -94,6 +94,8 @@ class SarifExporter:
         target_url: str = "",
         tool_version: str = "1.0.0",
         coverage: dict | None = None,
+        status: str | None = None,
+        status_reasons: list[str] | None = None,
     ) -> dict:
         """
         findings_dicts (Finding.to_dict() の出力リスト) から
@@ -114,6 +116,15 @@ class SarifExporter:
             "hypothesis_findings": len(findings) - confirmed_total,
             "total_results": len(findings),
         }
+        if status is not None:
+            properties["scan_status"] = status
+            from wscan.terminal_outcome import terminal_outcome
+            properties["terminal_outcome"] = terminal_outcome(
+                status, "; ".join(str(reason) for reason in (status_reasons or []))
+            )
+        if status_reasons:
+            from wscan.url_scope import redact_event_data
+            properties["completion_reasons"] = redact_event_data({"reasons": list(status_reasons)})["reasons"]
         coverage_props = self._build_coverage_properties(coverage)
         if coverage_props:
             properties["coverage"] = coverage_props
@@ -324,6 +335,8 @@ def write_sarif(
     output_path: "Path | str",
     tool_version: str = "1.0.0",
     coverage: dict | None = None,
+    status: str | None = None,
+    status_reasons: list[str] | None = None,
     lang: str = DEFAULT_LANG,
 ) -> Path:
     """
@@ -341,7 +354,8 @@ def write_sarif(
 
     exporter = SarifExporter(lang=lang)
     sarif_doc = exporter.export(
-        findings_dicts, target_url=target_url, tool_version=tool_version, coverage=coverage
+        findings_dicts, target_url=target_url, tool_version=tool_version, coverage=coverage,
+        status=status, status_reasons=status_reasons,
     )
 
     out = Path(output_path)

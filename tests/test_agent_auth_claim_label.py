@@ -335,6 +335,9 @@ async def test_agent_mode_labels_unverified_login_claim(tmp_path, monkeypatch):
         max_steps=30,
         harness_output_dir=tmp_path,
     )
+    async def enable_guard(_session):
+        return True
+    monkeypatch.setattr(scanner, "_enable_request_scoped_headers", enable_guard)
 
     monkeypatch.setitem(sys.modules, "browser_use", fake_browser_use)
     monkeypatch.setitem(
@@ -429,6 +432,9 @@ async def test_agent_mode_labels_verified_login_claim(tmp_path, monkeypatch):
         max_steps=30,
         harness_output_dir=tmp_path,
     )
+    async def enable_guard(_session):
+        return True
+    monkeypatch.setattr(scanner, "_enable_request_scoped_headers", enable_guard)
 
     monkeypatch.setitem(sys.modules, "browser_use", fake_browser_use)
     monkeypatch.setitem(
@@ -458,13 +464,16 @@ async def test_agent_engine_records_auth_verification_in_evidence_and_report(tmp
     """Test that AgentEngine preserves auth verification status in evidence.json and calls report."""
     from wscan.agent_engine import AgentEngine
     from wscan.llm_agent_browser import AgentFinding, AgentScanResult
+    from wscan.monitor import MonitorServer
 
+    monitor = MonitorServer()
     engine = AgentEngine(
         url="http://fixture.test",
         auth_user="user",
         auth_pass="pass",
         output_dir=tmp_path,
         llm_provider="ollama",
+        monitor=monitor,
     )
 
     mock_result = AgentScanResult(
@@ -495,6 +504,11 @@ async def test_agent_engine_records_auth_verification_in_evidence_and_report(tmp
     evidence_file = tmp_path / "evidence.json"
     assert evidence_file.exists()
     evidence_data = json.loads(evidence_file.read_text(encoding="utf-8"))
+    assert evidence_data["status"] == "incomplete"
+    assert evidence_data["terminal_outcome"]["status"] == "incomplete"
+    assert evidence_data["terminal_outcome"]["exit_code"] == 2
+    assert monitor.api_scan_status == "incomplete"
+    assert monitor._terminal_outcome()["status"] == "incomplete"
     assert evidence_data["auth_verification_status"] == AGENT_AUTH_UNVERIFIED
     assert evidence_data["auth_verification_reasons"] == ["missing_session_artifact"]
     assert "auth:login_not_verified" in evidence_data["coverage_gaps"]
@@ -502,5 +516,6 @@ async def test_agent_engine_records_auth_verification_in_evidence_and_report(tmp
     report_file = tmp_path / "report.html"
     assert report_file.exists()
     report_content = report_file.read_text(encoding="utf-8")
+    assert "Scan incomplete" in report_content
     assert "unverified_auth_claim" in report_content
     assert "auth:login_not_verified" in report_content

@@ -158,12 +158,15 @@
       }
     }
     const rawStatus = (state.status || (currentScanStatus && currentScanStatus.status) || 'idle').toLowerCase();
+    const terminalOutcome = state.terminal_outcome || (currentScanStatus && currentScanStatus.terminal_outcome) || null;
 
-    // Map execution status: idle | running | paused | done | aborted | error | partial | unknown
+    // Map execution status: incomplete must remain visibly non-successful.
     let execState = 'idle';
-    if (/running|scanning|active/.test(rawStatus)) execState = 'running';
+    if (terminalOutcome && terminalOutcome.status) execState = terminalOutcome.status;
+    else if (/running|scanning|active/.test(rawStatus)) execState = 'running';
     else if (/paused/.test(rawStatus)) execState = 'paused';
     else if (/done|completed|success/.test(rawStatus)) execState = 'done';
+    else if (/incomplete/.test(rawStatus)) execState = 'incomplete';
     else if (/aborted|cancelled|canceled/.test(rawStatus)) execState = 'aborted';
     else if (/error|failed/.test(rawStatus)) execState = 'error';
     else if (/partial/.test(rawStatus)) execState = 'partial';
@@ -198,7 +201,7 @@
     // Freshness: fresh | stale | snapshot
     let freshness = state.freshness;
     if (!freshness) {
-      if (['done', 'aborted', 'error', 'partial'].includes(execState)) {
+      if (['done', 'aborted', 'error', 'partial', 'incomplete'].includes(execState)) {
         freshness = 'snapshot';
       } else if (connState === 'connected') {
         freshness = 'fresh';
@@ -219,7 +222,9 @@
     // Main status text: Scan <id> · <status> (preserves exact substrings for tests)
     const main = document.createElement('span');
     main.className = 'scan-status-main';
-    main.textContent = `Scan ${scanId || '—'} · ${rawStatus || 'idle'}`;
+    main.textContent = terminalOutcome
+      ? `Scan ${scanId || '—'} · ${terminalOutcome.label}`
+      : `Scan ${scanId || '—'} · ${rawStatus || 'idle'}`;
 
     // Meta items
     const meta = document.createElement('span');
@@ -277,6 +282,7 @@
       aborted: '⏹',
       error: '✗',
       failed: '✗',
+      incomplete: '!',
       partial: '⟲',
       stale: '⟲',
       unverified: '?',
@@ -284,7 +290,17 @@
       unknown: '—'
     };
     const stateGlyph = stateIcons[execState] || '';
-    stateBadge.textContent = stateGlyph ? `${stateGlyph} ${execState}` : execState;
+    stateBadge.textContent = terminalOutcome
+      ? `${stateGlyph} ${terminalOutcome.label}`
+      : (stateGlyph ? `${stateGlyph} ${execState}` : execState);
+    if (terminalOutcome && terminalOutcome.severity) {
+      stateBadge.dataset.severity = terminalOutcome.severity;
+      if (terminalOutcome.color) {
+        stateBadge.style.color = terminalOutcome.color;
+        stateBadge.style.borderColor = terminalOutcome.color;
+        stateBadge.style.backgroundColor = `${terminalOutcome.color}20`;
+      }
+    }
     meta.appendChild(stateBadge);
 
     // Canonical ETA and Progress rendering if present

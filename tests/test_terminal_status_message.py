@@ -14,7 +14,7 @@ class CompletionStatusMessageTests(unittest.TestCase):
         )
         self.assertEqual(_completion_status_message("incomplete"), "Scan incomplete")
         self.assertEqual(_completion_status_message("error"), "Scan failed")
-        self.assertEqual(_completion_status_message("unknown"), "Scan finished")
+        self.assertEqual(_completion_status_message("unknown"), "Scan status: unknown")
 
     def test_scan_complete_clears_stale_phase_message(self):
         monitor = MonitorServer(port=0)
@@ -59,7 +59,8 @@ class CompletionStatusMessageTests(unittest.TestCase):
 
         asyncio.run(run())
         snapshot = monitor._scan_snapshot_event()["data"]
-        self.assertEqual(snapshot["status"], "error")
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["terminal_outcome"]["status"], "failed")
         self.assertEqual(
             snapshot["status_message"], "スキャン中にエラーが発生しました: fixture"
         )

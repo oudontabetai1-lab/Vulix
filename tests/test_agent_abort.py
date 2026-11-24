@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 import main
+from wscan.monitor import MonitorServer
 
 
 class _Monitor:
@@ -132,7 +133,9 @@ async def test_hybrid_recon_abort_stops_before_phase_two():
 
     handoff, continue_to_phase2 = await asyncio.wait_for(task, timeout=1)
 
-    assert (handoff, continue_to_phase2) == (None, False)
+    assert handoff is not None
+    assert handoff.incomplete_reason == "recon_aborted"
+    assert continue_to_phase2 is False
     assert attempts == [True]
     assert cleaned_up.is_set()
     assert monitor.command_queue.empty()
@@ -169,7 +172,9 @@ async def test_hybrid_recon_abort_with_time_window_monitor_stops_before_phase_tw
 
     handoff, continue_to_phase2 = await asyncio.wait_for(task, timeout=2)
 
-    assert (handoff, continue_to_phase2) == (None, False)
+    assert handoff is not None
+    assert handoff.incomplete_reason == "recon_aborted"
+    assert continue_to_phase2 is False
     assert cleaned_up.is_set()
     assert monitor.command_queue.empty()
     assert monitor.statuses[-1] == ("ハイブリッド Phase 1 を中断しました。", "aborted")
@@ -205,7 +210,9 @@ async def test_hybrid_recon_window_close_cancels_abort_monitored_operation():
         timeout=1,
     )
 
-    assert (handoff, continue_to_phase2) == (None, True)
+    assert handoff is not None
+    assert handoff.incomplete_reason == "retry_limit"
+    assert continue_to_phase2 is True
     assert cleaned_up.is_set()
     assert monitor.command_queue.empty()
     assert monitor.statuses[-1][1] == "warning"
@@ -270,8 +277,127 @@ async def test_hybrid_abort_wins_at_time_window_boundary(race_order):
     if not release_cleanup.is_set():
         release_cleanup.set()
 
-    assert (handoff, continue_to_phase2) == (None, False)
+    assert handoff is not None
+    assert handoff.incomplete_reason == "recon_aborted"
+    assert continue_to_phase2 is False
     assert recon_finished.is_set()
     assert monitor.scan_abort_event.is_set()
     assert monitor.command_queue.empty()
     assert monitor.statuses[-1][1] == "aborted"
+
+
+@pytest.mark.parametrize("mode", ["scan", "agent", "hybrid"])
+@pytest.mark.parametrize("terminal_status", ["done", "incomplete", "failed", "aborted"])
+def test_each_mode_publishes_terminal_status_and_scan_complete_once(
+    mode, terminal_status
+):
+    async def exercise():
+        monitor = MonitorServer()
+        monitor._begin_scan_snapshot()
+
+        if mode == "scan" and terminal_status == "failed":
+            # ScanEngine's exception path emits error, then its finally emits failed.
+            try:
+                raise RuntimeError("synthetic scan failure")
+            except RuntimeError as exc:
+                await monitor.emit_status(f"Scan error: {exc}", "error")
+        elif mode == "agent" and terminal_status == "aborted":
+            started = asyncio.Event()
+
+            async def operation():
+                started.set()
+                await asyncio.Event().wait()
+
+            task = asyncio.create_task(
+                main._run_with_abort_monitor(operation, monitor, phase_label="Agent")
+            )
+            await started.wait()
+            monitor.command_queue.put_nowait("abort")
+            await asyncio.wait_for(task, timeout=1)
+        elif mode == "hybrid" and terminal_status == "aborted":
+            started = asyncio.Event()
+
+            async def operation():
+                started.set()
+                await asyncio.Event().wait()
+
+            task = asyncio.create_task(
+                main._run_hybrid_recon_with_retries(operation, monitor)
+            )
+            await started.wait()
+            monitor.command_queue.put_nowait("abort")
+            handoff, continue_to_phase2 = await asyncio.wait_for(task, timeout=1)
+            assert handoff.incomplete_reason == "recon_aborted"
+            assert continue_to_phase2 is False
+        elif mode == "hybrid" and terminal_status == "incomplete":
+            from datetime import datetime
+
+            async def interrupted_by_window():
+                await asyncio.Event().wait()
+
+            handoff, continue_to_phase2 = await main._run_hybrid_recon_with_retries(
+                interrupted_by_window,
+                monitor,
+                ["Mon 10:00-12:00"],
+                now_fn=lambda: datetime(2024, 1, 1, 12, 1),
+                max_retries=0,
+            )
+            assert handoff.incomplete_reason == "retry_limit"
+            assert continue_to_phase2 is True
+        else:
+            await monitor.emit_status(
+                f"{mode} terminal status {terminal_status}", terminal_status
+            )
+
+        # Some mode wrappers return an incomplete handoff before the final
+        # scan result is published. Exercise that shared publication
+        # step explicitly for every mode/state pair.
+        await monitor.emit_status(
+            f"{mode} final outcome {terminal_status}", terminal_status
+        )
+
+        completion = {
+            "status": terminal_status,
+            "aborted": terminal_status == "aborted",
+            "total_findings": 3,
+            "report_path": "/tmp/terminal-report.html",
+        }
+        await monitor.emit("scan_complete", completion)
+        # Reproduce duplicate completion from a repeated cleanup/finalizer call.
+        await monitor.emit("scan_complete", completion)
+        # Duplicate producers and a conflicting late producer must not add a second
+        # terminal event or mutate the first canonical outcome.
+        await monitor.emit_status("duplicate terminal status", terminal_status)
+        rejected_status = "failed" if terminal_status != "failed" else "done"
+        await monitor.emit_status("late conflicting status", rejected_status)
+        await monitor.emit(
+            "scan_complete", {**completion, "status": rejected_status}
+        )
+
+        terminal_status_events = []
+        scan_complete_events = []
+        event_sequence = []
+        for event in monitor.event_history:
+            data = event.get("data") or {}
+            if event.get("type") == "status" and data.get("terminal_outcome"):
+                state = data["terminal_outcome"]["status"]
+                terminal_status_events.append(state)
+                event_sequence.append(("status", state))
+            elif event.get("type") == "scan_complete":
+                state = data["terminal_outcome"]["status"]
+                scan_complete_events.append(state)
+                event_sequence.append(("scan_complete", state))
+        return monitor, terminal_status_events, scan_complete_events, event_sequence
+
+    monitor, status_events, completion_events, event_sequence = asyncio.run(exercise())
+    assert len(status_events) == 1, (mode, terminal_status, status_events)
+    assert len(completion_events) == 1, (mode, terminal_status, completion_events)
+    assert status_events == [terminal_status]
+    assert completion_events == [terminal_status]
+    assert event_sequence == [
+        ("status", terminal_status),
+        ("scan_complete", terminal_status),
+    ], (mode, terminal_status)
+    assert monitor._terminal_outcome()["status"] == terminal_status
+    assert monitor._scan_complete_data["status"] == terminal_status
+    assert monitor._scan_complete_data["report_path"] == "/tmp/terminal-report.html"

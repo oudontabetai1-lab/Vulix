@@ -33,6 +33,8 @@ async def test_first_multimodal_error_restarts_text_only(monkeypatch):
     class Browser:
         def __init__(self, **kwargs): browsers.append(self)
         async def stop(self): pass
+    class Profile:
+        def __init__(self, **kwargs): pass
     class History:
         def is_successful(self): return False
         def final_result(self): return ''
@@ -46,10 +48,15 @@ async def test_first_multimodal_error_restarts_text_only(monkeypatch):
             await llm.ainvoke([])
             return History()
     module = types.ModuleType('browser_use')
-    module.Agent, module.Browser = Agent, Browser
+    module.Agent, module.Browser, module.BrowserSession = Agent, Browser, Browser
+    profile = types.ModuleType('browser_use.browser.profile')
+    profile.BrowserProfile = Profile
     monkeypatch.setitem(sys.modules, 'browser_use', module)
+    monkeypatch.setitem(sys.modules, 'browser_use.browser.profile', profile)
+    scanner = AgentBrowserScanner('http://fixture.test', llm_provider='ollama')
+    monkeypatch.setattr(scanner, '_enable_request_scoped_headers', AsyncMock(return_value=True))
     with patch('wscan.llm_agent_browser._build_llm', return_value=llm), patch('httpx.AsyncClient.post', side_effect=__import__('httpx').ConnectError('unavailable')):
-        result = await AgentBrowserScanner('http://fixture.test', llm_provider='ollama').run()
+        result = await scanner.run()
     assert modes == [True, False]
     assert len(browsers) == 2
     assert invoke.await_count == 2
@@ -88,12 +95,14 @@ async def test_auth_then_first_vision_request_falls_back_once(tmp_path, retry_fa
     profile.BrowserProfile = Profile
     monkeypatch.setitem(sys.modules, 'browser_use', module)
     monkeypatch.setitem(sys.modules, 'browser_use.browser.profile', profile)
+    scanner = AgentBrowserScanner(
+        'http://fixture.test', llm_provider='ollama',
+        login_url='http://fixture.test/login', auth_user='fixture-user',
+        auth_pass='fixture-password', harness_output_dir=tmp_path, max_steps=8,
+    )
+    monkeypatch.setattr(scanner, '_enable_request_scoped_headers', AsyncMock(return_value=True))
     with patch('wscan.llm_agent_browser._build_llm', return_value=llm), patch('httpx.AsyncClient.post', side_effect=__import__('httpx').ConnectError('unavailable')):
-        result = await AgentBrowserScanner(
-            'http://fixture.test', llm_provider='ollama',
-            login_url='http://fixture.test/login', auth_user='fixture-user',
-            auth_pass='fixture-password', harness_output_dir=tmp_path, max_steps=8,
-        ).run()
+        result = await scanner.run()
     assert modes[:3] == [False, True, False]
     assert modes.count(True) == 1
     assert 'vision:text_only' in result.coverage_gaps

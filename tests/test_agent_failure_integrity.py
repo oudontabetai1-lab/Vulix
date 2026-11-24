@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from fastapi.testclient import TestClient
 from rich.console import Console
 
 import main
+from wscan.monitor import MonitorServer
 from wscan.llm_agent_browser import (
     AgentBrowserScanner,
     _agent_config_directory_result,
@@ -37,14 +39,14 @@ def test_agent_exit_code_flags_errors_and_unsuccessful_empty_runs():
     assert main._agent_exit_code(
         SimpleNamespace(error="", success=True, findings=[])
     ) == 0
-    # history 上の非成功 かつ 0 findings（誤成功表示の元）→ 1。
+    # history 上の非成功 かつ 0 findings は incomplete → 2。
     assert main._agent_exit_code(
         SimpleNamespace(error="", success=False, findings=[])
-    ) == 1
-    # 非成功でも findings があれば検出は有効 → 0。
+    ) == 2
+    # partial/incomplete の findings は保持するが終了状態は非成功 → 2。
     assert main._agent_exit_code(
         SimpleNamespace(error="", success=False, findings=[object()])
-    ) == 0
+    ) == 2
     assert main._agent_exit_code(None) == 0
     assert main._agent_exit_code(
         SimpleNamespace(error="", success=False, findings=[object()], harness_status="partial")
@@ -71,7 +73,7 @@ async def test_agent_initialization_error_prints_failed_not_zero_findings():
     rendered = output.getvalue()
     assert result.error == "provider unavailable"
     assert main._agent_exit_code(result) == 1
-    assert "Agent scan FAILED: provider unavailable" in rendered
+    assert "Scan failed: provider unavailable" in rendered
     assert "脆弱性は検出されませんでした" not in rendered
     assert "0 findings" not in rendered
 
@@ -95,7 +97,50 @@ async def test_agent_missing_browser_use_is_failed_not_traceback():
 
     assert result.error is not None
     assert main._agent_exit_code(result) == 1
-    assert "Agent scan FAILED" in output.getvalue()
+    assert "Scan failed" in output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_missing_browser_use_error_alias_is_published_as_failed(monkeypatch):
+    # Exercise a real failed browser-use import, then the serve exception path's
+    # legacy `error` input at the public API/WebSocket boundary.
+    monkeypatch.setitem(sys.modules, "browser_use", None)
+    monkeypatch.setitem(sys.modules, "browser_use.llm", None)
+    monitor = MonitorServer()
+    monitor._begin_scan_snapshot()
+    output = StringIO()
+    scanner = AgentBrowserScanner(target_url="http://fixture.test")
+    with patch(
+        "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, ""),
+    ), patch(
+        "wscan.llm_agent_browser.console",
+        Console(file=output, force_terminal=False, color_system=None),
+    ):
+        result = await scanner.run()
+
+    assert "browser_use" in result.error
+    await monitor.emit_status(f"Agent error: {result.error}", "error")
+
+    api_status = TestClient(monitor.app).get("/api/v1/scan/status").json()
+    assert api_status["status"] == "failed"
+    assert api_status["terminal_outcome"]["status"] == "failed"
+    status_events = [
+        event["data"]
+        for event in monitor.event_history
+        if event["type"] == "status" and event["data"].get("terminal_outcome")
+    ]
+    assert len(status_events) == 1
+    assert status_events[0]["state"] == "failed"
+    assert status_events[0]["terminal_outcome"]["status"] == "failed"
+
+    await monitor.emit("scan_complete", {"status": "error"})
+    completion = next(
+        event["data"]
+        for event in monitor.event_history
+        if event["type"] == "scan_complete"
+    )
+    assert completion["status"] == "failed"
+    assert completion["terminal_outcome"]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -103,6 +148,7 @@ async def test_agent_unsuccessful_history_is_incomplete_not_clean(monkeypatch):
     # browser-use が例外でなく history.is_successful()=False で失敗を報告し、findings が
     # 空のとき、「正常完了・0 findings」と誤表示せず INCOMPLETE＋非0 exit にする。
     import types
+    from wscan.monitor import MonitorServer
 
     output = StringIO()
 
@@ -142,9 +188,20 @@ async def test_agent_unsuccessful_history_is_incomplete_not_clean(monkeypatch):
     browser_use = types.ModuleType("browser_use")
     browser_use.Agent = _FakeAgent
     browser_use.Browser = _FakeBrowser
+    browser_use.BrowserSession = _FakeBrowser
+    profile = types.ModuleType("browser_use.browser.profile")
+    profile.BrowserProfile = type("FakeBrowserProfile", (), {"__init__": lambda self, **_kwargs: None})
 
-    scanner = AgentBrowserScanner(target_url="http://fixture.test")
+    monitor = MonitorServer()
+    scanner = AgentBrowserScanner(target_url="http://fixture.test", monitor=monitor)
     monkeypatch.setitem(sys.modules, "browser_use", browser_use)
+    monkeypatch.setitem(sys.modules, "browser_use.browser.profile", profile)
+
+    async def guard_ready(_session):
+        return True
+
+    monkeypatch.setattr(scanner, "_enable_request_scoped_headers", guard_ready)
+    monkeypatch.setattr(scanner, "_enable_agent_network_guard", guard_ready)
     with patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, ""),
     ), patch(
@@ -159,9 +216,11 @@ async def test_agent_unsuccessful_history_is_incomplete_not_clean(monkeypatch):
     assert result.error is None
     assert result.success is False
     assert not result.findings
-    assert main._agent_exit_code(result) == 1
-    assert "INCOMPLETE" in rendered
-    assert "Agent Scan Complete" not in rendered
+    assert main._agent_exit_code(result) == 2
+    assert monitor.api_scan_status == "incomplete"
+    assert monitor._terminal_outcome()["status"] == "incomplete"
+    assert "Scan incomplete" in rendered
+    assert "Scan complete" not in rendered
     assert "脆弱性は検出されませんでした" not in rendered
 
 
@@ -241,9 +300,131 @@ async def test_monitored_agent_incomplete_empty_returns_before_sleep(monkeypatch
         result = await main.run_agent(args)
 
     assert result is incomplete
-    assert main._agent_exit_code(result) == 1
+    assert main._agent_exit_code(result) == 2
     # sleep(3600)（Ctrl+C 待ち）へは絶対に入らない。
     assert 3600 not in sleep_calls
+
+
+@pytest.mark.asyncio
+async def test_monitored_agent_cancel_publishes_aborted_outcome(monkeypatch):
+    import asyncio
+    import types
+
+    class _FakeEngine:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self):
+            raise asyncio.CancelledError
+
+    class _FakeMonitor:
+        instances = []
+
+        def __init__(self, **_kwargs):
+            self.app = object()
+            self.events = []
+            self.__class__.instances.append(self)
+
+        async def emit_status(self, message, state):
+            self.events.append((message, state))
+
+    class _FakeConfig:
+        def __init__(self, **_kwargs):
+            pass
+
+    class _FakeServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        async def serve(self):
+            return None
+
+    args = SimpleNamespace(
+        url="http://fixture.test", llm="none", model="", ollama_url="http://localhost:11434",
+        llm_base_url="", checks=["xss"], no_headless=True, auth_user="", auth_pass="",
+        login_url="", max_steps=1, output="", open_report=False, no_open_report=True,
+        no_monitor=False, port=9099, header_file="", bearer="", header=[],
+    )
+    monkeypatch.setitem(
+        sys.modules, "uvicorn", types.SimpleNamespace(Config=_FakeConfig, Server=_FakeServer)
+    )
+    with patch("wscan.monitor.MonitorServer", _FakeMonitor), patch(
+        "wscan.agent_engine.AgentEngine", _FakeEngine
+    ), patch("main.webbrowser.open", lambda *_a, **_k: None):
+        result = await main.run_agent(args)
+
+    assert result.harness_status == "cancelled"
+    assert args._scan_terminal_status == "aborted"
+    assert main._agent_exit_code(result) == 2
+    assert _FakeMonitor.instances[-1].events[-1][1] == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_monitored_agent_cancel_during_dashboard_wait_keeps_done(monkeypatch):
+    import asyncio
+    import types
+
+    completed = SimpleNamespace(
+        target_url="http://fixture.test", success=True, findings=[], harness_status="complete"
+    )
+    sleep_calls = []
+
+    async def _fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        if seconds == 3600:
+            raise asyncio.CancelledError
+
+    class _FakeEngine:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self):
+            await _FakeMonitor.instances[-1].emit_status("Scan complete", "done")
+            return completed
+
+    class _FakeMonitor:
+        instances = []
+
+        def __init__(self, **_kwargs):
+            self.app = object()
+            self.events = []
+            self.__class__.instances.append(self)
+
+        async def emit_status(self, message, state):
+            self.events.append((message, state))
+
+    class _FakeConfig:
+        def __init__(self, **_kwargs):
+            pass
+
+    class _FakeServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        async def serve(self):
+            return None
+
+    args = SimpleNamespace(
+        url="http://fixture.test", llm="none", model="", ollama_url="http://localhost:11434",
+        llm_base_url="", checks=["xss"], no_headless=True, auth_user="", auth_pass="",
+        login_url="", max_steps=1, output="", open_report=False, no_open_report=True,
+        no_monitor=False, port=9099, header_file="", bearer="", header=[],
+    )
+    monkeypatch.setitem(
+        sys.modules, "uvicorn", types.SimpleNamespace(Config=_FakeConfig, Server=_FakeServer)
+    )
+    with patch("wscan.monitor.MonitorServer", _FakeMonitor), patch(
+        "wscan.agent_engine.AgentEngine", _FakeEngine
+    ), patch("main.webbrowser.open", lambda *_a, **_k: None), patch(
+        "main.asyncio.sleep", _fake_sleep
+    ):
+        result = await main.run_agent(args)
+
+    assert result is completed
+    assert args._scan_terminal_status == "done"
+    assert main._agent_exit_code(result) == 0
+    assert [state for _, state in _FakeMonitor.instances[-1].events] == ["done"]
+    assert sleep_calls == [1.5, 3600]
 
 
 @pytest.mark.asyncio

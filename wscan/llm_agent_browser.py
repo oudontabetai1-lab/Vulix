@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import hashlib
+import ipaddress
 import json
 import inspect
 import os
@@ -30,7 +31,7 @@ import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
 from rich.console import Console
 from rich.rule import Rule
@@ -65,6 +66,8 @@ from .content_provenance import (
     ContentType,
     wrap_untrusted_observation,
 )
+from .runtime_scope_guard import ScopePolicy, evaluate_scope
+from .request_logger import redact_url
 
 if TYPE_CHECKING:
     from wscan.monitor import MonitorServer
@@ -72,6 +75,69 @@ if TYPE_CHECKING:
 console = Console()
 
 _TARGET_HANDLER_TIMEOUT_SECONDS = 3.0
+
+
+def _agent_network_block_reason(request: dict, policy: ScopePolicy, *, auth_phase=False,
+                                login_url="", exclude_fields=()) -> str:
+    """CDP request pause 時の scope/mutation 判定。理由コードだけを返す純粋関数。"""
+    url = str(request.get("url") or "")
+    decision = evaluate_scope(url, policy)
+    if not decision.allowed:
+        return decision.reason
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        ip = ipaddress.ip_address(host.strip("[]"))
+        if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_unspecified:
+            explicitly_scoped = decision.reason.startswith((
+                "target_url", "access_url", "login_url",
+            ))
+            if not explicitly_scoped:
+                return "private_address"
+    except ValueError:
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
+        if host in {"localhost", "metadata.google.internal"} and not decision.reason.startswith((
+            "target_url", "access_url", "login_url",
+        )):
+            return "private_address"
+    method = str(request.get("method") or "GET").upper()
+    if method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return ""
+    if login_url and evaluate_scope(url, ScopePolicy(target_urls=(login_url,))).allowed:
+        return ""
+    initiator_url = str((request.get("initiator") or {}).get("url") or "")
+    if auth_phase and (
+        not login_url or (
+            initiator_url and evaluate_scope(
+                initiator_url, ScopePolicy(target_urls=(login_url,))
+            ).allowed
+        )
+    ):
+        return ""
+    # Body fields can be detected for urlencoded and JSON form submissions.
+    body = str(request.get("postData") or request.get("post_data") or "")
+    names = {
+        name.casefold()
+        for name, _ in parse_qsl(parsed.query, keep_blank_values=True)
+    }
+    names.update(name.casefold() for name, _ in parse_qsl(body, keep_blank_values=True))
+    try:
+        parsed_body = json.loads(body)
+        if isinstance(parsed_body, dict):
+            names.update(str(name).casefold() for name in parsed_body)
+    except (TypeError, ValueError):
+        pass
+    excluded = {str(name).strip().casefold() for name in exclude_fields if str(name).strip()}
+    if names & excluded:
+        return "excluded_field"
+    # This evaluator's target/access classification is shared with the HTTP guard.
+    if decision.reason.startswith("access_url") or decision.reason == "login_url":
+        return "access_only_mutation"
+    return ""
+
+
+def _agent_network_safe_url(url: str) -> str:
+    return redact_url(str(url or ""))
 
 
 def parse_reviewer_gap_lines(text: str) -> tuple[list[str], list[str]]:
@@ -452,6 +518,7 @@ class AgentScanResult:
     auth_verification_status: Optional[str] = None
     auth_verification_reasons: list[str] = field(default_factory=list)
     preserve_existing_artifacts: bool = False
+    network_guard_errors: list[str] = field(default_factory=list)
 
 
 # ── LLM ファクトリ ──────────────────────────────────────────────────────────
@@ -766,6 +833,10 @@ class AgentBrowserScanner:
         self._fetch_enabled_targets: dict[str, tuple[int, str]] = {}
         self._target_event_client = None
         self._target_event_tasks: set[asyncio.Task] = set()
+        self._request_event_tasks: set[asyncio.Task] = set()
+        self._request_event_force_fail: dict[asyncio.Task, object] = {}
+        self._accept_target_events = True
+        self._accept_request_events = True
         self._headers_applied = False
         self._missing_header_url_api_warned = False
         self._header_application_failed_warned = False
@@ -779,12 +850,18 @@ class AgentBrowserScanner:
         self._active_episode_id = "legacy"
         self._active_role: AgentRole | None = None
         self._harness: AgentHarness | None = None
+        self._network_guard_failed = False
         self._runtime_work_targets: dict[str, str] = {}
         self._runtime_observed_urls: list[str] = []
         self._runtime_hypotheses: dict[str, dict] = {}
         self._auth_verification = None
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
+        self._network_guard_errors: list[str] = []
+        self._network_guard_policy = ScopePolicy(
+            target_urls=tuple(self.target_urls), access_urls=tuple(self.access_urls),
+            exclude_urls=tuple(self.exclude_urls), login_url=self.login_url,
+        )
 
     def _warn_missing_header_url_api(self) -> None:
         """現在 URL を安全に判定できない browser-use 版を一度だけ警告する。"""
@@ -867,6 +944,22 @@ class AgentBrowserScanner:
         else:
             self._headers_applied = False
 
+    async def _record_network_guard_error(self, reason: str, url: str = "") -> None:
+        safe_url = _agent_network_safe_url(url)
+        message = f"network_scope_blocked:{reason}:{safe_url}" if safe_url else f"network_guard_failed:{reason}"
+        if message not in self._network_guard_errors:
+            self._network_guard_errors.append(message)
+        if self._harness:
+            try:
+                self._harness.record_reviewer_gaps((message,))
+            except Exception:
+                pass
+        if self.monitor:
+            try:
+                await self.monitor.emit_status(message, "warning")
+            except Exception:
+                pass
+
     async def _apply_extra_headers(self, session, intended_url: str = "") -> None:
         """許可オリジンの Agent 対象ページにだけ追加ヘッダを適用する。"""
         if not self.extra_headers or not hasattr(session, "set_extra_headers"):
@@ -926,14 +1019,45 @@ class AgentBrowserScanner:
             async def _continue_paused_request(event, event_session_id=None):
                 request_id = None
                 continued = False
+                request_url = ""
                 continue_session_id = event_session_id or cdp_session_id
                 try:
                     request_id = event.get("requestId") or event.get("request_id")
                     if not request_id:
+                        await self._record_network_guard_error("request_id_missing")
                         return
 
                     request = event.get("request") or {}
                     request_url = request.get("url") or ""
+                    auth_phase = bool(
+                        self._active_role == AgentRole.AUTHENTICATOR
+                        or (
+                            self._harness
+                            and self._harness.state.phase == AgentPhase.AUTHENTICATING
+                        )
+                    )
+                    block_reason = _agent_network_block_reason(
+                        request, self._network_guard_policy,
+                        auth_phase=auth_phase, login_url=self.login_url,
+                        exclude_fields=self.exclude_fields,
+                    )
+                    if block_reason:
+                        await self._record_network_guard_error(block_reason, request_url)
+                        # failRequest が失敗しても continueRequest に倒して通信を
+                        # 通さない。request は未解決のまま browser 側 timeout に任せる。
+                        continued = True
+                        try:
+                            await asyncio.wait_for(
+                                fetch_commands.failRequest(
+                                    params={"requestId": request_id, "errorReason": "BlockedByClient"},
+                                    session_id=continue_session_id,
+                                ), timeout=3.0,
+                            )
+                        except Exception:
+                            await self._record_network_guard_error(
+                                f"{block_reason}_fail_request_failed", request_url
+                            )
+                        return
                     params = {"requestId": request_id}
                     if headers_allowed_for_url(request_url, self._header_origins):
                         existing_headers = request.get("headers") or {}
@@ -960,21 +1084,27 @@ class AgentBrowserScanner:
                     )
                     continued = True
                 except Exception:
-                    # 判定・ヘッダ生成・CDP 送信のどこで失敗しても値は出力しない。
-                    pass
-                finally:
+                    # 判定や continueRequest の例外では理由を記録し、同じ request を fail にする。
                     if request_id and not continued:
+                        await self._record_network_guard_error("policy_error", request_url)
+                        continued = True
                         try:
                             await asyncio.wait_for(
-                                fetch_commands.continueRequest(
-                                    params={"requestId": request_id},
+                                fetch_commands.failRequest(
+                                    params={"requestId": request_id, "errorReason": "BlockedByClient"},
                                     session_id=continue_session_id,
-                                ),
-                                timeout=3.0,
+                                ), timeout=3.0,
                             )
                         except Exception:
-                            # 最後の素通しも失敗した場合は Agent 全体を止めない。
-                            pass
+                            await self._record_network_guard_error(
+                                "fail_request_failed", request_url
+                            )
+                    elif not request_id:
+                        await self._record_network_guard_error("callback_error")
+                finally:
+                    # 未解決で素通しにする fallback は設けない。CDP 失敗は記録し、通信を通さない。
+                    if request_id and not continued:
+                        await self._record_network_guard_error("unresolved_request", request_url)
 
             async def _continue_auth_challenge(event, event_session_id=None):
                 request_id = None
@@ -1043,8 +1173,51 @@ class AgentBrowserScanner:
                     # パスワードなどの秘匿情報を漏らさず、失敗を可視化する
                     await self._warn_proxy_auth_failed(f"{type(exc).__name__}")
 
+            async def _fail_paused_request(event, event_session_id=None):
+                request = event.get("request") or {}
+                request_id = event.get("requestId") or event.get("request_id")
+                request_url = request.get("url") or ""
+                await self._record_network_guard_error("teardown_request_blocked", request_url)
+                if not request_id:
+                    await self._record_network_guard_error("teardown_request_id_missing")
+                    return
+                try:
+                    await asyncio.wait_for(
+                        fetch_commands.failRequest(
+                            params={"requestId": request_id, "errorReason": "BlockedByClient"},
+                            session_id=event_session_id or cdp_session_id,
+                        ), timeout=1.0,
+                    )
+                except Exception:
+                    await self._record_network_guard_error(
+                        "teardown_fail_request_failed", request_url
+                    )
+
+            def _schedule_fetch_event(callback, event, event_session_id=None):
+                # cdp_use は event handler の await 完了まで WebSocket の受信ループを
+                # 止めるため、handler 内で CDP response を待つと deadlock する。
+                task = asyncio.create_task(callback(event, event_session_id))
+                self._request_event_tasks.add(task)
+                if callback is _continue_paused_request:
+                    self._request_event_force_fail[task] = (
+                        lambda: _fail_paused_request(event, event_session_id)
+                    )
+                def _forget_task(done_task):
+                    self._request_event_tasks.discard(done_task)
+                    self._request_event_force_fail.pop(done_task, None)
+                task.add_done_callback(_forget_task)
+
+            def _on_request_paused(event, event_session_id=None):
+                callback = _continue_paused_request if self._accept_request_events else _fail_paused_request
+                _schedule_fetch_event(callback, event, event_session_id)
+
+            def _on_auth_challenge(event, event_session_id=None):
+                _schedule_fetch_event(
+                    _continue_auth_challenge, event, event_session_id
+                )
+
             # 登録を先に行うことで、登録失敗時には Fetch を有効化しない。
-            fetch_registration.requestPaused(_continue_paused_request)
+            fetch_registration.requestPaused(_on_request_paused)
 
             enable_params = {"patterns": [{"urlPattern": "*"}]}
             if has_auth:
@@ -1054,7 +1227,7 @@ class AgentBrowserScanner:
                         cdp_client._event_registry, "_handlers", {}
                     ).get("Fetch.authRequired")
                 if hasattr(fetch_registration, "authRequired"):
-                    fetch_registration.authRequired(_continue_auth_challenge)
+                    fetch_registration.authRequired(_on_auth_challenge)
 
             await asyncio.wait_for(
                 fetch_commands.enable(
@@ -1105,54 +1278,101 @@ class AgentBrowserScanner:
         except Exception:
             return False
 
+    async def _drain_browser_event_tasks(self, timeout: float = 5.0) -> None:
+        """停止事件受付後、target→request の順で期限付き drain する。"""
+        self._accept_target_events = False
+        self._accept_request_events = False
+        deadline = asyncio.get_running_loop().time() + timeout
+        for tasks, kind in (
+            (self._target_event_tasks, "target"),
+            (self._request_event_tasks, "request"),
+        ):
+            while tasks:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                done, _ = await asyncio.wait(
+                    tuple(tasks), timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                await asyncio.gather(*done, return_exceptions=True)
+            if tasks:
+                if kind == "request":
+                    for task in tuple(tasks):
+                        force_fail = self._request_event_force_fail.get(task)
+                        if force_fail is not None:
+                            try:
+                                await asyncio.wait_for(force_fail(), timeout=1.1)
+                            except Exception:
+                                await self._record_network_guard_error(
+                                    "teardown_request_unresolved"
+                                )
+                else:
+                    await self._record_network_guard_error("teardown_target_unresolved")
+                for task in tuple(tasks):
+                    task.cancel()
+                await asyncio.gather(*tuple(tasks), return_exceptions=True)
+
     async def _enable_fetch_for_attached_target(
         self,
         cdp_client,
         event: dict,
         before_resume=None,
-    ) -> None:
-        """停止中の新 target に Fetch を設定し、成否にかかわらず再開する。"""
+    ) -> bool:
+        """新 target の Fetch と子 target 監視を設定できた場合だけ再開する。"""
         target_info = event.get("targetInfo") or {}
         target_id = target_info.get("targetId") or ""
         target_type = target_info.get("type") or ""
         cdp_session_id = event.get("sessionId") or ""
+        enabled = False
         try:
-            if target_type in {"page", "tab"} and target_id and cdp_session_id:
-                await self._enable_fetch_for_cdp_target(
+            if target_id and cdp_session_id:
+                enabled = await self._enable_fetch_for_cdp_target(
                     cdp_client,
                     cdp_session_id,
                     target_id,
                     session=getattr(self, "_active_session", None),
                 )
-        finally:
-            if before_resume is not None:
-                try:
-                    # browser-use の既存 attachedToTarget ハンドラは、Fetch の
-                    # 設定完了後、target を再開する前に引き渡す。
-                    result = before_resume()
-                    if inspect.isawaitable(result):
-                        await asyncio.wait_for(
-                            result,
-                            timeout=_TARGET_HANDLER_TIMEOUT_SECONDS,
-                        )
-                except Exception:
-                    # 既存ハンドラの失敗やタイムアウトで target を停止したままに
-                    # せず、下の runIfWaitingForDebugger へ必ず進む。
-                    pass
-            if cdp_session_id:
-                try:
-                    # waitForDebuggerOnStart=True で停止させた target は、Fetch の
-                    # 成否や対象種別にかかわらず必ず再開してブラウザをハングさせない。
-                    await asyncio.wait_for(
-                        cdp_client.send.Runtime.runIfWaitingForDebugger(
-                            session_id=cdp_session_id,
-                        ),
-                        timeout=3.0,
-                    )
-                except Exception:
-                    # browser-use の SessionManager も再開を試みる。ここで例外を
-                    # 伝播してイベント処理や Agent 全体を停止させない。
-                    pass
+            if enabled:
+                await cdp_client.send.Target.setAutoAttach(
+                    params={
+                        "autoAttach": True,
+                        "waitForDebuggerOnStart": True,
+                        "flatten": True,
+                    },
+                    session_id=cdp_session_id,
+                )
+                if before_resume is not None:
+                    try:
+                        result = before_resume()
+                        if inspect.isawaitable(result):
+                            await asyncio.wait_for(
+                                result, timeout=_TARGET_HANDLER_TIMEOUT_SECONDS
+                            )
+                    except Exception:
+                        # browser-use 側の bookkeeping は失敗しても、Fetch ガードは
+                        # 有効なので通信を保護したまま target を再開できる。
+                        pass
+                await asyncio.wait_for(
+                    cdp_client.send.Runtime.runIfWaitingForDebugger(
+                        session_id=cdp_session_id,
+                    ),
+                    timeout=3.0,
+                )
+                return True
+        except Exception:
+            enabled = False
+
+        if not enabled:
+            self._network_guard_failed = True
+            await self._record_network_guard_error(
+                f"target_setup_failed:{target_type or 'unknown'}"
+            )
+            # ガードを設定できない target は再開せず、未保護の通信を止める。
+            return False
+        return False
 
     async def _subscribe_fetch_for_new_targets(self, session) -> bool:
         """新 target を停止状態で検知し、初回リクエスト前に Fetch を有効化する。"""
@@ -1175,6 +1395,16 @@ class AgentBrowserScanner:
             # cdp_use 1.4.5 の EventRegistry はイベントごとに単一ハンドラ。
             # browser-use の SessionManager を壊さないよう既存ハンドラを包む。
             def _on_attached(event, event_session_id=None):
+                if not self._accept_target_events:
+                    async def _record_late_target():
+                        info = event.get("targetInfo") or {}
+                        await self._record_network_guard_error(
+                            f"target_attached_during_teardown:{info.get('type') or 'unknown'}"
+                        )
+                    task = asyncio.create_task(_record_late_target())
+                    self._target_event_tasks.add(task)
+                    task.add_done_callback(self._target_event_tasks.discard)
+                    return None
                 def _forward_existing_handler():
                     if existing_handler is None:
                         return
@@ -1213,42 +1443,39 @@ class AgentBrowserScanner:
         self._target_event_client = cdp_client
         return True
 
-    async def _enable_request_scoped_headers(self, session) -> bool:
-        """CDP Fetch でリクエスト単位のヘッダ付与を有効化する。
-
-        失敗時は Fetch を無効化して False を返す。呼び出し側は従来の
-        set_extra_headers 方式へフォールバックする。
-        """
-        if not self.extra_headers:
-            return False
-
+    async def _enable_agent_network_guard(self, session) -> bool:
+        """追加ヘッダ設定の有無にかかわらず、現在と将来の target を保護する。"""
         required_apis = (
-            "start",
-            "get_current_page",
-            "get_or_create_cdp_session",
+            "start", "get_current_page", "get_or_create_cdp_session",
             "agent_focus_target_id",
         )
         if not all(hasattr(session, name) for name in required_apis):
+            self._network_guard_failed = True
+            await self._record_network_guard_error("required_cdp_api_unavailable")
             return False
-
         self._active_session = session
         try:
-            # BrowserSession.start() は冪等。Fetch を有効化する target を先に確立する。
             await session.start()
             await session.get_current_page()
-            enabled = await self._enable_fetch_for_current_target(session)
+            # 新 target を先に停止・監視してから現在 target に Fetch を付ける。
+            if not await self._subscribe_fetch_for_new_targets(session):
+                self._network_guard_failed = True
+                await self._record_network_guard_error("target_auto_attach_unavailable")
+                return False
+            if not await self._enable_fetch_for_current_target(session):
+                self._network_guard_failed = True
+                await self._record_network_guard_error("current_target_fetch_failed")
+                return False
         except Exception:
-            enabled = False
-
-        if not enabled:
-            self._request_scoped_headers = False
+            self._network_guard_failed = True
+            await self._record_network_guard_error("guard_initialization_failed")
             return False
-
         self._request_scoped_headers = True
-        # 利用可能な browser-use / cdp_use では新 target をイベントで即時設定する。
-        # API 差異や登録失敗時も、各ステップの current target 確認を残して補完する。
-        await self._subscribe_fetch_for_new_targets(session)
         return True
+
+    async def _enable_request_scoped_headers(self, session) -> bool:
+        """ヘッダ設定の有無にかかわらず CDP Fetch guard を初期化する。"""
+        return await self._enable_agent_network_guard(session)
 
     async def _prepare_extra_headers_before_run(
         self, session, intended_url: str = ""
@@ -1525,10 +1752,15 @@ class AgentBrowserScanner:
             # `from browser_use.llm import ...` を実行するため、後段の except ImportError より
             # 前にここへ来る。traceback で漏らさず FAILED＋非0 exit へ倒す。
             result.error = str(e) or type(e).__name__
-            console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
+            from wscan.terminal_outcome import agent_result_outcome
+            outcome = agent_result_outcome(result)
+            console.print(
+                f"[{outcome['console_style']}]{outcome['message']}"
+                f"[/{outcome['console_style']}]"
+            )
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"Agent scan FAILED: {result.error}", "error"
+                    outcome["label"], "warning" if self.recon_mode else outcome["status"]
                 )
             return result
 
@@ -1673,34 +1905,8 @@ class AgentBrowserScanner:
             llm.ainvoke = _logging_ainvoke
 
         try:
-            from browser_use import Agent, Browser
-
-            def _build_legacy_browser():
-                """ヘッダ無しの従来ブラウザ構築（API差異時のフォールバック兼用）。"""
-                if self.proxy:
-                    try:
-                        from browser_use.browser.profile import BrowserProfile
-
-                        profile = self._build_browser_profile(BrowserProfile)
-                        return Browser(browser_profile=profile)
-                    except Exception as exc:
-                        raise RuntimeError(
-                            "設定された proxy を browser-use ブラウザへ適用できませんでした"
-                        ) from exc
-                # browser_use ≥ 0.2 uses BrowserConfig; older versions accept direct kwargs.
-                # BrowserConfig's disable_security properly disables SecurityWatchdog,
-                # while the legacy Browser(disable_security=True) only affects Playwright flags.
-                try:
-                    from browser_use import BrowserConfig
-                    return Browser(config=BrowserConfig(
-                        headless=self.headless,
-                        disable_security=True,
-                    ))
-                except (ImportError, TypeError):
-                    return Browser(
-                        headless=self.headless,
-                        disable_security=True,
-                    )
+            from browser_use import Agent, BrowserSession
+            from browser_use.browser.profile import BrowserProfile
 
             # タスク文字列には SSRF/redirect ペイロードとして複数の URL が含まれる。
             # directly_open_url=True (デフォルト) は「複数 URL 検出 → スキップ」する仕様のため、
@@ -1741,48 +1947,13 @@ class AgentBrowserScanner:
             if self._harness:
                 agent_kwargs["register_should_stop_callback"] = self._harness_should_stop
 
-            if self.extra_headers or sensitive_data or self.storage_state or self._harness or self.proxy:
-                # browser-use 0.12.6 の実 API:
-                # BrowserSession(browser_profile=...) → Agent(browser_session=...)。
-                # 注意: BrowserProfile.headers は「ブラウザ/CDP エンドポイントへの接続時
-                # ヘッダ」であり、リモート/クラウド CDP ブラウザだと対象の Bearer が
-                # ブラウザ提供者へ送られて漏れる。よって対象の認証ヘッダはここに載せず、
-                # ページの HTTP リクエストには CDP set_extra_headers(下記)だけを使う。
-                # 値はログやタスク文字列へ出さない。構築失敗時は従来経路へ戻す。
-                try:
-                    from browser_use import BrowserSession
-                    from browser_use.browser.profile import BrowserProfile
-
-                    browser_profile = self._build_browser_profile(BrowserProfile)
-                    browser = BrowserSession(browser_profile=browser_profile)
-                    agent_browser_arg = "browser_session"
-                    agent = None if self._harness else Agent(
-                        browser_session=browser, **agent_kwargs
-                    )
-                except Exception:
-                    if self.proxy:
-                        browser = _build_legacy_browser()
-                        agent_browser_arg = "browser"
-                        agent = None if self._harness else Agent(
-                            browser=browser, **agent_kwargs
-                        )
-                    elif sensitive_data or self.storage_state:
-                        raise RuntimeError(
-                            "認証情報を domain scope で保護できる BrowserSession を初期化できませんでした"
-                        )
-                    else:
-                        console.print(
-                            "[yellow]追加HTTPヘッダをブラウザへ設定できなかったため、"
-                            "従来構成で続行します。[/yellow]"
-                        )
-                        browser = _build_legacy_browser()
-                        agent_browser_arg = "browser"
-                        agent = None if self._harness else Agent(browser=browser, **agent_kwargs)
-            else:
-                # ヘッダ未指定時は完全に従来どおりの構築経路を使う。
-                browser = _build_legacy_browser()
-                agent_browser_arg = "browser"
-                agent = None if self._harness else Agent(browser=browser, **agent_kwargs)
+            # 通常実行でも CDP Fetch を必ず使うため、guard 対応 BrowserSession に固定する。
+            browser_profile = self._build_browser_profile(BrowserProfile)
+            browser = BrowserSession(browser_profile=browser_profile)
+            agent_browser_arg = "browser_session"
+            agent = None if self._harness else Agent(
+                browser_session=browser, **agent_kwargs
+            )
 
             console.print("[dim]エージェント起動中...[/dim]")
             if self.monitor:
@@ -1790,19 +1961,17 @@ class AgentBrowserScanner:
                     f"Agent Browser: {self.target_url} をスキャン中", "running"
                 )
 
-            self._request_scoped_headers = (
-                await self._enable_request_scoped_headers(browser)
-            )
+            self._request_scoped_headers = await self._enable_request_scoped_headers(browser)
             if not self._request_scoped_headers:
-                await self._prepare_extra_headers_before_run(browser, start_url)
+                raise RuntimeError("Agent browser network guard could not be enabled")
 
             on_step_start = None
-            if self.extra_headers and self._request_scoped_headers:
+            if self._request_scoped_headers:
                 async def _enable_fetch_on_step(_agent):
-                    # イベント購読が使えない版や CDP 再接続後も、ポップアップや
-                    # 新規タブの current target を各ステップで補完する。
-                    await self._subscribe_fetch_for_new_targets(browser)
-                    await self._enable_fetch_for_current_target(browser)
+                    if not await self._enable_agent_network_guard(browser):
+                        self._network_guard_failed = True
+                        await self._record_network_guard_error("guard_reenable_failed")
+                        raise RuntimeError("Agent browser network guard could not be re-enabled")
 
                 on_step_start = _enable_fetch_on_step
             elif self.extra_headers and hasattr(browser, "set_extra_headers"):
@@ -1832,13 +2001,10 @@ class AgentBrowserScanner:
                     await note_text_only()
                     # 再生成するセッションも先に明示破棄する。
                     await (browser.kill() if hasattr(browser, "kill") else browser.stop())
-                    if agent_browser_arg == "browser_session":
-                        browser = BrowserSession(browser_profile=self._build_browser_profile(BrowserProfile))
-                    else:
-                        browser = _build_legacy_browser()
+                    browser = BrowserSession(browser_profile=self._build_browser_profile(BrowserProfile))
                     self._request_scoped_headers = await self._enable_request_scoped_headers(browser)
                     if not self._request_scoped_headers:
-                        await self._prepare_extra_headers_before_run(browser, start_url)
+                        raise RuntimeError("Agent browser network guard could not be re-enabled")
                     replacement = Agent(**{agent_browser_arg: browser}, **kwargs)
                     return await replacement.run(**run_kwargs)
 
@@ -2195,6 +2361,7 @@ class AgentBrowserScanner:
             console.print(f"[red]エージェントスキャンエラー: {exc}[/red]")
         finally:
             if browser is not None:
+                await self._drain_browser_event_tasks()
                 try:
                     await self._capture_auth_state(browser)
                 except Exception:
@@ -2204,6 +2371,15 @@ class AgentBrowserScanner:
                     await (browser.kill() if hasattr(browser, "kill") else browser.stop())
                 except Exception as exc:
                     console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
+            # browser stop が event callback を最後に配送する場合があるため、停止後も回収する。
+            await self._drain_browser_event_tasks()
+
+        if self._network_guard_failed:
+            result.success = False
+            result.coverage_gaps = list(dict.fromkeys([
+                *result.coverage_gaps,
+                "network_guard: a browser target could not be protected",
+            ]))
 
         if hasattr(result, "__dict__"):
             result.cookies = self.captured_cookies
@@ -2215,22 +2391,22 @@ class AgentBrowserScanner:
             result.coverage_gaps.append("vision:text_only")
             result.final_summary = text_only_note + "\n" + result.final_summary
 
+        from wscan.terminal_outcome import agent_result_outcome
+        outcome = agent_result_outcome(result)
         incomplete_empty = (
-            not result.error and not result.success and not result.findings
+            outcome["status"] in {"incomplete", "aborted"} and not result.findings
         )
+        should_return_without_report = outcome["status"] == "failed" or incomplete_empty
         # サマリー表示
-        if result.error:
-            console.print(Rule("[bold red] Agent Scan Failed [/bold red]", style="red"))
-            console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
-        elif incomplete_empty:
-            console.print(Rule("[bold yellow] Agent Scan Incomplete [/bold yellow]", style="yellow"))
+        console.print(Rule(
+            f" {outcome['label']} ", style=outcome["console_style"]
+        ))
+        if outcome["status"] != "done" and outcome["reason"]:
             console.print(
-                "[bold yellow]Agent scan INCOMPLETE: 正常に完了しませんでした"
-                "（0 findings は安全を意味しません）[/bold yellow]"
+                f"[{outcome['console_style']}]Reason: {outcome['reason']}"
+                f"[/{outcome['console_style']}]"
             )
-        else:
-            console.print(Rule("[bold magenta] Agent Scan Complete [/bold magenta]", style="magenta"))
-        if result.error or incomplete_empty:
+        if should_return_without_report:
             pass
         elif result.findings:
             console.print(
@@ -2251,19 +2427,13 @@ class AgentBrowserScanner:
             console.print("  [dim]脆弱性は検出されませんでした。[/dim]")
 
         if self.monitor:
-            if result.error:
+            if self.recon_mode:
                 await self.monitor.emit_status(
-                    f"Agent scan FAILED: {result.error}", "error"
-                )
-            elif incomplete_empty:
-                await self.monitor.emit_status(
-                    "Agent scan INCOMPLETE: 正常に完了しませんでした（0 findings は安全を意味しません）",
-                    "error",
+                    f"Agent recon phase ended ({outcome['status']}); Phase 2 determines the scan outcome.",
+                    "warning" if outcome["status"] != "done" else "running",
                 )
             else:
-                await self.monitor.emit_status(
-                    f"Agent Browser 完了: {len(result.findings)} 件検出", "done"
-                )
+                await self.monitor.emit_status(outcome["label"], outcome["status"])
 
         return result
 

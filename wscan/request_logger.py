@@ -120,6 +120,9 @@ _KEYS_ALT = url_scope.KEYS_ALT
 
 # RFC 3986 userinfo plus @ handles malformed credentials without crossing header structure.
 _URL_USERINFO = re.compile(r"(?i)((?:[a-z][a-z0-9+.\-]*:)?//)([A-Za-z0-9._~%!$&'()*+,;=:@\-]*)@")
+_FREEFORM_COOKIE_HEADER = re.compile(
+    r"(?i)(?<![\w-])(set-cookie|cookie)(\s*[:=]\s*)([^\r\n]*)"
+)
 
 
 def _redact_url_userinfo(text):
@@ -139,8 +142,17 @@ def _redact_headers(headers: dict) -> dict:
 
 
 def _redact_text(text):
-    """urlencoded ボディ / JSON ボディ中の機微フィールド値をマスクする（url_scope へ委譲）。"""
-    return url_scope.redact_kv_values(_redact_url_userinfo(text))
+    """自由文内の Cookie header と機微値を既存の共有 redactor で伏せる。"""
+    safe = url_scope.redact_kv_values(_redact_url_userinfo(text))
+    if not isinstance(safe, str):
+        return safe
+
+    def redact_cookie_header(match):
+        header = match.group(1)
+        masked_value = _redact_headers({header: match.group(3)})[header]
+        return f"{header}{match.group(2)}{masked_value}"
+
+    return _FREEFORM_COOKIE_HEADER.sub(redact_cookie_header, safe)
 
 
 def _redact_url(url):

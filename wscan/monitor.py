@@ -8,6 +8,7 @@ import copy
 import datetime
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -37,6 +38,7 @@ from wscan.eta_estimator import EtaEstimator, EtaEstimate
 
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+_logger = logging.getLogger(__name__)
 # Where ScanEngine writes each scan's artifacts (output/<timestamp>/...).
 # Defined here to avoid importing the heavy engine module (pulls in Playwright).
 OUTPUT_BASE = Path.cwd() / "output"
@@ -267,23 +269,10 @@ def due_schedule_ids(schedules: list, now_epoch: Optional[float] = None) -> list
     return [i for i in out if i]
 
 
-TERMINAL_SCAN_STATUSES = frozenset({"done", "aborted", "incomplete", "error"})
-
-_TERMINAL_STATUS_MESSAGES = {
-    "done": "Scan complete",
-    "aborted": "Scan aborted (partial report)",
-    "incomplete": "Scan incomplete",
-    "error": "Scan failed",
-}
-
-
 def _completion_status_message(status: str) -> str:
-    """scan_complete 時に status_message へ残す確定メッセージ（純粋）。
-
-    スキャン中に最後に届いた phase 文言（例 "OS injection testing: ..."）を
-    snapshot へ持ち越さないため、終端状態ごとの文言を一元生成する。
-    """
-    return _TERMINAL_STATUS_MESSAGES.get(str(status or ""), "Scan finished")
+    """Compatibility wrapper for the canonical terminal outcome label."""
+    from wscan.terminal_outcome import terminal_outcome
+    return terminal_outcome(status)["label"]
 
 
 class MonitorServer:
@@ -312,6 +301,7 @@ class MonitorServer:
         self._scan_started_config: dict = {}
         self._scan_complete_data: dict = {}
         self._scan_status_message = ""
+        self._scan_status_reason = ""
         self._scan_paused = False
         self._scan_gaps: list[dict] = []
         self._scan_page_graph: dict[str, dict] = {}
@@ -349,7 +339,11 @@ class MonitorServer:
         self.default_scan_cfg: dict = {}
         # D: CI/CD REST API state
         self.api_scan_id: str = ""
-        self.api_scan_status: str = "idle"   # idle / scanning / done / error / aborted
+        self._api_scan_status: str = "idle"
+        self._final_scan_status: Optional[str] = None
+        self._terminal_status_event_emitted = False
+        self._scan_complete_event_emitted = False
+        self._terminal_status_conflicts: list[dict] = []
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
         # 進捗のスナップショット（ポータルが /api/v1/scan/status でモニターを
@@ -362,7 +356,7 @@ class MonitorServer:
         # 出力(output/)の保持ポリシー。0 = 無制限(既定・後方互換)。
         #   retention_days       … 経過日数を超えたスキャンを自動削除
         #   retention_max_scans  … 直近この件数のみ残し超過分を自動削除
-        # serve 起動時とスキャン完了毎に prune_old_scans() が適用する。
+        # serve 起動時と各 scan 終了時に prune_old_scans() が適用する。
         self.retention_days: float = 0
         self.retention_max_scans: int = 0
         # スキャン対象スコープ（共有サーバーでの誤爆・悪用防止）。0件なら無制限。
@@ -1213,6 +1207,7 @@ class MonitorServer:
             est = self.get_eta_estimate()
             return JSONResponse({
                 "status": self.api_scan_status,
+                "terminal_outcome": self._terminal_outcome(),
                 "scan_id": self.api_scan_id,
                 "findings_count": total,
                 "total_findings_count": total,
@@ -1241,6 +1236,7 @@ class MonitorServer:
             return JSONResponse({
                 "scan_id": self.api_scan_id,
                 "status": self.api_scan_status,
+                "terminal_outcome": self._terminal_outcome(),
                 "findings": self.api_findings,
                 "findings_count": total,
                 "total_findings_count": total,
@@ -1255,7 +1251,7 @@ class MonitorServer:
             """生成済み HTML レポートをファイルとして返す。"""
             if not self.api_report_path or not Path(self.api_report_path).exists():
                 return JSONResponse(
-                    {"error": "レポートがまだ生成されていません。スキャン完了後に再試行してください。"},
+                    {"error": "レポートがまだ生成されていません。生成後に再試行してください。"},
                     status_code=404,
                 )
             return FileResponse(
@@ -1279,6 +1275,7 @@ class MonitorServer:
             return JSONResponse({
                 "scan_id": self.api_scan_id,
                 "status": self.api_scan_status,
+                "terminal_outcome": self._terminal_outcome(),
                 "findings": self.api_findings,
                 "findings_count": confirmed_count,
                 "total_findings_count": total,
@@ -1638,6 +1635,7 @@ class MonitorServer:
                 return JSONResponse({
                     "scan_id": scan_id,
                     "status": self.api_scan_status,
+                    "terminal_outcome": self._terminal_outcome(),
                     "findings": self.api_findings,
                     "findings_count": total,
                     "total_findings_count": total,
@@ -1651,6 +1649,7 @@ class MonitorServer:
                 return JSONResponse({
                     "scan_id": scan_id,
                     "status": "incomplete",
+                    "terminal_outcome": self._terminal_outcome("incomplete"),
                     "findings": None,
                     "findings_available": False,
                     "error": "evidence.json not found",
@@ -1662,6 +1661,7 @@ class MonitorServer:
                 return JSONResponse({
                     "scan_id": scan_id,
                     "status": "error",
+                    "terminal_outcome": self._terminal_outcome("error", str(exc)),
                     "findings": None,
                     "findings_available": False,
                     "error": f"failed to read evidence.json: {exc}",
@@ -1672,6 +1672,15 @@ class MonitorServer:
                 return JSONResponse({
                     "scan_id": scan_id,
                     "status": data.get("status", "incomplete"),
+                    "terminal_outcome": self._terminal_outcome(
+                        data.get("status", "incomplete"),
+                        "; ".join(
+                            str(reason) for reason in (
+                                (data.get("observability") or {}).get("completion_reasons")
+                                or (data.get("coverage") or {}).get("completion_reasons") or []
+                            )
+                        ),
+                    ),
                     "findings": None,
                     "findings_available": False,
                     "error": "findings list not found in evidence",
@@ -1683,6 +1692,15 @@ class MonitorServer:
             return JSONResponse({
                 "scan_id": scan_id,
                 "status": data.get("status", "done"),
+                "terminal_outcome": self._terminal_outcome(
+                    data.get("status", "done"),
+                    "; ".join(
+                        str(reason) for reason in (
+                            (data.get("observability") or {}).get("completion_reasons")
+                            or (data.get("coverage") or {}).get("completion_reasons") or []
+                        )
+                    ),
+                ),
                 "findings": findings,
                 "findings_count": total,
                 "total_findings_count": total,
@@ -1897,6 +1915,7 @@ class MonitorServer:
             "scan_id": self.api_scan_id or self.current_scan_id,
             "target_url": self.api_target,
             "status": self.api_scan_status,
+            "terminal_outcome": self._terminal_outcome(),
             "phase": self.api_phase,
             "findings": list(self.api_findings),
             "scan_gaps": list(self._scan_gaps),
@@ -1920,6 +1939,13 @@ class MonitorServer:
                 ev = json.loads(ev_file.read_text(encoding="utf-8"))
                 if isinstance(ev, dict):
                     data["status"] = ev.get("status") or ("aborted" if ev.get("aborted") else "done")
+                    reasons = (
+                        (ev.get("observability") or {}).get("completion_reasons")
+                        or (ev.get("coverage") or {}).get("completion_reasons") or []
+                    )
+                    data["terminal_outcome"] = self._terminal_outcome(
+                        data["status"], "; ".join(str(reason) for reason in reasons)
+                    )
                     data["target_url"] = ev.get("target") or ""
                     data["findings"] = ev.get("findings") if ev.get("findings") is not None else []
                     if "findings_available" in ev:
@@ -1951,6 +1977,8 @@ class MonitorServer:
                         data["exhausted_truncations"] = cp["exhausted_truncations"]
             except Exception:
                 pass
+        if "terminal_outcome" not in data:
+            data["terminal_outcome"] = self._terminal_outcome(data["status"])
         return data
 
     # checkpoint.json の途中経過を読む上限（超えたら件数不明のまま＝履歴一覧を重くしない）。
@@ -2092,6 +2120,16 @@ class MonitorServer:
             # Running scan: no evidence yet but it is the active output folder.
             if self.scan_in_progress and d.name == self.current_scan_id:
                 info["status"] = "scanning"
+            from wscan.terminal_outcome import terminal_outcome
+            completion_reasons = []
+            if evidence_data is not None:
+                completion_reasons = (
+                    (evidence_data.get("observability") or {}).get("completion_reasons")
+                    or (evidence_data.get("coverage") or {}).get("completion_reasons") or []
+                )
+            info["terminal_outcome"] = terminal_outcome(
+                info["status"], "; ".join(str(reason) for reason in completion_reasons)
+            )
             try:
                 info["size_bytes"] = sum(
                     p.stat().st_size for p in d.rglob("*") if p.is_file()
@@ -2281,7 +2319,7 @@ class MonitorServer:
         return s[:8] + "…" + s[-4:]
 
     async def send_scan_complete_notification(self) -> None:
-        """ポータルで設定された Webhook へスキャン完了通知を送る（serve モード）。"""
+        """ポータルで設定された Webhook へ終端状態通知を送る（serve モード）。"""
         cfg = self._notify_settings()
         if not (cfg["enabled"] and cfg["webhook_url"]):
             return
@@ -2309,6 +2347,13 @@ class MonitorServer:
                 summary,
                 target_url=self.api_target,
                 report_path=self.api_report_path or "",
+                status=self.api_scan_status,
+                status_reason=self._scan_status_reason or "; ".join(
+                    str(reason) for reason in (
+                        self._scan_complete_data.get("completion_reasons")
+                        or self._scan_complete_data.get("coverage_gaps") or []
+                    )
+                ) or ("Coverage did not complete" if self.api_scan_status == "incomplete" else ""),
             )
         except Exception:
             pass
@@ -2661,6 +2706,13 @@ class MonitorServer:
                 "timestamp": time.time(),
             })
         self.scan_abort_event.clear()
+        # 各 scan lifecycle の終了値は最初の確定後に固定する。新しい snapshot の開始だけが
+        # 次の lifecycle への移行を許可する。
+        self._final_scan_status = None
+        self._terminal_status_event_emitted = False
+        self._scan_complete_event_emitted = False
+        self._terminal_status_conflicts = []
+        self._api_scan_status = "scanning"
         self._clear_pending_interactive()
         # 前スキャンのプラン確認状態を持ち越さない（古い編集の誤適用・即時通過の防止）。
         self.confirmed_plan_edits = {}
@@ -2675,6 +2727,7 @@ class MonitorServer:
         self._scan_started_config = {}
         self._scan_complete_data = {}
         self._scan_status_message = ""
+        self._scan_status_reason = ""
         self._scan_paused = False
         self._scan_gaps = []
         self._scan_page_graph = {}
@@ -2682,6 +2735,49 @@ class MonitorServer:
         self.event_history.clear()
         if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
             self.eta_estimator.reset()
+
+    @property
+    def api_scan_status(self) -> str:
+        return self._api_scan_status
+
+    @api_scan_status.setter
+    def api_scan_status(self, status: str) -> None:
+        self._transition_scan_status(status)
+
+    def _transition_scan_status(self, status: str, reason: str = "") -> bool:
+        """Apply the canonical status once; terminal values are immutable per scan."""
+        from wscan.request_logger import redact_text
+        from wscan.terminal_outcome import terminal_outcome
+
+        # Status messages can contain arbitrary URLs/query strings. Use the existing
+        # request redactor so key-based and configured-value redaction both apply.
+        safe_reason = redact_text(str(reason or ""))
+        outcome = terminal_outcome(status, safe_reason)
+        canonical = outcome["status"]
+        requested = str(status or "unknown").strip().lower()
+        # Keep the active abort-request phase distinct, but never expose the
+        # internal `error` alias; terminal_outcome owns its public mapping.
+        display_status = requested if requested == "aborting" else canonical
+        terminal = canonical in {"done", "incomplete", "failed", "aborted"}
+        if self._final_scan_status:
+            if canonical == self._final_scan_status:
+                return True
+            conflict = {
+                "kept": self._final_scan_status,
+                "rejected": canonical,
+                "reason_code": "terminal_status_already_finalized",
+                "reason": outcome["reason"],
+            }
+            self._terminal_status_conflicts.append(conflict)
+            _logger.warning(
+                "Rejected terminal scan status change %s -> %s (%s)",
+                conflict["kept"], conflict["rejected"], conflict["reason_code"],
+            )
+            return False
+        if terminal:
+            self._final_scan_status = canonical
+        self._api_scan_status = display_status
+        return True
 
     def _scan_snapshot_event(self) -> dict:
         """Return the canonical UI state at the latest per-scan event cursor."""
@@ -2699,6 +2795,7 @@ class MonitorServer:
             "backend_version": SCHEMA_VERSION,
             "data": {
                 "status": self.api_scan_status,
+                "terminal_outcome": self._terminal_outcome(),
                 "status_message": self._scan_status_message,
                 "paused": self._scan_paused,
                 "aborted": self.api_scan_status in ("aborted", "aborting"),
@@ -2728,6 +2825,18 @@ class MonitorServer:
     # Broadcast helpers
     # ------------------------------------------------------------------
 
+    def _terminal_outcome(self, status: Optional[str] = None, reason: Optional[str] = None) -> dict:
+        """Build the shared user-facing interpretation of a scan status."""
+        from wscan.terminal_outcome import terminal_outcome
+        if reason is None:
+            reason = self._scan_status_reason or "; ".join(
+                str(item) for item in (
+                    self._scan_complete_data.get("completion_reasons")
+                    or self._scan_complete_data.get("coverage_gaps") or []
+                )
+            )
+        return terminal_outcome(status or self.api_scan_status, reason)
+
     async def emit(self, event_type: str, data: Any = None):
         """Send an event to all connected monitoring clients."""
         # 全イベントの単一の入口。履歴・WS 配信・派生状態（scan_gaps 等）に入る前に、設定済み資格情報の
@@ -2736,20 +2845,34 @@ class MonitorServer:
         # スキャンが完了したら未解決のレビュー待ちは無効化する。
         # （非serve単発や異常終了で pending が残ったまま再接続→亡霊表示を防ぐ）
         if event_type == "scan_complete":
-            self._clear_pending_interactive()
             status = event_data.get("status")
             if not status:
                 if event_data.get("aborted") or self.api_scan_status == "aborted":
                     status = "aborted"
                 else:
                     status = "done"
-            self.api_scan_status = status
+            status_reason = "; ".join(
+                str(reason) for reason in (
+                    event_data.get("completion_reasons")
+                    or event_data.get("coverage_gaps") or []
+                )
+            )
+            terminal = self._terminal_outcome(status, status_reason)
+            status = terminal["status"]
+            event_data["status"] = status
+            if not self._transition_scan_status(status, status_reason):
+                return
+            if self._scan_complete_event_emitted:
+                return
+            self._clear_pending_interactive()
+            self._scan_status_reason = status_reason
+            event_data["terminal_outcome"] = terminal
             if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
                 self.eta_estimator.record_terminal(status="completed" if status == "done" else "aborted")
             # 終端では最後の phase 文言を残さない（Done なのに "OS injection testing" が
             # snapshot/再接続後も見える回帰を防ぐ）。ここが完了を確定する唯一の場所。
-            # error だけは直前の具体的な失敗理由を優先し、無い場合のみ既定文言にする。
-            if status != "error" or not self._scan_status_message:
+            # failed は直前の具体的な失敗理由を優先し、無い場合のみ既定文言にする。
+            if status != "failed" or not self._scan_status_message:
                 self._scan_status_message = _completion_status_message(status)
             if status == "done":
                 if self.api_progress.get("total", 0) > 0:
@@ -2761,7 +2884,9 @@ class MonitorServer:
             for optional_key in (
                 "status", "aborted", "total_findings_count",
                 "confirmed_findings_count", "hypothesis_count",
-                "evidence_completion", "authentication",
+                "evidence_completion", "authentication", "coverage_gaps",
+                "completion_reasons",
+                "terminal_outcome",
             ):
                 if optional_key in event_data:
                     keys_to_copy.append(optional_key)
@@ -2818,6 +2943,8 @@ class MonitorServer:
             self._scan_started_config = copy.deepcopy(event_data)
         elif event_type == "status" and isinstance(event_data, dict):
             self._scan_status_message = event_data.get("message", "")
+            if event_data.get("terminal_outcome"):
+                self._scan_status_reason = event_data["terminal_outcome"].get("reason", "")
 
         self._scan_sequence += 1
         event = {
@@ -2831,6 +2958,8 @@ class MonitorServer:
             "data": event_data,
         }
         self.event_history.append(event)
+        if event_type == "scan_complete":
+            self._scan_complete_event_emitted = True
         dead = set()
         for client in list(self.clients):
             sync_buffer = self._ws_sync_buffers.get(client)
@@ -2874,15 +3003,28 @@ class MonitorServer:
 
     async def emit_status(self, message: str, state: str = "running"):
         # D: CI/CD API — ステータス自動更新
-        if state == "done":
-            self.api_scan_status = "done"
-        elif state == "aborted":
-            self.api_scan_status = "aborted"
-        elif state == "error":
-            self.api_scan_status = "error"
+        outcome = None
+        if state in {"done", "aborted", "error", "failed", "incomplete"}:
+            from wscan.terminal_outcome import terminal_outcome
+            outcome = terminal_outcome(state, message)
+            canonical = outcome["status"]
+            if (
+                self._terminal_status_event_emitted
+                and canonical == self._final_scan_status
+            ):
+                return
+            if not self._transition_scan_status(state, message):
+                return
+            # Set before the first await so concurrent terminal callers cannot
+            # publish the same outcome twice into event_history / WebSocket.
+            self._terminal_status_event_emitted = True
+            state = canonical
         elif state == "running" and self.api_scan_status == "idle":
-            self.api_scan_status = "scanning"
-        await self.emit("status", {"message": message, "state": state})
+            self._transition_scan_status("scanning")
+        event = {"message": message, "state": state}
+        if outcome is not None:
+            event["terminal_outcome"] = outcome
+        await self.emit("status", event)
 
     @staticmethod
     def _finding_snapshot_key(f: dict) -> tuple:

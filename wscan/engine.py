@@ -2068,9 +2068,16 @@ class ScanEngine:
 
     def _observability_report_data(self, sample_limit: int = 5) -> dict:
         """レポート用に集計と代表サンプルを同じデータ源から返す。"""
+        from .url_scope import redact_event_data
+        from .terminal_outcome import terminal_outcome
+        safe_reasons = redact_event_data({"reasons": list(self.wave_errors)})["reasons"]
+        status = self._terminal_status()
         data = {
             **self.observability_summary(),
             "samples": [str(note) for note in self.wave_errors[:sample_limit]],
+            "scan_status": status,
+            "terminal_outcome": terminal_outcome(status, "; ".join(safe_reasons)),
+            "completion_reasons": safe_reasons,
         }
         if getattr(self, "token_lifecycle_manager", False) is True:
             events = getattr(self, "_token_lifecycle_events", [])
@@ -4302,6 +4309,7 @@ class ScanEngine:
                     "aborted": scan_aborted,
                     "evidence_completion": self.evidence_completion(),
                     "authentication": getattr(self, "authentication_state", {}),
+                    "completion_reasons": list(self.wave_errors),
                 })
 
     # =========================================================================
@@ -9509,7 +9517,7 @@ class ScanEngine:
         aborted を最優先し、authentication failure または unverified のとき「incomplete」に
         し、正常完了時のみ「done」とする（不一致 terminal truth を防止）。
         """
-        aborted = self.scan_aborted if scan_aborted is None else scan_aborted
+        aborted = getattr(self, "scan_aborted", False) if scan_aborted is None else scan_aborted
         if aborted:
             return "aborted"
         auth_state = getattr(self, "authentication_state", {"state": "unknown"})
@@ -9517,7 +9525,11 @@ class ScanEngine:
             e.startswith(("authentication_incomplete:", "authentication_unverified:"))
             for e in getattr(self, "wave_errors", [])
         )
-        return "incomplete" if auth_failed else "done"
+        recon_incomplete = any(
+            str(e).startswith(("hybrid_agent_recon_incomplete:", "hybrid_agent_recon_coverage_gap:"))
+            for e in getattr(self, "wave_errors", [])
+        )
+        return "incomplete" if auth_failed or recon_incomplete else "done"
 
     def _save_evidence(self):
         findings_dicts = [f.to_dict() for f in self.all_findings]
@@ -9539,10 +9551,14 @@ class ScanEngine:
 
         llm_summary = self._llm_runtime_summary()
         terminal_status = self._terminal_status()
+        from .terminal_outcome import terminal_outcome
         evidence = {
             "target": self.target_url,
             "scan_date": datetime.datetime.now().isoformat(),
             "status": terminal_status,
+            "terminal_outcome": terminal_outcome(
+                terminal_status, "; ".join(str(reason) for reason in self.wave_errors)
+            ),
             "aborted": bool(self.scan_aborted),
             "checks": self.checks,
             "visited_urls": list(self.visited_urls),
@@ -9550,7 +9566,7 @@ class ScanEngine:
             "findings": findings_dicts,
             "scan_matrix": self._scan_matrix_for_display(),
             "observability": self._observability_report_data(),
-            "coverage": self.coverage_summary(),
+            "coverage": self._report_coverage_data(),
             "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
             "diff": diff_data,
             "attack_plans": [
@@ -9621,13 +9637,15 @@ class ScanEngine:
                     output_path=self.output_dir / "report.sarif",
                     lang=getattr(self, "report_lang", "ja"),
                     coverage=self.coverage_summary(),  # 検査カバレッジを SARIF へ
+                    status=terminal_status,
+                    status_reasons=list(self.wave_errors),
                 )
                 sarif_out = str(sarif_path)
                 console.print(f"  [dim]SARIF:   [/dim] {sarif_path}")
             except Exception as _sarif_err:
                 console.print(f"  [yellow][SARIF] 書き出し失敗: {_sarif_err}[/yellow]")
 
-        # L: スキャン完了通知
+        # L: 終端状態通知
         if self._notifier and self._notifier.notify_complete:
             # 完了サマリーは confirmed(verified) のみを脆弱性として数える。
             _confirmed = [_f for _f in self.all_findings if _f.verified]
@@ -9651,6 +9669,8 @@ class ScanEngine:
                         target_url=self.target_url,
                         report_path=str(self.output_dir / "report.html"),
                         sarif_path=sarif_out,
+                        status=terminal_status,
+                        status_reason="; ".join(self.wave_errors),
                     )
                 )
             except Exception as _notify_err:
@@ -9666,6 +9686,8 @@ class ScanEngine:
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir, lang=getattr(self, "report_lang", "ja"))
         display_scan_matrix = self._scan_matrix_for_display()
+        report_coverage = getattr(self, "_report_coverage_data", None)
+        coverage_data = report_coverage() if callable(report_coverage) else self.coverage_summary()
 
         # 差分スキャン結果を読み込む (evidence.json に書き込み済み)
         diff_result = None
@@ -9690,7 +9712,7 @@ class ScanEngine:
             scan_matrix=display_scan_matrix,
             llm_summary=self._llm_runtime_summary(),
             observability=self._observability_report_data(),
-            coverage=self.coverage_summary(),
+            coverage=coverage_data,
             template="audit",
             diff_result=diff_result,
         )
@@ -9708,13 +9730,27 @@ class ScanEngine:
                     scan_matrix=display_scan_matrix,
                     llm_summary=self._llm_runtime_summary(),
                     observability=self._observability_report_data(),
-                    coverage=self.coverage_summary(),
+                    coverage=coverage_data,
                     template=tmpl,
                     diff_result=diff_result,
                 )
             except Exception:
                 pass
         return report_path
+
+    def _report_coverage_data(self) -> dict:
+        """レポート受信側に終端状態を加え、通常の coverage 集計契約を保つ。"""
+        from .url_scope import redact_event_data
+        from .terminal_outcome import terminal_outcome
+        data = self.coverage_summary()
+        status_getter = getattr(self, "_terminal_status", None)
+        status = status_getter() if callable(status_getter) else "done"
+        data["completion_reasons"] = redact_event_data({
+            "reasons": list(getattr(self, "wave_errors", []) or [])
+        })["reasons"]
+        data["scan_status"] = status
+        data["terminal_outcome"] = terminal_outcome(status, "; ".join(data["completion_reasons"]))
+        return data
 
     def _generate_report(self):
         import webbrowser

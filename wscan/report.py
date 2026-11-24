@@ -1619,6 +1619,19 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         categories = observability.get("by_category", {}) or {}
         samples = observability.get("samples", []) or []
         llm_calls = int(observability.get("llm_calls", 0) or 0)
+        from wscan.terminal_outcome import terminal_outcome
+        scan_status = str(observability.get("scan_status") or "done").lower()
+        outcome = observability.get("terminal_outcome") or terminal_outcome(
+            scan_status,
+            "; ".join(str(reason) for reason in observability.get("completion_reasons", [])),
+        )
+        status_html = ""
+        if scan_status not in {"idle", "scanning", "running"} and not outcome["is_success"]:
+            reason_text = self._escape(outcome.get("reason", "")) if not outcome["is_success"] else ""
+            status_html = (
+                f'<p style="color:{outcome["color"]};font-weight:700">{self._escape(outcome["label"])}</p>'
+                + (f'<p style="color:{outcome["color"]}">Reason: {reason_text}</p>' if reason_text else "")
+            )
         none_label = t("report.common.none")
         category_html = "".join(
             f"<li><code>{self._escape(category)}</code>: {count}</li>"
@@ -1637,7 +1650,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         return f"""
         <div class="section observability-section">
             <h2>{t('report.observability.heading')}</h2>
-            <p>{t('report.observability.dropped', total=total)}</p>
+            {status_html}<p>{t('report.observability.dropped', total=total)}</p>
             <p>{t('report.observability.llm_calls', count=llm_calls)}</p>
             {warning}
             <h3 style="margin-top:14px">by_category</h3>
@@ -1657,6 +1670,20 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         t = self._t
 
         auth_verification_status = coverage.get("auth_verification_status")
+        scan_status = str(coverage.get("scan_status") or "").lower()
+        completion_reasons = coverage.get("completion_reasons") or []
+        from wscan.terminal_outcome import terminal_outcome
+        outcome = coverage.get("terminal_outcome") or terminal_outcome(
+            scan_status or "done", "; ".join(str(reason) for reason in completion_reasons)
+        )
+        status_banner = ""
+        if scan_status and not outcome["is_success"]:
+            color = outcome["color"]
+            reasons = self._escape(outcome.get("reason", "")) if not outcome["is_success"] else ""
+            status_banner = (
+                f'<p style="color:{color};font-weight:700">{self._escape(outcome["label"])}</p>'
+                + (f'<p style="color:{color}">Reason: {reasons}</p>' if reasons else "")
+            )
         auth_reasons = coverage.get("auth_verification_reasons") or []
         coverage_gaps = coverage.get("coverage_gaps") or []
         auth_cov_html = ""
@@ -1677,11 +1704,10 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             <h3 style="margin-top:14px">Coverage Gaps</h3>
             <ul>{gaps_items}</ul>"""
 
-        if not coverage.get("http_status") and (auth_verification_status or coverage_gaps):
+        if not coverage.get("http_status") and (auth_verification_status or coverage_gaps or status_banner):
             return f"""
         <div class="section coverage-section">
-            <h2>{t('report.coverage.heading')}</h2>
-            {auth_cov_html}
+            <h2>{t('report.coverage.heading')}</h2>{status_banner}{auth_cov_html}
             {gaps_html}
         </div>"""
 
@@ -1843,8 +1869,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         ) if transport_rows else ""
         return f"""
         <div class="section coverage-section">
-            <h2>{t('report.coverage.heading')}</h2>
-            <p>{t('report.coverage.summary', reached=reached_count, attempts=attempts, findings=findings_total)}</p>
+            <h2>{t('report.coverage.heading')}</h2>{status_banner}<p>{t('report.coverage.summary', reached=reached_count, attempts=attempts, findings=findings_total)}</p>
             {check_coverage_html}
             {completion_html}
             {prereq_html}

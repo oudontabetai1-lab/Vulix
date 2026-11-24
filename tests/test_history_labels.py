@@ -52,7 +52,13 @@ def test_app_history_uses_shared_labels_without_duplicate_map():
 def test_dashboard_history_labels_stay_japanese():
     """レガシー履歴（/monitor）の日本語ラベルと途中件数の表記を固定する。"""
     dashboard = (ROOT / "templates/dashboard.html").read_text(encoding="utf-8")
-    assert "statusLabel = '実行中';" in dashboard
-    assert "statusLabel = '中断（途中）';" in dashboard
-    assert "件（実行中・途中）" in dashboard
-    assert "件（途中）" in dashboard
+    assert "const outcome = scan.terminal_outcome || {};" in dashboard
+    assert "const rawStatus = String(outcome.status || scan.status || 'incomplete').toLowerCase();" in dashboard
+    assert "outcome.label_ja || scan.status || '—'" in dashboard
+    assert "const legacyCssStatus = {" in dashboard
+    assert "incomplete: 'incomplete', failed: 'error'" in dashboard
+    assert "history-status-${legacyCssStatus}" in dashboard
+    # Incomplete remains a distinct badge even though its severity is warning.
+    assert ".history-status-incomplete" in dashboard
+    assert "done: 'done'" in dashboard
+    assert "statusSpan.style.color = outcome.color" in dashboard

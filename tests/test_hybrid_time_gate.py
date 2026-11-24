@@ -4,6 +4,8 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import main
+from wscan.agent_engine import AgentHandoffData
+from wscan.engine import ScanEngine
 
 
 class _Monitor:
@@ -11,18 +13,30 @@ class _Monitor:
         self.command_queue = asyncio.Queue()
         self.scan_abort_event = asyncio.Event()
         self.statuses = []
+        self.terminal_states = []
         self.api_scan_status = "scanning"
 
     async def emit_status(self, message, state="running"):
         self.statuses.append((message, state))
+        if state in {"done", "incomplete", "error", "aborted"}:
+            self.terminal_states.append(state)
         if state == "done":
             self.api_scan_status = "done"
         elif state == "error":
             self.api_scan_status = "error"
+        elif state in {"incomplete", "failed", "aborted"}:
+            from wscan.terminal_outcome import terminal_outcome
+            self.api_scan_status = terminal_outcome(state)["status"]
 
     def request_abort(self):
         self.scan_abort_event.set()
         self.command_queue.put_nowait("abort")
+
+    async def emit(self, event_type, data=None):
+        if event_type == "scan_complete":
+            status = (data or {}).get("status", "done")
+            self.api_scan_status = status
+            self.terminal_states.append(status)
 
 
 def test_hybrid_recon_window_allows_immediately_inside_window():
@@ -129,6 +143,7 @@ def test_hybrid_recon_wait_can_be_aborted_from_monitor_command_queue():
     assert sleeps == [0.5]
     assert monitor.statuses[0][1] == "paused"
     assert monitor.statuses[-1][1] == "aborted"
+    assert monitor.terminal_states == ["aborted"]
 
 
 def test_agent_mode_waits_outside_window_without_real_sleep():
@@ -283,7 +298,7 @@ def test_hybrid_recon_retries_after_next_window_and_keeps_handoff():
     assert any("再試行 1/2" in message for message, _state in monitor.statuses)
 
 
-def test_hybrid_recon_retry_limit_falls_back_without_seed():
+def test_hybrid_recon_retry_limit_falls_back_without_seed(tmp_path):
     monitor = _Monitor()
     current = [datetime(2024, 1, 1, 11, 59, 59)]
     attempts = []
@@ -310,11 +325,87 @@ def test_hybrid_recon_retry_limit_falls_back_without_seed():
     )
 
     assert attempts == [1, 2, 3]
-    assert handoff is None
+    assert isinstance(handoff, AgentHandoffData)
+    assert handoff.coverage_complete is False
+    assert handoff.incomplete_reason == "retry_limit"
+    assert "hybrid_recon_incomplete:retry_limit" in handoff.coverage_gaps
     assert continue_to_phase2 is True
     assert monitor.api_scan_status == "scanning"
     assert monitor.statuses[-1][1] == "warning"
     assert "再試行上限 (2 回)" in monitor.statuses[-1][0]
+
+    engine = ScanEngine(
+        url="http://fixture.test", output_dir=str(tmp_path), fast_mode=True
+    )
+    engine.wave_errors.extend(main._hybrid_handoff_wave_errors(handoff))
+    assert engine._terminal_status() == "incomplete"
+
+
+def test_hybrid_recon_retry_window_abort_returns_incomplete_handoff():
+    monitor = _Monitor()
+    current = [datetime(2024, 1, 1, 11, 59, 59)]
+    attempts = []
+    sleep_calls = []
+
+    async def abort_when_waiting(_delay):
+        sleep_calls.append(_delay)
+        if len(sleep_calls) == 1:
+            # まず時間帯の境界で偵察 task を中断し、その後の次枠待機へ進める。
+            current[0] = datetime(2024, 1, 1, 12, 0)
+        else:
+            monitor.command_queue.put_nowait("abort")
+
+    async def interrupted_recon():
+        attempts.append(True)
+        await asyncio.Event().wait()
+
+    handoff, continue_to_phase2 = asyncio.run(
+        main._run_hybrid_recon_with_retries(
+            interrupted_recon,
+            monitor,
+            ["Mon 10:00-12:00"],
+            None,
+            now_fn=lambda: current[0],
+            sleep_fn=abort_when_waiting,
+        )
+    )
+
+    assert attempts == [True]
+    assert isinstance(handoff, AgentHandoffData)
+    assert handoff.incomplete_reason == "retry_window_aborted"
+    assert continue_to_phase2 is False
+    assert any(state == "aborted" for _message, state in monitor.statuses)
+    assert not any(state == "incomplete" for _message, state in monitor.statuses)
+    assert monitor.terminal_states == ["aborted"]
+
+
+def test_hybrid_empty_handoff_is_classified_incomplete():
+    errors = main._hybrid_handoff_wave_errors(AgentHandoffData())
+    assert errors == ["hybrid_agent_recon_incomplete:empty_handoff"]
+
+    handoff = main._mark_hybrid_handoff_incomplete(None, "phase1_window_aborted")
+    assert handoff.coverage_complete is False
+    assert handoff.incomplete_reason == "phase1_window_aborted"
+    assert main._hybrid_handoff_wave_errors(handoff)[0] == (
+        "hybrid_agent_recon_incomplete:phase1_window_aborted"
+    )
+
+
+def test_hybrid_phase1_window_abort_keeps_aborted_terminal():
+    monitor = _Monitor()
+    monitor.command_queue.put_nowait("abort")
+
+    allowed = asyncio.run(main._wait_for_hybrid_recon_window(
+        monitor,
+        ["Mon 10:00-12:00"],
+        None,
+        now_fn=lambda: datetime(2024, 1, 1, 9, 0),
+    ))
+    assert allowed is False
+    assert monitor.api_scan_status == "aborted"
+    assert monitor.statuses[-1][1] == "aborted"
+    assert not any(state == "incomplete" for _message, state in monitor.statuses)
+    assert monitor.terminal_states == ["aborted"]
 
 
 def test_window_monitor_is_disabled_when_unconfigured():

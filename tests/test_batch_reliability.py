@@ -38,6 +38,9 @@ def test_batch_exit_code_all_and_partial_failures():
     assert main._batch_exit_code([ok, ok]) == 0    # 全成功は 0
     assert main._batch_exit_code([ok, bad]) == 1   # 一部失敗は非0
     assert main._batch_exit_code([bad, bad]) == 1  # 全失敗は非0
+    incomplete = BatchResult(target=BatchTarget(url="http://c/"), status="incomplete")
+    assert main._batch_exit_code([incomplete]) == 2
+    assert main._batch_exit_code([ok, incomplete]) == 2
 
 
 def test_empty_message_exception_counts_as_failure(tmp_path):
@@ -67,3 +70,41 @@ def test_summary_text_marks_failures():
     ]
     text = runner.summary_text()
     assert "失敗" in text and "B" in text
+
+
+def test_batch_summary_marks_incomplete_as_not_success(tmp_path):
+    runner = BatchRunner(targets=[], global_kwargs={})
+    runner.output_base = tmp_path
+    runner.results = [BatchResult(
+        target=BatchTarget(url="http://a/", label="A"), status="incomplete",
+        status_reason="hybrid_agent_recon_incomplete:retry_limit",
+    )]
+    text = runner.summary_text()
+    assert "不完全" in text
+    assert "✅" not in text
+    assert "retry_limit" in text
+    assert main._batch_exit_code(runner.results) == 2
+
+
+def test_batch_run_one_records_incomplete_without_marking_success(tmp_path):
+    runner = BatchRunner(targets=[], global_kwargs={})
+    runner.output_base = tmp_path
+    target = BatchTarget(url="http://a/", label="A")
+
+    class _IncompleteEngine:
+        def __init__(self, **kwargs):
+            self.all_findings = []
+            self.wave_errors = ["hybrid_agent_recon_incomplete:retry_limit"]
+
+        async def run(self):
+            return None
+
+        def _terminal_status(self):
+            return "incomplete"
+
+    with patch("wscan.engine.ScanEngine", _IncompleteEngine):
+        result = asyncio.run(runner._run_one(target))
+
+    assert result.status == "incomplete"
+    assert result.success
+    assert main._batch_exit_code([result]) == 2

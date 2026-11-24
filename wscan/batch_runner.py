@@ -68,6 +68,8 @@ class BatchResult:
     output_dir: str = ""
     duration_secs: float = 0.0
     error: str = ""
+    status: str = "done"
+    status_reason: str = ""
 
     @property
     def success(self) -> bool:
@@ -207,6 +209,12 @@ class BatchRunner:
             engine = ScanEngine(**kwargs)
             await engine.run()
 
+            terminal_status = engine._terminal_status()
+            from wscan.url_scope import redact_event_data
+            terminal_reasons = redact_event_data({
+                "reasons": list(getattr(engine, "wave_errors", []) or [])
+            })["reasons"]
+
             counts: dict[str, int] = {}
             for f in engine.all_findings:
                 counts[f.severity] = counts.get(f.severity, 0) + 1
@@ -220,6 +228,8 @@ class BatchRunner:
                 low=counts.get("low", 0),
                 output_dir=out_dir,
                 duration_secs=time.time() - start,
+                status=terminal_status,
+                status_reason="; ".join(terminal_reasons),
             )
         except Exception as exc:
             # str(exc) が空の例外（bare TimeoutError() 等）でも error を必ず非空にする。
@@ -231,11 +241,14 @@ class BatchRunner:
                 duration_secs=time.time() - start,
                 error=err,
             )
-            _print(f"[Batch] エラー: {label} — {err}")
 
-        status = "✅" if result.success else "❌"
+        from wscan.terminal_outcome import terminal_outcome
+        outcome = terminal_outcome(
+            result.status if result.success else "failed",
+            result.status_reason if result.success else result.error,
+        )
         _print(
-            f"[Batch] {status} {label} — "
+            f"[Batch] {outcome['emoji']} {outcome['message']} — {label} — "
             f"{result.findings_count} 件 ({result.severity_summary()}) "
             f"[{result.duration_secs:.1f}s]"
         )
@@ -253,9 +266,16 @@ class BatchRunner:
             "=" * 60,
         ]
         total_findings = 0
+        from wscan.terminal_outcome import terminal_outcome
+        outcomes = {}
         for r in self.results:
             label = r.target.label or r.target.url
-            status = "✅" if r.success else f"❌ ({r.error[:50]})"
+            outcome = terminal_outcome(
+                r.status if r.success else "failed",
+                r.status_reason if r.success else r.error,
+            )
+            outcomes[id(r)] = outcome
+            status = f"{outcome['emoji']} {outcome['message']}"
             lines.append(
                 f"  {status} {label[:40]:<40} "
                 f"Total={r.findings_count:3d}  "
@@ -263,8 +283,9 @@ class BatchRunner:
                 f"[{r.duration_secs:.1f}s]"
             )
             total_findings += r.findings_count
-        failed = [r for r in self.results if not r.success]
-        succeeded = len(self.results) - len(failed)
+        failed = [r for r in self.results if outcomes[id(r)]["exit_code"] == 1]
+        incomplete = [r for r in self.results if outcomes[id(r)]["exit_code"] == 2]
+        succeeded = sum(1 for r in self.results if outcomes[id(r)]["is_success"])
         lines.append("-" * 60)
         lines.append(f"  合計: {total_findings} 件の脆弱性が検出されました")
         if failed:
@@ -272,6 +293,9 @@ class BatchRunner:
             scope = "全対象が失敗" if succeeded == 0 else f"{len(failed)}/{len(self.results)} 対象が失敗"
             names = ", ".join((r.target.label or r.target.url)[:40] for r in failed)
             lines.append(f"  ⚠️  {scope}（成功 {succeeded} / 失敗 {len(failed)}）: {names}")
+        if incomplete:
+            names = ", ".join((r.target.label or r.target.url)[:40] for r in incomplete)
+            lines.append(f"  ⚠️  不完全 {len(incomplete)} 件（結果は未完了）: {names}")
         lines.append(f"  出力: {self.output_base}")
         return "\n".join(lines)
 
@@ -294,6 +318,12 @@ class BatchRunner:
                     "duration_secs":  round(r.duration_secs, 2),
                     "error":          r.error,
                     "success":        r.success,
+                    "status":         r.status,
+                    "status_reason":  r.status_reason,
+                    "terminal_outcome": terminal_outcome(
+                        r.status if r.success else "failed",
+                        r.status_reason if r.success else r.error,
+                    ),
                 }
                 for r in self.results
             ],

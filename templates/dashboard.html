@@ -6083,10 +6083,18 @@ function dispatchLegacyEvent(event) {
       // 設定 + 結果サマリはサーバ側でアウトプットフォルダに自動保存される。
       // 必要に応じて「📤 設定をエクスポート」ボタンから手動でダウンロード可能。
       // replaceFindings が 0 件時の中断注記を判定するため、state を先に確定させる。
-      const isAborted = data.status === 'aborted' || !!data.aborted;
-      const isIncomplete = data.status === 'incomplete';
+      const outcome = data.terminal_outcome || {
+        status: data.status || (data.aborted ? 'aborted' : 'unknown'),
+        label: data.status || (data.aborted ? 'aborted' : 'unknown'),
+        is_success: data.status === 'done' || data.status === 'completed' || data.status === 'success',
+      };
+      const terminalStatus = outcome.status || data.status || (data.aborted ? 'aborted' : 'unknown');
+      const isAborted = terminalStatus === 'aborted';
+      const isIncomplete = terminalStatus === 'incomplete';
+      const isFailed = terminalStatus === 'failed';
       state.scanDone = true;
-      state.status = isAborted ? 'aborted' : (isIncomplete ? 'incomplete' : 'done');
+      state.status = terminalStatus;
+      state.terminalOutcome = outcome;
       state.aborted = isAborted;
       if (Array.isArray(data.findings)) {
         replaceFindings(data.findings);
@@ -6112,19 +6120,28 @@ function dispatchLegacyEvent(event) {
       showPostScanActions(true);
 
       if (isAborted) {
-        setStatus(`Scan aborted (partial report) — ${data.total_findings} finding(s)`, 'aborted');
-        addEventLog('status', `Scan aborted (partial report). Report: ${data.report_path || ''}`);
+        setTerminalStatus(outcome, `${outcome.label} — ${data.total_findings} finding(s)`);
+        addEventLog('status', `${outcome.label}. Report: ${data.report_path || ''}`);
         document.getElementById('statRemain').textContent = '中断';
       } else if (isIncomplete) {
-        setStatus(`Authentication unconfirmed (partial report) — ${data.total_findings} finding(s)`, 'incomplete');
-        addEventLog('status', 'Authenticated coverage is incomplete.');
+        const authUnconfirmed = data.authentication &&
+          ['incomplete', 'failure', 'configured'].includes(data.authentication.state);
+        const authContext = authUnconfirmed ? 'Authentication unconfirmed / ' : '';
+        setTerminalStatus(outcome, `${authContext}${outcome.label} — ${data.total_findings} finding(s)`);
+        const reasons = data.completion_reasons || data.coverage_gaps || [];
+        addEventLog('status', `${outcome.label}${reasons.length ? `: ${reasons.join('; ')}` : '.'}`);
         document.getElementById('statRemain').textContent = '未完了';
+      } else if (isFailed) {
+        setTerminalStatus(outcome, `${outcome.label} — ${data.total_findings} finding(s)`);
+        const reasons = outcome.reason || (data.completion_reasons || []).join('; ');
+        addEventLog('status', `${outcome.label}${reasons ? `: ${reasons}` : '.'}`);
+        document.getElementById('statRemain').textContent = '失敗';
       } else {
         const evidenceLabel = evidenceCompletion ? ` / evidence ${evidenceCompletion.status}` : '';
-        setStatus(`Scan complete${evidenceLabel} — ${data.total_findings} finding(s)`, 'done');
+        setTerminalStatus(outcome, `${outcome.label}${evidenceLabel} — ${data.total_findings} finding(s)`);
         document.getElementById('progressBar').style.width = '100%';
         document.getElementById('statPct').textContent = '100%';
-        addEventLog('status', `Scan complete. Report: ${data.report_path}`);
+        addEventLog('status', `${outcome.label}. Report: ${data.report_path}`);
         document.getElementById('statRemain').textContent = '完了';
       }
       // Close timing for any phase that started but didn't get a "next phase" event
@@ -6369,10 +6386,16 @@ function applyScanSnapshot(event) {
   state.eventCount = state.lastEventSequence;
 
   const status = data.status || 'idle';
+  const terminalOutcome = data.terminal_outcome || (data.complete && data.complete.terminal_outcome) || {
+    status,
+    label: data.status_message || status,
+    is_success: status === 'done',
+  };
   const findings = Array.isArray(data.findings) ? data.findings : [];
   state.scanGapCount = Number(data.scan_gap_count) || 0;
   state.scanGaps = Array.isArray(data.scan_gaps) ? [...data.scan_gaps] : [];
   state.status = status;
+  state.terminalOutcome = terminalOutcome;
   state.aborted = status === 'aborted' || !!data.aborted;
   state.pageCount = Number(data.page_count) || 0;
   state.checkCounts = data.check_counts && typeof data.check_counts === 'object'
@@ -6384,7 +6407,7 @@ function applyScanSnapshot(event) {
   state.urlStatuses = data.url_statuses && typeof data.url_statuses === 'object'
     ? {...data.url_statuses} : {};
   state.phase = data.phase || null;
-  state.scanDone = ['done', 'aborted', 'incomplete'].includes(status);
+  state.scanDone = ['done', 'aborted', 'incomplete', 'failed'].includes(terminalOutcome.status) || status === 'error';
   document.getElementById('eventCount').textContent = state.eventCount;
   document.getElementById('statPages').textContent = state.pageCount;
   renderCheckCounters();
@@ -6418,7 +6441,7 @@ function applyScanSnapshot(event) {
   state.lastProgress = progress;
 
   let pct = Number(progress.percent) || 0;
-  if (status === 'done') {
+  if (terminalOutcome.is_success) {
     pct = 100;
   } else if (serverEta && serverEta.progressPercent != null && Number.isFinite(serverEta.progressPercent)) {
     pct = Math.min(99.9, serverEta.progressPercent);
@@ -6428,7 +6451,9 @@ function applyScanSnapshot(event) {
   document.getElementById('statPct').textContent = pctDisplay;
   document.getElementById('statCurrent').textContent = progress.current ?? 0;
   document.getElementById('statTotal').textContent = progress.total > 0 ? '/' + progress.total : '';
-  document.getElementById('progressStripe').style.display = (['done', 'aborted', 'incomplete'].includes(status)) ? 'none' : (pct < 100 ? 'block' : 'none');
+  document.getElementById('progressStripe').style.display =
+    (terminalOutcome.is_success || ['aborted', 'incomplete', 'failed'].includes(terminalOutcome.status))
+      ? 'none' : (pct < 100 ? 'block' : 'none');
   if (status === 'scanning' || status === 'aborting') {
     updateETA(progress.eta_current ?? progress.current ?? 0, progress.eta_total ?? progress.total ?? 0, event.timestamp,
       progress.phase || '', progress.unit || '', progress.total_known !== false, serverEta);
@@ -6438,27 +6463,28 @@ function applyScanSnapshot(event) {
     });
   }
 
-  if (status === 'done') {
+  if (terminalOutcome.is_success) {
     const complete = data.complete || {};
     if (Object.keys(complete).length && !wasDone) {
       handleEvent({type: 'scan_complete', data: complete, timestamp: event.timestamp});
     } else if (!wasDone) {
-      setStatus(`Scan complete — ${findings.length} finding(s)`, 'done');
+      setTerminalStatus(terminalOutcome, `${terminalOutcome.label} — ${findings.length} finding(s)`);
       state.scanDone = true;
       document.getElementById('statRemain').textContent = '完了';
       document.getElementById('statETA').textContent = '—';
       showPostScanActions(true);
     } else {
-      setStatus(`Scan complete — ${findings.length} finding(s)`, 'done');
+      setTerminalStatus(terminalOutcome, `${terminalOutcome.label} — ${findings.length} finding(s)`);
     }
-  } else if (status === 'incomplete') {
-    handleEvent({type: 'scan_complete', data: {...(data.complete || {}), status: 'incomplete',
+  } else if (terminalOutcome.status === 'incomplete') {
+    handleEvent({type: 'scan_complete', data: {...(data.complete || {}), status: terminalOutcome.status, terminal_outcome: terminalOutcome,
       total_findings: findings.length, findings}, timestamp: event.timestamp});
-  } else if (status === 'aborted') {
+  } else if (terminalOutcome.status === 'aborted') {
     const complete = data.complete || {};
     const abortPayload = {
       ...complete,
-      status: 'aborted',
+      status: terminalOutcome.status,
+      terminal_outcome: terminalOutcome,
       aborted: true,
       total_findings: complete.total_findings != null ? complete.total_findings : findings.length,
       findings: complete.findings || findings,
@@ -6468,16 +6494,16 @@ function applyScanSnapshot(event) {
     if (Object.keys(complete).length && !wasDone) {
       handleEvent({type: 'scan_complete', data: abortPayload, timestamp: event.timestamp});
     } else if (!wasDone) {
-      setStatus(`Scan aborted (partial report) — ${findings.length} finding(s)`, 'aborted');
+      setTerminalStatus(terminalOutcome, `${terminalOutcome.label} — ${findings.length} finding(s)`);
       state.scanDone = true;
       document.getElementById('statRemain').textContent = '中断';
       document.getElementById('statETA').textContent = '—';
       showPostScanActions(true);
     } else {
-      setStatus(`Scan aborted (partial report) — ${findings.length} finding(s)`, 'aborted');
+      setTerminalStatus(terminalOutcome, `${terminalOutcome.label} — ${findings.length} finding(s)`);
     }
-  } else if (status === 'error') {
-    setStatus(data.status_message || 'Scan failed', 'error');
+  } else if (terminalOutcome.status === 'failed' || terminalOutcome.status === 'error') {
+    setTerminalStatus(terminalOutcome, data.status_message || terminalOutcome.label);
   } else if (status === 'scanning') {
     setStatus(`スキャン中: ${data.target || ''}`, 'running');
   } else {
@@ -6564,6 +6590,15 @@ function setStatus(message, state) {
   var _rs=document.getElementById('railStatus'); if(_rs)_rs.textContent = message; var _pl=document.querySelector('.ws-rail .pulse'); if(_pl)_pl.className='pulse'+(state?' '+state:'');
   const dot = document.getElementById('statusDot');
   dot.className = 'status-dot' + (state ? ' ' + state : '');
+  dot.style.backgroundColor = '';
+}
+
+function setTerminalStatus(outcome, message) {
+  setStatus(message || outcome.label, outcome.status);
+  const dot = document.getElementById('statusDot');
+  if (dot && outcome.color) dot.style.backgroundColor = outcome.color;
+  const pulse = document.querySelector('.ws-rail .pulse');
+  if (pulse && outcome.color) pulse.style.backgroundColor = outcome.color;
 }
 
 function timeStr(ts) {
@@ -6766,7 +6801,8 @@ function replaceFindings(findings) {
     if (state.scanDone && (state.status === 'aborted' || state.aborted)) {
       panel.innerHTML = '<div class="no-findings-msg" style="color:var(--high)">⚠ スキャンは中断されました — 中断前に検出された脆弱性はありません (部分結果)。<br><span style="font-size:0.75rem;color:var(--text-muted)">No vulnerabilities detected before scan was aborted.</span></div>';
     } else if (state.scanDone && state.status === 'incomplete') {
-      panel.innerHTML = '<div class="no-findings-msg">Authentication unconfirmed — authenticated coverage is incomplete. No findings in the tested surface.</div>';
+      const label = state.terminalOutcome && state.terminalOutcome.label;
+      panel.innerHTML = `<div class="no-findings-msg">${escapeHtml(label)}. No findings in the tested surface do not mean the scan completed successfully.</div>`;
     } else if (state.scanGapCount > 0 || Object.values(state.urlStatuses).some(s => s === 'error')) {
       const errCount = state.scanGapCount || Object.values(state.urlStatuses).filter(s => s === 'error').length;
       panel.innerHTML = `<div class="no-findings-msg">検査済み対象に脆弱性は検出されませんでした。<br><span style="color:#facc15;font-size:0.75rem">⚠ 注意: ${errCount} 件の対象/入力は未検査(エラー/除外)です。</span></div>`;
@@ -6992,7 +7028,7 @@ function filterFindings() {
 let _crawlReviewPages = [];
 
 // 操作待ちモーダル（巡回レビュー / プランレビュー）を強制的に閉じる。
-// スキャン完了・アイドル復帰時に呼び、解決済みなのに残る亡霊モーダルを防ぐ。
+// scan terminal / idle 復帰時に呼び、解決済みなのに残る亡霊モーダルを防ぐ。
 function closeInteractiveModals() {
   ['crawlReviewOverlay', 'planModalOverlay'].forEach(id => {
     const el = document.getElementById(id);
@@ -8326,30 +8362,22 @@ function renderHistoryTable() {
     // 3. Status
     const tdStatus = document.createElement('td');
     const statusSpan = document.createElement('span');
-    const rawStatus = (scan.status || 'incomplete').toLowerCase();
-    let statusClass = 'history-status-incomplete';
-    let statusLabel = rawStatus;
-    if (rawStatus === 'done') {
-      statusClass = 'history-status-done';
-      statusLabel = '完了';
-    } else if (rawStatus === 'scanning') {
-      statusClass = 'history-status-scanning';
-      statusLabel = '実行中';
-    } else if (rawStatus === 'aborted') {
-      statusClass = 'history-status-aborted';
-      statusLabel = '中断';
-    } else if (rawStatus === 'error') {
-      statusClass = 'history-status-error';
-      statusLabel = 'エラー';
-    } else if (rawStatus === 'incomplete') {
-      statusClass = 'history-status-incomplete';
-      statusLabel = '未完了';
-    } else if (rawStatus === 'interrupted') {
-      statusClass = 'history-status-incomplete';
-      statusLabel = '中断（途中）';
-    }
+    const outcome = scan.terminal_outcome || {};
+    const rawStatus = String(outcome.status || scan.status || 'incomplete').toLowerCase();
+    // Keep the existing status-specific CSS tokens; severity and status are different vocabularies.
+    const legacyCssStatus = {
+      done: 'done', scanning: 'scanning', aborted: 'aborted',
+      incomplete: 'incomplete', failed: 'error',
+    }[rawStatus] || 'incomplete';
+    const statusClass = `history-status-${legacyCssStatus}`;
     statusSpan.className = `history-status-badge ${statusClass}`;
-    statusSpan.textContent = statusLabel;
+    statusSpan.textContent = outcome.label_ja || scan.status || '—';
+    statusSpan.title = outcome.reason || outcome.label_ja || '';
+    if (outcome.color) {
+      statusSpan.style.color = outcome.color;
+      statusSpan.style.borderColor = outcome.color;
+      statusSpan.style.backgroundColor = `${outcome.color}20`;
+    }
     tdStatus.appendChild(statusSpan);
     tr.appendChild(tdStatus);
 

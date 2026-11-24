@@ -720,7 +720,7 @@ async def _wait_for_scan_window(
             await monitor.emit_status(
                 "検査可能時間帯に到達できない設定のため、"
                 f"{phase_label} を中断しました。",
-                "error",
+                "warning",
             )
             return False
 
@@ -925,10 +925,19 @@ async def _run_hybrid_recon_with_retries(
 ):
     """時間帯中断された Hybrid 偵察を、次の許可枠で上限付き再実行する。
 
-    戻り値は ``(handoff, continue_to_phase2)``。再試行上限に達した場合は
-    ``(None, True)`` として seed 無しの Phase 2 へフォールバックする。
-    ゲート待機中に abort された場合だけ ``continue_to_phase2`` は ``False``。
+    戻り値は ``(handoff, continue_to_phase2)``。偵察が完了しないすべての終了経路で
+    incomplete reason を持つ handoff を返し、再試行上限時は seed 無しで Phase 2 へ進む。
+    ゲート待機中に abort された場合は incomplete handoff を返して Phase 2 を止める。
     """
+    from wscan.agent_engine import AgentHandoffData
+
+    def incomplete_handoff(reason):
+        return AgentHandoffData(
+            coverage_complete=False,
+            coverage_gaps=[f"hybrid_recon_incomplete:{reason}"],
+            incomplete_reason=reason,
+        )
+
     if max_retries is None:
         max_retries = HYBRID_RECON_MAX_RETRIES
 
@@ -946,18 +955,16 @@ async def _run_hybrid_recon_with_retries(
         )
         if interrupted:
             if _scan_abort_requested(monitor):
-                await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
                 return None, False, True
             return None, True, False
         handoff, aborted = result
         if _scan_abort_requested(monitor) and not aborted:
-            await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
             return None, False, True
         return handoff, False, aborted
 
     handoff, interrupted, aborted = await run_with_monitors()
     if aborted or _scan_abort_requested(monitor):
-        return None, False
+        return incomplete_handoff("recon_aborted"), False
     retries = 0
 
     while interrupted and retries < max_retries:
@@ -974,10 +981,7 @@ async def _run_hybrid_recon_with_retries(
             now_fn=now_fn,
             sleep_fn=sleep_fn,
         ):
-            return None, False
-        if _scan_abort_requested(monitor):
-            await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
-            return None, False
+            return incomplete_handoff("retry_window_aborted"), False
         await monitor.emit_status(
             f"ハイブリッド Phase 1: 再試行 {retries}/{max_retries} を開始します。",
             "running",
@@ -986,7 +990,7 @@ async def _run_hybrid_recon_with_retries(
             on_retry()
         handoff, interrupted, aborted = await run_with_monitors()
         if aborted:
-            return None, False
+            return incomplete_handoff("recon_aborted"), False
 
     if interrupted:
         await monitor.emit_status(
@@ -995,9 +999,81 @@ async def _run_hybrid_recon_with_retries(
             "URL シードなしで Phase 2 を続行します。",
             "warning",
         )
-        return None, True
+        return incomplete_handoff("retry_limit"), True
+
+    if handoff is None:
+        return incomplete_handoff("empty_handoff"), True
+    if (
+        hasattr(handoff, "discovered_urls")
+        and not getattr(handoff, "discovered_urls", None)
+        and not getattr(handoff, "findings", None)
+    ):
+        return incomplete_handoff("empty_handoff"), True
 
     return handoff, True
+
+
+def _mark_hybrid_handoff_incomplete(handoff, reason: str):
+    """Hybrid 偵察/時間帯ゲートの未完了理由を handoff へ集約する。"""
+    from wscan.agent_engine import AgentHandoffData
+
+    if handoff is None:
+        handoff = AgentHandoffData()
+    handoff.coverage_complete = False
+    if handoff.incomplete_reason and reason not in handoff.incomplete_reason.split(";"):
+        handoff.incomplete_reason = f"{handoff.incomplete_reason};{reason}"
+    else:
+        handoff.incomplete_reason = handoff.incomplete_reason or reason
+    marker = f"hybrid_recon_incomplete:{reason}"
+    if marker not in handoff.coverage_gaps:
+        handoff.coverage_gaps.append(marker)
+    return handoff
+
+
+def _hybrid_handoff_wave_errors(handoff) -> list[str]:
+    """handoff の incomplete 情報を Phase 2 の observability error に変換する。"""
+    if handoff is None:
+        return ["hybrid_agent_recon_incomplete:empty_handoff"]
+    urls = getattr(handoff, "discovered_urls", None) or []
+    findings = getattr(handoff, "findings", None) or []
+    network_errors = list(getattr(handoff, "network_guard_errors", []) or [])
+    gaps = list(getattr(handoff, "coverage_gaps", []) or [])
+    incomplete = (
+        not getattr(handoff, "coverage_complete", True)
+        or not urls and not findings
+        or bool(network_errors)
+    )
+    errors = []
+    if incomplete:
+        reason = getattr(handoff, "incomplete_reason", "") or (
+            "empty_handoff" if not urls and not findings else "coverage_incomplete"
+        )
+        errors.append(f"hybrid_agent_recon_incomplete:{reason}")
+    errors.extend(network_errors)
+    errors.extend(f"hybrid_agent_recon_coverage_gap:{gap}" for gap in gaps)
+    return list(dict.fromkeys(errors))
+
+
+async def _emit_hybrid_incomplete_terminal(monitor, handoff):
+    """Phase 2 を開始できない偵察終了も dashboard の terminal truth に残す。"""
+    from wscan.terminal_outcome import terminal_outcome
+
+    current = terminal_outcome(getattr(monitor, "api_scan_status", "idle"))
+    if current["status"] in {"done", "incomplete", "failed", "aborted"}:
+        return
+    reason = getattr(handoff, "incomplete_reason", "") or "recon_incomplete"
+    message = (
+        f"ハイブリッド偵察は不完全です ({reason})。"
+        "0 件は安全・完了を意味しません。"
+    )
+    # status event は warning に留め、terminal status は scan_complete で一度だけ確定する。
+    await monitor.emit_status(message, "warning")
+    await monitor.emit("scan_complete", {
+        "status": "incomplete",
+        "findings": [],
+        "total_findings": 0,
+        "coverage_gaps": list(getattr(handoff, "coverage_gaps", []) or []),
+    })
 
 
 def _effective_totp_sources(args) -> tuple[str, str, str]:
@@ -2261,22 +2337,14 @@ def _checks_display(args) -> str:
 def _agent_exit_code(result) -> int:
     """Agent 結果だけを対象に CLI 終了コードを決める純粋関数。
 
-    失敗（``error``）に加え、**正常に完了しなかった 0-findings** も非0にする。browser-use は
-    実行失敗を例外だけでなく ``history.is_successful()``（→ ``result.success``）でも報告するため、
-    success=False の空振りを「成功・0 findings」と誤表示しない。findings があれば実際に検出
-    できているので 0（不完全でも検出結果は有効）。
+    終了状態は Agent result helper を通して canonical outcome に変換する。
+    partial/incomplete に findings があっても結果は保存する一方、run が未完なら成功 exit にしない。
     """
     if result is None:
         return 0
-    if getattr(result, "error", None):
-        return 1
-    if getattr(result, "harness_status", "") in {
-        "partial", "evidence_incomplete", "cancelled"
-    }:
-        return 2
-    if not getattr(result, "success", False) and not getattr(result, "findings", None):
-        return 1
-    return 0
+    from wscan.terminal_outcome import agent_result_outcome
+
+    return agent_result_outcome(result)["exit_code"]
 
 
 def _batch_exit_code(results) -> int:
@@ -2285,7 +2353,32 @@ def _batch_exit_code(results) -> int:
     1 件でも失敗（例外/開始不能＝``success`` が偽）があれば非0。全成功・空リストは 0。
     全対象失敗でも 0 を返し「合計0件」を成功と誤認させていた問題を防ぐ。
     """
-    return 1 if any(not getattr(r, "success", False) for r in (results or [])) else 0
+    from wscan.terminal_outcome import terminal_outcome
+
+    outcomes = [
+        terminal_outcome(
+            getattr(result, "status", "done") if getattr(result, "success", False) else "failed",
+            getattr(result, "error", "") or getattr(result, "status_reason", ""),
+        )
+        for result in (results or [])
+    ]
+    codes = [outcome["exit_code"] for outcome in outcomes]
+    return 1 if 1 in codes else 2 if 2 in codes else 0
+
+
+def _scan_exit_code(status: str) -> int:
+    """通常 scan の終端 status を CLI に反映する。"""
+    from wscan.terminal_outcome import terminal_outcome
+    return terminal_outcome(status)["exit_code"]
+
+
+def _print_terminal_outcome(console, status: str, reason: str = "", report_path: str = "") -> dict:
+    """Print a scan terminal result using the canonical outcome presentation."""
+    from wscan.terminal_outcome import terminal_outcome
+    outcome = terminal_outcome(status, reason)
+    suffix = f"  Report: [cyan]{report_path}[/cyan]" if report_path else ""
+    console.print(f"\n[{outcome['console_style']}]{outcome['message']}[/]{suffix}")
+    return outcome
 
 
 def _llm_model_display(args) -> str:
@@ -2480,6 +2573,7 @@ async def run_agent(args):
 
     async def run_agent_task():
         await asyncio.sleep(1.5)
+        completed_result = None
 
         try:
             engine = AgentEngine(
@@ -2519,18 +2613,37 @@ async def run_agent(args):
             from wscan.open_policy import open_in_browser
             open_in_browser(dashboard_url)
             result = await engine.run()
+            completed_result = result
+            from wscan.terminal_outcome import agent_result_outcome
+            outcome = agent_result_outcome(result)
+            args._scan_terminal_status = outcome["status"]
             # early-return 条件は _agent_exit_code の非0条件と一致させる。
             # incomplete-empty（success=False かつ 0 findings）でも sleep(3600) に入れず
             # result をそのまま返し、非0 exit を確実に届ける。
-            if _agent_exit_code(result):
+            if outcome["exit_code"]:
                 return result
             console.print("[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]")
             await asyncio.sleep(3600)
             return result
         except asyncio.CancelledError:
-            pass
+            # engine.run() が返った後の Ctrl+C は dashboard 待機を終えるだけ。
+            # scan の終了値と結果は既に確定しているため、上書きしない。
+            if completed_result is not None:
+                return completed_result
+            from wscan.terminal_outcome import agent_result_outcome
+            result = AgentScanResult(
+                target_url=getattr(args, "url", ""),
+                success=False,
+                harness_status="cancelled",
+            )
+            outcome = agent_result_outcome(result)
+            args._scan_terminal_status = outcome["status"]
+            await monitor.emit_status(outcome["label"], outcome["status"])
+            return result
         except Exception as exc:
-            console.print(f"\n[red]Error: {exc}[/red]")
+            from wscan.terminal_outcome import terminal_outcome
+            args._scan_terminal_status = "failed"
+            _print_terminal_outcome(console, "failed", str(exc))
             raise
         finally:
             server.should_exit = True
@@ -3153,8 +3266,19 @@ async def run_scan(args):
         from wscan.engine import ScanEngine
 
         engine = ScanEngine(**_engine_kwargs(None))
-        await engine.run()
-        return
+        try:
+            await engine.run()
+        except asyncio.CancelledError:
+            args._scan_terminal_status = "aborted"
+            _print_terminal_outcome(console, "aborted", "Scan interrupted before completion")
+            raise
+        status = engine._terminal_status() if hasattr(engine, "_terminal_status") else "done"
+        args._scan_terminal_status = status
+        _print_terminal_outcome(
+            console, status, "; ".join(getattr(engine, "wave_errors", []) or []),
+            str(Path(engine.output_dir) / "report.html") if getattr(engine, "output_dir", None) else "",
+        )
+        return status
 
     # ── With monitoring dashboard ──────────────────────────────────
     import uvicorn
@@ -3188,28 +3312,34 @@ async def run_scan(args):
             from wscan.open_policy import open_in_browser
             open_in_browser(dashboard_url)
             await engine.run()
-
-            console.print(
-                f"\n[bold green]Scan complete![/bold green]  "
-                f"Report: [cyan]{engine.output_dir / 'report.html'}[/cyan]"
+            status = engine._terminal_status()
+            args._scan_terminal_status = status
+            _print_terminal_outcome(
+                console, status, "; ".join(engine.wave_errors),
+                str(engine.output_dir / "report.html"),
             )
             console.print(
                 "[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]"
             )
             # Keep dashboard alive so the user can review findings
             await asyncio.sleep(3600)
+            return status
         except asyncio.CancelledError:
-            pass
+            if not getattr(args, "_scan_terminal_status", None):
+                args._scan_terminal_status = "aborted"
+                _print_terminal_outcome(console, "aborted", "Scan interrupted before completion")
         except Exception as exc:
-            console.print(f"\n[red]Error: {exc}[/red]")
+            args._scan_terminal_status = "failed"
+            _print_terminal_outcome(console, "failed", str(exc))
             raise
         finally:
             server.should_exit = True
 
-    await asyncio.gather(
+    _, terminal_status = await asyncio.gather(
         server.serve(),
         run_scanner_task(),
     )
+    return terminal_status
 
 
 def _bind_is_intranet(host: str) -> bool:
@@ -3482,8 +3612,10 @@ async def run_serve(args):
         the dashboard stays up so the operator can launch the next scan.
         """
         url = cfg.get("url", "").strip()
+        args._scan_terminal_status = None
         if not url:
-            console.print("[red]No target URL provided — ignoring request.[/red]")
+            args._scan_terminal_status = "failed"
+            outcome = _print_terminal_outcome(console, "failed", "No target URL provided")
             await monitor.emit_status(
                 "ターゲットURLが空のため、リクエストを無視しました。", "error"
             )
@@ -3519,8 +3651,9 @@ async def run_serve(args):
                 default_llm_stream_timeout=float(_CFG.get("llm_stream_timeout_seconds", 90)),
             )
         except ValueError as exc:
+            args._scan_terminal_status = "failed"
             err_msg = f"タイムアウト設定が無効なためスキャンを開始できません: {exc}"
-            console.print(f"[red]{err_msg}[/red]")
+            outcome = _print_terminal_outcome(console, "failed", err_msg)
             if monitor is not None:
                 await monitor.emit_status(err_msg, "error")
             return
@@ -3606,7 +3739,13 @@ async def run_serve(args):
                 _agent_result, agent_interrupted = agent_run_result
                 if agent_interrupted:
                     return
-                console.print("[dim]Agent scan finished — dashboard ready for the next scan.[/dim]")
+                from wscan.terminal_outcome import agent_result_outcome
+                agent_outcome = agent_result_outcome(_agent_result)
+                console.print(
+                    f"[{agent_outcome['console_style']}]"
+                    f"{agent_outcome['label']} — dashboard ready for the next scan."
+                    f"[/{agent_outcome['console_style']}]"
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -3618,6 +3757,8 @@ async def run_serve(args):
         seed_urls: list = []
         agent_findings: list = []
         handoff = None
+        hybrid_recon_errors: list = []
+        hybrid_recon_incomplete = False
         if cfg.get("hybrid_mode"):
             from wscan.agent_engine import AgentEngine
             # 偵察側の base URL は、偵察(hybrid_llm)が openai_compatible のときだけ渡す。
@@ -3629,6 +3770,13 @@ async def run_serve(args):
                 cfg.get("allowed_hours") or None,
                 cfg.get("forbidden_hours") or None,
             ):
+                handoff = _mark_hybrid_handoff_incomplete(
+                    None, "phase1_window_aborted"
+                )
+                hybrid_recon_incomplete = True
+                hybrid_recon_errors = _hybrid_handoff_wave_errors(handoff)
+                if not _scan_abort_requested(monitor):
+                    await _emit_hybrid_incomplete_terminal(monitor, handoff)
                 return
             await monitor.emit_status("🔀 ハイブリッド Phase 1: Agent偵察中...", "running")
             try:
@@ -3667,11 +3815,22 @@ async def run_serve(args):
                         on_retry=lambda: setattr(recon_engine, "resume", True),
                     )
                 )
-                if not continue_to_phase2 or _scan_abort_requested(monitor):
-                    return
-                if handoff is not None:
-                    seed_urls = handoff.discovered_urls
-                    agent_findings = handoff.findings
+                if handoff is None:
+                    handoff = _mark_hybrid_handoff_incomplete(
+                        None, "empty_handoff"
+                    )
+                seed_urls = getattr(handoff, "discovered_urls", []) or []
+                agent_findings = getattr(handoff, "findings", []) or []
+                hybrid_recon_errors = _hybrid_handoff_wave_errors(handoff)
+                hybrid_recon_incomplete = any(
+                    error.startswith("hybrid_agent_recon_incomplete:")
+                    for error in hybrid_recon_errors
+                )
+                if hybrid_recon_incomplete and not _scan_abort_requested(monitor):
+                    await monitor.emit_status(
+                        "⚠ Agent偵察は不完全です。Phase 2 の結果が 0 件でも安全・完了を意味しません。",
+                        "warning",
+                    )
             except Exception as exc:
                 if _scan_abort_requested(monitor):
                     await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
@@ -3680,8 +3839,19 @@ async def run_serve(args):
                     f"[yellow]⚠ 偵察フェーズ失敗 ({exc})。"
                     f"URL シードなしで通常スキャンを続行します。[/yellow]"
                 )
+                handoff = _mark_hybrid_handoff_incomplete(
+                    None, "phase1_failed"
+                )
                 seed_urls = []
                 agent_findings = []
+                hybrid_recon_incomplete = True
+                hybrid_recon_errors = _hybrid_handoff_wave_errors(handoff)
+                continue_to_phase2 = True
+
+            if not continue_to_phase2:
+                if not _scan_abort_requested(monitor):
+                    await _emit_hybrid_incomplete_terminal(monitor, handoff)
+                return
 
             # Phase 1 完了と時間枠終了が競合した場合も、Phase 2 を枠外で
             # 開始しないよう必ず直前に同じゲートを再確認する。
@@ -3691,13 +3861,22 @@ async def run_serve(args):
                 cfg.get("forbidden_hours") or None,
                 phase_label="ハイブリッド Phase 2",
             ):
+                handoff = _mark_hybrid_handoff_incomplete(
+                    handoff, "phase2_window_aborted"
+                )
+                hybrid_recon_incomplete = True
+                hybrid_recon_errors = _hybrid_handoff_wave_errors(handoff)
+                if not _scan_abort_requested(monitor):
+                    await _emit_hybrid_incomplete_terminal(monitor, handoff)
                 return
             if _scan_abort_requested(monitor):
                 await monitor.emit_status("ハイブリッド Phase 2 を中断しました。", "aborted")
                 return
             await monitor.emit_status(
                 f"🔀 Phase 2: {len(seed_urls)} URL / "
-                f"{len(agent_findings)} Agent Finding 発見済み。通常スキャン開始...",
+                f"{len(agent_findings)} Agent Finding 発見済み。"
+                f"{'Phase 1 不完全（0 件でも安全を意味しません）。' if hybrid_recon_incomplete else ''}"
+                "通常スキャン開始...",
                 "running",
             )
 
@@ -3844,6 +4023,8 @@ async def run_serve(args):
                     )
                 ),
             )
+            if hybrid_recon_errors:
+                engine.wave_errors.extend(hybrid_recon_errors)
             # アウトプットフォルダに送信された設定スナップショットを保存しておく
             # (ブラウザの自動ダウンロードに頼らず、レポートと同じ場所に残す)
             try:
@@ -3863,6 +4044,8 @@ async def run_serve(args):
             except Exception as _exc:
                 console.print(f"[yellow]設定スナップショット保存に失敗: {_exc}[/yellow]")
             await engine.run()
+            status = engine._terminal_status()
+            args._scan_terminal_status = status
             # 完了時に手動巡回JSONがあればアウトプットフォルダにコピー
             try:
                 manual_src = cfg.get("manual_crawl_file", "") or ""
@@ -3873,16 +4056,21 @@ async def run_serve(args):
                         _shutil.copy2(src_path, engine.output_dir / src_path.name)
             except Exception as _exc:
                 console.print(f"[yellow]手動巡回JSONのコピーに失敗: {_exc}[/yellow]")
-            console.print(
-                f"\n[bold green]Scan complete![/bold green]  "
-                f"Report: [cyan]{engine.output_dir / 'report.html'}[/cyan]"
+            outcome = _print_terminal_outcome(
+                console, status, "; ".join(engine.wave_errors),
+                str(engine.output_dir / "report.html"),
             )
             console.print("[dim]Dashboard ready for the next scan.[/dim]")
+            return status
         except asyncio.CancelledError:
+            if not getattr(args, "_scan_terminal_status", None):
+                args._scan_terminal_status = "aborted"
+                _print_terminal_outcome(console, "aborted", "Scan interrupted before completion")
             raise
         except Exception as exc:
-            console.print(f"\n[red]Error: {exc}[/red]")
-            await monitor.emit_status(f"スキャン中にエラーが発生しました: {exc}", "error")
+            args._scan_terminal_status = "failed"
+            outcome = _print_terminal_outcome(console, "failed", str(exc))
+            await monitor.emit_status(str(exc), "error")
         return
 
     async def serve_task():
@@ -3951,16 +4139,18 @@ async def run_serve(args):
                     try:
                         await asyncio.wait_for(run_one_scan(cfg), timeout=hard_timeout)
                     except asyncio.TimeoutError:
-                        console.print(
-                            f"\n[red]watchdog: スキャンが上限＋猶予({hard_timeout:.0f}秒)を"
-                            f"超えたため強制終了しました。[/red]"
+                        timeout_reason = (
+                            f"watchdog: スキャンが上限＋猶予({hard_timeout:.0f}秒)を"
+                            "超えたため強制終了しました。"
                         )
+                        outcome = _print_terminal_outcome(console, "failed", timeout_reason)
+                        args._scan_terminal_status = "failed"
                         # status を error にし、ポータル/CI が「終わらないスキャン」を
                         # ポーリングし続けないよう可視化する。
                         monitor.api_scan_status = "error"
                         try:
                             await monitor.emit_status(
-                                "スキャンが上限時間を超えたため強制終了しました。", "error"
+                                timeout_reason, "error"
                             )
                         except Exception:
                             pass
@@ -3969,15 +4159,16 @@ async def run_serve(args):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                console.print(f"\n[red]Unexpected error: {exc}[/red]")
+                args._scan_terminal_status = "failed"
+                _print_terminal_outcome(console, "failed", str(exc))
             finally:
                 monitor.scan_in_progress = False
-                # スキャン完了通知（ポータルで設定された Webhook へ）。
+                # 終端結果通知（ポータルで設定された Webhook へ）。
                 try:
                     await monitor.send_scan_complete_notification()
                 except Exception:
                     pass
-                # スキャン完了毎に保持ポリシーを適用（実行中スキャンは保護）。
+                # 各 run 終了時に保持ポリシーを適用（実行中スキャンは保護）。
                 try:
                     monitor.prune_old_scans()
                 except Exception:
@@ -4466,9 +4657,18 @@ def main():
         elif args.command in {"checks", "check"}:
             run_check_catalog(args)
         else:
-            asyncio.run(run_scan(args))
+            scan_status = asyncio.run(run_scan(args))
+            scan_exit = _scan_exit_code(scan_status) if scan_status else 0
+            if scan_exit:
+                sys.exit(scan_exit)
     except KeyboardInterrupt:
         print("\nInterrupted.")
+        status = getattr(args, "_scan_terminal_status", None)
+        if status:
+            from wscan.terminal_outcome import terminal_outcome
+            code = terminal_outcome(status)["exit_code"]
+            if code:
+                sys.exit(code)
         sys.exit(0)
 
 

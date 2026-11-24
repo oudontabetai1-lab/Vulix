@@ -59,7 +59,7 @@ class NotificationManager:
     ----------
     webhook_url   : 通知先 URL (Slack または汎用 POST エンドポイント)
     min_severity  : この重大度以上の検出のみ通知 (デフォルト: "high")
-    notify_complete: スキャン完了時にサマリーを送信するか
+    notify_complete: スキャン終了時にサマリーを送信するか
     """
 
     def __init__(
@@ -106,11 +106,16 @@ class NotificationManager:
         target_url: str = "",
         report_path: str = "",
         sarif_path: str = "",
+        status: str = "done",
+        status_reason: str = "",
     ) -> None:
-        """スキャン完了通知を送信する。"""
+        """終端状態サマリーを送信する。"""
         if not self.enabled or not self.notify_complete:
             return
-        payload = self._build_complete_payload(summary, target_url, report_path, sarif_path)
+        payload = self._build_complete_payload(
+            summary, target_url, report_path, sarif_path,
+            status=status, status_reason=status_reason,
+        )
         await self._send(payload)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -172,8 +177,10 @@ class NotificationManager:
         target_url: str,
         report_path: str,
         sarif_path: str,
+        status: str = "done",
+        status_reason: str = "",
     ) -> dict:
-        """スキャン完了サマリーペイロードを生成する。"""
+        """終端状態サマリーペイロードを生成する。"""
         total = summary.get("total", 0)
         critical = summary.get("critical", 0)
         high = summary.get("high", 0)
@@ -181,35 +188,58 @@ class NotificationManager:
         low = summary.get("low", 0)
         hypothesis = summary.get("hypothesis", 0)
 
-        # confirmed が無くても未確証があれば緑にせず、その存在を明示する（見落とし防止）。
-        status_emoji = (
-            "🔴" if critical > 0 else "🟠" if high > 0 else "🟡" if medium > 0
-            else "🔵" if hypothesis > 0 else "🟢"
-        )
-        text = f"{status_emoji} *スキャン完了*: {target_url}"
+        status = str(status or "done").lower()
+        from wscan.terminal_outcome import terminal_outcome
+        outcome = terminal_outcome(status, status_reason)
+        label = outcome["label_ja"]
+        event = "scan_complete" if outcome["is_success"] else f"scan_{outcome['status']}"
+        status_color = outcome["color"]
+        if outcome["status"] == "done":
+            status_emoji = (
+                "🔴" if critical > 0 else "🟠" if high > 0 else "🟡" if medium > 0
+                else "🔵" if hypothesis > 0 else "🟢"
+            )
+        else:
+            status_emoji = {
+                "incomplete": "⚠️", "aborted": "⏹️", "failed": "❌"
+            }.get(outcome["status"], "⚠️")
+        text = f"{status_emoji} *{label}*: {target_url}"
+        low_emoji = "🟢" if status in {"done", "completed"} else "⚪"
         details = [
-            f"🔴 Critical: {critical}　🟠 High: {high}　🟡 Medium: {medium}　🟢 Low: {low}",
+            f"🔴 Critical: {critical}　🟠 High: {high}　🟡 Medium: {medium}　{low_emoji} Low: {low}",
             f"確証: {total} 件　🔵 未確証(hypothesis): {hypothesis} 件",
         ]
         if report_path:
             details.append(f"レポート: `{report_path}`")
         if sarif_path:
             details.append(f"SARIF: `{sarif_path}`")
+        status_reason = outcome["reason"]
+        if status_reason:
+            details.append(f"理由: {status_reason}")
 
-        color = "#742a2a" if critical > 0 else ("#e53e3e" if high > 0 else "#d69e2e")
+        color = status_color if not outcome["is_success"] else (
+            "#742a2a" if critical > 0 else
+            "#e53e3e" if high > 0 else
+            "#dd6b20" if medium > 0 else
+            "#d69e2e" if low > 0 else
+            "#4299e1" if hypothesis > 0 else status_color
+        )
 
         return {
             "text": text,
             "attachments": [
                 {
                     "color": color,
-                    "title": f"スキャン完了 — {target_url}",
+                    "title": f"{label} — {target_url}",
                     "text": "\n".join(details),
                     "footer": "AutoXSScheckTool",
                     "ts": int(time.time()),
                 }
             ],
-            "event":    "scan_complete",
+            "event":    event,
+            "status":   status,
+            "status_reason": status_reason,
+            "terminal_outcome": outcome,
             "target":   target_url,
             "summary":  summary,
         }
