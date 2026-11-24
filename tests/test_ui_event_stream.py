@@ -1252,6 +1252,7 @@ class EventStreamChromiumIntegrationTests(unittest.TestCase):
                 page = context.new_page()
                 page.goto(f"{self.base_url}/monitor", wait_until="domcontentloaded")
                 page.wait_for_function("() => window._eventStream && window._eventStream.connected")
+                page.wait_for_function("() => document.getElementById('statusText')?.textContent.includes('スキャン中:')")
 
                 # Connected baseline
                 ws_badge = page.locator("#wsBadge")
@@ -1261,6 +1262,7 @@ class EventStreamChromiumIntegrationTests(unittest.TestCase):
                 # Close socket to trigger real disconnect event
                 page.evaluate("() => state.ws.close(1000)")
                 page.wait_for_function("() => !window._eventStream.connected")
+                page.wait_for_function("() => document.getElementById('statusText')?.textContent.includes('Disconnected')")
 
                 self.assertIn("Disconnected", ws_badge.inner_text())
                 self.assertFalse(ws_badge.evaluate("el => el.classList.contains('connected')"))

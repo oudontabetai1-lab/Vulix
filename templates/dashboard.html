@@ -5724,16 +5724,19 @@ fetch('/api/auth-status').then(r => r.ok ? r.json() : null).then(d => {
 
 // ─── Event Stream & WebSocket Manager ───────────────────────────
 let _eventStream = null;
+let _eventStreamDisconnected = false;
 
 function _onEventStreamStatusChange(evt) {
   const badge = document.getElementById('wsBadge');
   if (evt.connected) {
+    _eventStreamDisconnected = false;
     if (badge) {
       badge.textContent = 'WS: Connected';
       badge.className = 'ws-badge connected';
     }
     setStatus('Connected — waiting for scan...', '');
   } else {
+    _eventStreamDisconnected = true;
     if (badge) {
       badge.textContent = 'WS: Disconnected';
       badge.className = 'ws-badge';
@@ -6554,6 +6557,9 @@ function togglePayloadExpand() {
 
 // ─── UI Helpers ─────────────────────────────────────────────────
 function setStatus(message, state) {
+  // A queued scan/snapshot update can run after the socket close callback.
+  // Keep the transport failure visible until the connection is restored.
+  if (_eventStreamDisconnected && !String(message).startsWith('Disconnected.')) return;
   document.getElementById('statusText').textContent = message;
   var _rs=document.getElementById('railStatus'); if(_rs)_rs.textContent = message; var _pl=document.querySelector('.ws-rail .pulse'); if(_pl)_pl.className='pulse'+(state?' '+state:'');
   const dot = document.getElementById('statusDot');
