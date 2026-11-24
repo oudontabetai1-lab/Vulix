@@ -241,8 +241,39 @@ def test_monitor_keeps_completed_terminal_status_after_late_abort(mode):
     assert [event["data"]["status"] for event in monitor.event_history
             if event["type"] == "scan_complete"] == ["done"]
     assert monitor._terminal_status_conflicts == [
-        {"kept": "done", "rejected": "aborted", "reason": ""}
+        {
+            "kept": "done", "rejected": "aborted",
+            "reason_code": "terminal_status_already_finalized", "reason": "",
+        }
     ]
+
+
+def test_terminal_conflict_redacts_unregistered_query_userinfo_and_cookie_value(
+    monkeypatch, caplog
+):
+    from wscan import url_scope
+
+    cookie_secret = "ConfiguredCookieValue"
+    monkeypatch.setitem(url_scope._SECRET_VALUES, cookie_secret, "test_cookie")
+    reason = (
+        "Cookie: tenant=" + cookie_secret
+        + "; requested abort for https://alice:pass123@example.test/path"
+        "?access_token=UnregisteredAccessToken"
+    )
+    monitor = MonitorServer()
+    monitor.api_scan_status = "done"
+
+    with caplog.at_level("WARNING", logger="wscan.monitor"):
+        assert monitor._transition_scan_status("aborted", reason) is False
+
+    recorded = repr(monitor._terminal_status_conflicts)
+    for secret in ("alice", "pass123", "UnregisteredAccessToken", cookie_secret):
+        assert secret not in recorded
+        assert secret not in caplog.text
+    assert "access_token=<redacted>" in recorded
+    assert "<redacted>@example.test" in recorded
+    assert "[REDACTED:test_cookie]" in recorded
+    assert "terminal_status_already_finalized" in caplog.text
 
 
 @pytest.mark.parametrize("mode", ["agent", "scan", "hybrid"])

@@ -2742,9 +2742,13 @@ class MonitorServer:
 
     def _transition_scan_status(self, status: str, reason: str = "") -> bool:
         """Apply the canonical status once; terminal values are immutable per scan."""
+        from wscan.request_logger import redact_text
         from wscan.terminal_outcome import terminal_outcome
 
-        outcome = terminal_outcome(status, reason)
+        # Status messages can contain arbitrary URLs/query strings. Use the existing
+        # request redactor so key-based and configured-value redaction both apply.
+        safe_reason = redact_text(str(reason or ""))
+        outcome = terminal_outcome(status, safe_reason)
         canonical = outcome["status"]
         requested = str(status or "unknown").strip().lower()
         display_status = requested if requested in {"aborting", "error"} else canonical
@@ -2755,12 +2759,13 @@ class MonitorServer:
             conflict = {
                 "kept": self._final_scan_status,
                 "rejected": canonical,
+                "reason_code": "terminal_status_already_finalized",
                 "reason": outcome["reason"],
             }
             self._terminal_status_conflicts.append(conflict)
             _logger.warning(
-                "Rejected terminal scan status change %s -> %s: %s",
-                conflict["kept"], conflict["rejected"], conflict["reason"],
+                "Rejected terminal scan status change %s -> %s (%s)",
+                conflict["kept"], conflict["rejected"], conflict["reason_code"],
             )
             return False
         if terminal:
