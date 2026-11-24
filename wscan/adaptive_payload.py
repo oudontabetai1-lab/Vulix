@@ -488,6 +488,12 @@ class AdaptivePayloadEngine:
             content_type=ContentType.EVIDENCE.value,
         ).format_tagged_block()
         payloads_list = "\n".join(f"  {p}" for p in payloads_tried[:30]) or "  (none recorded)"
+        payloads_list = wrap_untrusted_observation(
+            payloads_list,
+            source=ContentSource.HTTP.value,
+            origin=url,
+            content_type=ContentType.EVIDENCE.value,
+        ).format_tagged_block()
         # Sanitize attacker-controlled HTML before injecting into the LLM prompt
         # so that crafted pages cannot exfiltrate the system prompt or redirect
         # the model with instructions like "ignore previous directions".
@@ -502,12 +508,28 @@ class AdaptivePayloadEngine:
                 f"Known bypass techniques for {waf_name}:\n{hints_text}\n"
                 f"You MUST incorporate these evasion strategies into your payloads."
             )
+            waf_section = wrap_untrusted_observation(
+                waf_section,
+                source=ContentSource.HTTP.value,
+                origin=url,
+                content_type=ContentType.OBSERVATION.value,
+            ).format_tagged_block()
         else:
             waf_section = "No WAF detected — focus on application-level filtering bypasses."
 
         prompt = _ADAPTIVE_PROMPT.format(
-            url=url,
-            field_name=field_name,
+            url=wrap_untrusted_observation(
+                url,
+                source=ContentSource.HTTP.value,
+                origin=url,
+                content_type=ContentType.OBSERVATION.value,
+            ).format_tagged_block(),
+            field_name=wrap_untrusted_observation(
+                field_name,
+                source=ContentSource.DOM.value,
+                origin=url,
+                content_type=ContentType.OBSERVATION.value,
+            ).format_tagged_block(),
             check_type=check_type,
             cheatsheet=cheatsheet,
             waf_section=waf_section,
