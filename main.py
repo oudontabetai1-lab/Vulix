@@ -673,7 +673,7 @@ async def _wait_for_scan_window(
     元の queue へ戻す。
     """
     if not allowed_hours and not forbidden_hours:
-        return True
+        return not _scan_abort_requested(monitor)
 
     now_fn = now_fn or datetime.now
     sleep_fn = sleep_fn or asyncio.sleep
@@ -681,27 +681,29 @@ async def _wait_for_scan_window(
     announced = False
 
     while True:
-        abort_requested = False
+        abort_requested = _scan_abort_requested(monitor)
         while True:
             try:
                 command = monitor.command_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
             if str(command).lower().strip() in ("abort", "q"):
+                _mark_scan_aborted(monitor)
                 abort_requested = True
             else:
                 deferred_commands.append(command)
 
         if abort_requested:
-            await monitor.emit_status(
-                f"{phase_label} の時間帯待機を中断しました。", "done"
-            )
+            await monitor.emit_status(f"{phase_label} を中断しました。", "aborted")
             return False
 
         wait = _scan_window_wait_seconds(
             now_fn(), allowed_hours, forbidden_hours
         )
         if wait is None or wait <= 0:
+            if _scan_abort_requested(monitor):
+                await monitor.emit_status(f"{phase_label} を中断しました。", "aborted")
+                return False
             for command in deferred_commands:
                 monitor.command_queue.put_nowait(command)
             if announced:
@@ -712,6 +714,9 @@ async def _wait_for_scan_window(
             return True
 
         if wait == float("inf"):
+            if _scan_abort_requested(monitor):
+                await monitor.emit_status(f"{phase_label} を中断しました。", "aborted")
+                return False
             await monitor.emit_status(
                 "検査可能時間帯に到達できない設定のため、"
                 f"{phase_label} を中断しました。",
@@ -728,6 +733,23 @@ async def _wait_for_scan_window(
 
         # dashboard の abort に素早く反応できるよう、長い待機を細かく刻む。
         await sleep_fn(min(0.5, max(0.05, wait)))
+
+
+def _scan_abort_event(monitor):
+    """Return the per-scan abort latch, creating it for lightweight test doubles."""
+    event = getattr(monitor, "scan_abort_event", None)
+    if event is None:
+        event = asyncio.Event()
+        monitor.scan_abort_event = event
+    return event
+
+
+def _scan_abort_requested(monitor) -> bool:
+    return _scan_abort_event(monitor).is_set()
+
+
+def _mark_scan_aborted(monitor) -> None:
+    _scan_abort_event(monitor).set()
 
 
 async def _wait_for_hybrid_recon_window(
@@ -767,7 +789,10 @@ async def _run_with_time_window_monitor(
     自体の終了を意味する呼び出し元は ``terminal_on_interrupt=True`` を指定する。
     """
     if not allowed_hours and not forbidden_hours:
-        return await operation(), False
+        if _scan_abort_requested(monitor):
+            return None, True
+        result = await operation()
+        return (None, True) if _scan_abort_requested(monitor) else (result, False)
 
     now_fn = now_fn or datetime.now
     sleep_fn = sleep_fn or asyncio.sleep
@@ -791,10 +816,15 @@ async def _run_with_time_window_monitor(
         if operation_task in done:
             watcher_task.cancel()
             await asyncio.gather(watcher_task, return_exceptions=True)
+            if _scan_abort_requested(monitor):
+                return None, True
             return operation_task.result(), False
 
         operation_task.cancel()
         await asyncio.gather(operation_task, return_exceptions=True)
+        if _scan_abort_requested(monitor):
+            await monitor.emit_status(f"{phase_label} を中断しました。", "aborted")
+            return None, True
         if terminal_on_interrupt:
             message = (
                 f"検査時間帯を外れたため {phase_label} を中断しました。"
@@ -819,6 +849,69 @@ async def _run_with_time_window_monitor(
         )
 
 
+async def _run_with_abort_monitor(operation, monitor, *, phase_label: str):
+    """Agent 系処理を dashboard の abort command で cancel し、終了を待つ。
+
+    Agent 実行中は通常スキャンの command consumer が動かないため、この境界で abort を
+    消費する。キャンセル後に operation の cleanup が完了してから terminal 状態を通知する。
+    """
+    if _scan_abort_requested(monitor):
+        await monitor.emit_status(f"{phase_label} を中断しました。", "aborted")
+        return None, True
+    operation_task = asyncio.create_task(operation())
+    unsupported_command_reported = False
+
+    async def report_unsupported_command():
+        nonlocal unsupported_command_reported
+        await monitor.emit_status(
+            "Agent モードでは一時停止・再開はできません。実行中のスキャンは中断できます。",
+            "running",
+        )
+        unsupported_command_reported = True
+
+    async def wait_for_abort():
+        while True:
+            command = await monitor.command_queue.get()
+            if str(command).lower().strip() in ("abort", "q"):
+                _mark_scan_aborted(monitor)
+                return
+            if not unsupported_command_reported:
+                await report_unsupported_command()
+
+    abort_task = asyncio.create_task(wait_for_abort())
+    try:
+        done, _pending = await asyncio.wait(
+            {operation_task, abort_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if operation_task in done and not _scan_abort_requested(monitor):
+            return operation_task.result(), False
+
+        operation_task.cancel()
+        await asyncio.gather(operation_task, return_exceptions=True)
+        _mark_scan_aborted(monitor)
+        await monitor.emit_status(f"{phase_label} を中断しました。", "aborted")
+        return None, True
+    finally:
+        if not operation_task.done():
+            operation_task.cancel()
+        if not abort_task.done():
+            abort_task.cancel()
+        await asyncio.gather(operation_task, abort_task, return_exceptions=True)
+        unsupported_command_pending = False
+        while True:
+            try:
+                command = monitor.command_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if str(command).lower().strip() not in ("abort", "q"):
+                unsupported_command_pending = True
+            else:
+                _mark_scan_aborted(monitor)
+        if unsupported_command_pending and not unsupported_command_reported:
+            await report_unsupported_command()
+
+
 async def _run_hybrid_recon_with_retries(
     operation,
     monitor,
@@ -839,15 +932,32 @@ async def _run_hybrid_recon_with_retries(
     if max_retries is None:
         max_retries = HYBRID_RECON_MAX_RETRIES
 
-    handoff, interrupted = await _run_with_time_window_monitor(
-        operation,
-        monitor,
-        allowed_hours,
-        forbidden_hours,
-        phase_label="ハイブリッド Phase 1",
-        now_fn=now_fn,
-        sleep_fn=sleep_fn,
-    )
+    async def run_with_monitors():
+        result, interrupted = await _run_with_time_window_monitor(
+            lambda: _run_with_abort_monitor(
+                operation, monitor, phase_label="ハイブリッド Phase 1"
+            ),
+            monitor,
+            allowed_hours,
+            forbidden_hours,
+            phase_label="ハイブリッド Phase 1",
+            now_fn=now_fn,
+            sleep_fn=sleep_fn,
+        )
+        if interrupted:
+            if _scan_abort_requested(monitor):
+                await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
+                return None, False, True
+            return None, True, False
+        handoff, aborted = result
+        if _scan_abort_requested(monitor) and not aborted:
+            await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
+            return None, False, True
+        return handoff, False, aborted
+
+    handoff, interrupted, aborted = await run_with_monitors()
+    if aborted or _scan_abort_requested(monitor):
+        return None, False
     retries = 0
 
     while interrupted and retries < max_retries:
@@ -865,21 +975,18 @@ async def _run_hybrid_recon_with_retries(
             sleep_fn=sleep_fn,
         ):
             return None, False
+        if _scan_abort_requested(monitor):
+            await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
+            return None, False
         await monitor.emit_status(
             f"ハイブリッド Phase 1: 再試行 {retries}/{max_retries} を開始します。",
             "running",
         )
         if on_retry:
             on_retry()
-        handoff, interrupted = await _run_with_time_window_monitor(
-            operation,
-            monitor,
-            allowed_hours,
-            forbidden_hours,
-            phase_label="ハイブリッド Phase 1",
-            now_fn=now_fn,
-            sleep_fn=sleep_fn,
-        )
+        handoff, interrupted, aborted = await run_with_monitors()
+        if aborted:
+            return None, False
 
     if interrupted:
         await monitor.emit_status(
@@ -3482,16 +3589,21 @@ async def run_serve(args):
                     storage_state=cfg.get("storage_state", "") or "",
                     proxy=cfg.get("proxy", "") or "",
                 )
-                _agent_result, agent_interrupted = (
-                    await _run_with_time_window_monitor(
+                agent_run_result, scan_aborted = await _run_with_abort_monitor(
+                    lambda: _run_with_time_window_monitor(
                         agent_engine.run,
                         monitor,
                         cfg.get("allowed_hours") or None,
                         cfg.get("forbidden_hours") or None,
                         phase_label="Agent Browser スキャン",
                         terminal_on_interrupt=True,
-                    )
+                    ),
+                    monitor,
+                    phase_label="Agent Browser スキャン",
                 )
+                if scan_aborted:
+                    return
+                _agent_result, agent_interrupted = agent_run_result
                 if agent_interrupted:
                     return
                 console.print("[dim]Agent scan finished — dashboard ready for the next scan.[/dim]")
@@ -3555,12 +3667,15 @@ async def run_serve(args):
                         on_retry=lambda: setattr(recon_engine, "resume", True),
                     )
                 )
-                if not continue_to_phase2:
+                if not continue_to_phase2 or _scan_abort_requested(monitor):
                     return
                 if handoff is not None:
                     seed_urls = handoff.discovered_urls
                     agent_findings = handoff.findings
             except Exception as exc:
+                if _scan_abort_requested(monitor):
+                    await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
+                    return
                 console.print(
                     f"[yellow]⚠ 偵察フェーズ失敗 ({exc})。"
                     f"URL シードなしで通常スキャンを続行します。[/yellow]"
@@ -3576,6 +3691,9 @@ async def run_serve(args):
                 cfg.get("forbidden_hours") or None,
                 phase_label="ハイブリッド Phase 2",
             ):
+                return
+            if _scan_abort_requested(monitor):
+                await monitor.emit_status("ハイブリッド Phase 2 を中断しました。", "aborted")
                 return
             await monitor.emit_status(
                 f"🔀 Phase 2: {len(seed_urls)} URL / "

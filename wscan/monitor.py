@@ -51,6 +51,7 @@ _UPLOAD_ALLOWED_EXT = {
 # OUTPUT_BASE 直下だが「スキャン成果物」ではない予約ディレクトリ。scan_id として
 # 解決させず、artifact 配信/削除ルートから隔離する（アップロードした秘匿ファイル保護）。
 _RESERVED_OUTPUT_NAMES = {"uploads"}
+ABORT_IDLE_MESSAGE = "実行中のスキャンはありません。"
 
 # Name of the session cookie set after a successful token login.
 SESSION_COOKIE = "wscan_session"
@@ -322,6 +323,9 @@ class MonitorServer:
         # ── Intervention / plan-confirm channels ──────────────────────
         # Commands arriving from the web UI (pause / resume / skip_field / skip_page / abort)
         self.command_queue: asyncio.Queue = asyncio.Queue()
+        self.discarded_scan_commands: collections.deque = collections.deque(maxlen=100)
+        # Persistent for the lifetime of one scan; queue consumers may drain commands.
+        self.scan_abort_event: asyncio.Event = asyncio.Event()
         # Set when the operator clicks "Start Attack" in the plan review modal
         self.plan_confirm_event: asyncio.Event = asyncio.Event()
         # Plan edits returned by the operator (field overrides sent from web UI)
@@ -536,7 +540,7 @@ class MonitorServer:
         if time.time() - self._scan_started_at > self.scan_max_seconds:
             self._watchdog_fired = True
             try:
-                self.command_queue.put_nowait("abort")
+                self.request_abort()
             except Exception:
                 pass
             return True
@@ -666,7 +670,15 @@ class MonitorServer:
                     try:
                         raw = await asyncio.wait_for(ws.receive_text(), timeout=30)
                         ws_ip = (ws.client.host if ws.client else "") or "ws"
-                        self._handle_client_message(raw, ws_ip)
+                        rejection = self._handle_client_message(raw, ws_ip)
+                        if rejection:
+                            # Notify only the requesting tab; an idle rejection is not scan state.
+                            await ws.send_text(json.dumps({
+                                "type": "status",
+                                "timestamp": time.time(),
+                                "backend_version": self._capability_schema_version(),
+                                "data": {"message": rejection, "state": "warning"},
+                            }))
                     except asyncio.TimeoutError:
                         # Send ping to keep alive
                         await ws.send_text(json.dumps({"type": "ping"}))
@@ -1505,12 +1517,12 @@ class MonitorServer:
 
         @app.post("/api/v1/scan/abort")
         async def api_scan_abort(request: Request):
-            """Request the running scan to stop (saves a partial report)."""
-            if not self.scan_in_progress:
+            """Request an accepted scan to stop (saves a partial report)."""
+            if not self.abort_is_accepted():
                 return JSONResponse(
-                    {"error": "実行中のスキャンはありません。"}, status_code=409
+                    {"error": ABORT_IDLE_MESSAGE}, status_code=409
                 )
-            self.command_queue.put_nowait("abort")
+            self.request_abort()
             self.api_scan_status = "aborting"
             self._audit("scan_abort", self._client_ip(request), self.current_scan_id)
             return JSONResponse({"status": "aborting"})
@@ -2487,7 +2499,7 @@ class MonitorServer:
     # Client message handler (called from WebSocket coroutine)
     # ------------------------------------------------------------------
 
-    def _handle_client_message(self, raw: str, client_ip: str = "ws") -> None:
+    def _handle_client_message(self, raw: str, client_ip: str = "ws") -> Optional[str]:
         """Parse and dispatch a JSON message sent from the browser."""
         try:
             msg = json.loads(raw)
@@ -2500,7 +2512,12 @@ class MonitorServer:
             # e.g. {"action": "intervention", "command": "pause"}
             cmd = msg.get("command", "")
             if cmd:
-                self.command_queue.put_nowait(cmd)
+                if str(cmd).lower().strip() in ("abort", "q"):
+                    if not self.abort_is_accepted():
+                        return ABORT_IDLE_MESSAGE
+                    self.request_abort()
+                else:
+                    self.command_queue.put_nowait(cmd)
 
         elif action == "plan_confirm":
             # e.g. {"action": "plan_confirm", "edits": { url: {field: {risk, checks}} }}
@@ -2620,8 +2637,30 @@ class MonitorServer:
             return
         self.pending_interactive = None
 
+    def request_abort(self) -> None:
+        """Latch an abort for this scan and enqueue it for legacy consumers."""
+        self.scan_abort_event.set()
+        self.command_queue.put_nowait("abort")
+
+    def abort_is_accepted(self) -> bool:
+        """Whether a scan is active or accepted and waiting to start."""
+        return self.scan_in_progress or self.scan_request_event.is_set()
+
     def _begin_scan_snapshot(self) -> None:
         """Start a new live-state generation without changing the public scan ID."""
+        # 前回 run の未処理コマンドを新しいスキャンへ持ち越さない。
+        while True:
+            try:
+                command = self.command_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self.discarded_scan_commands.append({
+                "run_id": self._scan_run_id,
+                "command": str(command)[:64],
+                "reason": "new_scan_started",
+                "timestamp": time.time(),
+            })
+        self.scan_abort_event.clear()
         self._clear_pending_interactive()
         # 前スキャンのプラン確認状態を持ち越さない（古い編集の誤適用・即時通過の防止）。
         self.confirmed_plan_edits = {}
