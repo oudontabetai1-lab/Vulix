@@ -56,6 +56,13 @@ async def test_shared_session_survives_episodes_and_is_killed(tmp_path, monkeypa
     monkeypatch.setitem(sys.modules, 'browser_use', module)
     monkeypatch.setitem(sys.modules, 'browser_use.browser.profile', profile)
     scanner = AgentBrowserScanner('http://fixture.test', harness_output_dir=tmp_path, max_steps=8)
+    guarded_sessions = []
+
+    async def enable_guard(session):
+        guarded_sessions.append(session)
+        return True
+
+    monkeypatch.setattr(scanner, '_enable_request_scoped_headers', enable_guard)
     with patch('wscan.llm_agent_browser._build_llm', return_value=object()):
         if ending == 'cancel':
             with pytest.raises(asyncio.CancelledError): await scanner.run()
@@ -63,8 +70,50 @@ async def test_shared_session_survives_episodes_and_is_killed(tmp_path, monkeypa
             result = await scanner.run()
             assert result.error == ('episode failed' if ending == 'error' else None)
     assert len(navigations) >= 2
+    assert guarded_sessions == [sessions[0]]
     assert all(session is sessions[0] for session in navigations)
     assert all(session.killed for session in sessions)
+
+
+@pytest.mark.asyncio
+async def test_agent_run_does_not_navigate_when_network_guard_is_unavailable(monkeypatch):
+    agent_runs = []
+
+    class Profile:
+        def __init__(self, **_kwargs):
+            pass
+
+    class BrowserSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def stop(self):
+            pass
+
+    class Agent:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            agent_runs.append(True)
+
+    module = types.ModuleType('browser_use')
+    module.Agent = Agent
+    module.BrowserSession = BrowserSession
+    profile = types.ModuleType('browser_use.browser.profile')
+    profile.BrowserProfile = Profile
+    monkeypatch.setitem(sys.modules, 'browser_use', module)
+    monkeypatch.setitem(sys.modules, 'browser_use.browser.profile', profile)
+    scanner = AgentBrowserScanner('http://fixture.test')
+
+    with patch('wscan.llm_agent_browser._build_llm', return_value=object()), patch(
+        'wscan.llm_agent_browser.check_agent_config_directory', return_value=(True, '')
+    ):
+        result = await scanner.run()
+
+    assert not agent_runs
+    assert result.error == 'Agent browser network guard could not be enabled'
+    assert any('required_cdp_api_unavailable' in error for error in scanner._network_guard_errors)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('case', ['success', 'before_actions_error', 'mid_actions_error', 'stale_history', 'wrong_step', 'wrong_agent', 'wrong_episode'])

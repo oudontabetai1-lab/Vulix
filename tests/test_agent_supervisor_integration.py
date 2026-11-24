@@ -12,7 +12,24 @@ import pytest
 from wscan.llm_agent_browser import AgentBrowserScanner
 from wscan.agent_harness import AgentHarness, AgentRole, AgentRunSpec
 from wscan.agent_harness import WorkStatus
-from tests.fixtures.agent_eval_fake import FakeHistory as _History, fake_browser_use
+from tests.fixtures.agent_eval_fake import FakeHistory as _History
+
+
+def _install_guarded_browser_use(monkeypatch, agent, browser, scanner):
+    module = types.ModuleType("browser_use")
+    module.Agent = agent
+    module.BrowserSession = browser
+    module.Browser = browser
+    profile = types.ModuleType("browser_use.browser.profile")
+    profile.BrowserProfile = type("FakeBrowserProfile", (), {"__init__": lambda self, **_kwargs: None})
+
+    async def guard_ready(_session):
+        return True
+
+    monkeypatch.setitem(sys.modules, "browser_use", module)
+    monkeypatch.setitem(sys.modules, "browser_use.browser.profile", profile)
+    monkeypatch.setattr(scanner, "_enable_request_scoped_headers", guard_ready)
+    monkeypatch.setattr(scanner, "_enable_agent_network_guard", guard_ready)
 
 
 @pytest.mark.asyncio
@@ -76,13 +93,18 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
                 )
             return _History("REVIEW COMPLETE")
 
-    module = fake_browser_use(_Agent)
+    class _Browser:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def stop(self):
+            pass
     scanner = AgentBrowserScanner(
         "http://fixture.test", checks=["xss"], max_steps=40,
         access_urls=["http://idp.test"],
         harness_output_dir=tmp_path,
     )
-    monkeypatch.setitem(sys.modules, "browser_use", module)
+    _install_guarded_browser_use(monkeypatch, _Agent, _Browser, scanner)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
     ):
@@ -327,14 +349,11 @@ async def test_successful_retry_uses_final_work_state(tmp_path, monkeypatch):
         async def stop(self):
             pass
 
-    module = types.ModuleType("browser_use")
-    module.Agent = _Agent
-    module.Browser = _Browser
     scanner = AgentBrowserScanner(
         "http://fixture.test", checks=["xss"], max_steps=20,
         harness_output_dir=tmp_path,
     )
-    monkeypatch.setitem(sys.modules, "browser_use", module)
+    _install_guarded_browser_use(monkeypatch, _Agent, _Browser, scanner)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
     ):
@@ -376,14 +395,11 @@ async def test_later_episode_failure_returns_checkpoint_findings(tmp_path, monke
         async def stop(self):
             pass
 
-    module = types.ModuleType("browser_use")
-    module.Agent = _Agent
-    module.Browser = _Browser
     scanner = AgentBrowserScanner(
         "http://fixture.test", checks=["xss"], max_steps=20,
         harness_output_dir=tmp_path,
     )
-    monkeypatch.setitem(sys.modules, "browser_use", module)
+    _install_guarded_browser_use(monkeypatch, _Agent, _Browser, scanner)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
     ):
@@ -494,14 +510,11 @@ async def test_reviewer_retry_requires_explicit_gap_resolution(tmp_path, resolve
         async def stop(self):
             pass
 
-    module = types.ModuleType("browser_use")
-    module.Agent = _Agent
-    module.Browser = _Browser
     scanner = AgentBrowserScanner(
         "http://fixture.test", checks=["xss"], max_steps=40,
         harness_output_dir=tmp_path,
     )
-    monkeypatch.setitem(sys.modules, "browser_use", module)
+    _install_guarded_browser_use(monkeypatch, _Agent, _Browser, scanner)
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
     ):

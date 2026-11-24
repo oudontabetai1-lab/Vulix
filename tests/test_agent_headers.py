@@ -82,11 +82,13 @@ class _FetchCommands:
         fail_enable=False,
         fail_header_continue=False,
         fail_auth_continue=False,
+        fail_request=False,
     ):
         self.calls = []
         self.fail_enable = fail_enable
         self.fail_header_continue = fail_header_continue
         self.fail_auth_continue = fail_auth_continue
+        self.fail_request = fail_request
 
     async def enable(self, params=None, session_id=None):
         self.calls.append(("enable", params, session_id))
@@ -103,6 +105,8 @@ class _FetchCommands:
 
     async def failRequest(self, params=None, session_id=None):
         self.calls.append(("failRequest", params, session_id))
+        if self.fail_request:
+            raise RuntimeError("Fetch failRequest failed")
 
     async def continueWithAuth(self, params, session_id=None):
         self.calls.append(("continueWithAuth", params, session_id))
@@ -128,11 +132,14 @@ class _FetchRegistration:
 
 
 class _TargetCommands:
-    def __init__(self):
+    def __init__(self, fail_auto_attach=False):
         self.calls = []
+        self.fail_auto_attach = fail_auto_attach
 
     async def setAutoAttach(self, params=None, session_id=None):
         self.calls.append(("setAutoAttach", params, session_id))
+        if self.fail_auto_attach:
+            raise RuntimeError("Target auto attach failed")
 
 
 class _RuntimeCommands:
@@ -171,7 +178,8 @@ class _RequestScopedHeaderSession:
         fail_registration=False,
         fail_header_continue=False,
         fail_auth_continue=False,
-        target_events=False,
+        fail_request=False,
+        target_events=True,
     ):
         self.calls = []
         self.agent_focus_target_id = "target-1"
@@ -179,6 +187,7 @@ class _RequestScopedHeaderSession:
             fail_enable=fail_enable,
             fail_header_continue=fail_header_continue,
             fail_auth_continue=fail_auth_continue,
+            fail_request=fail_request,
         )
         self.fetch_registration = _FetchRegistration(
             fail_registration=fail_registration
@@ -522,16 +531,20 @@ class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_recon_passes_headers_to_scanner(self):
         result = SimpleNamespace(
             findings=[],
-            memory=SimpleNamespace(visited_urls=[]),
+            memory=SimpleNamespace(visited_urls=["http://fixture.test/page"]),
             final_summary="",
             error=None,
             success=True,
+            coverage_gaps=[],
         )
 
         with tempfile.TemporaryDirectory() as output_dir, patch(
             "wscan.llm_agent_browser.AgentBrowserScanner"
         ) as scanner_cls:
             scanner_cls.return_value.run = AsyncMock(return_value=result)
+            scanner_cls.return_value._network_guard_errors = [
+                "network_scope_blocked:out_of_scope_destination:https://outside.test/"
+            ]
             engine = AgentEngine(
                 url="http://fixture.test",
                 extra_headers={"X-Tenant": "example"},
@@ -545,6 +558,8 @@ class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
             scanner_cls.call_args.kwargs["extra_headers"],
             {"X-Tenant": "example"},
         )
+        self.assertEqual(engine.wave_errors, scanner_cls.return_value._network_guard_errors)
+        self.assertFalse(result.success)
 
 
 class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
@@ -556,7 +571,7 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         session = _RequestScopedHeaderSession()
 
         enabled = await scanner._enable_request_scoped_headers(session)
-        await session.fetch_registration.callback(
+        session.fetch_registration.callback(
             {
                 "requestId": "allowed-request",
                 "request": {
@@ -569,6 +584,7 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             },
             "event-session",
         )
+        await asyncio.gather(*tuple(scanner._request_event_tasks))
 
         self.assertTrue(enabled)
         self.assertTrue(scanner._request_scoped_headers)
@@ -598,7 +614,7 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         session = _RequestScopedHeaderSession()
 
         enabled = await scanner._enable_request_scoped_headers(session)
-        await session.fetch_registration.callback(
+        session.fetch_registration.callback(
             {
                 "requestId": "disallowed-request",
                 "request": {
@@ -608,6 +624,7 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             },
             None,
         )
+        await asyncio.gather(*tuple(scanner._request_event_tasks))
 
         self.assertTrue(enabled)
         self.assertEqual(
@@ -619,7 +636,7 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    async def test_request_scoped_handler_exception_still_continues_request(self):
+    async def test_request_scoped_handler_exception_fails_request_closed(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",
             extra_headers={"Authorization": "Bearer test-token"},
@@ -628,27 +645,25 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         await scanner._enable_request_scoped_headers(session)
 
         with patch(
-            "wscan.llm_agent_browser.headers_allowed_for_url",
-            side_effect=RuntimeError("origin check failed"),
+            "wscan.llm_agent_browser._agent_network_block_reason",
+            side_effect=RuntimeError("scope check failed"),
         ):
-            await session.fetch_registration.callback(
+            session.fetch_registration.callback(
                 {
                     "requestId": "fallback-request",
                     "request": {"url": "http://fixture.test/page", "headers": {}},
                 },
                 None,
             )
+            await asyncio.gather(*tuple(scanner._request_event_tasks))
 
-        self.assertEqual(
-            session.fetch_commands.calls[-1],
-            (
-                "continueRequest",
-                {"requestId": "fallback-request"},
-                "target-session",
-            ),
-        )
+        self.assertIn(("failRequest", {
+            "requestId": "fallback-request", "errorReason": "BlockedByClient",
+        }, "target-session"), session.fetch_commands.calls)
+        self.assertFalse(any(call[0] == "continueRequest" for call in session.fetch_commands.calls))
+        self.assertIn("network_scope_blocked:policy_error", scanner._network_guard_errors[0])
 
-    async def test_request_scoped_continue_failure_retries_without_headers(self):
+    async def test_request_scoped_continue_failure_fails_closed(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",
             extra_headers={"Authorization": "Bearer test-token"},
@@ -656,29 +671,36 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         session = _RequestScopedHeaderSession(fail_header_continue=True)
         await scanner._enable_request_scoped_headers(session)
 
-        await session.fetch_registration.callback(
+        session.fetch_registration.callback(
             {
                 "requestId": "retry-request",
                 "request": {"url": "http://fixture.test/page", "headers": {}},
             },
             None,
         )
+        await asyncio.gather(*tuple(scanner._request_event_tasks))
 
-        continue_calls = [
-            call
-            for call in session.fetch_commands.calls
-            if call[0] == "continueRequest"
-        ]
-        self.assertEqual(len(continue_calls), 2)
-        self.assertIn("headers", continue_calls[0][1])
         self.assertEqual(
-            continue_calls[1],
-            (
-                "continueRequest",
-                {"requestId": "retry-request"},
-                "target-session",
-            ),
+            [call[0] for call in session.fetch_commands.calls].count("continueRequest"), 1
         )
+        self.assertIn(("failRequest", {
+            "requestId": "retry-request", "errorReason": "BlockedByClient",
+        }, "target-session"), session.fetch_commands.calls)
+        self.assertTrue(scanner._network_guard_errors)
+
+    async def test_fail_request_cdp_error_never_falls_back_to_continue(self):
+        scanner = AgentBrowserScanner("http://fixture.test")
+        session = _RequestScopedHeaderSession(fail_request=True)
+        await scanner._enable_request_scoped_headers(session)
+
+        session.fetch_registration.callback({
+            "requestId": "blocked-request",
+            "request": {"url": "https://outside.test", "method": "GET"},
+        }, None)
+        await asyncio.gather(*tuple(scanner._request_event_tasks))
+
+        self.assertFalse(any(call[0] == "continueRequest" for call in session.fetch_commands.calls))
+        self.assertTrue(any("fail_request_failed" in e for e in scanner._network_guard_errors))
 
     async def test_request_scoped_enable_failure_disables_and_returns_false(self):
         scanner = AgentBrowserScanner(
@@ -716,15 +738,18 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             ("disable", None, "target-session"),
         )
 
-    async def test_request_scoped_headers_skips_empty_headers(self):
+    async def test_network_guard_enables_fetch_without_custom_headers(self):
         scanner = AgentBrowserScanner("http://fixture.test")
         session = _RequestScopedHeaderSession()
 
         enabled = await scanner._enable_request_scoped_headers(session)
 
-        self.assertFalse(enabled)
-        self.assertEqual(session.calls, [])
-        self.assertEqual(session.fetch_commands.calls, [])
+        self.assertTrue(enabled)
+        self.assertTrue(scanner._request_scoped_headers)
+        self.assertEqual(
+            [call[0] for call in session.fetch_commands.calls],
+            ["enable"],
+        )
 
     async def test_request_scoped_headers_enable_fetch_for_new_target(self):
         scanner = AgentBrowserScanner(
@@ -795,6 +820,50 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             [(event, "root-session")],
         )
         self.assertIn("popup-target", scanner._fetch_enabled_targets)
+        self.assertEqual(
+            session.target_commands.calls[-1][2], "popup-session"
+        )
+
+    async def test_iframe_and_service_worker_targets_receive_fetch_guard(self):
+        scanner = AgentBrowserScanner("http://fixture.test")
+        session = _RequestScopedHeaderSession()
+        self.assertTrue(await scanner._enable_request_scoped_headers(session))
+
+        for target_type in ("iframe", "service_worker", "page"):
+            target_id = f"target-{target_type}"
+            session_id = f"session-{target_type}"
+            session.target_registration.callback({
+                "sessionId": session_id,
+                "targetInfo": {"targetId": target_id, "type": target_type},
+            }, "parent-session")
+            await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+            self.assertIn(target_id, scanner._fetch_enabled_targets)
+            self.assertIn(
+                ("enable", {"patterns": [{"urlPattern": "*"}]}, session_id),
+                session.fetch_commands.calls,
+            )
+            self.assertIn(
+                ("setAutoAttach", {
+                    "autoAttach": True,
+                    "waitForDebuggerOnStart": True,
+                    "flatten": True,
+                }, session_id),
+                session.target_commands.calls,
+            )
+            self.assertIn(
+                ("runIfWaitingForDebugger", None, session_id),
+                session.runtime_commands.calls,
+            )
+            session.fetch_registration.callback({
+                "requestId": f"request-{target_type}",
+                "request": {"url": "https://outside.test/", "method": "GET"},
+            }, session_id)
+            await asyncio.gather(*tuple(scanner._request_event_tasks))
+            self.assertIn(("failRequest", {
+                "requestId": f"request-{target_type}",
+                "errorReason": "BlockedByClient",
+            }, session_id), session.fetch_commands.calls)
 
     async def test_target_event_awaits_async_existing_handler_before_resume(self):
         scanner = AgentBrowserScanner(
@@ -940,7 +1009,7 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             [("runIfWaitingForDebugger", None, "popup-session")],
         )
 
-    async def test_target_event_fetch_failure_still_resumes_target(self):
+    async def test_target_event_fetch_failure_keeps_target_paused(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",
             extra_headers={"Authorization": "Bearer test-token"},
@@ -967,29 +1036,37 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             session.fetch_commands.calls[-1],
             ("disable", None, "popup-session"),
         )
-        self.assertEqual(
-            session.runtime_commands.calls,
-            [("runIfWaitingForDebugger", None, "popup-session")],
-        )
+        self.assertEqual(session.runtime_commands.calls, [])
+        self.assertTrue(scanner._network_guard_failed)
+        self.assertTrue(any("target_setup_failed:page" in error for error in scanner._network_guard_errors))
 
-    async def test_request_scoped_headers_keep_step_path_without_target_events(self):
+    async def test_target_auto_attach_failure_keeps_target_paused(self):
+        scanner = AgentBrowserScanner("http://fixture.test")
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+        session.target_commands.fail_auto_attach = True
+
+        session.target_registration.callback({
+            "sessionId": "iframe-session",
+            "targetInfo": {"targetId": "iframe-target", "type": "iframe"},
+        }, "root-session")
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertEqual(session.runtime_commands.calls, [])
+        self.assertTrue(any("target_setup_failed:iframe" in e for e in scanner._network_guard_errors))
+
+    async def test_network_guard_refuses_sessions_without_target_subscription(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",
             extra_headers={"Authorization": "Bearer test-token"},
         )
-        session = _RequestScopedHeaderSession()
+        session = _RequestScopedHeaderSession(target_events=False)
 
         enabled = await scanner._enable_request_scoped_headers(session)
-        session.agent_focus_target_id = "target-2"
-        step_enabled = await scanner._enable_fetch_for_current_target(session)
 
-        self.assertTrue(enabled)
+        self.assertFalse(enabled)
         self.assertIsNone(scanner._target_event_client)
-        self.assertTrue(step_enabled)
-        self.assertEqual(
-            [call[0] for call in session.fetch_commands.calls].count("enable"),
-            2,
-        )
+        self.assertFalse(session.fetch_commands.calls)
 
     async def test_request_scoped_headers_do_not_enable_same_target_twice(self):
         scanner = AgentBrowserScanner(
@@ -1385,16 +1462,46 @@ class AgentNetworkScopeGuardTests(unittest.IsolatedAsyncioTestCase):
         session = _RequestScopedHeaderSession()
         await scanner._enable_fetch_for_cdp_target(
             session.cdp_session.cdp_client, "target-session", "target-1")
-        await session.fetch_registration.callback({
+        session.fetch_registration.callback({
             "requestId": "request-1",
             "request": {"url": "https://user:pass@outside.test/private", "method": "GET"},
         }, "target-session")
+        await asyncio.gather(*tuple(scanner._request_event_tasks))
         self.assertIn(("failRequest", {
             "requestId": "request-1", "errorReason": "BlockedByClient",
         }, "target-session"), session.fetch_commands.calls)
         self.assertFalse(any(call[0] == "continueRequest" for call in session.fetch_commands.calls))
         self.assertIn("network_scope_blocked:out_of_scope_destination", scanner._network_guard_errors[0])
         self.assertNotIn("user:pass", scanner._network_guard_errors[0])
+
+    async def test_cdp_event_handler_does_not_wait_for_its_command_response(self):
+        scanner = AgentBrowserScanner("https://target.test")
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_fetch_for_cdp_target(
+            session.cdp_session.cdp_client, "target-session", "target-1")
+        response = asyncio.Event()
+        completed = []
+
+        async def delayed_continue(params, session_id=None):
+            await response.wait()
+            completed.append((params, session_id))
+
+        session.fetch_commands.continueRequest = delayed_continue
+        returned = session.fetch_registration.callback({
+            "requestId": "request-2",
+            "request": {"url": "https://target.test/page", "method": "GET"},
+        }, "target-session")
+
+        self.assertIsNone(returned)
+        await asyncio.sleep(0)
+        self.assertEqual(completed, [])
+        self.assertEqual(len(scanner._request_event_tasks), 1)
+        response.set()
+        await asyncio.gather(*tuple(scanner._request_event_tasks))
+        self.assertEqual(
+            completed,
+            [({"requestId": "request-2", "headers": []}, "target-session")],
+        )
 
 
 class AgentAuthenticatedProxyFetchTests(unittest.IsolatedAsyncioTestCase):
@@ -1479,7 +1586,7 @@ class AgentAuthenticatedProxyFetchTests(unittest.IsolatedAsyncioTestCase):
         session = _RequestScopedHeaderSession()
         await scanner._enable_request_scoped_headers(session)
 
-        await session.fetch_registration.auth_callback(
+        session.fetch_registration.auth_callback(
             {
                 "requestId": "auth-req-1",
                 "authChallenge": {
@@ -1489,6 +1596,7 @@ class AgentAuthenticatedProxyFetchTests(unittest.IsolatedAsyncioTestCase):
             },
             "event-session",
         )
+        await asyncio.gather(*tuple(scanner._request_event_tasks))
 
         auth_calls = [
             call for call in session.fetch_commands.calls if call[0] == "continueWithAuth"
@@ -1520,7 +1628,7 @@ class AgentAuthenticatedProxyFetchTests(unittest.IsolatedAsyncioTestCase):
         session = _RequestScopedHeaderSession()
         await scanner._enable_request_scoped_headers(session)
 
-        await session.fetch_registration.auth_callback(
+        session.fetch_registration.auth_callback(
             {
                 "requestId": "auth-req-2",
                 "authChallenge": {
@@ -1530,6 +1638,7 @@ class AgentAuthenticatedProxyFetchTests(unittest.IsolatedAsyncioTestCase):
             },
             "event-session",
         )
+        await asyncio.gather(*tuple(scanner._request_event_tasks))
 
         auth_calls = [
             call for call in session.fetch_commands.calls if call[0] == "continueWithAuth"
@@ -1560,7 +1669,7 @@ class AgentAuthenticatedProxyFetchTests(unittest.IsolatedAsyncioTestCase):
         session = _RequestScopedHeaderSession(fail_auth_continue=True)
         await scanner._enable_request_scoped_headers(session)
 
-        await session.fetch_registration.auth_callback(
+        session.fetch_registration.auth_callback(
             {
                 "requestId": "auth-req-fail",
                 "authChallenge": {
@@ -1570,6 +1679,7 @@ class AgentAuthenticatedProxyFetchTests(unittest.IsolatedAsyncioTestCase):
             },
             "event-session",
         )
+        await asyncio.gather(*tuple(scanner._request_event_tasks))
 
         self.assertTrue(scanner._proxy_auth_failed)
         self.assertTrue(scanner._proxy_auth_failed_warned)

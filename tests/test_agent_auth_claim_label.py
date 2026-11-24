@@ -335,6 +335,9 @@ async def test_agent_mode_labels_unverified_login_claim(tmp_path, monkeypatch):
         max_steps=30,
         harness_output_dir=tmp_path,
     )
+    async def enable_guard(_session):
+        return True
+    monkeypatch.setattr(scanner, "_enable_request_scoped_headers", enable_guard)
 
     monkeypatch.setitem(sys.modules, "browser_use", fake_browser_use)
     monkeypatch.setitem(
@@ -429,6 +432,9 @@ async def test_agent_mode_labels_verified_login_claim(tmp_path, monkeypatch):
         max_steps=30,
         harness_output_dir=tmp_path,
     )
+    async def enable_guard(_session):
+        return True
+    monkeypatch.setattr(scanner, "_enable_request_scoped_headers", enable_guard)
 
     monkeypatch.setitem(sys.modules, "browser_use", fake_browser_use)
     monkeypatch.setitem(

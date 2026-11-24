@@ -506,6 +506,14 @@ class AgentEngine:
         )
 
         result = await scanner.run()
+        result.network_guard_errors = list(getattr(scanner, "_network_guard_errors", ()))
+        self.wave_errors.extend(result.network_guard_errors)
+        if result.network_guard_errors:
+            result.success = False
+            result.coverage_gaps = list(dict.fromkeys([
+                *result.coverage_gaps,
+                "network_scope_blocked: one or more browser requests were blocked",
+            ]))
         if "vision:text_only" in getattr(result, "coverage_gaps", []):
             (self.output_dir / "agent_vision_note.md").write_text(
                 "model has no image input; running text-only (DOM only; visual checks unavailable)\n",

@@ -142,9 +142,19 @@ async def test_agent_unsuccessful_history_is_incomplete_not_clean(monkeypatch):
     browser_use = types.ModuleType("browser_use")
     browser_use.Agent = _FakeAgent
     browser_use.Browser = _FakeBrowser
+    browser_use.BrowserSession = _FakeBrowser
+    profile = types.ModuleType("browser_use.browser.profile")
+    profile.BrowserProfile = type("FakeBrowserProfile", (), {"__init__": lambda self, **_kwargs: None})
 
     scanner = AgentBrowserScanner(target_url="http://fixture.test")
     monkeypatch.setitem(sys.modules, "browser_use", browser_use)
+    monkeypatch.setitem(sys.modules, "browser_use.browser.profile", profile)
+
+    async def guard_ready(_session):
+        return True
+
+    monkeypatch.setattr(scanner, "_enable_request_scoped_headers", guard_ready)
+    monkeypatch.setattr(scanner, "_enable_agent_network_guard", guard_ready)
     with patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, ""),
     ), patch(
