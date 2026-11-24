@@ -276,9 +276,22 @@ def test_untrusted_observation_redacts_origin_and_body_secrets():
         encoded_secret_lower_hex = re.sub(
             r"%[0-9A-Fa-f]{2}", lambda match: match.group(0).lower(), encoded_secret
         )
+        case_turn = 0
+
+        def mixed_hex_case(match):
+            nonlocal case_turn
+            case_turn += 1
+            return match.group(0).lower() if case_turn % 2 else match.group(0).upper()
+
+        mixed_encoded_once = re.sub(r"%[0-9A-Fa-f]{2}", mixed_hex_case, quote(configured_secret, safe=""))
+        mixed_encoded_twice = quote(mixed_encoded_once, safe="")
+        partially_encoded = configured_secret.replace("/", "%2f").replace("+", "%2B")
+        similar_but_different = configured_secret[:-3] + "928"
         body = (
             f"Reflected value context is intact; {configured_secret}; "
-            f"ref={encoded_secret} ref={encoded_secret_lower_hex}; "
+            f"ref={encoded_secret} ref={encoded_secret_lower_hex} "
+            f"ref={mixed_encoded_once} ref={mixed_encoded_twice} "
+            f"ref={partially_encoded} ref={similar_but_different}; "
             "access%5Ftoken=body-token-927;suffix-927; Database error near SELECT; "
             "sid=sid-body-927; Response continued; "
             '{"%61ccess_token":"json-body-token-927","diagnostic":"JSON response remains"}; '
@@ -302,6 +315,9 @@ def test_untrusted_observation_redacts_origin_and_body_secrets():
             configured_secret,
             encoded_secret,
             encoded_secret_lower_hex,
+            mixed_encoded_once,
+            mixed_encoded_twice,
+            partially_encoded,
             "body-token-927",
             "suffix-927",
             "sid-body-927",
@@ -316,6 +332,7 @@ def test_untrusted_observation_redacts_origin_and_body_secrets():
         assert "Reflected value context is intact" in prompt
         assert "JSON response remains" in prompt
         assert "Database error near SELECT" in prompt
+        assert similar_but_different in prompt
     finally:
         url_scope.clear_secret_values()
 
@@ -381,6 +398,17 @@ def test_prompt_redaction_preserves_benign_reflection_context():
         assert "ref=marker-" in prompt
         assert "xss" in prompt
         assert "Database error near SELECT" in prompt
+    finally:
+        url_scope.clear_secret_values()
+
+
+def test_configured_secret_pattern_limit_fails_closed():
+    from wscan import url_scope
+
+    url_scope.clear_secret_values()
+    url_scope.register_secret_values([("long_secret", "s" * 4097)])
+    try:
+        assert url_scope.redact_secret_values("diagnostic remains", encoded_layers=2) == "[REDACTED]"
     finally:
         url_scope.clear_secret_values()
 

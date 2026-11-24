@@ -227,6 +227,9 @@ _RE_URL_SCHEME = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
 MIN_SECRET_LEN = 4  # これ未満は証跡（"a" 等）を壊すため登録しない（skipped_secret_labels に記録）
 _SECRET_VALUES: dict[str, str] = {}
 skipped_secret_labels: list[str] = []
+_MAX_SECRET_PATTERN_VALUE_LENGTH = 4096
+_MAX_SECRET_PATTERN_CHARS = 131072
+_MAX_SECRET_PATTERN_TOTAL_CHARS = 262144
 
 
 def clear_secret_values() -> None:
@@ -310,28 +313,52 @@ def redact_secret_values(text, *, encoded_layers=0):
     from urllib.parse import quote, quote_plus
     import html as _html, json as _json, shlex
 
-    def percent_case_forms(value):
-        return {
-            value,
-            re.sub(r"%[0-9A-Fa-f]{2}", lambda match: match.group(0).lower(), value),
-        }
+    def percent_byte_pattern(byte):
+        digits = f"{byte:02X}"
+        return "".join(
+            f"[{digit.lower()}{digit.upper()}]" if digit.isalpha() else digit
+            for digit in digits
+        )
 
+    def configured_value_pattern(value, layers, max_pattern_chars):
+        if len(value) > _MAX_SECRET_PATTERN_VALUE_LENGTH:
+            return None
+        pieces = []
+        pattern_chars = 0
+        for character in value:
+            encoded = "".join(f"%{percent_byte_pattern(byte)}" for byte in character.encode("utf-8"))
+            double_encoded = "".join(f"%25{percent_byte_pattern(byte)}" for byte in character.encode("utf-8"))
+            alternatives = [re.escape(character)]
+            if layers >= 1:
+                alternatives.append(encoded)
+                if character == " ":
+                    alternatives.extend((r"\+", r"%[2][bB]"))
+            if layers >= 2:
+                alternatives.append(double_encoded)
+                if character == " ":
+                    alternatives.extend((r"%252[bB]",))
+            piece = "(?:" + "|".join(dict.fromkeys(alternatives)) + ")"
+            pieces.append(piece)
+            pattern_chars += len(piece)
+            if pattern_chars > min(_MAX_SECRET_PATTERN_CHARS, max_pattern_chars):
+                return None
+        return re.compile("".join(pieces))
+
+    remaining_pattern_chars = _MAX_SECRET_PATTERN_TOTAL_CHARS
     for value in sorted(_SECRET_VALUES, key=len, reverse=True):
         marker = f"[REDACTED:{_SECRET_VALUES[value]}]"
-        forms = {
+        layers = max(0, min(int(encoded_layers), 2))
+        if layers:
+            pattern = configured_value_pattern(value, layers, remaining_pattern_chars)
+            if pattern is None:
+                return "[REDACTED]"
+            text = pattern.sub(marker, text)
+            remaining_pattern_chars -= len(pattern.pattern)
+        forms = (
             value, quote(value, safe=""), quote_plus(value), _json.dumps(value)[1:-1],
             _html.escape(value), _html.escape(value, quote=False),
             shlex.quote(value)[1:-1] if shlex.quote(value).startswith("'") else shlex.quote(value),
-        }
-        encoded_forms = set(forms)
-        for _ in range(max(0, min(int(encoded_layers), 2))):
-            encoded_forms = {
-                encoded
-                for form in encoded_forms
-                for candidate in (quote(form, safe=""), quote_plus(form))
-                for encoded in percent_case_forms(candidate)
-            }
-            forms.update(encoded_forms)
+        )
         for form in forms:
             if form in text:
                 text = text.replace(form, marker)
