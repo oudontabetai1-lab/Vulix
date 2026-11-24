@@ -22,7 +22,8 @@ import pytest
 from wscan.settings_schema import FIELDS, PROFILES, SCHEMA_VERSION, build_settings_schema
 from fastapi.testclient import TestClient
 import wscan.check_catalog as check_catalog
-from wscan.monitor import MonitorServer, TERMINAL_SCAN_STATUSES
+from wscan.monitor import MonitorServer
+from wscan.terminal_outcome import terminal_outcome
 from tests.ui_harness import UIHarness, require_browser
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -978,7 +979,7 @@ def test_setup_credentials_e2e_websocket_payload():
                             last_status = json.loads(resp.read().decode("utf-8")).get("status", "missing")
                         if last_status == "scanning":
                             break
-                        if last_status in TERMINAL_SCAN_STATUSES:
+                        if terminal_outcome(last_status)["status"] not in {"idle", "scanning"}:
                             already_terminal = True
                             break
                     except Exception:
@@ -1002,7 +1003,7 @@ def test_setup_credentials_e2e_websocket_payload():
                     try:
                         with urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status", timeout=2) as resp:
                             last_status = json.loads(resp.read().decode("utf-8")).get("status", "missing")
-                            if last_status in TERMINAL_SCAN_STATUSES:
+                            if terminal_outcome(last_status)["status"] not in {"idle", "scanning"}:
                                 return
                     except Exception:
                         pass

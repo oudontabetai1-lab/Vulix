@@ -345,10 +345,15 @@ def test_hybrid_recon_retry_window_abort_returns_incomplete_handoff():
     monitor = _Monitor()
     current = [datetime(2024, 1, 1, 11, 59, 59)]
     attempts = []
+    sleep_calls = []
 
     async def abort_when_waiting(_delay):
-        current[0] = datetime(2024, 1, 1, 12, 0)
-        monitor.command_queue.put_nowait("abort")
+        sleep_calls.append(_delay)
+        if len(sleep_calls) == 1:
+            # まず時間帯の境界で偵察 task を中断し、その後の次枠待機へ進める。
+            current[0] = datetime(2024, 1, 1, 12, 0)
+        else:
+            monitor.command_queue.put_nowait("abort")
 
     async def interrupted_recon():
         attempts.append(True)

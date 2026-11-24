@@ -99,13 +99,30 @@ async def _run_mock_agent(tmp_path, monkeypatch, scenario: str, *, add_empty_gua
             return FakeHistory("No coverage gaps found. REVIEW COMPLETE")
 
     module = types.ModuleType("browser_use")
+    module.__path__ = []
     module.Agent = FakeAgent
     module.Browser = FakeBrowser
+    module.BrowserSession = FakeBrowser
+    browser_package = types.ModuleType("browser_use.browser")
+    browser_package.__path__ = []
+    profile_module = types.ModuleType("browser_use.browser.profile")
+
+    class FakeBrowserProfile:
+        def __init__(self, **_kwargs):
+            pass
+
+    profile_module.BrowserProfile = FakeBrowserProfile
+    monkeypatch.setitem(sys.modules, "browser_use.browser", browser_package)
+    monkeypatch.setitem(sys.modules, "browser_use.browser.profile", profile_module)
     scanner = AgentBrowserScanner(
         "http://fixture.test", checks=["xss"], max_steps=30,
         access_urls=["http://access.test"], harness_output_dir=tmp_path,
     )
     scanner_ref["scanner"] = scanner
+    async def guard_ready(_session):
+        return True
+
+    scanner._enable_agent_network_guard = guard_ready
     monkeypatch.setitem(sys.modules, "browser_use", module)
     with patch("wscan.llm_agent_browser._build_llm", return_value=FakeLLM()), patch(
         "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")

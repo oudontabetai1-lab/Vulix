@@ -60,9 +60,6 @@ def test_agent_and_hybrid_phase1_kwargs_propagation(tmp_path, monkeypatch, mode)
             return MagicMock(error=None, success=True, findings=[])
 
         async def run_recon(self):
-            if server_ref:
-                server_ref[0].should_exit = True
-            done.set()
             from wscan.agent_engine import AgentHandoffData
             return AgentHandoffData(
                 discovered_urls=["http://fixture.test/"],
@@ -78,6 +75,9 @@ def test_agent_and_hybrid_phase1_kwargs_propagation(tmp_path, monkeypatch, mode)
             fake_scan_engines.append(self)
 
         async def run(self):
+            if server_ref:
+                server_ref[0].should_exit = True
+            done.set()
             return
 
     monkeypatch.setattr(uvicorn, "Server", FakeServer)

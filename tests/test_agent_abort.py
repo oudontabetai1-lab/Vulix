@@ -132,7 +132,9 @@ async def test_hybrid_recon_abort_stops_before_phase_two():
 
     handoff, continue_to_phase2 = await asyncio.wait_for(task, timeout=1)
 
-    assert (handoff, continue_to_phase2) == (None, False)
+    assert handoff is not None
+    assert handoff.incomplete_reason == "recon_aborted"
+    assert continue_to_phase2 is False
     assert attempts == [True]
     assert cleaned_up.is_set()
     assert monitor.command_queue.empty()
@@ -169,7 +171,9 @@ async def test_hybrid_recon_abort_with_time_window_monitor_stops_before_phase_tw
 
     handoff, continue_to_phase2 = await asyncio.wait_for(task, timeout=2)
 
-    assert (handoff, continue_to_phase2) == (None, False)
+    assert handoff is not None
+    assert handoff.incomplete_reason == "recon_aborted"
+    assert continue_to_phase2 is False
     assert cleaned_up.is_set()
     assert monitor.command_queue.empty()
     assert monitor.statuses[-1] == ("ハイブリッド Phase 1 を中断しました。", "aborted")
@@ -205,7 +209,9 @@ async def test_hybrid_recon_window_close_cancels_abort_monitored_operation():
         timeout=1,
     )
 
-    assert (handoff, continue_to_phase2) == (None, True)
+    assert handoff is not None
+    assert handoff.incomplete_reason == "retry_limit"
+    assert continue_to_phase2 is True
     assert cleaned_up.is_set()
     assert monitor.command_queue.empty()
     assert monitor.statuses[-1][1] == "warning"
@@ -270,7 +276,9 @@ async def test_hybrid_abort_wins_at_time_window_boundary(race_order):
     if not release_cleanup.is_set():
         release_cleanup.set()
 
-    assert (handoff, continue_to_phase2) == (None, False)
+    assert handoff is not None
+    assert handoff.incomplete_reason == "recon_aborted"
+    assert continue_to_phase2 is False
     assert recon_finished.is_set()
     assert monitor.scan_abort_event.is_set()
     assert monitor.command_queue.empty()
