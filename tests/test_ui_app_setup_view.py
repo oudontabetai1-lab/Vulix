@@ -967,12 +967,28 @@ def test_setup_credentials_e2e_websocket_payload():
                 assert len(messages) >= expected, f"Expected at least {expected} start_scan messages, got {len(messages)}"
 
             def abort_and_wait(timeout_s: float = 10.0) -> None:
+                deadline = time.monotonic() + timeout_s
+                # framesent only proves the browser wrote the WebSocket frame;
+                # wait until the server has accepted this scan before aborting.
+                while time.monotonic() < deadline:
+                    try:
+                        with urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status", timeout=2) as resp:
+                            status = json.loads(resp.read().decode("utf-8")).get("status")
+                        if status == "scanning":
+                            break
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(50)
+                else:
+                    raise AssertionError("Scan was not accepted before the abort step")
+
                 try:
                     req = urllib.request.Request(f"{harness.server_url}/api/v1/scan/abort", data=b"", method="POST")
                     urllib.request.urlopen(req, timeout=2)
                 except Exception:
+                    # The scan may have completed between status polling and abort.
                     pass
-                deadline = time.monotonic() + timeout_s
+
                 while time.monotonic() < deadline:
                     try:
                         with urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status", timeout=2) as resp:
