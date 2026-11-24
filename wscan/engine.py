@@ -9520,6 +9520,8 @@ class ScanEngine:
         aborted = getattr(self, "scan_aborted", False) if scan_aborted is None else scan_aborted
         if aborted:
             return "aborted"
+        if getattr(self, "_execution_failed", False):
+            return "failed"
         auth_state = getattr(self, "authentication_state", {"state": "unknown"})
         auth_failed = (auth_state.get("state") in ("failure", "configured")) or any(
             e.startswith(("authentication_incomplete:", "authentication_unverified:"))

@@ -2864,6 +2864,13 @@ class MonitorServer:
                 return
             if self._scan_complete_event_emitted:
                 return
+            # scan_complete は全 producer に共通する lifecycle finalizer。
+            # status producer が無い正常 ScanEngine 経路でも、terminal status を
+            # completion より先に一度だけ公開する。await 前に seal して、並行する
+            # completion producer が status→completion の順序を割り込まないようにする。
+            self._scan_complete_event_emitted = True
+            if not self._terminal_status_event_emitted:
+                await self.emit_status(_completion_status_message(status), status)
             self._clear_pending_interactive()
             self._scan_status_reason = status_reason
             event_data["terminal_outcome"] = terminal
