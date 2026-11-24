@@ -518,6 +518,7 @@ class RequestLogger:
         timeout_seconds=None, elapsed_seconds=None, status: str = "",
         retries=None, prompt_chars=None, response_chars=None,
         input_tokens=None, output_tokens=None, exception_type=None, caller: str = "",
+        injection_signals=None, injection_signals_discarded_count=0,
     ) -> None:
         """LLM 呼び出し1回のメタデータを記録する（観測性）。
 
@@ -527,6 +528,12 @@ class RequestLogger:
         """
         if not self.enabled:
             return
+        from wscan.content_provenance import normalize_injection_signals
+
+        normalized_signals, discarded_count = normalize_injection_signals(
+            injection_signals,
+            previously_discarded=injection_signals_discarded_count,
+        )
         record = {
             "ts": time.time(),
             "provider": provider,
@@ -542,7 +549,10 @@ class RequestLogger:
             "output_tokens": output_tokens,
             "exception_type": exception_type,
             "caller": caller,
+            "injection_signals": sorted({item["pattern"] for item in normalized_signals}),
         }
+        if discarded_count:
+            record["injection_signals_discarded_count"] = discarded_count
         # 実際に永続化できた行だけ数える。失敗時に加算すると evidence.json の総数が
         # llm_calls.jsonl の実行数と食い違う。
         if self._append(self.llm_path, record):

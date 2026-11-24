@@ -18,6 +18,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable
 
+from wscan.content_provenance import (
+    detect_injection_signal_details, normalize_injection_signals,
+)
 from wscan.request_logger import _KEYS_ALT, redact_text, redact_url
 from wscan.url_normalize import normalize_proxy_endpoint
 
@@ -443,18 +446,33 @@ class AgentStepRecord:
     llm_call_ids: tuple[str, ...] = ()
     probe_attempt_ids: tuple[str, ...] = ()
     hypothesis_ids: tuple[str, ...] = ()
+    injection_signals: tuple[dict, ...] = ()
+    injection_signals_discarded_count: int = 0
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["llm_call_ids"] = list(self.llm_call_ids)
         data["probe_attempt_ids"] = list(self.probe_attempt_ids)
         data["hypothesis_ids"] = list(self.hypothesis_ids)
+        data["injection_signals"], data["injection_signals_discarded_count"] = (
+            normalize_injection_signals(
+                self.injection_signals,
+                previously_discarded=self.injection_signals_discarded_count,
+            )
+        )
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentStepRecord":
         values = dict(data)
-        for k in ("proposed_actions", "executed_actions", "llm_call_ids", "probe_attempt_ids", "hypothesis_ids"):
+        values["injection_signals"], values["injection_signals_discarded_count"] = (
+            normalize_injection_signals(
+                values.get("injection_signals", ()),
+                previously_discarded=values.get("injection_signals_discarded_count", 0),
+            )
+        )
+        values["injection_signals"] = tuple(values["injection_signals"])
+        for k in ("proposed_actions", "executed_actions", "llm_call_ids", "probe_attempt_ids", "hypothesis_ids", "injection_signals"):
             if k in values and isinstance(values[k], (list, tuple)):
                 values[k] = tuple(values[k])
         known = {f.name for f in fields(cls)}
@@ -867,6 +885,7 @@ class AgentHarness:
             llm_call_ids=tuple(str(x) for x in llm_call_ids if str(x)),
             probe_attempt_ids=tuple(str(x) for x in probe_attempt_ids if str(x)),
             hypothesis_ids=tuple(str(x) for x in hypothesis_ids if str(x)),
+            injection_signals=tuple(detect_injection_signal_details(str(page_state or ""))),
         )
         self._append_trace(record)
         self.checkpoint()

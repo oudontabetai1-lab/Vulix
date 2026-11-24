@@ -3,14 +3,41 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from typing import Any, Literal
 
 import httpx
 
 from . import llm_endpoint
+from .content_provenance import normalize_injection_signals
 
 
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504, 529}
+
+_INJECTION_SIGNAL_ATTR = re.compile(r'injection_signals="([a-z_,]*)"')
+_INJECTION_SIGNAL_DISCARDED_ATTR = re.compile(r'injection_signals_discarded_count="([0-9]+)"')
+
+
+def _prompt_injection_signal_metadata(prompt) -> tuple[list[dict], int]:
+    """Read and normalize category IDs emitted by provenance envelopes only."""
+    if not isinstance(prompt, str):
+        return [], 0
+    candidates = [
+        item
+        for match in _INJECTION_SIGNAL_ATTR.finditer(prompt)
+        for item in match.group(1).split(",")
+        if item
+    ]
+    claimed_discarded = 0
+    for match in _INJECTION_SIGNAL_DISCARDED_ATTR.finditer(prompt):
+        claimed_discarded = min(1_000_000, claimed_discarded + int(match.group(1)))
+    return normalize_injection_signals(candidates, previously_discarded=claimed_discarded)
+
+
+def _prompt_injection_signals(prompt) -> list[str]:
+    """Read known category IDs emitted by provenance envelopes."""
+    signals, _discarded = _prompt_injection_signal_metadata(prompt)
+    return sorted({signal["pattern"] for signal in signals})
 
 CompletionStatus = Literal[
     "ok", "empty", "unavailable", "transient", "permanent", "blocked"
@@ -110,6 +137,7 @@ def _retry_after_seconds(response: Any, cap: float = 8.0) -> float | None:
 def record_llm_call(
     pg, *, provider, role, model, timeout_seconds, elapsed_seconds, status,
     retries=0, prompt_chars=None, response_chars=None, caller="", exception_type=None,
+    injection_signals=(), injection_signals_discarded_count=0,
 ) -> None:
     """LLM 呼び出しメタデータを ``pg.request_logger`` へ記録する。
 
@@ -127,6 +155,8 @@ def record_llm_call(
             timeout_seconds=timeout_seconds, elapsed_seconds=elapsed_seconds,
             status=status, retries=retries, prompt_chars=prompt_chars,
             response_chars=response_chars, caller=caller, exception_type=exception_type,
+            injection_signals=injection_signals,
+            injection_signals_discarded_count=injection_signals_discarded_count,
         )
     except Exception:
         pass
@@ -270,6 +300,9 @@ async def complete_text(
             isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError))
             or (exc is not None and exc.__class__.__name__ in {"APITimeoutError"})
         )
+        injection_signals, injection_signals_discarded_count = (
+            _prompt_injection_signal_metadata(prompt)
+        )
         record_llm_call(
             pg, provider=provider, role=_role, model=_model,
             timeout_seconds=request_timeout, elapsed_seconds=_time.monotonic() - _t0,
@@ -277,6 +310,8 @@ async def complete_text(
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(text) if isinstance(text, str) else 0,
             caller=caller, exception_type=exc_type,
+            injection_signals=injection_signals,
+            injection_signals_discarded_count=injection_signals_discarded_count,
         )
         # 恒久失敗（4xx・キー/クライアント不在）は可用性を倒し、以降の同一鍵（provider
         # 全体もしくは role 解決済みモデル）の呼び出しが入口で打ち切られる。

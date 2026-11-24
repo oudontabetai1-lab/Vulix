@@ -38,6 +38,64 @@ _PROMPT_SENSITIVE_KEY_TOKENS = (
 _JWT_VALUE_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 _BEARER_VALUE_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 
+INJECTION_SIGNAL_NAMES = frozenset({
+    "ignore_previous_instructions", "stop_scan_directive",
+    "false_safe_declaration", "scope_expansion_override",
+    "fake_completion_or_nonce_spoof",
+})
+
+
+def normalize_injection_signals(values, *, previously_discarded=0) -> tuple[list[dict], int]:
+    """Return allowlisted notes and the total count of discarded signal values."""
+    discarded = (
+        min(previously_discarded, 1_000_000)
+        if type(previously_discarded) is int and previously_discarded >= 0
+        else 1
+    )
+    if isinstance(values, (str, dict)):
+        values = [values]
+    elif not isinstance(values, (list, tuple)):
+        return [], discarded + (0 if values is None else 1)
+
+    clean = []
+    seen = set()
+    for item in values:
+        extra_count = 0
+        if isinstance(item, str):
+            pattern = item
+            metadata = {}
+        elif isinstance(item, dict):
+            pattern = item.get("pattern")
+            metadata = {}
+            has_start, has_end = "start" in item, "end" in item
+            if has_start != has_end:
+                discarded += 1
+                continue
+            if has_start:
+                start, end = item.get("start"), item.get("end")
+                if (type(start) is not int or type(end) is not int
+                        or not 0 <= start <= end <= 2_147_483_647):
+                    discarded += 1
+                    continue
+                metadata = {"start": start, "end": end}
+            extra_count = sum(key not in {"pattern", "start", "end"} for key in item)
+        else:
+            discarded += 1
+            continue
+
+        if type(pattern) is not str or pattern not in INJECTION_SIGNAL_NAMES:
+            discarded += 1
+            continue
+        normalized = {"pattern": pattern, **metadata}
+        key = (pattern, metadata.get("start"), metadata.get("end"))
+        if key in seen:
+            discarded += 1
+            continue
+        seen.add(key)
+        clean.append(normalized)
+        discarded += extra_count
+    return clean, discarded
+
 
 def _is_sensitive_prompt_key(key: str, sensitive_tokens: tuple[str, ...]) -> bool:
     """Match secret names as complete normalized words, including camelCase parts."""
@@ -262,6 +320,28 @@ def detect_prompt_injection(text: str) -> list[str]:
     return signals
 
 
+def detect_injection_signal_details(text: str) -> list[dict[str, int | str]]:
+    """Return category and character offsets only; never retain matched text."""
+    if not text:
+        return []
+    checks = (
+        ("ignore_previous_instructions", _IGNORE_PREVIOUS_PATTERNS),
+        ("stop_scan_directive", _STOP_SCAN_PATTERNS),
+        ("false_safe_declaration", _FALSE_SAFE_PATTERNS),
+        ("scope_expansion_override", _SCOPE_OVERRIDE_PATTERNS),
+        ("fake_completion_or_nonce_spoof", _FAKE_COMPLETION_PATTERNS),
+    )
+    found = []
+    for category, patterns in checks:
+        for pattern in patterns:
+            match = pattern.search(text)
+            if match:
+                found.append({"pattern": category, "start": match.start(), "end": match.end()})
+                break
+    normalized, _discarded = normalize_injection_signals(found)
+    return normalized
+
+
 @dataclass
 class ProvenanceEnvelope:
     """Envelope wrapping content with provenance metadata and injection guards."""
@@ -272,10 +352,13 @@ class ProvenanceEnvelope:
     content_type: str
     correlation_id: str = ""
     injection_signals: tuple[str, ...] = ()
+    injection_signal_details: tuple[dict[str, int | str], ...] = ()
     sanitized_content: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize envelope to dictionary."""
+        signals, category_drops = normalize_injection_signals(self.injection_signals)
+        details, detail_drops = normalize_injection_signals(self.injection_signal_details)
         return {
             "content": self.content,
             "source": self.source,
@@ -283,7 +366,9 @@ class ProvenanceEnvelope:
             "trust": self.trust,
             "content_type": self.content_type,
             "correlation_id": self.correlation_id,
-            "injection_signals": list(self.injection_signals),
+            "injection_signals": [item["pattern"] for item in signals],
+            "injection_signal_details": details,
+            "injection_signals_discarded_count": category_drops + detail_drops,
             "sanitized_content": self.sanitized_content,
         }
 
@@ -291,7 +376,10 @@ class ProvenanceEnvelope:
         """Format content into an untrusted target delimiter block with breakout escaping."""
         body = self.sanitized_content if self.sanitized_content != "" else self.content
         escaped_body = _escape_nfkc_closers(body)
-        inj_detected = "true" if self.injection_signals else "false"
+        signals, discarded = normalize_injection_signals(self.injection_signals)
+        _details, detail_drops = normalize_injection_signals(self.injection_signal_details)
+        discarded += detail_drops
+        inj_detected = "true" if signals else "false"
         attrs = [
             f'source="{escape_html(self.source, quote=True)}"',
             f'origin="{escape_html(self.origin, quote=True)}"',
@@ -299,6 +387,8 @@ class ProvenanceEnvelope:
             f'content_type="{escape_html(self.content_type, quote=True)}"',
             f'correlation_id="{escape_html(self.correlation_id, quote=True)}"',
             f'injection_detected="{inj_detected}"',
+            f'injection_signals="{escape_html(",".join(item["pattern"] for item in signals), quote=True)}"',
+            f'injection_signals_discarded_count="{discarded}"',
         ]
         attr_str = " ".join(attrs)
         if escaped_body:
@@ -366,5 +456,6 @@ def wrap_untrusted_observation(
         content_type=str(content_type),
         correlation_id=str(correlation_id),
         injection_signals=tuple(signals),
+        injection_signal_details=tuple(detect_injection_signal_details(source_text)),
         sanitized_content=sanitized,
     )
