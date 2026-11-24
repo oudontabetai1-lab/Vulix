@@ -967,20 +967,23 @@ def test_setup_credentials_e2e_websocket_payload():
                 assert len(messages) >= expected, f"Expected at least {expected} start_scan messages, got {len(messages)}"
 
             def abort_and_wait(timeout_s: float = 10.0) -> None:
-                deadline = time.monotonic() + timeout_s
                 # framesent only proves the browser wrote the WebSocket frame;
                 # wait until the server has accepted this scan before aborting.
-                while time.monotonic() < deadline:
+                accept_deadline = time.monotonic() + timeout_s
+                last_status = "unavailable"
+                while time.monotonic() < accept_deadline:
                     try:
                         with urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status", timeout=2) as resp:
-                            status = json.loads(resp.read().decode("utf-8")).get("status")
-                        if status == "scanning":
+                            last_status = json.loads(resp.read().decode("utf-8")).get("status", "missing")
+                        if last_status == "scanning":
                             break
                     except Exception:
                         pass
                     page.wait_for_timeout(50)
                 else:
-                    raise AssertionError("Scan was not accepted before the abort step")
+                    raise AssertionError(
+                        f"Scan was not accepted before the abort step; last status={last_status!r}"
+                    )
 
                 try:
                     req = urllib.request.Request(f"{harness.server_url}/api/v1/scan/abort", data=b"", method="POST")
@@ -989,15 +992,19 @@ def test_setup_credentials_e2e_websocket_payload():
                     # The scan may have completed between status polling and abort.
                     pass
 
-                while time.monotonic() < deadline:
+                terminal_deadline = time.monotonic() + timeout_s
+                while time.monotonic() < terminal_deadline:
                     try:
                         with urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status", timeout=2) as resp:
-                            st = json.loads(resp.read().decode("utf-8")).get("status")
-                            if st in ("idle", "done", "error", "aborted"):
+                            last_status = json.loads(resp.read().decode("utf-8")).get("status", "missing")
+                            if last_status in ("idle", "done", "error", "aborted"):
                                 return
                     except Exception:
                         pass
                     page.wait_for_timeout(200)
+                raise AssertionError(
+                    f"Scan did not reach a terminal status before timeout; last status={last_status!r}"
+                )
 
             # 1. Normal mode submission
             page.locator("#setupStartScanBtn").click()
