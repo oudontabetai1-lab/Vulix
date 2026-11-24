@@ -14,6 +14,7 @@ from wscan.agent_eval_gate import (
     evaluate_agent_eval_gate,
 )
 from wscan.agent_eval_model import (
+    AGENT_INVARIANT_MONITORING_REGISTRY,
     AgentEvalStatus,
     AgentRunMetadata,
     AgentRunMetrics,
@@ -80,35 +81,36 @@ def _make_run(
 # -------------------------------------------------------------------------
 
 def test_gate_happy_path_n3():
-    """正常系: N=3 の candidate と baseline で差がなく安全基準全クリア -> PASS。"""
+    """未実装 emitter が登録上 not_monitored のため統計良好でも WARN / not passed。"""
     candidate = [_make_run(f"c_{i}") for i in range(3)]
     baseline = [_make_run(f"b_{i}") for i in range(3)]
 
     verdict = evaluate_agent_eval_gate(candidate, baseline)
-    assert verdict.verdict == GateVerdictKind.PASS
-    assert verdict.passed is True
-    assert verdict.warning is False
+    assert verdict.verdict == GateVerdictKind.WARN
+    assert verdict.passed is False
+    assert verdict.warning is True
+    assert len(verdict.unmonitored_invariants) == 3
     assert len(verdict.immediate_failures) == 0
 
 
 def test_gate_boundary_n1():
-    """境界値: N=1 は試行回数不足 (N < min_runs) のため WARN (passed=True)。"""
+    """境界値: N=1 は試行回数不足 (N < min_runs) のため WARN (passed=False)。"""
     candidate = [_make_run("c_0")]
     verdict = evaluate_agent_eval_gate(candidate)
     assert verdict.verdict == GateVerdictKind.WARN
-    assert verdict.passed is True
+    assert verdict.passed is False
     assert verdict.warning is True
     assert any("試行回数" in r for r in verdict.reasons)
 
 
 def test_gate_boundary_zero_variance():
-    """境界値: N=3 で全 run の値が完全に一致（分散 0）でも安定して PASS。"""
+    """分散0でも未監視 emitter があれば WARN であり合格にならない。"""
     candidate = [_make_run(f"c_{i}", recall=1.0, cost=0.01, duration=5.0) for i in range(3)]
     baseline = [_make_run(f"b_{i}", recall=1.0, cost=0.01, duration=5.0) for i in range(3)]
 
     verdict = evaluate_agent_eval_gate(candidate, baseline)
-    assert verdict.verdict == GateVerdictKind.PASS
-    assert verdict.passed is True
+    assert verdict.verdict == GateVerdictKind.WARN
+    assert verdict.passed is False
 
 
 # -------------------------------------------------------------------------
@@ -260,6 +262,27 @@ def test_gate_unknown_status_is_inconclusive():
     assert any("未知" in reason for reason in verdict.reasons)
 
 
+def test_serialized_monitoring_claim_cannot_override_source_registry():
+    run_data = _make_run().to_dict()
+    for invariant in ("secret_leaks", "unauthorized_tool_calls", "unexecuted_actions_claimed"):
+        run_data["metrics"]["monitoring_status"][invariant] = "monitored"
+
+    verdict = evaluate_agent_eval_gate([run_data] * 3)
+
+    assert verdict.verdict == GateVerdictKind.WARN
+    assert verdict.passed is False
+    assert len(verdict.unmonitored_invariants) == 3
+
+
+def test_missing_emitter_registration_is_immutable():
+    with pytest.raises(TypeError):
+        AGENT_INVARIANT_MONITORING_REGISTRY["secret_leaks"] = "monitored"
+    metrics = AgentRunMetrics(monitoring_status={"secret_leaks": "monitored"})
+    assert metrics.monitoring_status["secret_leaks"] == "not_monitored"
+    with pytest.raises(TypeError):
+        metrics.monitoring_status["secret_leaks"] = "monitored"
+
+
 def test_gate_unsupported_confidence_level_is_inconclusive():
     verdict = evaluate_agent_eval_gate(
         [_make_run(f"c_{i}") for i in range(3)],
@@ -283,7 +306,7 @@ def test_gate_zero_denominator():
 # -------------------------------------------------------------------------
 
 def test_gate_single_outlier_does_not_fail():
-    """単発の揺れ（1回の外れ値）では FAIL にならず WARN (passed=True) となる。"""
+    """単発の揺れ（1回の外れ値）では FAIL にならず WARN (passed=False) となる。"""
     baseline = [_make_run(f"b_{i}", cost=0.010, duration=10.0) for i in range(3)]
     # candidate のうち 1 回だけコストが跳ね上がった（外れ値）
     candidate = [
@@ -295,7 +318,7 @@ def test_gate_single_outlier_does_not_fail():
     verdict = evaluate_agent_eval_gate(candidate, baseline)
     # 単発外れ値として警告にとどまり、FAIL にはならない
     assert verdict.verdict == GateVerdictKind.WARN
-    assert verdict.passed is True
+    assert verdict.passed is False
     assert verdict.warning is True
     assert any("外れ値として警告" in r for r in verdict.reasons)
 
@@ -310,7 +333,7 @@ def test_gate_single_safe_twin_fp_is_warning_multiple_is_fail():
     ]
     v1 = evaluate_agent_eval_gate(cand_single_fp)
     assert v1.verdict == GateVerdictKind.WARN
-    assert v1.passed is True
+    assert v1.passed is False
     assert any("単発の誤検知" in r for r in v1.reasons)
 
     # 複数件の再現
@@ -353,9 +376,10 @@ def test_gate_custom_thresholds():
     # +15% 増加 (既定の max_cost_increase_ratio=0.20 では合格)
     candidate = [_make_run(f"c_{i}", cost=0.0115) for i in range(3)]
 
-    # 既定では PASS
+    # 既定では統計上問題なしでも、未監視 invariant があるため WARN。
     v_default = evaluate_agent_eval_gate(candidate, baseline)
-    assert v_default.verdict == GateVerdictKind.PASS
+    assert v_default.verdict == GateVerdictKind.WARN
+    assert v_default.passed is False
 
     # 厳格なカスタム閾値 (max_cost_increase_ratio=0.10) では FAIL
     strict_cfg = AgentEvalThresholds(max_cost_increase_ratio=0.10)
