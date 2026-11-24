@@ -9,28 +9,40 @@ import base64
 import json
 import re
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 from collections import Counter
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .api_spec_importer import ApiSeedData, RequestTemplate
+from . import content_provenance, request_logger, url_scope
 from .runtime_scope_guard import ScopePolicy, evaluate_scope
 
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
 MAX_ITEMS = 20_000
-_SECRET_KEY = re.compile(r"(?:authorization|cookie|token|secret|password|passwd|session|api[-_]?key|credential)", re.I)
-_SECRET_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token", "x-access-token"})
+MAX_JSON_DEPTH = 64
+
+
+def _is_sensitive_name(name: str) -> bool:
+    """既存のヘッダ正典と key token 判定を組み合わせる。"""
+    return request_logger.is_sensitive_header(name) or content_provenance._is_sensitive_prompt_key(
+        name, url_scope.SENSITIVE_KEY_TOKENS
+    )
 
 
 def _safe_url(url: str) -> str:
     """URL userinfo と認証らしい query 値を落とす。"""
-    p = urlsplit(url.strip())
-    if p.scheme.lower() not in {"http", "https"} or not p.hostname:
+    try:
+        p = urlsplit(url.strip())
+        host = p.hostname
+        port = p.port
+    except (TypeError, ValueError):
         return ""
-    host = p.hostname
-    if p.port:
-        host += f":{p.port}"
-    query = [(k, "<redacted>" if _SECRET_KEY.search(k) else v) for k, v in parse_qsl(p.query, keep_blank_values=True)]
+    if p.scheme.lower() not in {"http", "https"} or not host:
+        return ""
+    if port:
+        host += f":{port}"
+    query = [(k, url_scope.REDACTED if url_scope.is_sensitive_query_key(k) else url_scope.redact_secret_values(v)) for k, v in parse_qsl(p.query, keep_blank_values=True)]
     return urlunsplit((p.scheme.lower(), host, p.path or "/", urlencode(query), ""))
 
 
@@ -43,16 +55,25 @@ def _safe_headers(headers: Any) -> dict[str, str]:
             continue
         name = str(h.get("name", h.get("key", ""))).strip()
         value = str(h.get("value", ""))
-        if name and name.lower() not in _SECRET_HEADERS and name.lower() not in {"host", "content-length"}:
-            out[name] = value
+        if not name or name.lower() in {"host", "content-length"}:
+            continue
+        out[name] = url_scope.REDACTED if _is_sensitive_name(name) else url_scope.redact_secret_values(value)
     return out
 
 
-def _safe_body(value: Any) -> Any:
+def _safe_body(value: Any, depth: int = 0) -> Any:
+    if depth > MAX_JSON_DEPTH:
+        raise ValueError("json_depth_exceeded")
     if isinstance(value, dict):
-        return {k: _safe_body(v) for k, v in value.items() if not _SECRET_KEY.search(str(k))}
+        return {
+            k: _safe_body(v, depth + 1)
+            for k, v in value.items()
+            if not content_provenance._is_sensitive_prompt_key(str(k), url_scope.SENSITIVE_KEY_TOKENS)
+        }
     if isinstance(value, list):
-        return [_safe_body(v) for v in value]
+        return [_safe_body(v, depth + 1) for v in value]
+    if isinstance(value, str):
+        return url_scope.redact_secret_values(value)
     return value
 
 
@@ -64,23 +85,35 @@ def _make_seed(items: list[dict], target_urls: list[str], access_urls: list[str]
     seen: set[str] = set()
     rejected: Counter[str] = Counter()
     for item in items[:MAX_ITEMS]:
-        url = _safe_url(str(item.get("url", "")))
-        if not url:
-            rejected["invalid_url"] += 1
-            continue
-        decision = evaluate_scope(url, policy)
-        if not decision.allowed:
-            rejected[decision.reason] += 1
-            continue
-        if url not in seen:
-            seen.add(url)
-            seed.urls.append(url)
-        headers = _safe_headers(item.get("headers", []))
-        seed.headers.update(headers)
-        method = str(item.get("method", "GET")).upper()
-        body = item.get("body")
-        if method in {"POST", "PUT", "PATCH", "DELETE"} and isinstance(body, dict):
-            seed.requests.append(RequestTemplate(method=method, url=url, headers=headers, json_body=_safe_body(body)))
+        try:
+            if item.get("parse_error") == "json_depth_exceeded":
+                rejected["json_depth_exceeded"] += 1
+                continue
+            url = _safe_url(str(item.get("url", "")))
+            if not url:
+                rejected["invalid_url"] += 1
+                continue
+            decision = evaluate_scope(url, policy)
+            if not decision.allowed:
+                rejected[decision.reason] += 1
+                continue
+            headers = _safe_headers(item.get("headers", []))
+            method = str(item.get("method", "GET")).upper()
+            body = item.get("body")
+            safe_body = _safe_body(body) if isinstance(body, dict) else None
+            if url not in seen:
+                seen.add(url)
+                seed.urls.append(url)
+            seed.headers.update(headers)
+            if method in {"POST", "PUT", "PATCH", "DELETE"} and safe_body is not None:
+                seed.requests.append(RequestTemplate(method=method, url=url, headers=headers, json_body=safe_body))
+        except ValueError as exc:
+            rejected["json_depth_exceeded" if str(exc) == "json_depth_exceeded" else "invalid_item"] += 1
+        except RecursionError:
+            rejected["json_depth_exceeded"] += 1
+        except Exception:
+            # 外部エクスポート由来の異常な値は項目単位で破棄し、値や例外文を記録しない。
+            rejected["invalid_item"] += 1
     seed.rejected_scope_count = sum(rejected.values())
     seed.rejected_scope_reasons = dict(rejected)
     return seed
@@ -90,13 +123,6 @@ def parse_zap_json(data: dict, *, target_urls: list[str], access_urls: list[str]
     """ZAP の alerts/sites または HAR log.entries を共通 seed に変換する。"""
     if not isinstance(data, dict):
         raise ValueError("ZAP JSON のルートは object である必要があります")
-    try:
-        if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > MAX_IMPORT_BYTES:
-            raise ValueError("ZAP JSON がサイズ上限を超えています")
-    except (TypeError, ValueError) as exc:
-        if isinstance(exc, ValueError) and "サイズ上限" in str(exc):
-            raise
-        raise ValueError("ZAP JSON に未対応の値が含まれています") from exc
     entries = data.get("log", {}).get("entries", []) if isinstance(data.get("log"), dict) else []
     if not entries:
         entries = data.get("requests", data.get("site", data.get("sites", [])))
@@ -130,6 +156,9 @@ def parse_zap_json(data: dict, *, target_urls: list[str], access_urls: list[str]
                     body = parsed if isinstance(parsed, dict) else None
                 except json.JSONDecodeError:
                     pass
+                except RecursionError:
+                    items.append({"parse_error": "json_depth_exceeded"})
+                    continue
         items.append({"url": url, "method": method, "headers": req.get("headers", []), "body": body})
     return _make_seed(items, target_urls, access_urls or [], exclude_urls or [])
 
@@ -139,11 +168,22 @@ def parse_burp_xml(data: bytes | str, *, target_urls: list[str], access_urls: li
     raw = data.encode() if isinstance(data, str) else data
     if len(raw) > MAX_IMPORT_BYTES:
         raise ValueError("Burp XML がサイズ上限を超えています")
-    if re.search(br"<!\s*(?:DOCTYPE|ENTITY)", raw, re.I):
+    # Expat が入力の文字コードを解釈した後の宣言イベントで拒否するため、
+    # UTF-8/UTF-16 や BOM、XML 宣言の encoding 指定でも迂回できない。
+    guard = expat.ParserCreate()
+
+    def reject_declaration(*_args):
         raise ValueError("DTD/entity 宣言を含む XML は受け付けません")
+
+    guard.StartDoctypeDeclHandler = reject_declaration
+    guard.EntityDeclHandler = reject_declaration
+    guard.UnparsedEntityDeclHandler = reject_declaration
+    guard.ExternalEntityRefHandler = reject_declaration
+    guard.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_ALWAYS)
     try:
+        guard.Parse(raw, True)
         root = ET.fromstring(raw)
-    except (ET.ParseError, ValueError) as exc:
+    except (ET.ParseError, expat.ExpatError, ValueError) as exc:
         raise ValueError("Burp XML を解析できません") from exc
     items = []
     for node in root.findall(".//item")[:MAX_ITEMS]:
