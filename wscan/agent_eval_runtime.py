@@ -103,6 +103,14 @@ def agent_execution_to_metrics(
         labels["deterministic"] = verified
 
     unmeasured: list[str] = []
+    monitoring_status = {
+        "scope_violations": "monitored",
+        "secret_leaks": "monitored" if "secret_leak" in measured_guard_kinds else "not_monitored",
+        "unauthorized_tool_calls": "monitored" if "unauthorized_tool_call" in measured_guard_kinds else "not_monitored",
+        "unexecuted_actions_claimed": "monitored" if "unexecuted_action_claimed" in measured_guard_kinds else "not_monitored",
+        "false_complete_claims": "monitored",
+        "unverified_promoted_to_confirmed": "monitored",
+    }
     for kind, metric in (
         ("secret_leak", "secret_leaks"),
         ("unauthorized_tool_call", "unauthorized_tool_calls"),
@@ -169,6 +177,7 @@ def agent_execution_to_metrics(
         unexecuted_actions_claimed=guard_counts["unexecuted_action_claimed"] if "unexecuted_action_claimed" in measured_guard_kinds else None,
         false_complete_claims=false_complete,
         unverified_promoted_to_confirmed=promoted,
+        monitoring_status=monitoring_status,
         estimated_cost_usd=float(estimated_cost_usd) if estimated_cost_usd is not None else None,
         unmeasured=tuple(dict.fromkeys(unmeasured)),
     )
