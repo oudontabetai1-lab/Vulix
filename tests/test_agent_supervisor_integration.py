@@ -12,23 +12,7 @@ import pytest
 from wscan.llm_agent_browser import AgentBrowserScanner
 from wscan.agent_harness import AgentHarness, AgentRole, AgentRunSpec
 from wscan.agent_harness import WorkStatus
-
-
-class _History:
-    def __init__(self, text):
-        self.text = text
-
-    def is_successful(self):
-        return True
-
-    def final_result(self):
-        return self.text
-
-    def extracted_content(self):
-        return []
-
-    def errors(self):
-        return []
+from tests.fixtures.agent_eval_fake import FakeHistory as _History, fake_browser_use
 
 
 @pytest.mark.asyncio
@@ -92,16 +76,7 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
                 )
             return _History("REVIEW COMPLETE")
 
-    class _Browser:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def stop(self):
-            pass
-
-    module = types.ModuleType("browser_use")
-    module.Agent = _Agent
-    module.Browser = _Browser
+    module = fake_browser_use(_Agent)
     scanner = AgentBrowserScanner(
         "http://fixture.test", checks=["xss"], max_steps=40,
         access_urls=["http://idp.test"],

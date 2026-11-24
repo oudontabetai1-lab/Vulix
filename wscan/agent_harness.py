@@ -392,6 +392,7 @@ class AgentRunState:
     checkpoint_generation: int = 0
     work_queue: list[AgentWorkItem] = field(default_factory=list)
     hypotheses: list[dict] = field(default_factory=list)
+    guard_records: list[dict] = field(default_factory=list)
     # 認証秘密の resume 同一性。per-run salt 付き scrypt（_auth_fingerprint）で、spec_hash には
     # 秘密を入れない（無塩 SHA-256 だと artifact から低エントロピー password を辞書攻撃できる）。
     auth_salt: str = ""
@@ -842,6 +843,8 @@ class AgentHarness:
             self.state.stop_reason = "loop_detected"
         if safe_url.startswith(("http://", "https://")):
             self.state.visited_urls = _unique([*self.state.visited_urls, safe_url])
+        if blocked_count:
+            self.record_guard_event("scope_violation", blocked=True, count=blocked_count)
         step_id = f"{episode_id}:{global_step:06d}"
         corr_id = str(correlation_id or step_id)
         record = AgentStepRecord(
@@ -868,6 +871,22 @@ class AgentHarness:
         self._append_trace(record)
         self.checkpoint()
         return record
+
+    def record_guard_event(self, kind: str, *, blocked: bool, count: int = 1) -> None:
+        """安全監査の件数だけを記録し、URL・payload・秘密は保持しない。"""
+        allowed = {
+            "scope_violation", "secret_leak", "unauthorized_tool_call",
+            "unexecuted_action_claimed", "false_complete_claim",
+            "unverified_promoted_to_confirmed",
+        }
+        if kind not in allowed:
+            raise ValueError("unsupported Agent guard event")
+        self.state.guard_records.append({
+            "kind": kind,
+            "blocked": bool(blocked),
+            "count": max(0, int(count)),
+        })
+        self.checkpoint()
 
     def record_execution(self, record: AgentStepRecord, actions: Iterable) -> None:
         # 同じ step_id の後続レコードは実行後の証拠。予算とループ判定は増やさない。

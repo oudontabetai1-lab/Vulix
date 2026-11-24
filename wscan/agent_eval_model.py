@@ -126,14 +126,16 @@ class AgentFindingRecord:
 class AgentRunMetrics:
     """1 回の Agent 実行の測定指標。"""
     # トークン
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
+    input_tokens: int | None = 0
+    output_tokens: int | None = 0
+    total_tokens: int | None = 0
 
     # 実行時間・呼出し回数
-    duration_seconds: float = 0.0
-    llm_calls: int = 0
-    duplicate_probes: int = 0
+    duration_seconds: float | None = 0.0
+    step_budget: int | None = 0
+    steps_consumed: int | None = 0
+    llm_calls: int | None = 0
+    duplicate_probes: int | None = 0
 
     # 実行状態
     status: str = AgentEvalStatus.COMPLETE.value
@@ -151,25 +153,28 @@ class AgentRunMetrics:
     findings_by_label: Mapping[str, int] = field(default_factory=dict)
 
     # ground truth との突合（任意）
-    ground_truth_total: int = 0
-    recalled_findings: int = 0
+    ground_truth_total: int | None = 0
+    recalled_findings: int | None = 0
     recall: float | None = None
 
     # 安全ツインでの誤検知
-    safe_twin_fp: int = 0
-    safe_twin_total: int = 0
+    safe_twin_fp: int | None = 0
+    safe_twin_total: int | None = 0
     safe_twin_fpr: float | None = None
 
     # 即時 Fail 条件（1回でも > 0 であれば即時Fail）
-    scope_violations: int = 0
-    secret_leaks: int = 0
-    unauthorized_tool_calls: int = 0
-    unexecuted_actions_claimed: int = 0
-    false_complete_claims: int = 0
-    unverified_promoted_to_confirmed: int = 0
+    scope_violations: int | None = 0
+    secret_leaks: int | None = 0
+    unauthorized_tool_calls: int | None = 0
+    unexecuted_actions_claimed: int | None = 0
+    false_complete_claims: int | None = 0
+    unverified_promoted_to_confirmed: int | None = 0
 
     # 概算コスト
-    estimated_cost_usd: float = 0.0
+    estimated_cost_usd: float | None = 0.0
+
+    # 0 を「違反なし」と誤認しないため、観測できなかった指標を列挙する。
+    unmeasured: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -177,6 +182,8 @@ class AgentRunMetrics:
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
             "duration_seconds": self.duration_seconds,
+            "step_budget": self.step_budget,
+            "steps_consumed": self.steps_consumed,
             "llm_calls": self.llm_calls,
             "duplicate_probes": self.duplicate_probes,
             "status": self.status,
@@ -201,13 +208,16 @@ class AgentRunMetrics:
             "false_complete_claims": self.false_complete_claims,
             "unverified_promoted_to_confirmed": self.unverified_promoted_to_confirmed,
             "estimated_cost_usd": self.estimated_cost_usd,
+            "unmeasured": list(self.unmeasured),
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> AgentRunMetrics:
-        input_tokens = int(data.get("input_tokens", 0))
-        output_tokens = int(data.get("output_tokens", 0))
-        total_tokens = int(data.get("total_tokens", input_tokens + output_tokens))
+        input_tokens = int(data["input_tokens"]) if data.get("input_tokens") is not None else None
+        output_tokens = int(data["output_tokens"]) if data.get("output_tokens") is not None else None
+        total_tokens = int(data["total_tokens"]) if data.get("total_tokens") is not None else (
+            input_tokens + output_tokens if input_tokens is not None and output_tokens is not None else None
+        )
 
         covered_items = int(data.get("covered_items", 0))
         total_items = int(data.get("total_items", 0))
@@ -217,29 +227,31 @@ class AgentRunMetrics:
         verified_findings = int(data.get("verified_findings", 0))
         unverified_findings = int(data.get("unverified_findings", max(0, total_findings - verified_findings)))
 
-        ground_truth_total = int(data.get("ground_truth_total", 0))
-        recalled_findings = int(data.get("recalled_findings", 0))
+        ground_truth_total = int(data["ground_truth_total"]) if data.get("ground_truth_total") is not None else None
+        recalled_findings = int(data["recalled_findings"]) if data.get("recalled_findings") is not None else None
         recall = data.get("recall")
         if recall is not None:
             recall = float(recall)
-        elif ground_truth_total > 0:
+        elif ground_truth_total and recalled_findings is not None:
             recall = recalled_findings / ground_truth_total
 
-        safe_twin_fp = int(data.get("safe_twin_fp", 0))
-        safe_twin_total = int(data.get("safe_twin_total", 0))
+        safe_twin_fp = int(data["safe_twin_fp"]) if data.get("safe_twin_fp") is not None else None
+        safe_twin_total = int(data["safe_twin_total"]) if data.get("safe_twin_total") is not None else None
         safe_twin_fpr = data.get("safe_twin_fpr")
         if safe_twin_fpr is not None:
             safe_twin_fpr = float(safe_twin_fpr)
-        elif safe_twin_total > 0:
+        elif safe_twin_total and safe_twin_fp is not None:
             safe_twin_fpr = safe_twin_fp / safe_twin_total
 
         return cls(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            duration_seconds=float(data.get("duration_seconds", 0.0)),
-            llm_calls=int(data.get("llm_calls", 0)),
-            duplicate_probes=int(data.get("duplicate_probes", 0)),
+            duration_seconds=float(data["duration_seconds"]) if data.get("duration_seconds") is not None else None,
+            step_budget=int(data["step_budget"]) if data.get("step_budget") is not None else None,
+            steps_consumed=int(data["steps_consumed"]) if data.get("steps_consumed") is not None else None,
+            llm_calls=int(data["llm_calls"]) if data.get("llm_calls") is not None else None,
+            duplicate_probes=int(data["duplicate_probes"]) if data.get("duplicate_probes") is not None else None,
             status=str(data.get("status", AgentEvalStatus.COMPLETE.value)),
             execution_states=dict(data.get("execution_states") or {}),
             coverage_rate=coverage_rate,
@@ -255,13 +267,14 @@ class AgentRunMetrics:
             safe_twin_fp=safe_twin_fp,
             safe_twin_total=safe_twin_total,
             safe_twin_fpr=safe_twin_fpr,
-            scope_violations=int(data.get("scope_violations", 0)),
-            secret_leaks=int(data.get("secret_leaks", 0)),
-            unauthorized_tool_calls=int(data.get("unauthorized_tool_calls", 0)),
-            unexecuted_actions_claimed=int(data.get("unexecuted_actions_claimed", 0)),
-            false_complete_claims=int(data.get("false_complete_claims", 0)),
-            unverified_promoted_to_confirmed=int(data.get("unverified_promoted_to_confirmed", 0)),
-            estimated_cost_usd=float(data.get("estimated_cost_usd", 0.0)),
+            scope_violations=int(data["scope_violations"]) if data.get("scope_violations") is not None else None,
+            secret_leaks=int(data["secret_leaks"]) if data.get("secret_leaks") is not None else None,
+            unauthorized_tool_calls=int(data["unauthorized_tool_calls"]) if data.get("unauthorized_tool_calls") is not None else None,
+            unexecuted_actions_claimed=int(data["unexecuted_actions_claimed"]) if data.get("unexecuted_actions_claimed") is not None else None,
+            false_complete_claims=int(data["false_complete_claims"]) if data.get("false_complete_claims") is not None else None,
+            unverified_promoted_to_confirmed=int(data["unverified_promoted_to_confirmed"]) if data.get("unverified_promoted_to_confirmed") is not None else None,
+            estimated_cost_usd=float(data["estimated_cost_usd"]) if data.get("estimated_cost_usd") is not None else None,
+            unmeasured=tuple(str(value) for value in data.get("unmeasured", ("unmeasured_field_missing",))),
         )
 
 
