@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 from wscan import content_provenance, request_logger, url_scope
+from wscan.eval_artifact_schema import parse_scorecard, render_summary
 
 ALLOWED_NAMES = {"agent_eval_scorecard.json", "agent_eval_summary.md"}
 _UNSAFE = (
@@ -21,15 +23,25 @@ _UNSAFE = (
 def check_artifacts(paths: list[str | Path]) -> None:
     if len(paths) != 2 or {Path(path).name for path in paths} != ALLOWED_NAMES:
         raise ValueError("only the scorecard JSON and summary Markdown are allowed")
-    for path in paths:
-        candidate = Path(path)
-        text = candidate.read_text(encoding="utf-8")
+    path_by_name = {Path(path).name: Path(path) for path in paths}
+    score_path = path_by_name["agent_eval_scorecard.json"]
+    summary_path = path_by_name["agent_eval_summary.md"]
+    score_text = score_path.read_text(encoding="utf-8")
+    scorecard = parse_scorecard(score_text)
+    summary_text = summary_path.read_text(encoding="utf-8")
+    if summary_text != render_summary(scorecard):
+        raise ValueError("summary Markdown does not match the canonical template")
+
+    # The schema is the primary gate. These shared redaction and pattern checks
+    # remain defense in depth for secrets known to the process and future fields.
+    for candidate, text in ((score_path, score_text), (summary_path, summary_text)):
         # Exercise shared redaction entry points; any registered raw secret still fails.
         shared_redacted = request_logger.redact_text(url_scope.redact_secret_values(text, encoded_layers=2))
         if shared_redacted != text:
             raise ValueError(f"registered secret found in {candidate.name}")
-        if content_provenance.detect_prompt_injection(text):
+        normalized = unicodedata.normalize("NFKC", text)
+        if content_provenance.detect_prompt_injection(normalized):
             raise ValueError(f"unsafe injection_text found in {candidate.name}")
         for label, pattern in _UNSAFE:
-            if pattern.search(text):
+            if pattern.search(normalized):
                 raise ValueError(f"unsafe {label} found in {candidate.name}")

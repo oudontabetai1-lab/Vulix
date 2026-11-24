@@ -15,6 +15,7 @@ from wscan.agent_eval_model import (
     AgentAggregateScorecard, AgentRunMetadata, AgentRunMetrics, AgentRunScorecard,
     build_agent_scorecard,
 )
+from wscan.eval_artifact_schema import render_summary, validate_scorecard
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,7 @@ def _safe_artifact(result: EvalRun) -> dict[str, Any]:
     """固定 schema のみ公開し、run の findings/evidence/metadata を出力しない。"""
     safe_metrics = ("coverage_rate", "recall", "safe_twin_fp", "total_findings", "duration_seconds",
                     "total_tokens", "estimated_cost_usd")
-    return {
+    return validate_scorecard({
         "schema_version": 1,
         "profiles": {
             profile: {"runs_count": card.runs_count, "status_counts": dict(card.status_counts),
@@ -103,7 +104,7 @@ def _safe_artifact(result: EvalRun) -> dict[str, Any]:
         "gate": {"verdict": result.verdict.verdict.value, "passed": bool(result.verdict.passed),
                  "rollback_recorded": result.rollback_recorded, "promoted_profile": result.promoted_profile,
                  "warnings_count": len(result.warnings)},
-    }
+    })
 
 
 def write_eval_artifacts(result: EvalRun, output_dir: str | Path) -> tuple[Path, Path]:
@@ -116,13 +117,6 @@ def write_eval_artifacts(result: EvalRun, output_dir: str | Path) -> tuple[Path,
     json_path = directory / "agent_eval_scorecard.json"
     md_path = directory / "agent_eval_summary.md"
     json_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    gate = data["gate"]
-    md_path.write_text(
-        "# Agent evaluation summary\n\n"
-        f"- Gate: `{gate['verdict']}`\n- Candidate promotion: `{gate['promoted_profile']}`\n"
-        f"- Rollback recorded: `{str(gate['rollback_recorded']).lower()}`\n"
-        f"- Unmonitored invariants: {gate['warnings_count']} (WARN)\n",
-        encoding="utf-8",
-    )
+    md_path.write_text(render_summary(data), encoding="utf-8")
     check_artifacts([json_path, md_path])
     return json_path, md_path
