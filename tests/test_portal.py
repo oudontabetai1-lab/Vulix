@@ -121,7 +121,22 @@ class PortalEndpointTests(PortalTestBase):
         )
 
     def test_abort_idle_returns_409(self):
-        self.assertEqual(self.client.post("/api/v1/scan/abort").status_code, 409)
+        response = self.client.post("/api/v1/scan/abort")
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(self.srv.scan_abort_event.is_set())
+        self.assertTrue(self.srv.command_queue.empty())
+
+    def test_abort_accepted_scan_before_execution(self):
+        self.assertTrue(self.srv.request_scan({"url": "http://example.com"}))
+        self.assertFalse(self.srv.scan_in_progress)
+        self.assertTrue(self.srv.scan_request_event.is_set())
+
+        response = self.client.post("/api/v1/scan/abort")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "aborting"})
+        self.assertTrue(self.srv.scan_abort_event.is_set())
+        self.assertEqual(self.srv.command_queue.get_nowait(), "abort")
 
     def test_abort_running_queues_command(self):
         self.srv.scan_in_progress = True

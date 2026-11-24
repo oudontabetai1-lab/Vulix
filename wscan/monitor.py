@@ -1516,8 +1516,8 @@ class MonitorServer:
 
         @app.post("/api/v1/scan/abort")
         async def api_scan_abort(request: Request):
-            """Request the running scan to stop (saves a partial report)."""
-            if not self.scan_in_progress:
+            """Request an accepted scan to stop (saves a partial report)."""
+            if not self.abort_is_accepted():
                 return JSONResponse(
                     {"error": "実行中のスキャンはありません。"}, status_code=409
                 )
@@ -2512,7 +2512,7 @@ class MonitorServer:
             cmd = msg.get("command", "")
             if cmd:
                 if str(cmd).lower().strip() in ("abort", "q"):
-                    if not self.scan_in_progress and not self.scan_request_event.is_set():
+                    if not self.abort_is_accepted():
                         return "実行中のスキャンがありません。中断要求は受け付けませんでした。"
                     self.request_abort()
                 else:
@@ -2640,6 +2640,10 @@ class MonitorServer:
         """Latch an abort for this scan and enqueue it for legacy consumers."""
         self.scan_abort_event.set()
         self.command_queue.put_nowait("abort")
+
+    def abort_is_accepted(self) -> bool:
+        """Whether a scan is active or accepted and waiting to start."""
+        return self.scan_in_progress or self.scan_request_event.is_set()
 
     def _begin_scan_snapshot(self) -> None:
         """Start a new live-state generation without changing the public scan ID."""
