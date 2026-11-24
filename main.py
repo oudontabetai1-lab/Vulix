@@ -2080,11 +2080,15 @@ def _effective_llm_base_url(args) -> str:
 def _effective_open_report(args) -> bool:
     """`--no-monitor` などを踏まえた HTML レポート自動オープンの実効値を返す。
 
-    - ``--open-report`` を明示指定していれば常に開く（``--no-monitor`` でも最優先）。
+    - テスト/CI の no-auto-open ポリシー下では、明示指定にかかわらず開かない。
+    - 通常環境では ``--open-report`` を明示指定していれば開く（``--no-monitor`` より優先）。
     - ``--no-open-report``（明示 or config 由来の既定）が真なら開かない。
     - ``--no-monitor``（ダッシュボード無し＝自動化/テスト文脈）では自動表示しない。
     - それ以外は従来どおり開く。
     """
+    from wscan.open_policy import auto_open_disabled
+    if auto_open_disabled():
+        return False
     if getattr(args, "open_report", False):
         return True
     if getattr(args, "no_open_report", False):
@@ -2405,7 +2409,8 @@ async def run_agent(args):
                 f"\n[cyan]Monitoring dashboard:[/cyan] "
                 f"[underline]{dashboard_url}[/underline]"
             )
-            webbrowser.open(dashboard_url)
+            from wscan.open_policy import open_in_browser
+            open_in_browser(dashboard_url)
             result = await engine.run()
             # early-return 条件は _agent_exit_code の非0条件と一致させる。
             # incomplete-empty（success=False かつ 0 findings）でも sleep(3600) に入れず
@@ -3073,7 +3078,8 @@ async def run_scan(args):
                 f"\n[cyan]Monitoring dashboard:[/cyan] "
                 f"[underline]{dashboard_url}[/underline]"
             )
-            webbrowser.open(dashboard_url)
+            from wscan.open_policy import open_in_browser
+            open_in_browser(dashboard_url)
             await engine.run()
 
             console.print(
@@ -3767,7 +3773,8 @@ async def run_serve(args):
         await asyncio.sleep(1.2)
         if open_browser:
             try:
-                webbrowser.open(f"http://localhost:{port}/app")
+                from wscan.open_policy import open_in_browser
+                open_in_browser(f"http://localhost:{port}/app")
             except Exception:
                 pass
 

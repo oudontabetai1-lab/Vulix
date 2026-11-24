@@ -9630,7 +9630,8 @@ class ScanEngine:
 
         if self.open_report:
             try:
-                webbrowser.open(report_path.as_uri())
+                from wscan.open_policy import open_in_browser
+                open_in_browser(report_path.as_uri())
             except Exception:
                 pass
 
