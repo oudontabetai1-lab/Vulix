@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urlsplit
 from wscan.agent_harness import AgentRole, WorkStatus
 from wscan.injection_point import InjectionPoint
 from wscan.runtime_scope_guard import ScopePolicy, evaluate_scope
+from wscan.url_normalize import endpoint_identity
 
 
 SUPPORTED_CHECKS = frozenset({"xss", "sqli", "os"})
@@ -224,6 +225,8 @@ class AgentScannerTools:
         if self._already_dispatched(work_id):
             self.harness.finish_work(work_id, WorkStatus.INCONCLUSIVE, rejection_reason="prior dispatch outcome is unknown; automatic replay was suppressed")
             return {"status": "inconclusive", "reason": "a prior attempt may have reached the target; automatic replay was suppressed"}
+        binding = self._verification_binding(point, metadata, check)
+        binding_digest = self._binding_digest(binding)
         try:
             cookies = await self.scanner._capture_cookies(self.scanner._active_session)
         except Exception:
@@ -286,7 +289,7 @@ class AgentScannerTools:
                 return {"status": "unsupported", "reason": "this query input uses HTTPX transport; only Playwright form and query inputs are supported"}
             self.harness.record_probe_attempt(
                 target_url=point.url, check_type=check, work_id=work_id,
-                status="dispatching",
+                status="dispatching", binding=binding, binding_digest=binding_digest,
             )
             findings = await asyncio.wait_for(
                 scanner.scan_field(point.url, point.form_index, metadata["field"], point.legacy_is_url_param()),
@@ -305,7 +308,7 @@ class AgentScannerTools:
             self.harness.record_probe_attempt(
                 target_url=point.url, check_type=check, work_id=work_id,
                 status="inconclusive" if status == WorkStatus.INCONCLUSIVE else "completed",
-                evidence_id=work_id,
+                evidence_id=work_id, binding=binding, binding_digest=binding_digest,
             )
             self.harness.finish_work(work_id, status, summary=f"deterministic scanner work finished: {len(verified)} verified findings")
             for hypothesis in self.harness.state.hypotheses:
@@ -415,12 +418,21 @@ class AgentScannerTools:
             outcome = "inconclusive"
             reason = reason or "unverifiable_checkpoint: verification identifiers are incomplete"
         evidence_ids = (work_id,) if work_id else ()
+        binding = None
+        binding_digest = ""
+        point, metadata = self._resolve(point_id) if point_id else (None, None)
+        hypothesis = next((item for item in self.harness.state.hypotheses
+                           if str(item.get("candidate_id", "")) == hypothesis_id), {})
+        if point is not None and metadata is not None:
+            binding = self._verification_binding(point, metadata, str(hypothesis.get("check_type", "")))
+            binding_digest = self._binding_digest(binding)
         self.harness.record_verification(
             hypothesis_id, reproduced=confirmed, status=outcome,
             method="deterministic", work_id=work_id,
             scan_id=self.harness.state.run_id, head_id=head_id,
             injection_point_id=point_id, evidence_ids=evidence_ids,
             deterministic_confirmed=confirmed, rejection_reason=reason,
+            binding=binding, binding_digest=binding_digest,
         )
         self.harness.update_hypothesis(
             hypothesis_id,
@@ -482,11 +494,18 @@ class AgentScannerTools:
             or record.get("work_id") not in evidence_ids
             or record.get("candidate_id") != hypothesis.get("candidate_id")
             or record.get("injection_point_id") != point_id
-            or record.get("scan_id") != self.harness.state.run_id
-            or record.get("run_id") != self.harness.state.run_id
-            or not record.get("head_id") or record.get("head_id") != self._current_head_id()
             or record.get("method") != "deterministic"
         ):
+            return False
+        if not isinstance(record.get("binding"), dict):
+            return False
+        ledger_binding = dict(record["binding"])
+        # Legacy scalar columns remain for reporting; fold them into the single binding hash.
+        ledger_binding["scan_id"] = str(record.get("scan_id", ""))
+        ledger_binding["code_head"] = str(record.get("head_id", ""))
+        record = {**record, "binding": ledger_binding,
+                  "binding_digest": record.get("binding_digest")}
+        if not self._verification_binding_matches(record, point, hypothesis):
             return False
         work = next((item for item in self.harness.state.work_queue if item.work_id == record.get("work_id")), None)
         if (
@@ -526,19 +545,90 @@ class AgentScannerTools:
                     continue
                 attempt = json.loads(line)
                 if (
-                    attempt.get("run_id") == self.harness.state.run_id
-                    and attempt.get("work_id") == verification.get("work_id")
-                    and attempt.get("check_type") == next(
-                        (item.get("check_type") for item in self.harness.state.hypotheses
-                         if item.get("candidate_id") == verification.get("candidate_id")), None
-                    )
+                    attempt.get("work_id") == verification.get("work_id")
                     and attempt.get("evidence_id") == verification.get("work_id")
                     and (outcome is None or attempt.get("status") == outcome)
                 ):
+                    point_id = str(next((item.get("injection_point_id") for item in self.harness.state.hypotheses
+                                         if item.get("candidate_id") == verification.get("candidate_id")), ""))
+                    point, metadata = self._resolve(point_id)
+                    if point is None or metadata is None:
+                        return False
+                    expected = self._verification_binding(
+                        point, metadata, str(next((item.get("check_type") for item in self.harness.state.hypotheses
+                                                  if item.get("candidate_id") == verification.get("candidate_id")), "")),
+                    )
+                    # Probe destination is independently observed from the persisted request record.
+                    if not isinstance(attempt.get("binding"), dict):
+                        return False
+                    probe_binding = dict(attempt["binding"])
+                    from wscan.request_logger import redact_url
+                    probe_binding["endpoint_identity"] = endpoint_identity(redact_url(str(attempt.get("target_url", ""))))
+                    probe_binding["check"] = str(attempt.get("check_type", ""))
+                    probe_binding["scan_id"] = str(attempt.get("run_id", ""))
+                    if (
+                        not attempt.get("binding_digest")
+                        or self._binding_digest(probe_binding) != attempt.get("binding_digest")
+                        or attempt.get("binding_digest") != self._binding_digest(expected)
+                        or not self._recorded_target_in_scope(str(attempt.get("target_url", "")))
+                    ):
+                        return False
                     return True
             return False
         except (OSError, ValueError, AttributeError):
             return False
+
+    @staticmethod
+    def _binding_digest(binding: dict) -> str:
+        canonical = json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _verification_binding(self, point: InjectionPoint, metadata: dict, check: str) -> dict:
+        from wscan.request_logger import redact_url
+        # Only the endpoint identity is persisted; query secrets are redacted before canonicalization.
+        endpoint = endpoint_identity(redact_url(point.url))
+        carrier = str(point.carrier.value)
+        parameter_identity = {
+            "parameter_id": str(metadata.get("parameter_id", point.parameter_id)),
+            "form_index": int(point.form_index) if carrier == "form" else None,
+            "method": str(point.method or "").upper() if carrier == "form" else "",
+            "action_identity": endpoint_identity(redact_url(point.action)) if carrier == "form" and point.action else "",
+        }
+        return {
+            "endpoint_identity": endpoint,
+            "carrier": carrier,
+            "parameter_identity": parameter_identity,
+            "check": str(check),
+            "scan_id": str(self.harness.state.run_id),
+            "code_head": self._current_head_id(),
+        }
+
+    def _verification_binding_matches(self, record: dict, point: InjectionPoint, hypothesis: dict) -> bool:
+        metadata = self.points.get(str(hypothesis.get("injection_point_id", "")))
+        if not isinstance(metadata, dict):
+            return False
+        expected = self._verification_binding(point, metadata, str(hypothesis.get("check_type", "")))
+        digest = self._binding_digest(expected)
+        recorded_binding = record.get("binding")
+        return bool(
+            isinstance(recorded_binding, dict)
+            and record.get("binding_digest") == digest
+            and self._binding_digest(recorded_binding) == digest
+        )
+
+    def _recorded_target_in_scope(self, target_url: str) -> bool:
+        from wscan.llm_agent_browser import _url_is_excluded, security_probe_allowed
+        args = self.scanner
+        return bool(
+            target_url
+            and not _url_is_excluded(target_url, args.exclude_urls)
+            and security_probe_allowed(target_url, args.target_urls, args.exclude_urls,
+                                       access_urls=args.access_urls)
+            and evaluate_scope(target_url, ScopePolicy(
+                target_urls=tuple(args.target_urls), access_urls=tuple(args.access_urls),
+                exclude_urls=tuple(args.exclude_urls), login_url=args.login_url,
+            )).reason in {"target_url", "target_url_no_frag", "target_url_no_query"}
+        )
 
     def _mark_hypotheses(self, point_id: str, check: str, outcome: str, reason: str, *, work_id: str = "") -> None:
         for hypothesis in self.harness.state.hypotheses:

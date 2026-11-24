@@ -524,6 +524,8 @@ class AgentProbeAttemptRecord:
     status: str = "sent"
     response_status: int = 0
     evidence_id: str = ""
+    binding: dict = field(default_factory=dict)
+    binding_digest: str = ""
     timestamp: float = 0.0
 
     def to_dict(self) -> dict:
@@ -553,6 +555,8 @@ class AgentVerificationRecord:
     evidence_ids: tuple[str, ...] = ()
     rejection_reason: str = ""
     deterministic_confirmed: bool = False
+    binding: dict = field(default_factory=dict)
+    binding_digest: str = ""
     timestamp: float = 0.0
 
     def to_dict(self) -> dict:
@@ -1113,6 +1117,8 @@ class AgentHarness:
         status: str = "sent",
         response_status: int = 0,
         evidence_id: str = "",
+        binding: dict | None = None,
+        binding_digest: str = "",
     ) -> AgentProbeAttemptRecord:
         probe_id = f"probe-{secrets.token_hex(8)}"
         corr_id = str(correlation_id or step_id or probe_id)
@@ -1131,6 +1137,8 @@ class AgentHarness:
             status=str(status or "sent"),
             response_status=int(response_status),
             evidence_id=str(evidence_id or ""),
+            binding=dict(binding or {}),
+            binding_digest=str(binding_digest or ""),
             timestamp=time.time(),
         )
         self._append_jsonl(self.probe_attempts_path, record.to_dict())
@@ -1153,6 +1161,8 @@ class AgentHarness:
         evidence_ids: Iterable[str] = (),
         rejection_reason: str = "",
         deterministic_confirmed: bool = False,
+        binding: dict | None = None,
+        binding_digest: str = "",
     ) -> AgentVerificationRecord:
         verification_id = f"verify-{secrets.token_hex(8)}"
         corr_id = str(correlation_id or step_id or verification_id)
@@ -1178,6 +1188,8 @@ class AgentHarness:
             evidence_ids=safe_evidence,
             rejection_reason=safe_reason,
             deterministic_confirmed=bool(deterministic_confirmed),
+            binding=dict(binding or {}),
+            binding_digest=str(binding_digest or ""),
             timestamp=time.time(),
         )
         self._append_jsonl(self.verification_results_path, record.to_dict())

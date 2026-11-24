@@ -586,6 +586,64 @@ def test_confirmation_requires_matching_probe_evidence_after_resume(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("mutation", [
+    "target_url", "carrier", "parameter", "check", "scan_id", "verification_scan_id", "digest",
+])
+def test_tampered_probe_binding_cannot_restore_confirmation(tmp_path, mutation):
+    async def scenario():
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+        harness = _harness(tmp_path)
+        tools = AgentScannerTools(scanner, harness)
+        point_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+        candidate = {
+            "candidate_id": f"tampered-{mutation}", "check_type": "xss",
+            "url": "https://target.test/search?q=1", "field_name": "q",
+            "injection_point_id": point_id,
+        }
+        harness.note_hypotheses([candidate])
+        finding = SimpleNamespace(
+            check_type="xss", severity="high", url=candidate["url"], field_name="q",
+            payload="marker", evidence="reproduced",
+        )
+        tools.engine_factory = lambda *_: _FakeEngine("xss", SimpleNamespace(cookies=[]), finding=finding)
+        assert (await tools.verify_hypothesis(candidate["candidate_id"]))["status"] == "confirmed"
+
+        attempts = [json.loads(line) for line in harness.probe_attempts_path.read_text().splitlines()]
+        attempt = next(item for item in reversed(attempts) if item["status"] == "completed")
+        if mutation == "target_url":
+            attempt["target_url"] = "https://other.test/forged"
+        elif mutation == "carrier":
+            attempt["binding"]["carrier"] = "form"
+        elif mutation == "parameter":
+            attempt["binding"]["parameter_identity"]["parameter_id"] = "other"
+        elif mutation == "check":
+            attempt["check_type"] = "sqli"
+        elif mutation == "scan_id":
+            attempt["run_id"] = "another-scan"
+        elif mutation == "verification_scan_id":
+            verifications = [json.loads(line) for line in harness.verification_results_path.read_text().splitlines()]
+            verifications[-1]["scan_id"] = "another-scan"
+            harness.verification_results_path.write_text(
+                "".join(json.dumps(item) + "\n" for item in verifications), encoding="utf-8",
+            )
+        elif mutation == "digest":
+            attempt["binding_digest"] = "0" * 64
+        harness.probe_attempts_path.write_text("".join(json.dumps(item) + "\n" for item in attempts), encoding="utf-8")
+
+        resumed = _harness(tmp_path, resume=True)
+        resumed_tools = AgentScannerTools(
+            scanner, resumed,
+            engine_factory=lambda *_: pytest.fail("tampered evidence must not restore or replay confirmation"),
+        )
+        result = await resumed_tools.verify_hypothesis(candidate["candidate_id"])
+        assert result["status"] == "inconclusive"
+        saved = next(item for item in resumed.state.hypotheses if item["candidate_id"] == candidate["candidate_id"])
+        assert saved["status"] == "agent_only"
+        assert saved["deterministic_confirmed"] is False
+        assert "unverifiable_checkpoint" in saved["rejection_reason"]
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(("verify_result", "expected"), [(False, "rejected"), (None, "inconclusive")])
 def test_resumed_hypothesis_records_rejected_and_inconclusive_labels(tmp_path, verify_result, expected):
     async def scenario():
