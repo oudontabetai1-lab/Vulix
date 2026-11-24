@@ -127,7 +127,14 @@ async def search_web(query: str, max_results: int = 5) -> str:
             resp.raise_for_status()
             html = resp.text
     except Exception as exc:
-        return f"[Web search unavailable: {exc}]"
+        from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
+        return wrap_untrusted_observation(
+            f"[Web search unavailable: {exc}]",
+            source=ContentSource.WEB.value,
+            origin=_DDG_ENDPOINT,
+            content_type=ContentType.TOOL_OUTPUT.value,
+        ).format_tagged_block()
 
     # --- Parse results with regex (no BeautifulSoup dependency) ----------
     # DDG HTML result links have class "result__a"
@@ -180,7 +187,14 @@ async def fetch_url(url: str, max_chars: int = 3000) -> str:
             resp.raise_for_status()
             html = resp.text
     except Exception as exc:
-        return f"[Fetch failed: {exc}]"
+        from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
+        return wrap_untrusted_observation(
+            f"[Fetch failed: {exc}]",
+            source=ContentSource.WEB.value,
+            origin=url,
+            content_type=ContentType.TOOL_OUTPUT.value,
+        ).format_tagged_block()
 
     # Strip script / style blocks first, then all tags
     text = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL)
@@ -221,11 +235,25 @@ async def research_vulnerability(check_type: str, context: str) -> str:
         check_type,
         "{ctx} vulnerability exploit payload bypass",
     )
-    query = query_template.replace("{ctx}", context[:80])
+    from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
+    # Keep only generic technical terms in the external query. URLs, identifiers,
+    # credentials, and arbitrary target text are neither needed for research nor safe
+    # to echo into the follow-up prompt.
+    safe_context = build_planner_web_query(context, target_url=context).removeprefix(
+        "web application vulnerability "
+    )
+    query = query_template.replace("{ctx}", safe_context[:80])
     results = await search_web(query, max_results=4)
-    return (
+    intelligence = (
         f"--- Web Intelligence ({check_type}) ---\n"
         f"Query: {query}\n\n"
         f"{results}\n"
         f"--- End Web Intelligence ---"
     )
+    return wrap_untrusted_observation(
+        intelligence,
+        source=ContentSource.WEB.value,
+        origin=_DDG_ENDPOINT,
+        content_type=ContentType.TOOL_OUTPUT.value,
+    ).format_tagged_block()

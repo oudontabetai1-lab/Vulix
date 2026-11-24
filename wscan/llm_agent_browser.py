@@ -140,6 +140,17 @@ def _agent_network_safe_url(url: str) -> str:
     return redact_url(str(url or ""))
 
 
+def _agent_prompt_url(url: str) -> str:
+    """Wrap a target URL before placing it in a model-visible task string."""
+    value = str(url or "")
+    return wrap_untrusted_observation(
+        value,
+        source=ContentSource.HTTP.value,
+        origin=value,
+        content_type=ContentType.OBSERVATION.value,
+    ).format_tagged_block()
+
+
 def parse_reviewer_gap_lines(text: str) -> tuple[list[str], list[str]]:
     """reviewer の gap 報告・解決行をブラウザ非依存で抽出する。"""
     gaps, resolved = [], []
@@ -2715,13 +2726,13 @@ class AgentBrowserScanner:
         if work.role == AgentRole.AUTHENTICATOR:
             if self.storage_state and not (self.auth_user and self.auth_pass):
                 return (
-                    f"Open {self.login_url} using the restored browser storage state. "
+                    f"Open {_agent_prompt_url(self.login_url)} using the restored browser storage state. "
                     "Confirm that the authenticated landing page is accessible, output "
                     "AUTH COMPLETE, and stop. Do not run security probes."
                 )
             totp = " Enter WSCAN_bu_2fa_code when a one-time code is requested." if self.totp_secret else ""
             return (
-                f"Authenticate at {self.login_url}. Enter WSCAN_AUTH_USER and "
+                f"Authenticate at {_agent_prompt_url(self.login_url)}. Enter WSCAN_AUTH_USER and "
                 f"WSCAN_AUTH_PASS only into the configured login form.{totp} "
                 "Confirm the authenticated landing page, then output AUTH COMPLETE and stop. "
                 "Do not run security probes."
@@ -2736,7 +2747,7 @@ class AgentBrowserScanner:
         if work.role == AgentRole.PROBE_SPECIALIST:
             target = self._work_target(work)
             return (
-                f"Act only as the {work.check_type} probe specialist for {target}. "
+                f"Act only as the {work.check_type} probe specialist for {_agent_prompt_url(target)}. "
                 f"Navigate there and test every form field and URL parameter on that page for "
                 f"{work.check_type}. Use a normal-value negative control for every payload. "
                 "Report only directly observed hypotheses using the required nonce block. "
@@ -2780,12 +2791,21 @@ class AgentBrowserScanner:
             correlation_id=str(work.work_id),
         ).format_tagged_block()
         ledger = ""
+        wrapped_gaps = ""
         if self._harness:
             ledger = "\n".join(
-                f"- {item.role.value} | {item.target} | {item.check_type or '-'} | {item.status.value}"
+                f"- {item.role.value} | {_agent_prompt_url(item.target)} | "
+                f"{item.check_type or '-'} | {item.status.value}"
                 for item in self._harness.state.work_queue
                 if item.role != AgentRole.ADVERSARIAL_REVIEWER
             )
+            wrapped_gaps = wrap_untrusted_observation(
+                "\n".join(self._harness.state.reviewer_gaps),
+                source=ContentSource.HTTP.value,
+                origin=self.target_url,
+                content_type=ContentType.OBSERVATION.value,
+                correlation_id=str(work.work_id),
+            ).format_tagged_block()
         return (
             "Act as an adversarial reviewer. Do not submit payloads. Challenge false positives, "
             "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
@@ -2793,7 +2813,7 @@ class AgentBrowserScanner:
             "shows every discovered page and input was tested for every requested check.\n"
             "A resolved gap must be stated as `GAP RESOLVED: <description>`.\n"
             + "\nUnresolved reviewer gaps:\n"
-            + "\n".join(self._harness.state.reviewer_gaps if self._harness else [])
+            + wrapped_gaps
             + "\nDeterministic work ledger:\n" + ledger + "\nEvidence excerpt:\n" + wrapped_evidence
         )
 
@@ -2839,7 +2859,7 @@ class AgentBrowserScanner:
         if self.login_url and self.auth_user and self.auth_pass:
             auth_section = (
                 f"\n## Step 0: Authentication\n"
-                f"Before testing, log in at: {self.login_url}\n"
+                f"Before testing, log in at: {_agent_prompt_url(self.login_url)}\n"
                 "Username: WSCAN_AUTH_USER\n"
                 "Password: WSCAN_AUTH_PASS\n"
                 + ("TOTP code: WSCAN_bu_2fa_code\n" if self.totp_secret else "")
@@ -2858,13 +2878,13 @@ class AgentBrowserScanner:
         )
 
         return (
-            f"Perform a thorough authorized penetration test of: {self.target_url}\n"
+            f"Perform a thorough authorized penetration test of: {_agent_prompt_url(self.target_url)}\n"
             f"\n"
             f"## Vulnerability Checks Required\n"
             f"{checks_section}"
             f"{auth_section}\n"
             f"## Testing Procedure (follow for EVERY input field/parameter)\n"
-            f"1. Navigate to {self.target_url} and explore all pages/links\n"
+            f"1. Navigate to {_agent_prompt_url(self.target_url)} and explore all pages/links\n"
             f"2. For each form or URL parameter found:\n"
             f"   a. Note what the field does (search, login, comment, file path, etc.)\n"
             f"   b. Enter the test payload into the field\n"
@@ -2936,9 +2956,9 @@ class AgentBrowserScanner:
 
     def _build_security_scope_policy(self) -> str:
         """Agent が各操作前に従う攻撃対象・訪問専用スコープを生成する。"""
-        attack_lines = "\n".join(f"  - {url}" for url in self.target_urls) or "  - (none)"
-        access_lines = "\n".join(f"  - {url}" for url in self.access_urls) or "  - (none)"
-        exclude_url_lines = "\n".join(f"  - {url}" for url in self.exclude_urls) or "  - (none)"
+        attack_lines = "\n".join(f"  - {_agent_network_safe_url(url)}" for url in self.target_urls) or "  - (none)"
+        access_lines = "\n".join(f"  - {_agent_network_safe_url(url)}" for url in self.access_urls) or "  - (none)"
+        exclude_url_lines = "\n".join(f"  - {_agent_network_safe_url(url)}" for url in self.exclude_urls) or "  - (none)"
         exclude_field_lines = "\n".join(
             f"  - {field}" for field in self.exclude_fields
         ) or "  - (none)"
@@ -2974,7 +2994,7 @@ class AgentBrowserScanner:
         if self.login_url and self.auth_user and self.auth_pass:
             auth_section = (
                 f"\n## Step 0: Authentication\n"
-                f"Log in at: {self.login_url}\n"
+                f"Log in at: {_agent_prompt_url(self.login_url)}\n"
                 "Username: WSCAN_AUTH_USER\n"
                 "Password: WSCAN_AUTH_PASS\n"
                 + ("TOTP code: WSCAN_bu_2fa_code\n" if self.totp_secret else "")
@@ -2987,7 +3007,7 @@ class AgentBrowserScanner:
         )
 
         return (
-            f"You are a web crawler performing site reconnaissance on: {self.target_url}\n"
+            f"You are a web crawler performing site reconnaissance on: {_agent_prompt_url(self.target_url)}\n"
             f"\n"
             f"## Objective\n"
             f"Explore the entire website to discover all reachable pages and URL patterns.\n"
@@ -2995,7 +3015,7 @@ class AgentBrowserScanner:
             f"{auth_section}"
             f"\n"
             f"## Instructions\n"
-            f"1. Start at {self.target_url}\n"
+            f"1. Start at {_agent_prompt_url(self.target_url)}\n"
             f"2. Click links and navigate menus for discovery. Submit harmless dummy data only "
             f"inside ATTACK TARGETS; the configured login form is the only access-only exception.\n"
             f"3. For each unique page you reach, output EXACTLY this line:\n"

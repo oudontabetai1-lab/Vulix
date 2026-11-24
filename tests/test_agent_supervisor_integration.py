@@ -114,7 +114,11 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
     assert budgets[0] <= 20  # 40-step run の半分以上を後続 role に予約する。
     assert any("probe specialist" in task for task in tasks)
     assert any("fixture.test/observed-only" in task for task in tasks)
-    assert any("probe specialist for http://fixture.test/late" in task for task in tasks)
+    assert any(
+        "probe specialist for <untrusted_target_data" in task
+        and "http://fixture.test/late" in task
+        for task in tasks
+    )
     assert not any("probe specialist for http://idp.test" in task for task in tasks)
     assert any("independent verifier" in task for task in tasks)
     assert sum("independent verifier" in task for task in tasks) == 2
