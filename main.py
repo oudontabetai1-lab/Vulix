@@ -819,6 +819,45 @@ async def _run_with_time_window_monitor(
         )
 
 
+async def _run_with_abort_monitor(operation, monitor, *, phase_label: str):
+    """Agent 系処理を dashboard の abort command で cancel し、終了を待つ。
+
+    Agent 実行中は通常スキャンの command consumer が動かないため、この境界で abort を
+    消費する。キャンセル後に operation の cleanup が完了してから terminal 状態を通知する。
+    """
+    deferred_commands = []
+    operation_task = asyncio.create_task(operation())
+
+    async def wait_for_abort():
+        while True:
+            command = await monitor.command_queue.get()
+            if str(command).lower().strip() in ("abort", "q"):
+                return
+            deferred_commands.append(command)
+
+    abort_task = asyncio.create_task(wait_for_abort())
+    try:
+        done, _pending = await asyncio.wait(
+            {operation_task, abort_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if operation_task in done:
+            return operation_task.result(), False
+
+        operation_task.cancel()
+        await asyncio.gather(operation_task, return_exceptions=True)
+        await monitor.emit_status(
+            f"{phase_label} を中断しました。", "aborted"
+        )
+        return None, True
+    finally:
+        if not abort_task.done():
+            abort_task.cancel()
+        await asyncio.gather(abort_task, return_exceptions=True)
+        for command in deferred_commands:
+            monitor.command_queue.put_nowait(command)
+
+
 async def _run_hybrid_recon_with_retries(
     operation,
     monitor,
@@ -3482,16 +3521,21 @@ async def run_serve(args):
                     storage_state=cfg.get("storage_state", "") or "",
                     proxy=cfg.get("proxy", "") or "",
                 )
-                _agent_result, agent_interrupted = (
-                    await _run_with_time_window_monitor(
+                agent_run_result, scan_aborted = await _run_with_abort_monitor(
+                    lambda: _run_with_time_window_monitor(
                         agent_engine.run,
                         monitor,
                         cfg.get("allowed_hours") or None,
                         cfg.get("forbidden_hours") or None,
                         phase_label="Agent Browser スキャン",
                         terminal_on_interrupt=True,
-                    )
+                    ),
+                    monitor,
+                    phase_label="Agent Browser スキャン",
                 )
+                if scan_aborted:
+                    return
+                _agent_result, agent_interrupted = agent_run_result
                 if agent_interrupted:
                     return
                 console.print("[dim]Agent scan finished — dashboard ready for the next scan.[/dim]")
