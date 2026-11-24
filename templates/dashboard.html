@@ -5816,7 +5816,9 @@ function dispatchLegacyEvent(event) {
   switch (type) {
     case 'status':
       setStatus(data.message, data.state);
-      addEventLog('status', data.message);
+      // terminal outcome の最終表示・履歴は scan_complete 側で一度だけ記録する。
+      // status event は status bar の即時更新だけに使い、完了ログを重ねない。
+      if (!data.terminal_outcome) addEventLog('status', data.message);
       break;
 
     case 'page_start':

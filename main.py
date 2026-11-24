@@ -3734,23 +3734,58 @@ async def run_serve(args):
                     monitor,
                     phase_label="Agent Browser スキャン",
                 )
+                async def _publish_agent_completion(status, result=None, report_path=""):
+                    from wscan.terminal_outcome import agent_result_outcome, terminal_outcome
+                    findings = [
+                        finding.to_dict() if hasattr(finding, "to_dict") else dict(finding)
+                        for finding in (getattr(result, "findings", []) or [])
+                    ]
+                    monitor.api_findings = findings
+                    outcome = (
+                        agent_result_outcome(result)
+                        if result is not None else terminal_outcome(status)
+                    )
+                    await monitor.emit("scan_complete", {
+                        "status": outcome["status"],
+                        "aborted": outcome["status"] == "aborted",
+                        "total_findings": len(findings),
+                        "total_findings_count": len(findings),
+                        "findings": findings,
+                        "report_path": report_path,
+                        "completion_reasons": [outcome["reason"]] if outcome["reason"] else [],
+                    })
                 if scan_aborted:
+                    args._scan_terminal_status = "aborted"
+                    await _publish_agent_completion("aborted")
                     return
                 _agent_result, agent_interrupted = agent_run_result
                 if agent_interrupted:
+                    args._scan_terminal_status = "aborted"
+                    await _publish_agent_completion("aborted", _agent_result)
                     return
                 from wscan.terminal_outcome import agent_result_outcome
                 agent_outcome = agent_result_outcome(_agent_result)
+                args._scan_terminal_status = agent_outcome["status"]
                 console.print(
                     f"[{agent_outcome['console_style']}]"
                     f"{agent_outcome['label']} — dashboard ready for the next scan."
                     f"[/{agent_outcome['console_style']}]"
+                )
+                await _publish_agent_completion(
+                    agent_outcome["status"], _agent_result,
+                    str(getattr(agent_engine, "output_dir", "") / "report.html")
+                    if getattr(agent_engine, "output_dir", None) else "",
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 console.print(f"\n[red]Agent Error: {exc}[/red]")
                 await monitor.emit_status(f"Agent エラー: {exc}", "error")
+                args._scan_terminal_status = "failed"
+                await monitor.emit("scan_complete", {
+                    "status": "failed", "total_findings": 0,
+                    "total_findings_count": 0, "findings": [],
+                })
             return
 
         # ── Hybrid Mode: Agent偵察 (Phase 1) → 通常スキャン (Phase 2) ────
