@@ -977,6 +977,8 @@ python3 main.py scan https://example.com \
 
 確証済み Finding（`verified=true`）が通知重大度以上のときだけ Slack Incoming Webhook または汎用 JSON POST エンドポイントへ通知します。未確証はレポートに残りますが Finding 通知は送りません。通知失敗でスキャン本体は停止しません。serve の通知設定はポータルから管理します。
 
+スキャン終了通知は終端状態に応じて `done`（完了）、`incomplete`（不完全）、`aborted`（中断）、`failed`（失敗）を区別します。不完全・中断・失敗は成功を示す緑色や「完了」ラベルでは通知せず、利用可能な伏字済み理由も添えます。CLI の `scan` は正常完了で終了コード 0、失敗で 1、不完全または中断で 2 を返します（監視画面を表示した場合は、結果確認後に終了するときにこのコードが返ります）。`batch` も各対象の終端状態を集計し、不完全な対象があれば 2、失敗があれば 1 を返します。
+
 ### REST / WebSocket
 
 `serve` は `/api/v1/scan`、`/api/v1/scan/status`、`/api/v1/scan/findings`、`/api/v1/scan/results`、`/api/v1/scans`、認証必須の `/api/v1/upload`、スケジュール・履歴・手動巡回 API と `/ws` を提供します。トークン設定時は Bearer 認証が必要です。`/health` は稼働確認に使えます。

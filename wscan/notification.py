@@ -59,7 +59,7 @@ class NotificationManager:
     ----------
     webhook_url   : 通知先 URL (Slack または汎用 POST エンドポイント)
     min_severity  : この重大度以上の検出のみ通知 (デフォルト: "high")
-    notify_complete: スキャン完了時にサマリーを送信するか
+    notify_complete: スキャン終了時にサマリーを送信するか
     """
 
     def __init__(
@@ -109,7 +109,7 @@ class NotificationManager:
         status: str = "done",
         status_reason: str = "",
     ) -> None:
-        """スキャン完了通知を送信する。"""
+        """終端状態サマリーを送信する。"""
         if not self.enabled or not self.notify_complete:
             return
         payload = self._build_complete_payload(
@@ -180,7 +180,7 @@ class NotificationManager:
         status: str = "done",
         status_reason: str = "",
     ) -> dict:
-        """スキャン完了サマリーペイロードを生成する。"""
+        """終端状態サマリーペイロードを生成する。"""
         total = summary.get("total", 0)
         critical = summary.get("critical", 0)
         high = summary.get("high", 0)
@@ -189,27 +189,20 @@ class NotificationManager:
         hypothesis = summary.get("hypothesis", 0)
 
         status = str(status or "done").lower()
-        # 未確証や不完全/失敗を、finding 数だけから成功扱いしない。
-        status_emoji = (
-            "⚠️" if status not in {"done", "completed"} and status not in {"aborted", "paused", "error", "failed"} else
-            "⚠️" if status == "incomplete" else
-            "⏹️" if status in {"aborted", "paused"} else
-            "❌" if status in {"error", "failed"} else
-            "🔴" if critical > 0 else "🟠" if high > 0 else "🟡" if medium > 0
-            else "🔵" if hypothesis > 0 else "🟢"
-        )
-        labels = {
-            "incomplete": ("スキャン不完全", "scan_incomplete", "#d69e2e"),
-            "aborted": ("スキャン中断", "scan_aborted", "#d69e2e"),
-            "paused": ("スキャン中断", "scan_aborted", "#d69e2e"),
-            "error": ("スキャン失敗", "scan_failed", "#e53e3e"),
-            "failed": ("スキャン失敗", "scan_failed", "#e53e3e"),
-        }
-        label, event, status_color = labels.get(
-            status, ("スキャン完了" if status in {"done", "completed"} else f"スキャン状態: {status}",
-                     "scan_complete" if status in {"done", "completed"} else "scan_incomplete",
-                     "" if status in {"done", "completed"} else "#d69e2e")
-        )
+        from wscan.terminal_outcome import terminal_outcome
+        outcome = terminal_outcome(status, status_reason)
+        label = outcome["label_ja"]
+        event = "scan_complete" if outcome["is_success"] else f"scan_{outcome['status']}"
+        status_color = outcome["color"]
+        if outcome["status"] == "done":
+            status_emoji = (
+                "🔴" if critical > 0 else "🟠" if high > 0 else "🟡" if medium > 0
+                else "🔵" if hypothesis > 0 else "🟢"
+            )
+        else:
+            status_emoji = {
+                "incomplete": "⚠️", "aborted": "⏹️", "failed": "❌"
+            }.get(outcome["status"], "⚠️")
         text = f"{status_emoji} *{label}*: {target_url}"
         low_emoji = "🟢" if status in {"done", "completed"} else "⚪"
         details = [
@@ -220,15 +213,17 @@ class NotificationManager:
             details.append(f"レポート: `{report_path}`")
         if sarif_path:
             details.append(f"SARIF: `{sarif_path}`")
+        status_reason = outcome["reason"]
         if status_reason:
-            try:
-                from wscan.url_scope import redact_event_data
-                status_reason = redact_event_data({"status_reason": str(status_reason)})["status_reason"]
-            except Exception:
-                status_reason = "[REDACTED]"
             details.append(f"理由: {status_reason}")
 
-        color = status_color or ("#742a2a" if critical > 0 else ("#e53e3e" if high > 0 else "#d69e2e"))
+        color = status_color if not outcome["is_success"] else (
+            "#742a2a" if critical > 0 else
+            "#e53e3e" if high > 0 else
+            "#dd6b20" if medium > 0 else
+            "#d69e2e" if low > 0 else
+            "#4299e1" if hypothesis > 0 else status_color
+        )
 
         return {
             "text": text,
@@ -244,6 +239,7 @@ class NotificationManager:
             "event":    event,
             "status":   status,
             "status_reason": status_reason,
+            "terminal_outcome": outcome,
             "target":   target_url,
             "summary":  summary,
         }

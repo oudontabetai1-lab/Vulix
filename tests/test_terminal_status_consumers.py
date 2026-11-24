@@ -1,5 +1,8 @@
 import json
+import re
+from collections import Counter
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,8 +14,9 @@ from wscan.report import ReportGenerator
 
 def test_cli_scan_exit_code_does_not_treat_incomplete_as_success():
     assert main._scan_exit_code("done") == 0
-    assert main._scan_exit_code("incomplete") != 0
-    assert main._scan_exit_code("aborted") != 0
+    assert main._scan_exit_code("incomplete") == 2
+    assert main._scan_exit_code("aborted") == 2
+    assert main._scan_exit_code("failed") == 1
 
 
 def test_report_coverage_and_observability_label_incomplete(tmp_path):
@@ -38,9 +42,8 @@ def test_dashboard_receivers_render_incomplete_as_non_success():
     dashboard = (root / "templates/dashboard.html").read_text(encoding="utf-8")
     assert "else if (/incomplete/.test(rawStatus)) execState = 'incomplete'" in app_entry
     assert ".scan-state-incomplete" in app_styles
-    assert "const isIncomplete = data.status === 'incomplete'" in dashboard
-    assert "Scan incomplete (partial report)" in dashboard
-    assert "Scan coverage is incomplete" in dashboard
+    assert "setTerminalStatus(outcome," in dashboard
+    assert "terminal_outcome" in dashboard
 
 
 def test_json_evidence_and_observability_keep_incomplete_status():
@@ -68,6 +71,8 @@ async def test_websocket_terminal_event_and_api_snapshot_keep_incomplete_reason(
     response = TestClient(monitor.app).get("/api/v1/scan/status")
     assert response.status_code == 200
     assert response.json()["status"] == "incomplete"
+    assert response.json()["terminal_outcome"]["is_success"] is False
+    assert response.json()["terminal_outcome"]["label"] == "Scan incomplete"
 
 
 def test_observability_report_summary_marks_incomplete_terminal_state():
@@ -81,6 +86,7 @@ def test_observability_report_summary_marks_incomplete_terminal_state():
     summary = ScanEngine._observability_report_data(engine)
     assert summary["scan_status"] == "incomplete"
     assert summary["completion_reasons"] == ["hybrid_agent_recon_incomplete:retry_limit"]
+    assert summary["terminal_outcome"]["exit_code"] == 2
 
 
 @pytest.mark.asyncio
@@ -107,3 +113,207 @@ async def test_serve_notification_uses_incomplete_status_with_mocked_transport(m
     assert payload["event"] == "scan_incomplete"
     assert "完了" not in json.dumps(payload, ensure_ascii=False)
     assert "retry_limit" in payload["status_reason"]
+
+
+@pytest.mark.parametrize(
+    ("status", "label", "label_ja", "severity", "success", "exit_code"),
+    [
+        ("done", "Scan complete", "スキャン完了", "success", True, 0),
+        ("incomplete", "Scan incomplete", "スキャン不完全", "warning", False, 2),
+        ("failed", "Scan failed", "スキャン失敗", "error", False, 1),
+        ("aborted", "Scan aborted (partial report)", "スキャン中断（部分レポート）", "warning", False, 2),
+    ],
+)
+def test_terminal_outcome_is_canonical_for_all_terminal_states(
+    status, label, label_ja, severity, success, exit_code
+):
+    from wscan.terminal_outcome import terminal_outcome
+
+    outcome = terminal_outcome(status)
+    assert outcome["label"] == label
+    assert outcome["label_ja"] == label_ja
+    assert outcome["severity"] == severity
+    assert outcome["is_success"] is success
+    assert outcome["exit_code"] == exit_code
+    assert outcome["message"] == label
+    assert bool(outcome["color"]) and bool(outcome["console_style"])
+
+
+@pytest.mark.parametrize("status", ["done", "incomplete", "failed", "aborted"])
+def test_monitor_api_and_websocket_publish_shared_outcome(status):
+    import asyncio
+    from fastapi.testclient import TestClient
+    from wscan.terminal_outcome import terminal_outcome
+
+    monitor = MonitorServer()
+    asyncio.run(monitor.emit("scan_complete", {
+        "status": status,
+        "completion_reasons": ["retry_limit"] if status == "incomplete" else [],
+    }))
+    expected = terminal_outcome(status, "retry_limit" if status == "incomplete" else "")
+    snapshot = monitor._scan_snapshot_event()["data"]
+    response = TestClient(monitor.app).get("/api/v1/scan/status")
+    findings = TestClient(monitor.app).get("/api/v1/scan/findings")
+    results = TestClient(monitor.app).get("/api/v1/scan/results")
+    assert snapshot["terminal_outcome"] == expected
+    assert snapshot["complete"]["terminal_outcome"] == expected
+    assert response.json()["terminal_outcome"] == expected
+    assert findings.json()["terminal_outcome"] == expected
+    assert results.json()["terminal_outcome"] == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_exit"),
+    [("done", 0), ("incomplete", 2), ("failed", 1), ("aborted", 2)],
+)
+def test_cli_and_serve_terminal_display_and_exit_mapping(status, expected_exit):
+    class Console:
+        def __init__(self):
+            self.messages = []
+
+        def print(self, message):
+            self.messages.append(str(message))
+
+    console = Console()
+    outcome = main._print_terminal_outcome(console, status, report_path="/tmp/report.html")
+    assert outcome["label"] in console.messages[-1]
+    assert outcome["console_style"] in console.messages[-1]
+    assert "/tmp/report.html" in console.messages[-1]
+    assert main._scan_exit_code(status) == expected_exit
+
+
+@pytest.mark.parametrize("status", ["done", "incomplete", "failed", "aborted"])
+def test_notification_payload_uses_canonical_status_outcome(status):
+    from wscan.terminal_outcome import terminal_outcome
+
+    outcome = terminal_outcome(status)
+    payload = NotificationManager._build_complete_payload(
+        {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0},
+        "https://example.test", "", "", status=status,
+    )
+    assert payload["terminal_outcome"] == outcome
+    assert outcome["label_ja"] in payload["text"]
+    if not outcome["is_success"]:
+        assert payload["event"] != "scan_complete"
+        assert payload["attachments"][0]["color"] == outcome["color"]
+        assert "🟢" not in json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("status,expected_exit", [("done", 0), ("incomplete", 2), ("failed", 1), ("aborted", 2)])
+@pytest.mark.parametrize("no_monitor", [False, True])
+def test_main_scan_exit_code_is_status_driven(monkeypatch, status, expected_exit, no_monitor):
+    args = SimpleNamespace(command="scan", no_monitor=no_monitor)
+    monkeypatch.setattr(main, "parse_args", lambda: args)
+    def return_status(coroutine):
+        coroutine.close()
+        return status
+
+    monkeypatch.setattr(main.asyncio, "run", return_status)
+    if expected_exit:
+        with pytest.raises(SystemExit) as exc:
+            main.main()
+        assert exc.value.code == expected_exit
+    else:
+        main.main()
+
+
+@pytest.mark.parametrize("status,expected_exit", [("done", 0), ("incomplete", 2), ("failed", 1), ("aborted", 2)])
+def test_main_serve_exit_code_uses_last_scan_outcome(monkeypatch, status, expected_exit):
+    args = SimpleNamespace(command="serve")
+    monkeypatch.setattr(main, "parse_args", lambda: args)
+
+    def interrupt_after_scan(coroutine):
+        coroutine.close()
+        args._scan_terminal_status = status
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main.asyncio, "run", interrupt_after_scan)
+    if expected_exit:
+        with pytest.raises(SystemExit) as exc:
+            main.main()
+        assert exc.value.code == expected_exit
+    else:
+        with pytest.raises(SystemExit) as exc:
+            main.main()
+        assert exc.value.code == 0
+
+
+def test_status_output_routes_use_the_terminal_outcome_function():
+    import inspect
+
+    scan_source = inspect.getsource(main.run_scan)
+    serve_source = inspect.getsource(main.run_serve)
+    assert scan_source.count("_print_terminal_outcome(") >= 3  # monitor off, monitor on, failure
+    assert "engine._terminal_status()" in scan_source
+    assert "_print_terminal_outcome(" in serve_source
+    assert "args._scan_terminal_status = status" in serve_source
+    assert "terminal_outcome(status)[\"exit_code\"]" in inspect.getsource(main.main)
+
+
+def test_terminal_display_copy_is_centralized_with_documented_exceptions():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    phrases = re.compile(
+        r"Scan complete|Scan incomplete|Scan aborted|Scan failed|"
+        r"スキャン完了|スキャン不完全|スキャン中断|スキャン失敗"
+    )
+    expected = Counter({
+        ("wscan/terminal_outcome.py", "Scan complete"): 1,
+        ("wscan/terminal_outcome.py", "Scan incomplete"): 1,
+        ("wscan/terminal_outcome.py", "Scan aborted"): 1,
+        ("wscan/terminal_outcome.py", "Scan failed"): 1,
+        ("wscan/terminal_outcome.py", "スキャン完了"): 1,
+        ("wscan/terminal_outcome.py", "スキャン不完全"): 1,
+        ("wscan/terminal_outcome.py", "スキャン中断"): 1,
+        ("wscan/terminal_outcome.py", "スキャン失敗"): 1,
+        # The following are not final scan outcomes: abort causes, crawl-step/audit labels,
+        # notification toggles, and scanner error descriptions.
+        ("wscan/tls_scan.py", "スキャン失敗"): 1,
+        ("wscan/engine.py", "Scan aborted"): 1,
+        ("wscan/engine.py", "スキャン失敗"): 1,
+        ("wscan/intervention.py", "Scan aborted"): 5,
+        ("wscan/scanners/base.py", "Scan aborted"): 1,
+        ("wscan/scanners/tls_config_scan.py", "スキャン失敗"): 1,
+        ("templates/portal.html", "スキャン完了"): 1,
+        ("templates/dashboard.html", "スキャン中断"): 1,
+        ("templates/ui/summary-modules.js", "スキャン中断"): 1,
+        ("templates/ui/settings-module.js", "スキャン完了"): 1,
+        ("templates/ui/crawl-module.js", "スキャン中断"): 1,
+        ("templates/ui/crawl-module.js", "スキャン完了"): 1,
+    })
+    # Allowlist rationales are explicit so a new phrase cannot silently bypass review.
+    exception_reasons = {
+        "wscan/tls_scan.py": "scanner documentation describes an individual TLS failure, not a run outcome",
+        "wscan/engine.py": "abort prompt and diff-scan error describe local actions, not terminal labels",
+        "wscan/intervention.py": "exception reason records the operator abort cause for the scan engine",
+        "wscan/scanners/base.py": "exception reason records the operator abort cause for the scan engine",
+        "wscan/scanners/tls_config_scan.py": "scanner module documentation describes a local no-finding error behavior",
+        "templates/portal.html": "checkbox names a notification trigger, not a scan result",
+        "templates/dashboard.html": "audit action log label is an operator action, not a scan result",
+        "templates/ui/summary-modules.js": "audit action log label is an operator action, not a scan result",
+        "templates/ui/settings-module.js": "checkbox names a notification trigger, not a scan result",
+        "templates/ui/crawl-module.js": "crawl substep status is independent from the overall scan terminal state",
+    }
+    observed = Counter()
+    for path in [root / "main.py", * (root / "wscan").rglob("*.py"),
+                 * (root / "templates").rglob("*.js"), * (root / "templates").rglob("*.html")]:
+        relative = path.relative_to(root).as_posix()
+        for phrase in phrases.findall(path.read_text(encoding="utf-8")):
+            observed[(relative, phrase)] += 1
+    assert observed == expected
+    for (path, _phrase), count in expected.items():
+        if path != "wscan/terminal_outcome.py":
+            assert count > 0 and exception_reasons.get(path)
+
+
+def test_user_docs_explain_incomplete_status_and_cli_exit_code():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    usage = (root / "docs/dashboard_usage_ja.md").read_text(encoding="utf-8")
+    advanced = (root / "docs/advanced_features.md").read_text(encoding="utf-8")
+    assert "不完全または中断で 2" in readme
+    assert "`incomplete` は必要な検査が残った不完全終了" in usage
+    assert "`terminal_outcome`" in advanced

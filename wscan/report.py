@@ -1619,19 +1619,18 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         categories = observability.get("by_category", {}) or {}
         samples = observability.get("samples", []) or []
         llm_calls = int(observability.get("llm_calls", 0) or 0)
+        from wscan.terminal_outcome import terminal_outcome
         scan_status = str(observability.get("scan_status") or "done").lower()
+        outcome = observability.get("terminal_outcome") or terminal_outcome(
+            scan_status,
+            "; ".join(str(reason) for reason in observability.get("completion_reasons", [])),
+        )
         status_html = ""
-        if scan_status != "done":
-            label = "Scan incomplete" if scan_status == "incomplete" else f"Scan status: {scan_status}"
-            try:
-                from wscan.url_scope import redact_event_data
-                reasons = redact_event_data({"reasons": observability.get("completion_reasons", [])})["reasons"]
-            except Exception:
-                reasons = []
-            reason_text = self._escape("; ".join(str(reason) for reason in reasons))
+        if scan_status not in {"idle", "scanning", "running"} and not outcome["is_success"]:
+            reason_text = self._escape(outcome.get("reason", "")) if not outcome["is_success"] else ""
             status_html = (
-                f'<p style="color:#b45309;font-weight:700">{label}</p>'
-                + (f'<p style="color:#b45309">Reason: {reason_text}</p>' if reason_text else "")
+                f'<p style="color:{outcome["color"]};font-weight:700">{self._escape(outcome["label"])}</p>'
+                + (f'<p style="color:{outcome["color"]}">Reason: {reason_text}</p>' if reason_text else "")
             )
         none_label = t("report.common.none")
         category_html = "".join(
@@ -1673,23 +1672,16 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         auth_verification_status = coverage.get("auth_verification_status")
         scan_status = str(coverage.get("scan_status") or "").lower()
         completion_reasons = coverage.get("completion_reasons") or []
+        from wscan.terminal_outcome import terminal_outcome
+        outcome = coverage.get("terminal_outcome") or terminal_outcome(
+            scan_status or "done", "; ".join(str(reason) for reason in completion_reasons)
+        )
         status_banner = ""
-        if scan_status and scan_status != "done":
-            labels = {
-                "incomplete": ("Scan incomplete", "#b45309"),
-                "aborted": ("Scan aborted", "#b45309"),
-                "error": ("Scan failed", "#b91c1c"),
-                "failed": ("Scan failed", "#b91c1c"),
-            }
-            label, color = labels.get(scan_status, (f"Scan status: {scan_status}", "#b45309"))
-            try:
-                from wscan.url_scope import redact_event_data
-                safe_reasons = redact_event_data({"reasons": completion_reasons})["reasons"]
-            except Exception:
-                safe_reasons = []
-            reasons = self._escape("; ".join(safe_reasons))
+        if scan_status and not outcome["is_success"]:
+            color = outcome["color"]
+            reasons = self._escape(outcome.get("reason", "")) if not outcome["is_success"] else ""
             status_banner = (
-                f'<p style="color:{color};font-weight:700">{self._escape(label)}</p>'
+                f'<p style="color:{color};font-weight:700">{self._escape(outcome["label"])}</p>'
                 + (f'<p style="color:{color}">Reason: {reasons}</p>' if reasons else "")
             )
         auth_reasons = coverage.get("auth_verification_reasons") or []

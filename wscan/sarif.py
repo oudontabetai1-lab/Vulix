@@ -118,6 +118,10 @@ class SarifExporter:
         }
         if status is not None:
             properties["scan_status"] = status
+            from wscan.terminal_outcome import terminal_outcome
+            properties["terminal_outcome"] = terminal_outcome(
+                status, "; ".join(str(reason) for reason in (status_reasons or []))
+            )
         if status_reasons:
             from wscan.url_scope import redact_event_data
             properties["completion_reasons"] = redact_event_data({"reasons": list(status_reasons)})["reasons"]

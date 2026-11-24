@@ -2346,15 +2346,18 @@ def _agent_exit_code(result) -> int:
     """
     if result is None:
         return 0
-    if getattr(result, "error", None):
-        return 1
-    if getattr(result, "harness_status", "") in {
-        "partial", "evidence_incomplete", "cancelled"
-    }:
-        return 2
-    if not getattr(result, "success", False) and not getattr(result, "findings", None):
-        return 1
-    return 0
+    from wscan.terminal_outcome import terminal_outcome
+
+    harness_status = str(getattr(result, "harness_status", "") or "").lower()
+    if getattr(result, "error", None) or (
+        not getattr(result, "success", False) and not getattr(result, "findings", None)
+    ):
+        status = "failed"
+    elif harness_status in {"partial", "evidence_incomplete", "cancelled"}:
+        status = harness_status
+    else:
+        status = "done"
+    return terminal_outcome(status, str(getattr(result, "error", "") or ""))["exit_code"]
 
 
 def _batch_exit_code(results) -> int:
@@ -2363,16 +2366,32 @@ def _batch_exit_code(results) -> int:
     1 件でも失敗（例外/開始不能＝``success`` が偽）があれば非0。全成功・空リストは 0。
     全対象失敗でも 0 を返し「合計0件」を成功と誤認させていた問題を防ぐ。
     """
-    if any(not getattr(r, "success", False) for r in (results or [])):
-        return 1
-    if any(getattr(r, "status", "done") != "done" for r in (results or [])):
-        return 2
-    return 0
+    from wscan.terminal_outcome import terminal_outcome
+
+    outcomes = [
+        terminal_outcome(
+            getattr(result, "status", "done") if getattr(result, "success", False) else "failed",
+            getattr(result, "error", "") or getattr(result, "status_reason", ""),
+        )
+        for result in (results or [])
+    ]
+    codes = [outcome["exit_code"] for outcome in outcomes]
+    return 1 if 1 in codes else 2 if 2 in codes else 0
 
 
 def _scan_exit_code(status: str) -> int:
     """通常 scan の終端 status を CLI に反映する。"""
-    return 0 if status == "done" else 1 if status in {"error", "failed"} else 2
+    from wscan.terminal_outcome import terminal_outcome
+    return terminal_outcome(status)["exit_code"]
+
+
+def _print_terminal_outcome(console, status: str, reason: str = "", report_path: str = "") -> dict:
+    """Print a scan terminal result using the canonical outcome presentation."""
+    from wscan.terminal_outcome import terminal_outcome
+    outcome = terminal_outcome(status, reason)
+    suffix = f"  Report: [cyan]{report_path}[/cyan]" if report_path else ""
+    console.print(f"\n[{outcome['console_style']}]{outcome['message']}[/]{suffix}")
+    return outcome
 
 
 def _llm_model_display(args) -> str:
@@ -2617,7 +2636,9 @@ async def run_agent(args):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            console.print(f"\n[red]Error: {exc}[/red]")
+            from wscan.terminal_outcome import terminal_outcome
+            args._scan_terminal_status = "failed"
+            _print_terminal_outcome(console, "failed", str(exc))
             raise
         finally:
             server.should_exit = True
@@ -3240,8 +3261,19 @@ async def run_scan(args):
         from wscan.engine import ScanEngine
 
         engine = ScanEngine(**_engine_kwargs(None))
-        await engine.run()
-        return engine._terminal_status() if hasattr(engine, "_terminal_status") else "done"
+        try:
+            await engine.run()
+        except asyncio.CancelledError:
+            args._scan_terminal_status = "aborted"
+            _print_terminal_outcome(console, "aborted", "Scan interrupted before completion")
+            raise
+        status = engine._terminal_status() if hasattr(engine, "_terminal_status") else "done"
+        args._scan_terminal_status = status
+        _print_terminal_outcome(
+            console, status, "; ".join(getattr(engine, "wave_errors", []) or []),
+            str(Path(engine.output_dir) / "report.html") if getattr(engine, "output_dir", None) else "",
+        )
+        return status
 
     # ── With monitoring dashboard ──────────────────────────────────
     import uvicorn
@@ -3275,28 +3307,34 @@ async def run_scan(args):
             from wscan.open_policy import open_in_browser
             open_in_browser(dashboard_url)
             await engine.run()
-
-            console.print(
-                f"\n[bold green]Scan complete![/bold green]  "
-                f"Report: [cyan]{engine.output_dir / 'report.html'}[/cyan]"
+            status = engine._terminal_status()
+            args._scan_terminal_status = status
+            _print_terminal_outcome(
+                console, status, "; ".join(engine.wave_errors),
+                str(engine.output_dir / "report.html"),
             )
             console.print(
                 "[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]"
             )
             # Keep dashboard alive so the user can review findings
             await asyncio.sleep(3600)
+            return status
         except asyncio.CancelledError:
-            pass
+            if not getattr(args, "_scan_terminal_status", None):
+                args._scan_terminal_status = "aborted"
+                _print_terminal_outcome(console, "aborted", "Scan interrupted before completion")
         except Exception as exc:
-            console.print(f"\n[red]Error: {exc}[/red]")
+            args._scan_terminal_status = "failed"
+            _print_terminal_outcome(console, "failed", str(exc))
             raise
         finally:
             server.should_exit = True
 
-    await asyncio.gather(
+    _, terminal_status = await asyncio.gather(
         server.serve(),
         run_scanner_task(),
     )
+    return terminal_status
 
 
 def _bind_is_intranet(host: str) -> bool:
@@ -3569,8 +3607,10 @@ async def run_serve(args):
         the dashboard stays up so the operator can launch the next scan.
         """
         url = cfg.get("url", "").strip()
+        args._scan_terminal_status = None
         if not url:
-            console.print("[red]No target URL provided — ignoring request.[/red]")
+            args._scan_terminal_status = "failed"
+            outcome = _print_terminal_outcome(console, "failed", "No target URL provided")
             await monitor.emit_status(
                 "ターゲットURLが空のため、リクエストを無視しました。", "error"
             )
@@ -3606,8 +3646,9 @@ async def run_serve(args):
                 default_llm_stream_timeout=float(_CFG.get("llm_stream_timeout_seconds", 90)),
             )
         except ValueError as exc:
+            args._scan_terminal_status = "failed"
             err_msg = f"タイムアウト設定が無効なためスキャンを開始できません: {exc}"
-            console.print(f"[red]{err_msg}[/red]")
+            outcome = _print_terminal_outcome(console, "failed", err_msg)
             if monitor is not None:
                 await monitor.emit_status(err_msg, "error")
             return
@@ -3992,6 +4033,8 @@ async def run_serve(args):
             except Exception as _exc:
                 console.print(f"[yellow]設定スナップショット保存に失敗: {_exc}[/yellow]")
             await engine.run()
+            status = engine._terminal_status()
+            args._scan_terminal_status = status
             # 完了時に手動巡回JSONがあればアウトプットフォルダにコピー
             try:
                 manual_src = cfg.get("manual_crawl_file", "") or ""
@@ -4002,16 +4045,21 @@ async def run_serve(args):
                         _shutil.copy2(src_path, engine.output_dir / src_path.name)
             except Exception as _exc:
                 console.print(f"[yellow]手動巡回JSONのコピーに失敗: {_exc}[/yellow]")
-            console.print(
-                f"\n[bold green]Scan complete![/bold green]  "
-                f"Report: [cyan]{engine.output_dir / 'report.html'}[/cyan]"
+            outcome = _print_terminal_outcome(
+                console, status, "; ".join(engine.wave_errors),
+                str(engine.output_dir / "report.html"),
             )
             console.print("[dim]Dashboard ready for the next scan.[/dim]")
+            return status
         except asyncio.CancelledError:
+            if not getattr(args, "_scan_terminal_status", None):
+                args._scan_terminal_status = "aborted"
+                _print_terminal_outcome(console, "aborted", "Scan interrupted before completion")
             raise
         except Exception as exc:
-            console.print(f"\n[red]Error: {exc}[/red]")
-            await monitor.emit_status(f"スキャン中にエラーが発生しました: {exc}", "error")
+            args._scan_terminal_status = "failed"
+            outcome = _print_terminal_outcome(console, "failed", str(exc))
+            await monitor.emit_status(str(exc), "error")
         return
 
     async def serve_task():
@@ -4080,16 +4128,18 @@ async def run_serve(args):
                     try:
                         await asyncio.wait_for(run_one_scan(cfg), timeout=hard_timeout)
                     except asyncio.TimeoutError:
-                        console.print(
-                            f"\n[red]watchdog: スキャンが上限＋猶予({hard_timeout:.0f}秒)を"
-                            f"超えたため強制終了しました。[/red]"
+                        timeout_reason = (
+                            f"watchdog: スキャンが上限＋猶予({hard_timeout:.0f}秒)を"
+                            "超えたため強制終了しました。"
                         )
+                        outcome = _print_terminal_outcome(console, "failed", timeout_reason)
+                        args._scan_terminal_status = "failed"
                         # status を error にし、ポータル/CI が「終わらないスキャン」を
                         # ポーリングし続けないよう可視化する。
                         monitor.api_scan_status = "error"
                         try:
                             await monitor.emit_status(
-                                "スキャンが上限時間を超えたため強制終了しました。", "error"
+                                timeout_reason, "error"
                             )
                         except Exception:
                             pass
@@ -4098,15 +4148,16 @@ async def run_serve(args):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                console.print(f"\n[red]Unexpected error: {exc}[/red]")
+                args._scan_terminal_status = "failed"
+                _print_terminal_outcome(console, "failed", str(exc))
             finally:
                 monitor.scan_in_progress = False
-                # スキャン完了通知（ポータルで設定された Webhook へ）。
+                # 終端結果通知（ポータルで設定された Webhook へ）。
                 try:
                     await monitor.send_scan_complete_notification()
                 except Exception:
                     pass
-                # スキャン完了毎に保持ポリシーを適用（実行中スキャンは保護）。
+                # 各 run 終了時に保持ポリシーを適用（実行中スキャンは保護）。
                 try:
                     monitor.prune_old_scans()
                 except Exception:
@@ -4601,6 +4652,12 @@ def main():
                 sys.exit(scan_exit)
     except KeyboardInterrupt:
         print("\nInterrupted.")
+        status = getattr(args, "_scan_terminal_status", None)
+        if status:
+            from wscan.terminal_outcome import terminal_outcome
+            code = terminal_outcome(status)["exit_code"]
+            if code:
+                sys.exit(code)
         sys.exit(0)
 
 

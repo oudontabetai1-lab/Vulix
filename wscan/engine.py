@@ -2068,15 +2068,17 @@ class ScanEngine:
 
     def _observability_report_data(self, sample_limit: int = 5) -> dict:
         """レポート用に集計と代表サンプルを同じデータ源から返す。"""
+        from .url_scope import redact_event_data
+        from .terminal_outcome import terminal_outcome
+        safe_reasons = redact_event_data({"reasons": list(self.wave_errors)})["reasons"]
+        status = self._terminal_status()
         data = {
             **self.observability_summary(),
             "samples": [str(note) for note in self.wave_errors[:sample_limit]],
-            "scan_status": self._terminal_status(),
+            "scan_status": status,
+            "terminal_outcome": terminal_outcome(status, "; ".join(safe_reasons)),
+            "completion_reasons": safe_reasons,
         }
-        from .url_scope import redact_event_data
-        data["completion_reasons"] = redact_event_data({
-            "reasons": list(self.wave_errors)
-        })["reasons"]
         if getattr(self, "token_lifecycle_manager", False) is True:
             events = getattr(self, "_token_lifecycle_events", [])
             data["token_lifecycle"] = {
@@ -9549,10 +9551,14 @@ class ScanEngine:
 
         llm_summary = self._llm_runtime_summary()
         terminal_status = self._terminal_status()
+        from .terminal_outcome import terminal_outcome
         evidence = {
             "target": self.target_url,
             "scan_date": datetime.datetime.now().isoformat(),
             "status": terminal_status,
+            "terminal_outcome": terminal_outcome(
+                terminal_status, "; ".join(str(reason) for reason in self.wave_errors)
+            ),
             "aborted": bool(self.scan_aborted),
             "checks": self.checks,
             "visited_urls": list(self.visited_urls),
@@ -9639,7 +9645,7 @@ class ScanEngine:
             except Exception as _sarif_err:
                 console.print(f"  [yellow][SARIF] 書き出し失敗: {_sarif_err}[/yellow]")
 
-        # L: スキャン完了通知
+        # L: 終端状態通知
         if self._notifier and self._notifier.notify_complete:
             # 完了サマリーは confirmed(verified) のみを脆弱性として数える。
             _confirmed = [_f for _f in self.all_findings if _f.verified]
@@ -9735,12 +9741,15 @@ class ScanEngine:
     def _report_coverage_data(self) -> dict:
         """レポート受信側に終端状態を加え、通常の coverage 集計契約を保つ。"""
         from .url_scope import redact_event_data
+        from .terminal_outcome import terminal_outcome
         data = self.coverage_summary()
         status_getter = getattr(self, "_terminal_status", None)
-        data["scan_status"] = status_getter() if callable(status_getter) else "done"
+        status = status_getter() if callable(status_getter) else "done"
         data["completion_reasons"] = redact_event_data({
             "reasons": list(getattr(self, "wave_errors", []) or [])
         })["reasons"]
+        data["scan_status"] = status
+        data["terminal_outcome"] = terminal_outcome(status, "; ".join(data["completion_reasons"]))
         return data
 
     def _generate_report(self):

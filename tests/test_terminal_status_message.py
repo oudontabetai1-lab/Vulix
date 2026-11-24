@@ -14,7 +14,7 @@ class CompletionStatusMessageTests(unittest.TestCase):
         )
         self.assertEqual(_completion_status_message("incomplete"), "Scan incomplete")
         self.assertEqual(_completion_status_message("error"), "Scan failed")
-        self.assertEqual(_completion_status_message("unknown"), "Scan finished")
+        self.assertEqual(_completion_status_message("unknown"), "Scan status: unknown")
 
     def test_scan_complete_clears_stale_phase_message(self):
         monitor = MonitorServer(port=0)

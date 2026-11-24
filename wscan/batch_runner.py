@@ -241,13 +241,14 @@ class BatchRunner:
                 duration_secs=time.time() - start,
                 error=err,
             )
-            _print(f"[Batch] エラー: {label} — {err}")
 
-        status = "✅" if result.success and result.status == "done" else (
-            "⚠️ 不完全" if result.success and result.status == "incomplete" else "❌"
+        from wscan.terminal_outcome import terminal_outcome
+        outcome = terminal_outcome(
+            result.status if result.success else "failed",
+            result.status_reason if result.success else result.error,
         )
         _print(
-            f"[Batch] {status} {label} — "
+            f"[Batch] {outcome['emoji']} {outcome['message']} — {label} — "
             f"{result.findings_count} 件 ({result.severity_summary()}) "
             f"[{result.duration_secs:.1f}s]"
         )
@@ -265,11 +266,16 @@ class BatchRunner:
             "=" * 60,
         ]
         total_findings = 0
+        from wscan.terminal_outcome import terminal_outcome
+        outcomes = {}
         for r in self.results:
             label = r.target.label or r.target.url
-            status = ("✅" if r.success and r.status == "done" else
-                      f"⚠️ 不完全 ({r.status_reason[:120]})" if r.success and r.status == "incomplete" else
-                      f"❌ ({r.error[:50]})")
+            outcome = terminal_outcome(
+                r.status if r.success else "failed",
+                r.status_reason if r.success else r.error,
+            )
+            outcomes[id(r)] = outcome
+            status = f"{outcome['emoji']} {outcome['message']}"
             lines.append(
                 f"  {status} {label[:40]:<40} "
                 f"Total={r.findings_count:3d}  "
@@ -277,9 +283,9 @@ class BatchRunner:
                 f"[{r.duration_secs:.1f}s]"
             )
             total_findings += r.findings_count
-        failed = [r for r in self.results if not r.success]
-        incomplete = [r for r in self.results if r.success and r.status != "done"]
-        succeeded = len(self.results) - len(failed) - len(incomplete)
+        failed = [r for r in self.results if outcomes[id(r)]["exit_code"] == 1]
+        incomplete = [r for r in self.results if outcomes[id(r)]["exit_code"] == 2]
+        succeeded = sum(1 for r in self.results if outcomes[id(r)]["is_success"])
         lines.append("-" * 60)
         lines.append(f"  合計: {total_findings} 件の脆弱性が検出されました")
         if failed:
@@ -314,6 +320,10 @@ class BatchRunner:
                     "success":        r.success,
                     "status":         r.status,
                     "status_reason":  r.status_reason,
+                    "terminal_outcome": terminal_outcome(
+                        r.status if r.success else "failed",
+                        r.status_reason if r.success else r.error,
+                    ),
                 }
                 for r in self.results
             ],
