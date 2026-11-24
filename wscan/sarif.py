@@ -240,12 +240,14 @@ class SarifExporter:
         confidence = f.get("confidence", "tentative")
         source = f.get("source", "scanner")
         try:
-            from wscan.content_provenance import sanitize_injection_signal_details
-            injection_signals = sanitize_injection_signal_details(
-                (f.get("evidence_details", {}) or {}).get("injection_signals")
+            from wscan.content_provenance import normalize_injection_signals
+            details = f.get("evidence_details", {}) or {}
+            injection_signals, injection_signals_discarded_count = normalize_injection_signals(
+                details.get("injection_signals", ()),
+                previously_discarded=details.get("injection_signals_discarded_count", 0),
             )
         except Exception:
-            injection_signals = []
+            injection_signals, injection_signals_discarded_count = [], 0
 
         message = evidence
         if field_name:
@@ -291,6 +293,8 @@ class SarifExporter:
         }
         if injection_signals:
             result["properties"]["injection_signals"] = injection_signals
+        if injection_signals_discarded_count:
+            result["properties"]["injection_signals_discarded_count"] = injection_signals_discarded_count
 
         # scanner は従来 fingerprint を維持し、Agent 由来だけ名前空間を分ける。
         fingerprint = f"{ct}:{url}:{field_name}"

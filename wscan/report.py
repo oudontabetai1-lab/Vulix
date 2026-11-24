@@ -1403,10 +1403,13 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         evidence_type = getattr(finding, "evidence_type", "") or finding.check_type
         details = getattr(finding, "evidence_details", {}) or {}
         try:
-            from wscan.content_provenance import sanitize_injection_signal_details
-            injection_signals = sanitize_injection_signal_details(details.get("injection_signals"))
+            from wscan.content_provenance import normalize_injection_signals
+            injection_signals, discarded_count = normalize_injection_signals(
+                details.get("injection_signals", ()),
+                previously_discarded=details.get("injection_signals_discarded_count", 0),
+            )
         except Exception:
-            injection_signals = []
+            injection_signals, discarded_count = [], 0
         steps = getattr(finding, "reproduction_steps", []) or []
         if not details and not steps and not evidence_type and not injection_signals:
             return ""
@@ -1436,10 +1439,14 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         if injection_signals:
             labels = ", ".join(
                 f"{signal['pattern']} ({signal['start']}–{signal['end']})"
+                if "start" in signal else signal["pattern"]
                 for signal in injection_signals
             )
             cells.append(("Prompt Injection Signals", labels))
-        for key, value in [(k, v) for k, v in details.items() if k != "injection_signals"][:8]:
+        if discarded_count:
+            cells.append(("Discarded Injection Signal Values", discarded_count))
+        reserved = {"injection_signals", "injection_signals_discarded_count"}
+        for key, value in [(k, v) for k, v in details.items() if k not in reserved][:8]:
             cells.append((str(key).replace("_", " ").title(), value))
 
         cells_html = "".join(

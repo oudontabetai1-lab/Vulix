@@ -441,17 +441,35 @@ class Finding:
         # 注入兆候はfindingを判定/格下げせず、本文を含まない位置メタデータだけ証跡へ追加。
         try:
             from wscan.content_provenance import (
-                detect_injection_signal_details, sanitize_injection_signal_details,
+                detect_injection_signal_details, normalize_injection_signals,
             )
             signal_text = str(self.evidence or "")
-            signals = detect_injection_signal_details(signal_text)
+            detected = detect_injection_signal_details(signal_text)
             details = dict(self.evidence_details or {})
-            existing = sanitize_injection_signal_details(details.get("injection_signals"))
-            if signals or existing:
-                details["injection_signals"] = existing or signals
+            if ("injection_signals" in details or detected
+                    or "injection_signals_discarded_count" in details):
+                existing = details.get("injection_signals", ())
+                if not isinstance(existing, (list, tuple)):
+                    existing = [existing]
+                details["injection_signals"], discarded = normalize_injection_signals(
+                    [*existing, *detected],
+                    previously_discarded=details.get("injection_signals_discarded_count", 0),
+                )
+                if discarded:
+                    details["injection_signals_discarded_count"] = discarded
+                else:
+                    details.pop("injection_signals_discarded_count", None)
                 self.evidence_details = details
         except Exception:
-            pass
+            # 正規化に失敗した場合も、未検査の値を証跡へ残さない。
+            try:
+                details = dict(self.evidence_details or {})
+                if "injection_signals" in details:
+                    details["injection_signals"] = []
+                    details["injection_signals_discarded_count"] = 1
+                    self.evidence_details = details
+            except Exception:
+                self.evidence_details = {}
         # record_finding を通らない直接構築（ChainScanner/GraphQL/JWT/privesc/websocket 等）も
         # 含め、生成境界で一元的に既定 state を与える（whack-a-mole 防止）。dialog 発火=scan 時点で
         # 実行確証=reproduced。それ以外=assumed（_phase_verify を通る verifiable finding は後で
@@ -547,6 +565,7 @@ class Finding:
     def to_dict(self) -> dict:
         from wscan.compliance_map import get_refs
         from wscan.request_logger import _redact_headers
+        from wscan.content_provenance import normalize_injection_signals
 
         request = dict(self.request)
         if "headers" in request:
@@ -554,6 +573,17 @@ class Finding:
         response = {k: v for k, v in self.response.items() if k != "body"}
         if "headers" in response:
             response["headers"] = _redact_headers(response["headers"])
+        evidence_details = dict(self.evidence_details or {})
+        if ("injection_signals" in evidence_details
+                or "injection_signals_discarded_count" in evidence_details):
+            evidence_details["injection_signals"], discarded = normalize_injection_signals(
+                evidence_details.get("injection_signals", ()),
+                previously_discarded=evidence_details.get("injection_signals_discarded_count", 0),
+            )
+            if discarded:
+                evidence_details["injection_signals_discarded_count"] = discarded
+            else:
+                evidence_details.pop("injection_signals_discarded_count", None)
 
         return {
             "check_type": self.check_type,
@@ -576,7 +606,7 @@ class Finding:
             "verification_state": self.verification_state,
             "confidence": self.confidence,
             "evidence_type": self.evidence_type,
-            "evidence_details": self.evidence_details,
+            "evidence_details": evidence_details,
             "reproduction_steps": self.reproduction_steps,
             "source": self.source,
             "agent_verified": self.agent_verified,
