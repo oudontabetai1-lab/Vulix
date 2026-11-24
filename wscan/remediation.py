@@ -265,12 +265,19 @@ async def generate_fix(finding: "Finding", payload_gen: "PayloadGenerator") -> t
         content_type=ContentType.OBSERVATION.value,
     ).format_tagged_block()
 
+    wrapped_payload = wrap_untrusted_observation(
+        finding.payload or "",
+        source=ContentSource.HTTP.value,
+        origin=finding.url or "",
+        content_type=ContentType.EVIDENCE.value,
+    ).format_tagged_block()
+
     prompt = (
         f"You are a web security expert. A vulnerability has been found:\n"
         f"- Type: {check_type}\n"
         f"- URL: {wrap_untrusted_observation(finding.url or '', source=ContentSource.HTTP.value, origin=finding.url or '', content_type=ContentType.OBSERVATION.value).format_tagged_block()}\n"
         f"- Field: {clean_field}\n"
-        f"- Payload: {finding.payload}\n"
+        f"- Payload:\n{wrapped_payload}\n"
         f"- Evidence:\n{wrapped_evidence}\n\n"
         f"Provide a concise remediation guide (max 150 words) in Japanese. "
         f"Include:\n"
