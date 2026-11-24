@@ -216,7 +216,7 @@ class TestServeOutputAndDefaults:
         run_serve_source = ast.get_source_segment(source, run_serve_node)
         assert ":{port}/app" in run_serve_source
         assert "{lan_ip}:{port}/app" in run_serve_source
-        assert "webbrowser.open(f\"http://localhost:{port}/app\")" in run_serve_source
+        assert "open_in_browser(f\"http://localhost:{port}/app\")" in run_serve_source
 
     def test_serve_banner_output_contains_app(self, monkeypatch):
         captured_panels = []
@@ -259,6 +259,8 @@ class TestServeOutputAndDefaults:
 
         monkeypatch.setattr("rich.console.Console", DummyConsole)
         monkeypatch.setattr("webbrowser.open", lambda url: opened_urls.append(url))
+        monkeypatch.delenv("WSCAN_NO_AUTO_OPEN", raising=False)
+        monkeypatch.delenv("CI", raising=False)
 
         async def fast_sleep(*args, **kwargs):
             return
@@ -315,6 +317,8 @@ class TestServeOutputAndDefaults:
 
         monkeypatch.setattr("rich.console.Console", DummyConsole)
         monkeypatch.setattr("webbrowser.open", lambda url: opened_urls.append(url))
+        monkeypatch.delenv("WSCAN_NO_AUTO_OPEN", raising=False)
+        monkeypatch.delenv("CI", raising=False)
 
         async def fast_sleep(*args, **kwargs):
             return

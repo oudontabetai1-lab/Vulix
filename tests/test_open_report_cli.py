@@ -1,11 +1,24 @@
 """_effective_open_report（CLI/config のレポート自動表示解決）のテスト。"""
 import types
 import unittest
+import os
 
 import main
 
 
 class EffectiveOpenReportTests(unittest.TestCase):
+    def setUp(self):
+        # These tests describe the product's normal CLI defaults, not pytest's
+        # intentional no-auto-open environment.
+        self._saved_auto_open = os.environ.pop("WSCAN_NO_AUTO_OPEN", None)
+        self._saved_ci = os.environ.pop("CI", None)
+
+    def tearDown(self):
+        if self._saved_auto_open is not None:
+            os.environ["WSCAN_NO_AUTO_OPEN"] = self._saved_auto_open
+        if self._saved_ci is not None:
+            os.environ["CI"] = self._saved_ci
+
     @staticmethod
     def _args(no_monitor=False, no_open_report=False, open_report=False):
         return types.SimpleNamespace(

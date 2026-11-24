@@ -417,7 +417,8 @@ class AgentEngine:
             console.print(f"  Auth verification: [{auth_style}]{auth_status}[/{auth_style}]{reason_str}")
 
         if self.open_report and report_path.exists():
-            webbrowser.open(str(report_path))
+            from wscan.open_policy import open_in_browser
+            open_in_browser(str(report_path))
 
         if self.monitor:
             await self.monitor.emit_status(
