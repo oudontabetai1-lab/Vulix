@@ -304,9 +304,64 @@ def test_untrusted_observation_redacts_origin_and_body_secrets():
             assert secret not in prompt
             assert secret not in envelope.content
         assert "example.invalid/path" in prompt
-        assert "keep=visible" in prompt
+        assert "keep=&lt;redacted&gt;" in prompt
         assert "Reflected value context is intact" in prompt
         assert "JSON response remains" in prompt
+        assert "Database error near SELECT" in prompt
+    finally:
+        url_scope.clear_secret_values()
+
+
+def test_prompt_redaction_aliases_encoded_names_jwt_and_origin_allowlist():
+    from wscan import url_scope
+
+    url_scope.clear_secret_values()
+    try:
+        aliases = (
+            "jwt", "auth", "authorization", "bearer", "sid", "session",
+            "apikey", "api_key", "key", "secret", "password", "passwd", "pwd",
+            "signature", "sig", "credential", "access", "refresh", "id_token",
+            "code", "otp",
+        )
+        alias_fields = " ".join(f"{alias}={alias}-secret-927" for alias in aliases)
+        jwt_value = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature927"
+        double_encoded = "%2574%256f%256b%2565%256e=double-secret-927"
+        body = f"{alias_fields} {double_encoded} Authorization: Bearer bearer-secret-927 {jwt_value}"
+        origin = (
+            "https://user:origin-password-927@example.invalid/path"
+            "?ordinary=origin-query-secret-927&jwt=origin-jwt-927#private-fragment-927"
+        )
+        envelope = wrap_untrusted_observation(body, source="http", origin=origin)
+        prompt = envelope.format_tagged_block()
+
+        for secret in (
+            *(f"{alias}-secret-927" for alias in aliases),
+            "double-secret-927", "bearer-secret-927", jwt_value,
+            "origin-password-927", "origin-query-secret-927", "origin-jwt-927",
+            "private-fragment-927",
+        ):
+            assert secret not in prompt
+        assert "ordinary=&lt;redacted&gt;" in prompt
+        assert "example.invalid/path" in prompt
+    finally:
+        url_scope.clear_secret_values()
+
+
+def test_prompt_redaction_preserves_benign_reflection_context():
+    from wscan import url_scope
+
+    url_scope.clear_secret_values()
+    try:
+        reflected = "marker-<xss>-927"
+        envelope = wrap_untrusted_observation(
+            f'<a href="/search?ref={reflected}">Database error near SELECT</a>',
+            source="http",
+            origin="https://example.invalid/search",
+        )
+        prompt = envelope.format_tagged_block()
+
+        assert "ref=marker-" in prompt
+        assert "xss" in prompt
         assert "Database error near SELECT" in prompt
     finally:
         url_scope.clear_secret_values()

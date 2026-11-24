@@ -15,7 +15,7 @@ import json
 import re
 import unicodedata
 from typing import Any
-from urllib.parse import unquote_plus
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 
 _PROMPT_URL_PATTERN = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s<>\"']+")
@@ -29,45 +29,49 @@ _PROMPT_JSON_FIELD_PATTERN = re.compile(
 _UNTRUSTED_CLOSER_PATTERN = re.compile(
     r"<\s*/\s*untrusted_target_data\s*>", re.IGNORECASE
 )
+_PROMPT_SENSITIVE_KEY_TOKENS = (
+    "jwt", "auth", "authorization", "bearer", "sid", "session",
+    "apikey", "api_key", "key", "secret", "password", "passwd", "pwd",
+    "signature", "sig", "credential", "access", "refresh", "id_token",
+    "code", "otp", "token", "api-key", "client_secret", "private_key",
+)
+_JWT_VALUE_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+_BEARER_VALUE_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 
 
 def _is_sensitive_prompt_key(key: str, sensitive_tokens: tuple[str, ...]) -> bool:
     """Match prompt-only aliases without broadening shared persistence key semantics."""
-    normalized = unquote_plus(key).casefold()
+    normalized = key
+    for _ in range(3):
+        decoded = unquote_plus(normalized)
+        if decoded == normalized:
+            break
+        normalized = decoded
+    normalized = unicodedata.normalize("NFKC", normalized).casefold()
+    prompt_tokens = (*sensitive_tokens, *_PROMPT_SENSITIVE_KEY_TOKENS)
     if normalized in {"sid", "session"} or normalized.endswith(("_sid", "-sid")):
         return True
-    return any(token.casefold() in normalized for token in sensitive_tokens)
-
-
-def _redact_prompt_query(query: str, sensitive_tokens: tuple[str, ...], redacted: str) -> str:
-    """Redact decoded sensitive query names; '&' is the only URL query separator here."""
-    parts = []
-    for part in query.split("&"):
-        key, separator, _value = part.partition("=")
-        if separator and _is_sensitive_prompt_key(key, sensitive_tokens):
-            part = f"{key}={redacted}"
-        parts.append(part)
-    return "&".join(parts)
+    return any(token.casefold() in normalized for token in prompt_tokens)
 
 
 def _redact_prompt_origin(origin: str, url_scope) -> str:
-    """Use canonical URL redaction, then cover percent-encoded prompt-only key aliases."""
+    """Keep URL location metadata while discarding all query and fragment values."""
     safe = url_scope.redact_url(origin, drop_userinfo=True)
-    if "?" in safe:
-        prefix, remainder = safe.split("?", 1)
-        query, marker, fragment = remainder.partition("#")
-        safe = f"{prefix}?{_redact_prompt_query(query, url_scope.SENSITIVE_KEY_TOKENS, url_scope.REDACTED)}"
-        if marker:
-            safe += f"#{_redact_prompt_query(fragment, url_scope.SENSITIVE_KEY_TOKENS, url_scope.REDACTED)}"
-    elif "#" in safe:
-        prefix, fragment = safe.split("#", 1)
-        safe = f"{prefix}#{_redact_prompt_query(fragment, url_scope.SENSITIVE_KEY_TOKENS, url_scope.REDACTED)}"
-    return safe
+    parts = urlsplit(safe)
+    query = "&".join(
+        f"{key}={url_scope.REDACTED}" if separator else key
+        for item in parts.query.split("&") if item
+        for key, separator, _value in [item.partition("=")]
+    )
+    fragment = url_scope.REDACTED if parts.fragment else ""
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, fragment))
 
 
 def _redact_prompt_observation(text: str, url_scope) -> str:
     """Redact secrets in prompt observations while retaining following diagnostic text."""
     text = url_scope.redact_secret_values(text)
+    text = _JWT_VALUE_PATTERN.sub(url_scope.REDACTED, text)
+    text = _BEARER_VALUE_PATTERN.sub(f"Bearer {url_scope.REDACTED}", text)
     text = _PROMPT_URL_PATTERN.sub(
         lambda match: _redact_prompt_origin(match.group(0), url_scope), text
     )
