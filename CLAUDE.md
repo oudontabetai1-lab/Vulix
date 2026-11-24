@@ -300,13 +300,12 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 - **原則**: エージェント処理は plan→execute→observe→improve の目標志向ループ。graceful recovery を設計し、
   失敗パターンを first-class に分類・保存する。
 - **本ツール**: LLM の**一時障害で攻撃入力が黙って減る＝偽陰性**を確実性の敵として同格に扱う。
-  **ただし resume 回収が配線済みなのは adaptive 経路だけ**：`adaptive_engine.generate` が
-  `return_status=True` で `CompletionStatus` を受け、`engine._adaptive_llm_available` と `checkpoint.py` で
-  恒久失敗（収束）と一時失敗（未回収として残し `--resume` で再挑戦）を分ける。**通常掃射（baseline）は
-  未配線**：`PayloadGenerator.generate`→`_call_llm` は `return_status` を使わず、一時失敗時は黙って既定
-  payload へフォールバックし、`_scan_field` は当該 check を checkpoint 済みにする＝baseline の LLM payload が
-  一時障害で減っても `--resume` では戻らない。**新しく LLM を挟むときは「落ちたら攻撃が減る」箇所を洗い、
-  status を見てフォールバック/resume に繋ぐ**（baseline を回収対象にするなら adaptive と同様の配線が要る）。
+  **adaptive と baseline の双方で回収する**：`adaptive_engine.generate` と
+  `PayloadGenerator.generate` が `return_status=True` で `CompletionStatus` を受け、
+  transient/empty は checkpoint に未回収として残して `--resume` で再挑戦する。baseline は
+  fallback payload をその場で検査し、再開時に attempt ledger と候補列を照合して未送信分だけを追加する。
+  unavailable/permanent は恒久完了、blocked は可用性を保ったまま当該 prompt のみ完了とする。
+  **新しく LLM を挟むときは「落ちたら攻撃が減る」箇所を洗い、status を見てフォールバック/resume に繋ぐ**。
 
 ### 8. untrusted content ＝ プロンプトインジェクション前提
 - **原則**: 外部由来テキスト（ツール結果・取得ページ・レスポンス）は信頼境界の外。指示上書き

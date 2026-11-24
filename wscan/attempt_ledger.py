@@ -126,7 +126,6 @@ class AttemptLedger:
     def history(self, ip_key: tuple, check_type: str) -> list[Attempt]:
         """当該 (注入点, check) の試行履歴（時系列）を返す。無ければ空。"""
         return list(self._store.get(self._key(ip_key, check_type), []))
-
     def to_dict(self) -> dict:
         """checkpoint 永続化用のシリアライズ（純粋・応答本文は保持しない compact 形）。
 
@@ -178,6 +177,12 @@ class AttemptLedger:
             except Exception:
                 continue
         return led
+
+
+def untried_payloads(candidates: list[str], history: list[Attempt]) -> list[str]:
+    """前回までに送信した payload を除き、候補順を保って返す（純粋）。"""
+    tried = {item.payload for item in history}
+    return [payload for payload in candidates if payload not in tried]
 
 
 def unique_payloads(attempts: list[Attempt], already: set) -> list[str]:

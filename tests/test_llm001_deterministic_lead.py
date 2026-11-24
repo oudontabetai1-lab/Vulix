@@ -27,7 +27,7 @@ def test_generate_orders_deterministic_first():
     pg.default_payloads = {"sqli": [f"D{i}" for i in range(20)]}
     pg.prompt_templates = {"sqli": "inject {field_name} {url}"}
     pg._check_llm_available = AsyncMock(return_value=True)
-    pg._call_llm = AsyncMock(return_value=["LLMPAY0", "LLMPAY1"])
+    pg._call_llm = AsyncMock(return_value=(["LLMPAY0", "LLMPAY1"], "ok"))
     out = asyncio.run(pg.generate("sqli", "q", "http://t/"))
     assert out[0].startswith("D")
     # LLM が典型 cap(40) 内かつ小 cap でも早期に現れる

@@ -17,6 +17,7 @@ from wscan.attempt_ledger import (
     attempt_from_pair,
     format_history_for_prompt,
     neutralize_payload_for_prompt,
+    untried_payloads,
     unique_payloads,
 )
 from wscan.injection_point import InjectionPoint
@@ -106,6 +107,12 @@ class UniquePayloadsTests(unittest.TestCase):
 
 
 class LedgerTests(unittest.TestCase):
+    def test_resume_requeues_only_payloads_not_previously_sent(self):
+        self.assertEqual(
+            untried_payloads(["sent", "new", "sent", "newer"], [Attempt("sent")]),
+            ["new", "newer"],
+        )
+
     def test_record_and_history_by_key_and_check(self):
         led = AttemptLedger()
         key = ("http://t", "q", "0", "u", "")

@@ -2627,6 +2627,11 @@ class BaseScanner(ABC):
             attempt_history=attempt_history,
             learning_summary_provider=learning_summary_provider,
         )
+        checkpoint = getattr(self.engine, "checkpoint", None)
+        if ip is not None and checkpoint is not None and checkpoint.is_baseline_unrecovered_ip(ip, self.CHECK_TYPE):
+            # fallback payloads were already sent on the interrupted run; only add unseen payloads.
+            from wscan.attempt_ledger import untried_payloads
+            payloads = untried_payloads(payloads, attempt_history or [])
         # A-3 / ⑩: re-order by historical success rate (domain-aware)
         if _learning_on:
             payloads = learner.sort_payloads(self.CHECK_TYPE, payloads, domain=_domain)

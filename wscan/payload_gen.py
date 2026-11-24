@@ -18,9 +18,15 @@ from .llm_client import complete_text
 console = Console()
 
 _active_role: ContextVar[str | None] = ContextVar("pg_active_role", default=None)
+_baseline_completion_status: ContextVar[str] = ContextVar("pg_baseline_completion_status", default="ok")
 # LLM-001: 標準掃射で決定論 default を LLM より前に寄せる比率（default:LLM = N:1）。first-hit が
 # 強い決定論証拠で止まりやすくしつつ、小さい --max-payloads でも LLM が全滅しないよう交互配置する。
 _DETERMINISTIC_RATIO = 2
+
+
+def baseline_status_requires_resume(status: str) -> bool:
+    """一時失敗/空応答だけ baseline の check を resume 回収対象にする。"""
+    return status in {"transient", "empty"}
 
 
 def _order_deterministic_first(defaults: list, llm: list, ratio: int = _DETERMINISTIC_RATIO) -> list:
@@ -364,7 +370,8 @@ class PayloadGenerator:
         custom_payloads: Optional[list[str]] = None,
         attempt_history: Optional[list] = None,
         learning_summary_provider: "Optional[Callable[[], Optional[str]]]" = None,
-    ) -> list[str]:
+        return_status: bool = False,
+    ) -> list[str] | tuple[list[str], str]:
         """
         Generate payloads for a specific check type and field.
 
@@ -374,13 +381,18 @@ class PayloadGenerator:
         3. Default payloads + auto encoded variants
         """
         from wscan.payload_encoder import expand_payloads, ENCODING_EXAMPLES
+        status = "ok"
 
         if custom_payloads:
             return custom_payloads
 
         defaults = self.default_payloads.get(check_type, [])
 
-        if self.provider != "none" and await self._check_llm_available():
+        llm_available = self.provider != "none" and await self._check_llm_available()
+        if not llm_available:
+            status = "unavailable"
+            _baseline_completion_status.set(status)
+        if llm_available:
             template = self.prompt_templates.get(check_type, "")
             if template:
                 # エンコード例を LLM プロンプトに注入して Ollama の出力を豊かにする
@@ -434,7 +446,10 @@ class PayloadGenerator:
                         pass
 
                 with self.use_role("payload"):
-                    llm_payloads = await self._call_llm(prompt)
+                    llm_payloads, status = await self._call_llm(
+                        prompt, return_status=True, caller="payload"
+                    )
+                    _baseline_completion_status.set(status)
                 if llm_payloads:
                     console.print(
                         f"[dim]LLM generated {len(llm_payloads)} payloads for {field_name}[/dim]"
@@ -447,22 +462,34 @@ class PayloadGenerator:
                     # LLM-001: 決定論 default を LLM より前に寄せて first-hit が弱い LLM 反射で
                     # 止まるのを防ぐ。ratio:1 の交互配置で、小 cap でも LLM が全滅しない
                     # （LLM-only 脆弱性は adaptive も補完）。
-                    return _order_deterministic_first(tail, expanded)
+                    result = _order_deterministic_first(tail, expanded)
+                    return (result, status) if return_status else result
 
         # LLM なし/失敗 → デフォルトペイロードをエンコード展開して返す
-        return expand_payloads(defaults, check_type, max_variants_per_payload=1, max_total=40)
+        result = expand_payloads(defaults, check_type, max_variants_per_payload=1, max_total=40)
+        _baseline_completion_status.set(status)
+        return (result, status) if return_status else result
 
-    async def _call_llm(self, prompt: str) -> Optional[list[str]]:
+    async def _call_llm(
+        self, prompt: str, *, return_status: bool = False, caller: str = "complete_text",
+    ):
         """LLM の生テキストからペイロード配列を抽出する。"""
-        text = await complete_text(
+        result = await complete_text(
             self,
             prompt,
             max_tokens=500,
             temperature=0.7,
+            return_status=True,
+            caller=caller,
         )
+        text, status = result
         if text is None:
-            return None
-        return self._extract_json_list(text)
+            payloads = None
+        else:
+            payloads = self._extract_json_list(text)
+            if payloads is None and status == "ok":
+                status = "empty"
+        return (payloads, status) if return_status else payloads
 
     # ------------------------------------------------------------------
     # Screenshot vision analysis

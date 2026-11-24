@@ -97,7 +97,7 @@ class StateTests(unittest.TestCase):
         state.save_candidate_snapshot_ip(json_name, "sqli", "baseline", ["name"], "payload_generator")
 
         restored = CheckpointState.from_dict(state.to_dict())
-        self.assertEqual(restored.source_version, 9)
+        self.assertEqual(restored.source_version, 10)
         self.assertEqual(restored.get_candidate_snapshot_ip(first, "xss", "baseline"), (True, ["a", "b"]))
         self.assertEqual(restored.get_candidate_snapshot_ip(first, "xss", "adaptive"), (True, []))
         self.assertEqual(restored.get_candidate_snapshot_ip(other, "xss", "baseline"), (True, ["other"]))
@@ -709,6 +709,18 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
 
 
 class IoTests(unittest.TestCase):
+    def test_unrecovered_baseline_roundtrip_remains_incomplete(self):
+        from wscan.injection_point import InjectionPoint
+        ip = InjectionPoint.for_form("http://h/a", "q", 0)
+        state = CheckpointState()
+        state.mark_baseline_unrecovered_ip(ip, "xss")
+        self.assertTrue(state.is_baseline_unrecovered_ip(ip, "xss"))
+        self.assertFalse(state.is_done_ip(ip, "xss"))
+        loaded = CheckpointState.from_dict(state.to_dict())
+        self.assertTrue(loaded.is_baseline_unrecovered_ip(ip, "xss"))
+        loaded.clear_baseline_unrecovered_ip(ip, "xss")
+        self.assertFalse(loaded.is_baseline_unrecovered_ip(ip, "xss"))
+
     def test_save_load_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             s = CheckpointState(target_url="http://h", checks=["xss"])

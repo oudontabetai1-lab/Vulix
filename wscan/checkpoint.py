@@ -36,7 +36,8 @@ if TYPE_CHECKING:
 # v7: budget 打切り単位の再試行回数と、上限到達後も未完である印を永続化。
 # v8: 初回の打切り後に設定回数ぶん再試行できるよう exhausted 閾値を補正。
 # v9: field/check ごとの phase 別 payload 候補スナップショットと legacy unknown を保存。
-CHECKPOINT_VERSION = 9
+# v10: baseline LLM 一時失敗の未回収単位を保存。
+CHECKPOINT_VERSION = 10
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -98,6 +99,7 @@ class CheckpointState:
     candidate_snapshots: object = field(default_factory=dict)
     # 旧 checkpoint には過去の候補列が無い。復元不能な truncated unit は tested にしない。
     legacy_candidate_unknown: set[str] = field(default_factory=set)
+    unrecovered_baseline: set[str] = field(default_factory=set)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     # 読み込んだデータのスキーマ版（新規作成は現行版）。情報用。v1→v2 の差分
@@ -144,6 +146,17 @@ class CheckpointState:
             location_token=location_token,
             pointer=pointer,
         ))
+        self.updated_at = time.time()
+
+    def mark_baseline_unrecovered_ip(self, ip: "InjectionPoint", check_type: str) -> None:
+        self.unrecovered_baseline.add(self._candidate_unit_key(ip, check_type))
+        self.updated_at = time.time()
+
+    def is_baseline_unrecovered_ip(self, ip: "InjectionPoint", check_type: str) -> bool:
+        return self._candidate_unit_key(ip, check_type) in self.unrecovered_baseline
+
+    def clear_baseline_unrecovered_ip(self, ip: "InjectionPoint", check_type: str) -> None:
+        self.unrecovered_baseline.discard(self._candidate_unit_key(ip, check_type))
         self.updated_at = time.time()
 
     def record_truncation_ip(
@@ -343,6 +356,7 @@ class CheckpointState:
             "exhausted_truncations": sorted(self.exhausted_truncations),
             "candidate_snapshots": self.candidate_snapshots,
             "legacy_candidate_unknown": sorted(self.legacy_candidate_unknown),
+            "unrecovered_baseline": sorted(self.unrecovered_baseline),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -359,6 +373,10 @@ class CheckpointState:
         legacy_candidate_unknown = {
             key for key in raw_legacy_candidate_unknown if isinstance(key, str)
         } if isinstance(raw_legacy_candidate_unknown, list) else set()
+        raw_unrecovered_baseline = data.get("unrecovered_baseline", [])
+        unrecovered_baseline = {
+            key for key in raw_unrecovered_baseline if isinstance(key, str)
+        } if isinstance(raw_unrecovered_baseline, list) else set()
         state = cls(
             target_url=data.get("target_url", ""),
             checks=list(data.get("checks", []) or []),
@@ -381,6 +399,7 @@ class CheckpointState:
             # instead of silently treating it as absent and regenerating a different queue.
             candidate_snapshots=data.get("candidate_snapshots", {}),
             legacy_candidate_unknown=legacy_candidate_unknown,
+            unrecovered_baseline=unrecovered_baseline,
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
             source_version=source_version,

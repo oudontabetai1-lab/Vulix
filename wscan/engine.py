@@ -8005,6 +8005,8 @@ class ScanEngine:
             probe_failures = set()
             probe_failure_token = _FIELD_PROBE_FAILURES.set(probe_failures)
             checks_executed += 1
+            from .payload_gen import _baseline_completion_status
+            _baseline_completion_status.set("ok")
             _dlg_check = getattr(self.browser, "dialog_total", 0)
             _begin_observation = getattr(scanner, "_begin_evolution_observation", None)
             _observation_scope = _begin_observation() if callable(_begin_observation) else None
@@ -8152,6 +8154,21 @@ class ScanEngine:
                         self.wave_errors.append(
                             f"candidate_phase_unreached:{check_name}:{','.join(sorted(_candidate_phase_gaps))}"
                         )
+                _baseline_status = _baseline_completion_status.get()
+                from .payload_gen import baseline_status_requires_resume
+                if baseline_status_requires_resume(_baseline_status):
+                    check_errored = True
+                    if _checkpoint_state is not None:
+                        _checkpoint_state.mark_baseline_unrecovered_ip(ip, check_name)
+                        _checkpoint_state.clear_candidate_snapshots_ip(ip, check_name, {"baseline"})
+                    if not any(
+                        note.startswith(f"baseline_llm_unrecovered:{check_name}:")
+                        for note in self.wave_errors[_scan_note_start:]
+                    ):
+                        self.wave_errors.append(f"baseline_llm_unrecovered:{check_name}:{_baseline_status}")
+                elif _baseline_status in {"unavailable", "permanent", "ok"}:
+                    if _checkpoint_state is not None:
+                        _checkpoint_state.clear_baseline_unrecovered_ip(ip, check_name)
                 if _field_check_checkpointable(
                     check_errored, check_name in _truncated, check_wedged
                 ):
