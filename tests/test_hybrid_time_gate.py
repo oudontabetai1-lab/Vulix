@@ -9,6 +9,7 @@ import main
 class _Monitor:
     def __init__(self):
         self.command_queue = asyncio.Queue()
+        self.scan_abort_event = asyncio.Event()
         self.statuses = []
         self.api_scan_status = "scanning"
 
@@ -18,6 +19,10 @@ class _Monitor:
             self.api_scan_status = "done"
         elif state == "error":
             self.api_scan_status = "error"
+
+    def request_abort(self):
+        self.scan_abort_event.set()
+        self.command_queue.put_nowait("abort")
 
 
 def test_hybrid_recon_window_allows_immediately_inside_window():
@@ -108,7 +113,7 @@ def test_hybrid_recon_wait_can_be_aborted_from_monitor_command_queue():
 
     async def request_abort_while_waiting(delay):
         sleeps.append(delay)
-        monitor.command_queue.put_nowait("abort")
+        monitor.request_abort()
 
     result = asyncio.run(
         main._wait_for_hybrid_recon_window(
@@ -123,7 +128,7 @@ def test_hybrid_recon_wait_can_be_aborted_from_monitor_command_queue():
     assert result is False
     assert sleeps == [0.5]
     assert monitor.statuses[0][1] == "paused"
-    assert monitor.statuses[-1][1] == "done"
+    assert monitor.statuses[-1][1] == "aborted"
 
 
 def test_agent_mode_waits_outside_window_without_real_sleep():

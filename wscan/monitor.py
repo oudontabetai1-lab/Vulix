@@ -322,6 +322,8 @@ class MonitorServer:
         # ── Intervention / plan-confirm channels ──────────────────────
         # Commands arriving from the web UI (pause / resume / skip_field / skip_page / abort)
         self.command_queue: asyncio.Queue = asyncio.Queue()
+        # Persistent for the lifetime of one scan; queue consumers may drain commands.
+        self.scan_abort_event: asyncio.Event = asyncio.Event()
         # Set when the operator clicks "Start Attack" in the plan review modal
         self.plan_confirm_event: asyncio.Event = asyncio.Event()
         # Plan edits returned by the operator (field overrides sent from web UI)
@@ -536,7 +538,7 @@ class MonitorServer:
         if time.time() - self._scan_started_at > self.scan_max_seconds:
             self._watchdog_fired = True
             try:
-                self.command_queue.put_nowait("abort")
+                self.request_abort()
             except Exception:
                 pass
             return True
@@ -1510,7 +1512,7 @@ class MonitorServer:
                 return JSONResponse(
                     {"error": "実行中のスキャンはありません。"}, status_code=409
                 )
-            self.command_queue.put_nowait("abort")
+            self.request_abort()
             self.api_scan_status = "aborting"
             self._audit("scan_abort", self._client_ip(request), self.current_scan_id)
             return JSONResponse({"status": "aborting"})
@@ -2500,7 +2502,10 @@ class MonitorServer:
             # e.g. {"action": "intervention", "command": "pause"}
             cmd = msg.get("command", "")
             if cmd:
-                self.command_queue.put_nowait(cmd)
+                if str(cmd).lower().strip() in ("abort", "q"):
+                    self.request_abort()
+                else:
+                    self.command_queue.put_nowait(cmd)
 
         elif action == "plan_confirm":
             # e.g. {"action": "plan_confirm", "edits": { url: {field: {risk, checks}} }}
@@ -2620,8 +2625,14 @@ class MonitorServer:
             return
         self.pending_interactive = None
 
+    def request_abort(self) -> None:
+        """Latch an abort for this scan and enqueue it for legacy consumers."""
+        self.scan_abort_event.set()
+        self.command_queue.put_nowait("abort")
+
     def _begin_scan_snapshot(self) -> None:
         """Start a new live-state generation without changing the public scan ID."""
+        self.scan_abort_event.clear()
         self._clear_pending_interactive()
         # 前スキャンのプラン確認状態を持ち越さない（古い編集の誤適用・即時通過の防止）。
         self.confirmed_plan_edits = {}

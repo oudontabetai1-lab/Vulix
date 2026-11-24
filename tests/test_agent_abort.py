@@ -11,7 +11,12 @@ import main
 class _Monitor:
     def __init__(self):
         self.command_queue = asyncio.Queue()
+        self.scan_abort_event = asyncio.Event()
         self.statuses = []
+
+    def request_abort(self):
+        self.scan_abort_event.set()
+        self.command_queue.put_nowait("abort")
 
     async def emit_status(self, message, state):
         self.statuses.append((message, state))
@@ -204,3 +209,69 @@ async def test_hybrid_recon_window_close_cancels_abort_monitored_operation():
     assert cleaned_up.is_set()
     assert monitor.command_queue.empty()
     assert monitor.statuses[-1][1] == "warning"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("race_order", ["abort-first", "window-first", "same-turn"])
+async def test_hybrid_abort_wins_at_time_window_boundary(race_order):
+    """Boundary cancellation cleanup must not erase an abort from the same turn."""
+    from datetime import datetime
+
+    monitor = _Monitor()
+    current = [datetime(2024, 1, 1, 11, 59, 59)]
+    boundary_waiting = asyncio.Event()
+    release_boundary = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    recon_finished = asyncio.Event()
+
+    async def fake_sleep(_delay):
+        boundary_waiting.set()
+        await release_boundary.wait()
+        current[0] = datetime(2024, 1, 1, 12, 0)
+
+    async def recon_operation():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            recon_finished.set()
+
+    task = asyncio.create_task(
+        main._run_hybrid_recon_with_retries(
+            recon_operation,
+            monitor,
+            ["Mon 10:00-12:00"],
+            None,
+            now_fn=lambda: current[0],
+            sleep_fn=fake_sleep,
+            max_retries=0,
+        )
+    )
+    await boundary_waiting.wait()
+
+    if race_order == "abort-first":
+        monitor.request_abort()
+        release_boundary.set()
+        release_cleanup.set()
+    elif race_order == "window-first":
+        release_boundary.set()
+        await cleanup_started.wait()
+        monitor.request_abort()
+        release_cleanup.set()
+    else:
+        monitor.request_abort()
+        current[0] = datetime(2024, 1, 1, 12, 0)
+        release_boundary.set()
+        release_cleanup.set()
+
+    handoff, continue_to_phase2 = await asyncio.wait_for(task, timeout=1)
+    if not release_cleanup.is_set():
+        release_cleanup.set()
+
+    assert (handoff, continue_to_phase2) == (None, False)
+    assert recon_finished.is_set()
+    assert monitor.scan_abort_event.is_set()
+    assert monitor.command_queue.empty()
+    assert monitor.statuses[-1][1] == "aborted"
