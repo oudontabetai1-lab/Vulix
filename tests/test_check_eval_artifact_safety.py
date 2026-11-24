@@ -5,13 +5,15 @@ import json
 import pytest
 
 from wscan.eval_artifact_safety import check_artifacts
+from wscan.agent_eval_model import AGENT_EVAL_METRIC_UNITS
 from wscan.eval_artifact_schema import render_summary, validate_scorecard
 
 
 def _distribution(value=1.0):
+    extremum = int(value) if isinstance(value, float) and value.is_integer() else value
     return {
         "count": 3, "mean": value, "stddev": 0.0, "variance": 0.0,
-        "min_value": value, "max_value": value, "ci_lower": value, "ci_upper": value,
+        "min_value": extremum, "max_value": extremum, "ci_lower": value, "ci_upper": value,
         "confidence_level": 0.95,
     }
 
@@ -20,10 +22,7 @@ def _valid_scorecard():
     profile = {
         "runs_count": 3,
         "status_counts": {"complete": 3},
-        "metrics": {name: _distribution() for name in (
-            "coverage_rate", "recall", "safe_twin_fp", "total_findings",
-            "duration_seconds", "total_tokens", "estimated_cost_usd",
-        )},
+        "metrics": {name: _distribution() for name in AGENT_EVAL_METRIC_UNITS},
     }
     return validate_scorecard({
         "schema_version": 1,
@@ -135,3 +134,96 @@ def test_rejects_non_allowlisted_artifact_name(tmp_path):
     json_path.rename(other)
     with pytest.raises(ValueError, match="only"):
         check_artifacts([other, md_path])
+
+
+@pytest.mark.parametrize(("metric", "value"), [
+    ("recall", -4),
+    ("coverage_rate", 99),
+    ("estimated_cost_usd", -500),
+])
+def test_rejects_reviewed_impossible_metric_values(tmp_path, metric, value):
+    scorecard = _valid_scorecard()
+    for profile in scorecard["profiles"].values():
+        distribution = profile["metrics"][metric]
+        for field in ("mean", "min_value", "max_value", "ci_lower", "ci_upper"):
+            distribution[field] = value
+    json_path, md_path = _write_artifacts(tmp_path, scorecard)
+    with pytest.raises(ValueError):
+        check_artifacts([json_path, md_path])
+
+
+@pytest.mark.parametrize("metric", ["coverage_rate", "recall", "partial_rate", "safe_twin_fpr"])
+def test_ratio_metrics_accept_zero_and_one_but_reject_out_of_range_values(tmp_path, metric):
+    for value in (0, 1):
+        scorecard = _valid_scorecard()
+        for profile in scorecard["profiles"].values():
+            profile["metrics"][metric] = _distribution(value)
+        check_artifacts(_write_artifacts(tmp_path, scorecard))
+    for value in (-1e-12, 1 + 1e-12):
+        scorecard = _valid_scorecard()
+        for profile in scorecard["profiles"].values():
+            profile["metrics"][metric] = _distribution(value)
+        json_path, md_path = _write_artifacts(tmp_path, scorecard)
+        with pytest.raises(ValueError):
+            check_artifacts([json_path, md_path])
+
+
+@pytest.mark.parametrize("metric", ["safe_twin_fp", "total_findings", "total_tokens"])
+def test_count_metrics_accept_zero_and_reject_negative_or_fractional_extrema(tmp_path, metric):
+    scorecard = _valid_scorecard()
+    for profile in scorecard["profiles"].values():
+        profile["metrics"][metric] = _distribution(0)
+    check_artifacts(_write_artifacts(tmp_path, scorecard))
+
+    for field, value in (("mean", -1), ("min_value", 0.5), ("max_value", 1.5)):
+        scorecard = _valid_scorecard()
+        for profile in scorecard["profiles"].values():
+            profile["metrics"][metric][field] = value
+        json_path, md_path = _write_artifacts(tmp_path, scorecard)
+        with pytest.raises(ValueError):
+            check_artifacts([json_path, md_path])
+
+
+@pytest.mark.parametrize("metric", ["duration_seconds", "estimated_cost_usd"])
+def test_time_and_cost_accept_zero_and_large_finite_values_but_reject_negative_or_infinite(tmp_path, metric):
+    for value in (0, 1e300):
+        scorecard = _valid_scorecard()
+        for profile in scorecard["profiles"].values():
+            profile["metrics"][metric] = _distribution(value)
+        check_artifacts(_write_artifacts(tmp_path, scorecard))
+
+    for value in (-1e-12, float("inf"), float("nan")):
+        scorecard = _valid_scorecard()
+        for profile in scorecard["profiles"].values():
+            profile["metrics"][metric] = _distribution(value)
+        json_path, md_path = _write_artifacts(tmp_path, scorecard)
+        with pytest.raises(ValueError):
+            check_artifacts([json_path, md_path])
+
+
+def test_rejects_misordered_confidence_interval_and_zero_trial_count(tmp_path):
+    scorecard = _valid_scorecard()
+    for profile in scorecard["profiles"].values():
+        distribution = profile["metrics"]["recall"]
+        distribution.update({"min_value": 0.5, "mean": 0.5, "max_value": 0.5, "ci_lower": 0.6, "ci_upper": 0.8})
+    json_path, md_path = _write_artifacts(tmp_path, scorecard)
+    with pytest.raises(ValueError, match="ci_lower"):
+        check_artifacts([json_path, md_path])
+
+    scorecard = _valid_scorecard()
+    for profile in scorecard["profiles"].values():
+        profile["runs_count"] = 0
+    json_path, md_path = _write_artifacts(tmp_path, scorecard)
+    with pytest.raises(ValueError):
+        check_artifacts([json_path, md_path])
+
+
+def test_accepts_single_trial_scorecard(tmp_path):
+    scorecard = _valid_scorecard()
+    for profile in scorecard["profiles"].values():
+        profile["runs_count"] = 1
+        profile["status_counts"] = {"complete": 1}
+        for distribution in profile["metrics"].values():
+            if distribution is not None:
+                distribution["count"] = 1
+    check_artifacts(_write_artifacts(tmp_path, scorecard))

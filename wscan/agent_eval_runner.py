@@ -12,10 +12,10 @@ from urllib.parse import urlsplit
 
 from wscan.agent_eval_gate import AgentEvalThresholds, evaluate_agent_eval_gate
 from wscan.agent_eval_model import (
-    AgentAggregateScorecard, AgentRunMetadata, AgentRunMetrics, AgentRunScorecard,
+    AGENT_EVAL_METRIC_UNITS, AgentAggregateScorecard, AgentRunMetadata, AgentRunMetrics, AgentRunScorecard,
     build_agent_scorecard,
 )
-from wscan.eval_artifact_schema import render_summary, validate_scorecard
+from wscan.eval_artifact_schema import bound_distribution_for_artifact, render_summary, validate_scorecard
 
 
 @dataclass(frozen=True)
@@ -56,8 +56,8 @@ async def run_agent_eval(
     _require_localhost(target)
     if provider.casefold() not in {"none", "fake", "replay", "deterministic-fake"} and not allow_live_provider:
         raise ValueError("live provider is disabled; explicit allow_live_provider is required")
-    if type(trials) is not int or trials < 0 or trials > int(budget.get("max_trials", 100)):
-        raise ValueError("trials must be within the configured max_trials budget")
+    if type(trials) is not int or trials < 1 or trials > int(budget.get("max_trials", 100)):
+        raise ValueError("trials must be at least one and within the configured max_trials budget")
     if type(seed) is not int or int(budget.get("max_steps", 0)) <= 0:
         raise ValueError("seed and positive max_steps budget are required")
     rng = random.Random(seed)
@@ -91,14 +91,15 @@ async def run_agent_eval(
 
 def _safe_artifact(result: EvalRun) -> dict[str, Any]:
     """固定 schema のみ公開し、run の findings/evidence/metadata を出力しない。"""
-    safe_metrics = ("coverage_rate", "recall", "safe_twin_fp", "total_findings", "duration_seconds",
-                    "total_tokens", "estimated_cost_usd")
     return validate_scorecard({
         "schema_version": 1,
         "profiles": {
             profile: {"runs_count": card.runs_count, "status_counts": dict(card.status_counts),
-                      "metrics": {key: card.distributions[key].to_dict() if key in card.distributions else None
-                                  for key in safe_metrics}}
+                      "metrics": {
+                          key: bound_distribution_for_artifact(key, card.distributions[key].to_dict())
+                          if key in card.distributions else None
+                          for key in AGENT_EVAL_METRIC_UNITS
+                      }}
             for profile, card in result.scorecards.items()
         },
         "gate": {"verdict": result.verdict.verdict.value, "passed": bool(result.verdict.passed),

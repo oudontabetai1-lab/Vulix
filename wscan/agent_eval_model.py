@@ -436,8 +436,12 @@ def compute_distribution(
     if any(not math.isfinite(v) for v in float_values):
         raise ValueError("values must be finite")
     mean_val = float(statistics.mean(float_values))
-    min_val = float(min(float_values))
-    max_val = float(max(float_values))
+    integral_values = all(type(value) is int for value in values)
+    min_val = min(float_values)
+    max_val = max(float_values)
+    if integral_values:
+        min_val = int(min_val)
+        max_val = int(max_val)
 
     if n == 1:
         return MetricDistribution(
@@ -529,6 +533,22 @@ class AgentAggregateScorecard:
         )
 
 
+# Public aggregate metric names and units are the single source of truth for
+# artifact ranges. Statistical means and intervals may be fractional even for
+# integer-count source measures.
+AGENT_EVAL_METRIC_UNITS: Mapping[str, str] = MappingProxyType({
+    "coverage_rate": "ratio",
+    "recall": "ratio",
+    "safe_twin_fp": "count",
+    "safe_twin_fpr": "ratio",
+    "partial_rate": "ratio",
+    "total_findings": "count",
+    "duration_seconds": "duration",
+    "total_tokens": "count",
+    "estimated_cost_usd": "cost",
+})
+
+
 def build_agent_scorecard(
     runs: Sequence[AgentRunScorecard | Mapping[str, Any]],
     config_name: str = "",
@@ -564,7 +584,10 @@ def build_agent_scorecard(
     unverified_findings = [r.metrics.unverified_findings for r in normalized_runs]
     recalls = [r.metrics.recall for r in normalized_runs if r.metrics.recall is not None]
     safe_twin_fps = [r.metrics.safe_twin_fp for r in normalized_runs]
+    safe_twin_fprs = [r.metrics.safe_twin_fpr for r in normalized_runs if r.metrics.safe_twin_fpr is not None]
     costs = [r.metrics.estimated_cost_usd for r in normalized_runs]
+    incomplete_statuses = {status.value for status in INCOMPLETE_EVAL_STATUSES}
+    partial_rates = [float(r.metrics.status in incomplete_statuses) for r in normalized_runs]
 
     distributions: dict[str, MetricDistribution] = {
         "input_tokens": compute_distribution(token_inputs, confidence_level),
@@ -578,10 +601,13 @@ def build_agent_scorecard(
         "verified_findings": compute_distribution(verified_findings, confidence_level),
         "unverified_findings": compute_distribution(unverified_findings, confidence_level),
         "safe_twin_fp": compute_distribution(safe_twin_fps, confidence_level),
+        "partial_rate": compute_distribution(partial_rates, confidence_level),
         "estimated_cost_usd": compute_distribution(costs, confidence_level),
     }
     if recalls:
         distributions["recall"] = compute_distribution(recalls, confidence_level)
+    if safe_twin_fprs:
+        distributions["safe_twin_fpr"] = compute_distribution(safe_twin_fprs, confidence_level)
 
     # ステータス別集計
     status_counts: dict[str, int] = {}

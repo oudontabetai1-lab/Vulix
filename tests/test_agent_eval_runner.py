@@ -59,3 +59,6 @@ async def test_empty_runs_missing_keys_and_live_provider_are_not_passes():
     with pytest.raises(ValueError, match="loopback"):
         await run_agent_eval(target="http://example.com", trials=1, seed=1,
                              budget={"max_steps": 2}, episode=unused)
+    with pytest.raises(ValueError, match="at least one"):
+        await run_agent_eval(target="http://localhost", trials=0, seed=1,
+                             budget={"max_steps": 2}, episode=unused)
