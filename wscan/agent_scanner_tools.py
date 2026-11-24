@@ -18,6 +18,74 @@ SUPPORTED_CHECKS = frozenset({"xss", "sqli", "os"})
 _SUPPORTED_CARRIERS = frozenset({"form", "query"})
 
 
+def _verification_consistency_reason(
+    record: dict,
+    *,
+    expected_binding: dict,
+    injection_point_id: str,
+    check_type: str,
+    scanner_evidence: list[dict],
+    work_evidence_ids: tuple[str, ...],
+) -> str:
+    """Checkpoint の outcome・digest・scanner finding evidence を一括検証する。"""
+    outcome = record.get("status")
+    reproduced = record.get("reproduced")
+    deterministic = record.get("deterministic_confirmed")
+    expected_flags = {
+        "confirmed": (True, True),
+        "rejected": (False, False),
+        "inconclusive": (False, False),
+    }
+    if outcome not in expected_flags or (reproduced, deterministic) != expected_flags[outcome]:
+        return "outcome fields conflict"
+
+    expected_digest = AgentScannerTools._binding_digest(expected_binding)
+    binding = record.get("binding")
+    if (
+        not isinstance(binding, dict)
+        or record.get("binding_digest") != expected_digest
+        or AgentScannerTools._binding_digest(binding) != expected_digest
+    ):
+        return "verification binding does not match the current input point"
+
+    evidence_ids = record.get("evidence_ids")
+    if not isinstance(evidence_ids, list) or not all(isinstance(item, str) and item for item in evidence_ids):
+        return "evidence IDs are malformed"
+    if outcome != "confirmed":
+        return "non-confirmed outcome references scanner finding evidence" if evidence_ids else ""
+    if not evidence_ids:
+        return "confirmed outcome has no scanner finding evidence"
+
+    evidence_by_id = {}
+    for item in scanner_evidence:
+        if not isinstance(item, dict) or not item.get("evidence_id"):
+            continue
+        evidence_id = str(item["evidence_id"])
+        if evidence_id in evidence_by_id:
+            return "scanner finding evidence ID is duplicated"
+        evidence_by_id[evidence_id] = item
+    if len(set(evidence_ids)) != len(evidence_ids):
+        return "verification evidence IDs are duplicated"
+    for evidence_id in evidence_ids:
+        evidence = evidence_by_id.get(evidence_id)
+        if evidence is None or evidence_id not in work_evidence_ids:
+            return "referenced scanner finding evidence is missing"
+        finding = evidence.get("finding")
+        if (
+            evidence.get("work_id") != record.get("work_id")
+            or evidence.get("injection_point_id") != injection_point_id
+            or evidence.get("check_type") != check_type
+            or evidence.get("binding_digest") != expected_digest
+            or not isinstance(finding, dict)
+            or finding.get("check_type") != check_type
+            or finding.get("source") != "deterministic"
+            or finding.get("deterministic_confirmed") is not True
+            or finding.get("agent_verified") is not True
+        ):
+            return "scanner finding evidence is inconsistent with its verification binding"
+    return ""
+
+
 class AgentScannerTools:
     """Expose ID-only scanner actions while keeping transport and secrets server-side."""
 
@@ -304,13 +372,21 @@ class AgentScannerTools:
                 elif verification is None:
                     verification_inconclusive = True
             status = WorkStatus.INCONCLUSIVE if verification_inconclusive and not verified else WorkStatus.COMPLETE
-            self.findings[work_id] = self._sanitize_findings(verified)
+            sanitized_findings = self._sanitize_findings(verified)
+            evidence_ids = self._persist_scanner_evidence(
+                work_id, point_id, check, binding_digest, sanitized_findings,
+            )
+            self.findings[work_id] = sanitized_findings
             self.harness.record_probe_attempt(
                 target_url=point.url, check_type=check, work_id=work_id,
                 status="inconclusive" if status == WorkStatus.INCONCLUSIVE else "completed",
                 evidence_id=work_id, binding=binding, binding_digest=binding_digest,
             )
-            self.harness.finish_work(work_id, status, summary=f"deterministic scanner work finished: {len(verified)} verified findings")
+            self.harness.finish_work(
+                work_id, status,
+                summary=f"deterministic scanner work finished: {len(verified)} verified findings",
+                evidence_ids=evidence_ids,
+            )
             for hypothesis in self.harness.state.hypotheses:
                 hypothesis_id = str(hypothesis.get("candidate_id", ""))
                 if hypothesis.get("injection_point_id") == point_id and hypothesis.get("check_type") == check:
@@ -352,14 +428,18 @@ class AgentScannerTools:
         if not hypothesis:
             return {"status": "inconclusive", "reason": "unknown hypothesis ID"}
         recorded, ledger_error = self._verification_record(hypothesis_id)
-        if recorded is not None and self._verification_is_trustworthy(recorded, hypothesis):
+        record_reason = self._verification_consistency_reason(recorded, hypothesis) if recorded is not None else ""
+        if recorded is not None and not record_reason:
             self._restore_hypothesis_outcome(hypothesis_id, recorded)
             return self._verification_result(hypothesis_id, recorded)
         unverifiable_checkpoint = bool(
             recorded is not None or ledger_error or self._checkpoint_claims_confirmation(hypothesis)
         )
         if unverifiable_checkpoint:
-            self._downgrade_unverifiable(hypothesis_id)
+            self._downgrade_unverifiable(
+                hypothesis_id,
+                f"inconsistent_verification_record: {record_reason}" if record_reason else None,
+            )
         point_id = hypothesis.get("injection_point_id", "")
         check = hypothesis.get("check_type", "")
         scheduled = self.schedule_scanner(point_id, check)
@@ -372,15 +452,22 @@ class AgentScannerTools:
         self.work_specs[scheduled["work_id"]] = (point_id, check)
         existing = next(item for item in self.harness.state.work_queue if item.work_id == scheduled["work_id"])
         if existing.status == WorkStatus.COMPLETE:
-            reason = "unverifiable_checkpoint: completed scanner result has no valid deterministic evidence; replay was suppressed"
+            reason = (
+                f"inconsistent_verification_record: {record_reason}; replay was suppressed"
+                if record_reason else
+                "unverifiable_checkpoint: completed scanner result has no valid deterministic evidence; replay was suppressed"
+            )
             self._downgrade_unverifiable(hypothesis_id, reason)
             return {"status": "inconclusive", "reason": reason, "hypothesis_id": hypothesis_id, "work_id": existing.work_id}
         result = await self.run_scanner_work(scheduled["work_id"])
         recorded, ledger_error = self._verification_record(hypothesis_id)
-        if recorded is not None and self._verification_is_trustworthy(recorded, hypothesis):
+        record_reason = self._verification_consistency_reason(recorded, hypothesis) if recorded is not None else ""
+        if recorded is not None and not record_reason:
             self._restore_hypothesis_outcome(hypothesis_id, recorded)
             return {**self._verification_result(hypothesis_id, recorded), "work_id": scheduled["work_id"]}
-        if recorded is not None or ledger_error:
+        if record_reason:
+            reason = f"inconsistent_verification_record: {record_reason}; automatic replay was suppressed"
+        elif recorded is not None or ledger_error:
             reason = "unverifiable_checkpoint: deterministic verification ledger is unreadable or inconsistent; automatic replay was suppressed"
         else:
             reason = result.get("reason") or "scanner could not complete deterministic verification"
@@ -408,6 +495,7 @@ class AgentScannerTools:
         self, hypothesis_id: str, outcome: str, reason: str, *, work_id: str = "",
         injection_point_id: str = "",
     ) -> None:
+        # Checkpoint は信頼されたローカル状態であり、書込み権限者による整合した偽造は防御対象外。
         confirmed = outcome == "confirmed"
         point_id = injection_point_id or next((str(item.get("injection_point_id", ""))
             for item in self.harness.state.hypotheses
@@ -417,7 +505,6 @@ class AgentScannerTools:
             confirmed = False
             outcome = "inconclusive"
             reason = reason or "unverifiable_checkpoint: verification identifiers are incomplete"
-        evidence_ids = (work_id,) if work_id else ()
         binding = None
         binding_digest = ""
         point, metadata = self._resolve(point_id) if point_id else (None, None)
@@ -426,6 +513,12 @@ class AgentScannerTools:
         if point is not None and metadata is not None:
             binding = self._verification_binding(point, metadata, str(hypothesis.get("check_type", "")))
             binding_digest = self._binding_digest(binding)
+        work = next((item for item in self.harness.state.work_queue if item.work_id == work_id), None) if work_id else None
+        evidence_ids = tuple(work.evidence_ids) if confirmed and work is not None else ()
+        if confirmed and not evidence_ids:
+            confirmed = False
+            outcome = "inconclusive"
+            reason = reason or "inconsistent_verification_record: confirmed outcome has no scanner finding evidence"
         self.harness.record_verification(
             hypothesis_id, reproduced=confirmed, status=outcome,
             method="deterministic", work_id=work_id,
@@ -461,11 +554,11 @@ class AgentScannerTools:
             or hypothesis.get("source_label") == "agent_deterministic_confirmed"
         )
 
-    def _downgrade_unverifiable(self, hypothesis_id: str, reason: str = "unverifiable_checkpoint: deterministic ledger evidence is missing or inconsistent") -> None:
+    def _downgrade_unverifiable(self, hypothesis_id: str, reason: str | None = None) -> None:
         self.harness.update_hypothesis(
             hypothesis_id, status="agent_only", verification_outcome="inconclusive",
             deterministic_confirmed=False, source_label="agent_unverified",
-            rejection_reason=reason,
+            rejection_reason=reason or "unverifiable_checkpoint: deterministic ledger evidence is missing or inconsistent",
         )
 
     def _restore_hypothesis_outcome(self, hypothesis_id: str, record: dict) -> None:
@@ -481,59 +574,54 @@ class AgentScannerTools:
         )
 
     def _verification_is_trustworthy(self, record: dict, hypothesis: dict) -> bool:
+        return not self._verification_consistency_reason(record, hypothesis)
+
+    def _verification_consistency_reason(self, record: dict, hypothesis: dict) -> str:
         point_id = str(hypothesis.get("injection_point_id", ""))
-        point, _ = self._resolve(point_id)
-        if point is None:
-            return False
-        evidence_ids = record.get("evidence_ids")
+        point, metadata = self._resolve(point_id)
+        if point is None or metadata is None:
+            return "unknown injection point"
         if (
             not isinstance(record.get("verification_id"), str) or not record.get("verification_id")
-            or not isinstance(evidence_ids, list) or not evidence_ids
-            or not all(isinstance(item, str) for item in evidence_ids)
             or not isinstance(record.get("work_id"), str) or not record.get("work_id")
-            or record.get("work_id") not in evidence_ids
             or record.get("candidate_id") != hypothesis.get("candidate_id")
             or record.get("injection_point_id") != point_id
             or record.get("method") != "deterministic"
         ):
-            return False
+            return "verification identifiers are incomplete or inconsistent"
         if not isinstance(record.get("binding"), dict):
-            return False
+            return "verification binding is missing"
         ledger_binding = dict(record["binding"])
         # Legacy scalar columns remain for reporting; fold them into the single binding hash.
         ledger_binding["scan_id"] = str(record.get("scan_id", ""))
         ledger_binding["code_head"] = str(record.get("head_id", ""))
-        record = {**record, "binding": ledger_binding,
-                  "binding_digest": record.get("binding_digest")}
-        if not self._verification_binding_matches(record, point, hypothesis):
-            return False
+        record = {**record, "binding": ledger_binding}
+        expected_binding = self._verification_binding(point, metadata, str(hypothesis.get("check_type", "")))
         work = next((item for item in self.harness.state.work_queue if item.work_id == record.get("work_id")), None)
         if (
             work is None or work.target != point_id
             or work.check_type != hypothesis.get("check_type")
         ):
-            return False
+            return "scanner work does not match the hypothesis"
         outcome = record.get("status")
-        if outcome == "confirmed":
-            return (
-                work.status == WorkStatus.COMPLETE
-                and record.get("reproduced") is True
-                and record.get("deterministic_confirmed") is True
-                and self._probe_evidence_matches(record, outcome="completed")
-            )
-        if outcome == "rejected":
-            return (
-                work.status == WorkStatus.COMPLETE
-                and record.get("reproduced") is False
-                and record.get("deterministic_confirmed") is False
-                and self._probe_evidence_matches(record, outcome="completed")
-            )
-        return (
-            outcome == "inconclusive"
-            and record.get("reproduced") is False
-            and record.get("deterministic_confirmed") is False
-            and self._probe_evidence_matches(record, outcome=None)
+        if outcome in {"confirmed", "rejected"} and work.status != WorkStatus.COMPLETE:
+            return "scanner work is not complete"
+        if outcome == "inconclusive" and work.status not in {WorkStatus.INCONCLUSIVE, WorkStatus.COMPLETE}:
+            return "scanner work is not complete"
+        consistency_reason = _verification_consistency_reason(
+            record,
+            expected_binding=expected_binding,
+            injection_point_id=point_id,
+            check_type=str(hypothesis.get("check_type", "")),
+            scanner_evidence=self.harness.state.scanner_evidence,
+            work_evidence_ids=tuple(work.evidence_ids),
         )
+        if consistency_reason:
+            return consistency_reason
+        probe_status = "completed" if outcome in {"confirmed", "rejected"} else None
+        if not self._probe_evidence_matches(record, outcome=probe_status):
+            return "scanner probe evidence is missing or inconsistent"
+        return ""
 
     def _probe_evidence_matches(self, verification: dict, *, outcome: str | None) -> bool:
         path = self.harness.probe_attempts_path
@@ -602,19 +690,6 @@ class AgentScannerTools:
             "scan_id": str(self.harness.state.run_id),
             "code_head": self._current_head_id(),
         }
-
-    def _verification_binding_matches(self, record: dict, point: InjectionPoint, hypothesis: dict) -> bool:
-        metadata = self.points.get(str(hypothesis.get("injection_point_id", "")))
-        if not isinstance(metadata, dict):
-            return False
-        expected = self._verification_binding(point, metadata, str(hypothesis.get("check_type", "")))
-        digest = self._binding_digest(expected)
-        recorded_binding = record.get("binding")
-        return bool(
-            isinstance(recorded_binding, dict)
-            and record.get("binding_digest") == digest
-            and self._binding_digest(recorded_binding) == digest
-        )
 
     def _recorded_target_in_scope(self, target_url: str) -> bool:
         from wscan.llm_agent_browser import _url_is_excluded, security_probe_allowed
@@ -690,6 +765,29 @@ class AgentScannerTools:
                 deterministic_confirmed=True,
             ))
         return result
+
+    def _persist_scanner_evidence(
+        self, work_id: str, point_id: str, check: str, binding_digest: str, findings: list,
+    ) -> list[str]:
+        evidence_ids = []
+        for index, finding in enumerate(findings):
+            finding_dict = finding.to_dict()
+            canonical = json.dumps(
+                {"work_id": work_id, "binding_digest": binding_digest,
+                 "index": index, "finding": finding_dict},
+                sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            )
+            evidence_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+            self.harness.record_scanner_evidence({
+                "evidence_id": evidence_id,
+                "work_id": work_id,
+                "injection_point_id": point_id,
+                "check_type": check,
+                "binding_digest": binding_digest,
+                "finding": finding_dict,
+            })
+            evidence_ids.append(evidence_id)
+        return evidence_ids
 
     def agent_findings(self) -> list:
         return [finding for findings in self.findings.values() for finding in findings]

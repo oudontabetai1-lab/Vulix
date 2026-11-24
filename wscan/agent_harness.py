@@ -399,6 +399,7 @@ class AgentRunState:
     checkpoint_generation: int = 0
     work_queue: list[AgentWorkItem] = field(default_factory=list)
     hypotheses: list[dict] = field(default_factory=list)
+    scanner_evidence: list[dict] = field(default_factory=list)
     guard_records: list[dict] = field(default_factory=list)
     # 認証秘密の resume 同一性。per-run salt 付き scrypt（_auth_fingerprint）で、spec_hash には
     # 秘密を入れない（無塩 SHA-256 だと artifact から低エントロピー password を辞書攻撃できる）。
@@ -425,6 +426,8 @@ class AgentRunState:
         values["work_queue"] = [
             AgentWorkItem.from_dict(item) for item in values.get("work_queue", [])
         ]
+        scanner_evidence = values.get("scanner_evidence", [])
+        values["scanner_evidence"] = scanner_evidence if isinstance(scanner_evidence, list) else []
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in values.items() if k in known})
 
@@ -994,6 +997,20 @@ class AgentHarness:
                 existing[candidate_id] = merged
         self.state.hypotheses = list(existing.values())
         self.state.hypotheses_count = len(self.state.hypotheses)
+        self.checkpoint()
+
+    def record_scanner_evidence(self, evidence: dict) -> None:
+        """決定論スキャナが再現確認した finding を checkpoint に保存する。"""
+        safe = self._sanitize_value(dict(evidence))
+        evidence_id = str(safe.get("evidence_id", ""))
+        if not evidence_id:
+            raise ValueError("scanner evidence requires an evidence ID")
+        for existing in self.state.scanner_evidence:
+            if existing.get("evidence_id") == evidence_id:
+                if existing != safe:
+                    raise ValueError("scanner evidence ID collision")
+                return
+        self.state.scanner_evidence.append(safe)
         self.checkpoint()
 
     def update_hypothesis(

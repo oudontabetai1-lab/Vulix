@@ -429,7 +429,14 @@ def test_saved_hypothesis_can_be_verified_once_after_resume(tmp_path):
         assert stored["source_label"] == "agent_deterministic_confirmed"
         record = json.loads(resumed_harness.verification_results_path.read_text().splitlines()[-1])
         assert record["verification_id"]
-        assert record["evidence_ids"] == [work_id]
+        assert record["evidence_ids"]
+        assert record["evidence_ids"] != [work_id]
+        evidence = next(item for item in resumed_harness.state.scanner_evidence
+                        if item["evidence_id"] == record["evidence_ids"][0])
+        assert evidence["work_id"] == work_id
+        assert evidence["injection_point_id"] == point_id
+        assert evidence["check_type"] == "xss"
+        assert evidence["binding_digest"] == record["binding_digest"]
         assert record["head_id"] == resumed_tools._current_head_id()
         assert record["scan_id"] == resumed_harness.state.run_id
         assert record["injection_point_id"] == point_id
@@ -549,7 +556,7 @@ def test_verification_from_another_scan_is_not_trusted(tmp_path):
         assert stored["status"] == "agent_only"
         assert stored["deterministic_confirmed"] is False
         assert stored["source_label"] == "agent_unverified"
-        assert "unverifiable_checkpoint" in stored["rejection_reason"]
+        assert "inconsistent_verification_record" in stored["rejection_reason"]
         assert resumed.state.work_queue[0].work_id == work_id
     asyncio.run(scenario())
 
@@ -582,7 +589,7 @@ def test_confirmation_requires_matching_probe_evidence_after_resume(tmp_path):
         assert stored["verification_outcome"] == "inconclusive"
         assert stored["deterministic_confirmed"] is False
         assert stored["source_label"] == "agent_unverified"
-        assert "unverifiable_checkpoint" in stored["rejection_reason"]
+        assert "inconsistent_verification_record" in stored["rejection_reason"]
     asyncio.run(scenario())
 
 
@@ -640,7 +647,7 @@ def test_tampered_probe_binding_cannot_restore_confirmation(tmp_path, mutation):
         saved = next(item for item in resumed.state.hypotheses if item["candidate_id"] == candidate["candidate_id"])
         assert saved["status"] == "agent_only"
         assert saved["deterministic_confirmed"] is False
-        assert "unverifiable_checkpoint" in saved["rejection_reason"]
+        assert "inconsistent_verification_record" in saved["rejection_reason"]
     asyncio.run(scenario())
 
 
@@ -673,6 +680,7 @@ def test_resumed_hypothesis_records_rejected_and_inconclusive_labels(tmp_path, v
         ledger = [json.loads(line) for line in resumed.verification_results_path.read_text().splitlines()]
         assert ledger[-1]["status"] == expected
         assert ledger[-1]["deterministic_confirmed"] is False
+        assert ledger[-1]["evidence_ids"] == []
         stored = next(item for item in resumed.state.hypotheses if item["candidate_id"] == candidate["candidate_id"])
         assert stored["verification_outcome"] == expected
         assert stored["status"] == "agent_only"
@@ -681,6 +689,64 @@ def test_resumed_hypothesis_records_rejected_and_inconclusive_labels(tmp_path, v
         assert resumed.state.work_queue[0].work_id == work_id
         if expected == "inconclusive":
             assert resumed.state.work_queue[0].status == WorkStatus.INCONCLUSIVE
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("tampering", [
+    "rejected_to_confirmed", "empty_evidence", "missing_evidence", "conflicting_flags",
+])
+def test_resume_rejects_inconsistent_verification_evidence(tmp_path, tampering):
+    async def scenario():
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+        harness = _harness(tmp_path)
+        tools = AgentScannerTools(scanner, harness)
+        point_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+        candidate = {
+            "candidate_id": f"inconsistent-{tampering}", "check_type": "xss",
+            "url": "https://target.test/search?q=1", "field_name": "q",
+            "injection_point_id": point_id,
+        }
+        harness.note_hypotheses([candidate])
+        if tampering == "rejected_to_confirmed":
+            scanner_result = _FakeScanner(findings=[])
+            expected = "rejected"
+        else:
+            finding = SimpleNamespace(
+                check_type="xss", severity="high", url=candidate["url"], field_name="q",
+                payload="marker", evidence="reproduced",
+            )
+            scanner_result = _FakeScanner(findings=[finding])
+            expected = "confirmed"
+        tools.engine_factory = lambda *_: _FakeEngine(
+            "xss", SimpleNamespace(cookies=[]), scanner=scanner_result,
+        )
+        assert (await tools.verify_hypothesis(candidate["candidate_id"]))["status"] == expected
+
+        ledger = [json.loads(line) for line in harness.verification_results_path.read_text().splitlines()]
+        record = ledger[-1]
+        if tampering == "rejected_to_confirmed":
+            record.update(status="confirmed", reproduced=True, deterministic_confirmed=True)
+        elif tampering == "empty_evidence":
+            record["evidence_ids"] = []
+        elif tampering == "missing_evidence":
+            record["evidence_ids"] = ["missing-evidence"]
+        else:
+            record.update(status="confirmed", reproduced=True, deterministic_confirmed=False)
+        harness.verification_results_path.write_text(
+            "".join(json.dumps(item) + "\n" for item in ledger), encoding="utf-8",
+        )
+
+        resumed = _harness(tmp_path, resume=True)
+        resumed_tools = AgentScannerTools(
+            scanner, resumed,
+            engine_factory=lambda *_: pytest.fail("inconsistent evidence must not be replayed or confirmed"),
+        )
+        result = await resumed_tools.verify_hypothesis(candidate["candidate_id"])
+        assert result["status"] == "inconclusive"
+        stored = next(item for item in resumed.state.hypotheses if item["candidate_id"] == candidate["candidate_id"])
+        assert stored["status"] == "agent_only"
+        assert stored["deterministic_confirmed"] is False
+        assert "inconsistent_verification_record" in stored["rejection_reason"]
     asyncio.run(scenario())
 
 
