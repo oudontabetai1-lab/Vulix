@@ -32,6 +32,10 @@ class CandidateSnapshotError(RuntimeError):
     """Candidate state is corrupt or could not be durably saved."""
 
 
+class BaselineRecoveryBlocked(RuntimeError):
+    """送信履歴が完全と証明できず、baseline の再送を止めた。"""
+
+
 _CURRENT_EVOLUTION_OBSERVATION: ContextVar[Optional[tuple[dict, set[str]]]] = ContextVar(
     "wscan_current_evolution_observation", default=None
 )
@@ -1114,6 +1118,28 @@ class BaseScanner(ABC):
         self, ip: InjectionPoint, payload, *, probe_role="attack", probe_wave="standard",
         baseline_attempt_ids=(), control_attempt_ids=(), parent_attempt_id="",
     ) -> tuple[str, dict]:
+        # Persist the at-most-once marker before crossing the network boundary. If the
+        # process dies after the server acts, resume must already know this probe may
+        # have been delivered. Saving per dispatch is intentional: a later batch save
+        # would leave the same crash window as the observational attempt ledger.
+        checkpoint = getattr(getattr(self, "engine", None), "checkpoint", None)
+        engine = getattr(self, "engine", None)
+        if checkpoint is not None and getattr(engine, "enable_checkpoint", True):
+            try:
+                if not checkpoint.record_payload_fingerprint_ip(ip, self.CHECK_TYPE, payload):
+                    raise RuntimeError("payload fingerprint could not be recorded")
+                if not checkpoint.mark_payload_fingerprints_incomplete_ip(ip, self.CHECK_TYPE):
+                    raise RuntimeError("payload fingerprint state is invalid")
+                save = getattr(engine, "_save_checkpoint", None)
+                if not callable(save) or save() is not True:
+                    raise RuntimeError("payload fingerprint checkpoint could not be saved")
+            except Exception as exc:
+                errors = getattr(engine, "wave_errors", None)
+                if isinstance(errors, list):
+                    errors.append(f"baseline_llm_recovery_blocked:{self.CHECK_TYPE}:fingerprint_write")
+                raise BaselineRecoveryBlocked(
+                    "probe blocked because its sent-payload fingerprint was not durable"
+                ) from exc
         source, pair = await self._send_probe(
             ip, lambda: self._apply_ip_unrecorded(ip, payload), role=probe_role, wave=probe_wave,
             baseline_attempt_ids=baseline_attempt_ids, control_attempt_ids=control_attempt_ids,
@@ -2363,8 +2389,16 @@ class BaseScanner(ABC):
         )
 
     def _record_attempt(self, ip: "InjectionPoint", payload, source: str, pair: dict) -> None:
-        """(注入点, check) 単位で payload→応答メタを試行台帳へ蓄積する（best-effort）。"""
-        ledger = getattr(getattr(self, "engine", None), "attempt_ledger", None)
+        """送信指紋を保存し、観測用の応答メタを台帳へ蓄積する（best-effort）。"""
+        engine = getattr(self, "engine", None)
+        checkpoint = getattr(engine, "checkpoint", None)
+        if checkpoint is not None and getattr(engine, "enable_checkpoint", True):
+            try:
+                checkpoint.record_payload_fingerprint_ip(ip, self.CHECK_TYPE, payload)
+            except Exception:
+                # 指紋保存不能は complete 判定に反映され、後続 resume が fail closed になる。
+                pass
+        ledger = getattr(engine, "attempt_ledger", None)
         if ledger is None:
             return
         try:
@@ -2569,8 +2603,29 @@ class BaseScanner(ABC):
         )
         from wscan.engine import _FIELD_PAYLOAD_STAGE
         phase = _FIELD_PAYLOAD_STAGE.get() or "baseline"
+        checkpoint = getattr(self.engine, "checkpoint", None)
+        recovering_baseline = bool(
+            ip is not None
+            and checkpoint is not None
+            and phase == "baseline"
+            and checkpoint.is_baseline_unrecovered_ip(ip, self.CHECK_TYPE)
+        )
+        recovery_fingerprints: set[str] | None = None
+        if recovering_baseline:
+            complete, recovery_fingerprints, reason = checkpoint.get_payload_fingerprints_ip(
+                ip, self.CHECK_TYPE
+            )
+            if not complete:
+                from wscan.payload_gen import _baseline_completion_status
+                _baseline_completion_status.set("transient")
+                errors = getattr(self.engine, "wave_errors", None)
+                if isinstance(errors, list):
+                    errors.append(f"baseline_llm_recovery_blocked:{self.CHECK_TYPE}:{reason}")
+                raise BaselineRecoveryBlocked(
+                    "baseline recovery blocked: sent-payload history is incomplete"
+                )
         found, saved = self._candidate_snapshot(ip, phase)
-        if found:
+        if found and not recovering_baseline:
             return saved or []
         # 試行台帳から当該注入点の履歴を取り出し、生成へ戻す（evaluator-optimizer）。
         attempt_history = None
@@ -2627,11 +2682,28 @@ class BaseScanner(ABC):
             attempt_history=attempt_history,
             learning_summary_provider=learning_summary_provider,
         )
-        checkpoint = getattr(self.engine, "checkpoint", None)
-        if ip is not None and checkpoint is not None and checkpoint.is_baseline_unrecovered_ip(ip, self.CHECK_TYPE):
-            # fallback payloads were already sent on the interrupted run; only add unseen payloads.
+        if recovering_baseline:
+            assert recovery_fingerprints is not None
             from wscan.attempt_ledger import untried_payloads
-            payloads = untried_payloads(payloads, attempt_history or [])
+            unit_key = checkpoint._candidate_unit_key(ip, self.CHECK_TYPE)
+            payloads = untried_payloads(
+                payloads, recovery_fingerprints, unit_key, self.CHECK_TYPE
+            )
+            if not checkpoint.mark_payload_fingerprints_incomplete_ip(ip, self.CHECK_TYPE):
+                from wscan.payload_gen import _baseline_completion_status
+                _baseline_completion_status.set("transient")
+                errors = getattr(self.engine, "wave_errors", None)
+                if isinstance(errors, list):
+                    errors.append(f"baseline_llm_recovery_blocked:{self.CHECK_TYPE}:fingerprints_invalid")
+                raise BaselineRecoveryBlocked("baseline recovery blocked: sent-payload history is invalid")
+            save = getattr(self.engine, "_save_checkpoint", None)
+            if not callable(save) or save() is not True:
+                from wscan.payload_gen import _baseline_completion_status
+                _baseline_completion_status.set("transient")
+                errors = getattr(self.engine, "wave_errors", None)
+                if isinstance(errors, list):
+                    errors.append(f"baseline_llm_recovery_blocked:{self.CHECK_TYPE}:checkpoint_write")
+                raise BaselineRecoveryBlocked("baseline recovery blocked: checkpoint could not be saved")
         # A-3 / ⑩: re-order by historical success rate (domain-aware)
         if _learning_on:
             payloads = learner.sort_payloads(self.CHECK_TYPE, payloads, domain=_domain)

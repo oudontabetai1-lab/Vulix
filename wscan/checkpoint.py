@@ -18,12 +18,14 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from .url_normalize import key_url, normalize_url_for_key
+from .attempt_ledger import payload_fingerprint
 
 if TYPE_CHECKING:
     from wscan.injection_point import InjectionPoint
@@ -37,8 +39,11 @@ if TYPE_CHECKING:
 # v8: 初回の打切り後に設定回数ぶん再試行できるよう exhausted 閾値を補正。
 # v9: field/check ごとの phase 別 payload 候補スナップショットと legacy unknown を保存。
 # v10: baseline LLM 一時失敗の未回収単位を保存。
-CHECKPOINT_VERSION = 10
+# v11: 送信済み payload 指紋と完全性を保存。
+CHECKPOINT_VERSION = 11
 CHECKPOINT_FILENAME = "checkpoint.json"
+MAX_PAYLOAD_FINGERPRINTS_PER_UNIT = 4096
+_PAYLOAD_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def unit_key(
@@ -100,6 +105,9 @@ class CheckpointState:
     # 旧 checkpoint には過去の候補列が無い。復元不能な truncated unit は tested にしない。
     legacy_candidate_unknown: set[str] = field(default_factory=set)
     unrecovered_baseline: set[str] = field(default_factory=set)
+    # Baseline recovery の at-most-once 用。payload 本文は保存せず、unit/check 単位の
+    # SHA-256 指紋と集合の完全性だけを永続化する。
+    payload_fingerprints: object = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     # 読み込んだデータのスキーマ版（新規作成は現行版）。情報用。v1→v2 の差分
@@ -158,6 +166,116 @@ class CheckpointState:
     def clear_baseline_unrecovered_ip(self, ip: "InjectionPoint", check_type: str) -> None:
         self.unrecovered_baseline.discard(self._candidate_unit_key(ip, check_type))
         self.updated_at = time.time()
+
+    def has_payload_fingerprint_record_ip(
+        self, ip: "InjectionPoint", check_type: str,
+    ) -> bool:
+        if not isinstance(self.payload_fingerprints, dict):
+            return True  # 壊れた outer value も「履歴不明」として扱う
+        return self._candidate_unit_key(ip, check_type) in self.payload_fingerprints
+
+    def get_payload_fingerprints_ip(
+        self, ip: "InjectionPoint", check_type: str,
+    ) -> tuple[bool, set[str], str]:
+        """完全な指紋列のみ信用する。不在・旧形式・破損・上限超過は理由付きで失敗。"""
+        if not isinstance(self.payload_fingerprints, dict):
+            return False, set(), "fingerprints_invalid"
+        key = self._candidate_unit_key(ip, check_type)
+        entry = self.payload_fingerprints.get(key)
+        if entry is None:
+            return False, set(), "fingerprints_missing"
+        if not isinstance(entry, dict) or entry.get("version") != 1:
+            return False, set(), "fingerprints_legacy_or_invalid"
+        values = entry.get("fingerprints")
+        if (
+            not isinstance(values, list)
+            or any(not isinstance(value, str) or not _PAYLOAD_FINGERPRINT_RE.fullmatch(value) for value in values)
+        ):
+            return False, set(), "fingerprints_invalid"
+        if entry.get("truncated") is True or len(values) > MAX_PAYLOAD_FINGERPRINTS_PER_UNIT:
+            return False, set(), "fingerprints_truncated"
+        if entry.get("complete") is not True:
+            return False, set(), "fingerprints_incomplete"
+        return True, set(values), ""
+
+    def begin_payload_fingerprints_ip(
+        self, ip: "InjectionPoint", check_type: str,
+    ) -> bool:
+        """初回掃射前に未完の指紋記録を作る。既存記録は上書きしない。"""
+        if not isinstance(self.payload_fingerprints, dict):
+            return False
+        key = self._candidate_unit_key(ip, check_type)
+        if key not in self.payload_fingerprints:
+            self.payload_fingerprints[key] = {
+                "version": 1, "fingerprints": [], "complete": False, "truncated": False,
+            }
+            self.updated_at = time.time()
+        return True
+
+    def mark_payload_fingerprints_incomplete_ip(
+        self, ip: "InjectionPoint", check_type: str,
+    ) -> bool:
+        """resume probe の前に未完状態を永続化し、途中クラッシュを fail closed にする。"""
+        if not isinstance(self.payload_fingerprints, dict):
+            return False
+        entry = self.payload_fingerprints.get(self._candidate_unit_key(ip, check_type))
+        if not isinstance(entry, dict) or entry.get("version") != 1:
+            return False
+        entry["complete"] = False
+        self.updated_at = time.time()
+        return True
+
+    def record_payload_fingerprint_ip(
+        self, ip: "InjectionPoint", check_type: str, payload,
+    ) -> bool:
+        """送信直後に本文を保持せず指紋を追記。上限到達なら不完全を固定する。"""
+        if not self.begin_payload_fingerprints_ip(ip, check_type):
+            return False
+        key = self._candidate_unit_key(ip, check_type)
+        entry = self.payload_fingerprints.get(key)
+        if not isinstance(entry, dict) or entry.get("version") != 1:
+            return False
+        values = entry.get("fingerprints")
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not _PAYLOAD_FINGERPRINT_RE.fullmatch(value)
+            for value in values
+        ):
+            return False
+        fingerprint = payload_fingerprint(payload, key, check_type)
+        if fingerprint in values:
+            return True
+        if len(values) >= MAX_PAYLOAD_FINGERPRINTS_PER_UNIT:
+            entry["truncated"] = True
+            entry["complete"] = False
+            self.updated_at = time.time()
+            return False
+        values.append(fingerprint)
+        self.updated_at = time.time()
+        return True
+
+    def mark_payload_fingerprints_complete_ip(
+        self, ip: "InjectionPoint", check_type: str,
+    ) -> bool:
+        """正常に終了した掃射だけを complete にできる（truncated は復旧不能）。"""
+        if not isinstance(self.payload_fingerprints, dict):
+            return False
+        key = self._candidate_unit_key(ip, check_type)
+        entry = self.payload_fingerprints.get(key)
+        if not isinstance(entry, dict) or entry.get("version") != 1:
+            return False
+        values = entry.get("fingerprints")
+        if (
+            not isinstance(values, list)
+            or entry.get("truncated") is True
+            or len(values) > MAX_PAYLOAD_FINGERPRINTS_PER_UNIT
+            or any(not isinstance(value, str) or not _PAYLOAD_FINGERPRINT_RE.fullmatch(value) for value in values)
+        ):
+            entry["complete"] = False
+            self.updated_at = time.time()
+            return False
+        entry["complete"] = True
+        self.updated_at = time.time()
+        return True
 
     def record_truncation_ip(
         self, ip: "InjectionPoint", check_type: str, retry_limit: int,
@@ -357,6 +475,7 @@ class CheckpointState:
             "candidate_snapshots": self.candidate_snapshots,
             "legacy_candidate_unknown": sorted(self.legacy_candidate_unknown),
             "unrecovered_baseline": sorted(self.unrecovered_baseline),
+            "payload_fingerprints": self.payload_fingerprints,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -377,6 +496,7 @@ class CheckpointState:
         unrecovered_baseline = {
             key for key in raw_unrecovered_baseline if isinstance(key, str)
         } if isinstance(raw_unrecovered_baseline, list) else set()
+        payload_fingerprints = data.get("payload_fingerprints", {})
         state = cls(
             target_url=data.get("target_url", ""),
             checks=list(data.get("checks", []) or []),
@@ -400,6 +520,7 @@ class CheckpointState:
             candidate_snapshots=data.get("candidate_snapshots", {}),
             legacy_candidate_unknown=legacy_candidate_unknown,
             unrecovered_baseline=unrecovered_baseline,
+            payload_fingerprints=payload_fingerprints,
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
             source_version=source_version,
@@ -552,6 +673,24 @@ def save_checkpoint(output_dir: str | Path, state: CheckpointState) -> Path:
     raw = state.to_dict()
     data = redact_url_fields({**raw, "findings": []})  # reached_urls・scan_matrix[].url 等（鍵は生成時に key_url 済み）
     data["findings"] = [redact_finding_dict(f) for f in raw["findings"]]
+
+    # attempt_ledger は adaptive 用の観測履歴であり、secret-bearing payload を
+    # checkpoint に平文保存しない。resume 時の再送判定は本文でなく下記 fingerprint が担う。
+    def redact_ledger_payloads(value):
+        if isinstance(value, dict):
+            return {
+                key: (
+                    redact_secret_values(item) if key == "payload" and isinstance(item, str)
+                    else redact_ledger_payloads(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [redact_ledger_payloads(item) for item in value]
+        return value
+
+    if "attempt_ledger" in data:
+        data["attempt_ledger"] = redact_ledger_payloads(data["attempt_ledger"])
 
     # 候補列に含まれる機密値の永続化防止と、再開時の再試行・再生成の保証
     sanitized_snapshots = {}

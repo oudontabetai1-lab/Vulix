@@ -97,7 +97,7 @@ class StateTests(unittest.TestCase):
         state.save_candidate_snapshot_ip(json_name, "sqli", "baseline", ["name"], "payload_generator")
 
         restored = CheckpointState.from_dict(state.to_dict())
-        self.assertEqual(restored.source_version, 10)
+        self.assertEqual(restored.source_version, 11)
         self.assertEqual(restored.get_candidate_snapshot_ip(first, "xss", "baseline"), (True, ["a", "b"]))
         self.assertEqual(restored.get_candidate_snapshot_ip(first, "xss", "adaptive"), (True, []))
         self.assertEqual(restored.get_candidate_snapshot_ip(other, "xss", "baseline"), (True, ["other"]))
@@ -709,6 +709,65 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
 
 
 class IoTests(unittest.TestCase):
+    def test_payload_fingerprints_roundtrip_and_filter_truncated_ledger_history(self):
+        from wscan.attempt_ledger import Attempt, AttemptLedger, payload_fingerprint, untried_payloads
+
+        ip = InjectionPoint.for_form("http://h/a", "q", 0)
+        state = CheckpointState()
+        state.begin_payload_fingerprints_ip(ip, "xss")
+        ledger = AttemptLedger(max_per_key=40)
+        for index in range(41):
+            payload = f"probe-{index}"
+            state.record_payload_fingerprint_ip(ip, "xss", payload)
+            ledger.record(ip.stable_key_parts(), "xss", Attempt(payload))
+        state.mark_payload_fingerprints_complete_ip(ip, "xss")
+
+        # The observational ledger truncates probe-0, but the safety fingerprint set does not.
+        self.assertNotIn("probe-0", [item.payload for item in ledger.history(ip.stable_key_parts(), "xss")])
+        restored = CheckpointState.from_dict(state.to_dict())
+        complete, fingerprints, reason = restored.get_payload_fingerprints_ip(ip, "xss")
+        self.assertTrue(complete, reason)
+        unit = restored._candidate_unit_key(ip, "xss")
+        self.assertEqual(
+            untried_payloads(["probe-0", "probe-40", "fresh"], fingerprints, unit, "xss"),
+            ["fresh"],
+        )
+        self.assertNotIn("probe-0", str(restored.payload_fingerprints))
+
+    def test_missing_incomplete_truncated_and_legacy_fingerprints_fail_closed(self):
+        from unittest.mock import patch
+
+        ip = InjectionPoint.for_form("http://h/a", "q", 0)
+        missing = CheckpointState()
+        complete, _, reason = missing.get_payload_fingerprints_ip(ip, "xss")
+        self.assertFalse(complete)
+        self.assertEqual(reason, "fingerprints_missing")
+
+        legacy_state = CheckpointState()
+        legacy_state.mark_baseline_unrecovered_ip(ip, "xss")
+        legacy_dict = legacy_state.to_dict()
+        legacy_dict["version"] = 10
+        legacy_dict.pop("payload_fingerprints")
+        legacy = CheckpointState.from_dict(legacy_dict)
+        complete, _, reason = legacy.get_payload_fingerprints_ip(ip, "xss")
+        self.assertFalse(complete)
+        self.assertEqual(reason, "fingerprints_missing")
+        self.assertTrue(legacy.is_baseline_unrecovered_ip(ip, "xss"))
+
+        malformed = CheckpointState()
+        malformed.payload_fingerprints = {malformed._candidate_unit_key(ip, "xss"): {"version": 1}}
+        self.assertEqual(malformed.get_payload_fingerprints_ip(ip, "xss")[2], "fingerprints_invalid")
+
+        with patch("wscan.checkpoint.MAX_PAYLOAD_FINGERPRINTS_PER_UNIT", 1):
+            truncated = CheckpointState()
+            truncated.begin_payload_fingerprints_ip(ip, "xss")
+            truncated.record_payload_fingerprint_ip(ip, "xss", "first")
+            truncated.record_payload_fingerprint_ip(ip, "xss", "second")
+            self.assertFalse(truncated.mark_payload_fingerprints_complete_ip(ip, "xss"))
+            complete, _, reason = truncated.get_payload_fingerprints_ip(ip, "xss")
+            self.assertFalse(complete)
+            self.assertEqual(reason, "fingerprints_truncated")
+
     def test_unrecovered_baseline_roundtrip_remains_incomplete(self):
         from wscan.injection_point import InjectionPoint
         ip = InjectionPoint.for_form("http://h/a", "q", 0)

@@ -58,6 +58,30 @@ def test_checkpoint_json_has_no_configured_secret(engine, tmp_path):
     assert data["findings"][0]["payload"] == "' OR 1=1 --"  # スキャンペイロードは伏せない
 
 
+def test_checkpoint_redacts_credentials_from_attempt_ledger_and_fingerprints(engine, tmp_path):
+    from wscan.attempt_ledger import Attempt
+    from wscan.injection_point import InjectionPoint
+
+    engine._init_checkpoint()
+    ip = InjectionPoint.for_form("http://t.test/submit", "password", 0)
+    payload = f"prefix-{PW}-suffix"
+    engine.attempt_ledger.record(ip.stable_key_parts(), "sqli", Attempt(payload, status=200))
+    engine.checkpoint.begin_payload_fingerprints_ip(ip, "sqli")
+    engine.checkpoint.record_payload_fingerprint_ip(ip, "sqli", payload)
+    engine.checkpoint.mark_payload_fingerprints_complete_ip(ip, "sqli")
+
+    assert engine._save_checkpoint()
+    text = (tmp_path / "out" / "checkpoint.json").read_text()
+    assert PW not in text
+    assert payload not in text
+    data = json.loads(text)
+    stored_payload = data["attempt_ledger"]["records"][0]["attempts"][0]["payload"]
+    assert "[REDACTED:auth_password]" in stored_payload
+    stored_fingerprints = json.dumps(data["payload_fingerprints"])
+    assert "[REDACTED" not in stored_fingerprints
+    assert len(data["payload_fingerprints"][engine.checkpoint._candidate_unit_key(ip, "sqli")]["fingerprints"][0]) == 64
+
+
 def test_evidence_json_has_no_configured_secret(engine, tmp_path):
     engine.all_findings.append(_login_finding())
     engine._save_evidence()

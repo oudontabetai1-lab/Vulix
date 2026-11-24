@@ -303,7 +303,9 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
   **adaptive と baseline の双方で回収する**：`adaptive_engine.generate` と
   `PayloadGenerator.generate` が `return_status=True` で `CompletionStatus` を受け、
   transient/empty は checkpoint に未回収として残して `--resume` で再挑戦する。baseline は
-  fallback payload をその場で検査し、再開時に attempt ledger と候補列を照合して未送信分だけを追加する。
+  fallback payload をその場で検査し、再開時は unit/check に束縛した送信済み payload fingerprint と
+  完全性印で未送信分だけを追加する。不明・不完全・上限超過時は新規 probe を送らず未完のまま残す。
+  attempt ledger は観測用であり、checkpoint 保存時に資格情報を redaction する。
   unavailable/permanent は恒久完了、blocked は可用性を保ったまま当該 prompt のみ完了とする。
   **新しく LLM を挟むときは「落ちたら攻撃が減る」箇所を洗い、status を見てフォールバック/resume に繋ぐ**。
 

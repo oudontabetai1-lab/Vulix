@@ -17,6 +17,7 @@ from wscan.attempt_ledger import (
     attempt_from_pair,
     format_history_for_prompt,
     neutralize_payload_for_prompt,
+    payload_fingerprint,
     untried_payloads,
     unique_payloads,
 )
@@ -108,10 +109,19 @@ class UniquePayloadsTests(unittest.TestCase):
 
 class LedgerTests(unittest.TestCase):
     def test_resume_requeues_only_payloads_not_previously_sent(self):
+        unit = "http://fixture.test/p\x1fq\x1f0\x1ff\x1fxss"
+        sent = {payload_fingerprint("sent", unit, "xss")}
         self.assertEqual(
-            untried_payloads(["sent", "new", "sent", "newer"], [Attempt("sent")]),
+            untried_payloads(["sent", "new", "sent", "newer"], sent, unit, "xss"),
             ["new", "newer"],
         )
+
+    def test_fingerprint_is_fixed_size_and_bound_to_unit_and_check(self):
+        digest = payload_fingerprint("credential-like-payload", "unit-a", "xss")
+        self.assertEqual(len(digest), 64)
+        self.assertNotIn("credential-like-payload", digest)
+        self.assertNotEqual(digest, payload_fingerprint("credential-like-payload", "unit-b", "xss"))
+        self.assertNotEqual(digest, payload_fingerprint("credential-like-payload", "unit-a", "sqli"))
 
     def test_record_and_history_by_key_and_check(self):
         led = AttemptLedger()
@@ -433,6 +443,61 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(CandidateSnapshotError, "save_failed"):
             await scanner.get_payloads("q", ip.url, ip=ip)
         self.assertFalse(engine.checkpoint.is_done_ip(ip, "xss"))
+
+    async def test_incomplete_or_legacy_sent_history_blocks_baseline_recovery(self):
+        from wscan.scanners.base import BaselineRecoveryBlocked
+
+        class _QueueGen:
+            def __init__(self):
+                self.default_payloads = {"xss": []}
+                self.calls = 0
+
+            async def generate(self, **kwargs):
+                self.calls += 1
+                return ["must-not-be-dispatched"]
+
+        engine = _GenEngine()
+        engine.enable_checkpoint = True
+        engine.checkpoint = CheckpointState()
+        engine._save_checkpoint = lambda: True
+        engine.wave_errors = []
+        generator = _QueueGen()
+        engine.payload_gen = generator
+        scanner = _PlainScanner(engine)
+        ip = InjectionPoint.for_form("http://fixture.test/p", "q")
+        engine.checkpoint.mark_baseline_unrecovered_ip(ip, "xss")
+
+        with self.assertRaises(BaselineRecoveryBlocked):
+            await scanner.get_payloads("q", ip.url, ip=ip)
+        self.assertEqual(generator.calls, 0)
+        self.assertTrue(any("fingerprints_missing" in note for note in engine.wave_errors))
+
+    async def test_complete_fingerprints_filter_candidates_without_attempt_ledger(self):
+        class _QueueGen:
+            def __init__(self):
+                self.default_payloads = {"xss": []}
+
+            async def generate(self, **kwargs):
+                return ["probe-0", "fresh-probe"]
+
+        engine = _GenEngine()
+        engine.enable_checkpoint = True
+        engine.checkpoint = CheckpointState()
+        engine._save_checkpoint = lambda: True
+        ip = InjectionPoint.for_form("http://fixture.test/p", "q")
+        engine.checkpoint.begin_payload_fingerprints_ip(ip, "xss")
+        engine.checkpoint.record_payload_fingerprint_ip(ip, "xss", "probe-0")
+        engine.checkpoint.mark_payload_fingerprints_complete_ip(ip, "xss")
+        engine.checkpoint.mark_baseline_unrecovered_ip(ip, "xss")
+        engine.attempt_ledger = None  # Recovery safety does not depend on bounded observation history.
+        engine.payload_gen = _QueueGen()
+        scanner = _PlainScanner(engine)
+
+        self.assertEqual(
+            await scanner.get_payloads("q", ip.url, ip=ip),
+            ["fresh-probe"],
+        )
+        self.assertFalse(engine.checkpoint.get_payload_fingerprints_ip(ip, "xss")[0])
 
     async def test_no_ip_means_no_history(self):
         engine = _GenEngine()
