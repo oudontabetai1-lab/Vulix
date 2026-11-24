@@ -59,7 +59,8 @@ class CompletionStatusMessageTests(unittest.TestCase):
 
         asyncio.run(run())
         snapshot = monitor._scan_snapshot_event()["data"]
-        self.assertEqual(snapshot["status"], "error")
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["terminal_outcome"]["status"], "failed")
         self.assertEqual(
             snapshot["status_message"], "スキャン中にエラーが発生しました: fixture"
         )

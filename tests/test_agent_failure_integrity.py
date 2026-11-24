@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from fastapi.testclient import TestClient
 from rich.console import Console
 
 import main
+from wscan.monitor import MonitorServer
 from wscan.llm_agent_browser import (
     AgentBrowserScanner,
     _agent_config_directory_result,
@@ -96,6 +98,49 @@ async def test_agent_missing_browser_use_is_failed_not_traceback():
     assert result.error is not None
     assert main._agent_exit_code(result) == 1
     assert "Scan failed" in output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_missing_browser_use_error_alias_is_published_as_failed(monkeypatch):
+    # Exercise a real failed browser-use import, then the serve exception path's
+    # legacy `error` input at the public API/WebSocket boundary.
+    monkeypatch.setitem(sys.modules, "browser_use", None)
+    monkeypatch.setitem(sys.modules, "browser_use.llm", None)
+    monitor = MonitorServer()
+    monitor._begin_scan_snapshot()
+    output = StringIO()
+    scanner = AgentBrowserScanner(target_url="http://fixture.test")
+    with patch(
+        "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, ""),
+    ), patch(
+        "wscan.llm_agent_browser.console",
+        Console(file=output, force_terminal=False, color_system=None),
+    ):
+        result = await scanner.run()
+
+    assert "browser_use" in result.error
+    await monitor.emit_status(f"Agent error: {result.error}", "error")
+
+    api_status = TestClient(monitor.app).get("/api/v1/scan/status").json()
+    assert api_status["status"] == "failed"
+    assert api_status["terminal_outcome"]["status"] == "failed"
+    status_events = [
+        event["data"]
+        for event in monitor.event_history
+        if event["type"] == "status" and event["data"].get("terminal_outcome")
+    ]
+    assert len(status_events) == 1
+    assert status_events[0]["state"] == "failed"
+    assert status_events[0]["terminal_outcome"]["status"] == "failed"
+
+    await monitor.emit("scan_complete", {"status": "error"})
+    completion = next(
+        event["data"]
+        for event in monitor.event_history
+        if event["type"] == "scan_complete"
+    )
+    assert completion["status"] == "failed"
+    assert completion["terminal_outcome"]["status"] == "failed"
 
 
 @pytest.mark.asyncio

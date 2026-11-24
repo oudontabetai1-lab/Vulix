@@ -2755,7 +2755,9 @@ class MonitorServer:
         outcome = terminal_outcome(status, safe_reason)
         canonical = outcome["status"]
         requested = str(status or "unknown").strip().lower()
-        display_status = requested if requested in {"aborting", "error"} else canonical
+        # Keep the active abort-request phase distinct, but never expose the
+        # internal `error` alias; terminal_outcome owns its public mapping.
+        display_status = requested if requested == "aborting" else canonical
         terminal = canonical in {"done", "incomplete", "failed", "aborted"}
         if self._final_scan_status:
             if canonical == self._final_scan_status:
@@ -2855,19 +2857,22 @@ class MonitorServer:
                     or event_data.get("coverage_gaps") or []
                 )
             )
+            terminal = self._terminal_outcome(status, status_reason)
+            status = terminal["status"]
+            event_data["status"] = status
             if not self._transition_scan_status(status, status_reason):
                 return
             if self._scan_complete_event_emitted:
                 return
             self._clear_pending_interactive()
             self._scan_status_reason = status_reason
-            event_data["terminal_outcome"] = self._terminal_outcome(status, status_reason)
+            event_data["terminal_outcome"] = terminal
             if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
                 self.eta_estimator.record_terminal(status="completed" if status == "done" else "aborted")
             # 終端では最後の phase 文言を残さない（Done なのに "OS injection testing" が
             # snapshot/再接続後も見える回帰を防ぐ）。ここが完了を確定する唯一の場所。
-            # error だけは直前の具体的な失敗理由を優先し、無い場合のみ既定文言にする。
-            if status != "error" or not self._scan_status_message:
+            # failed は直前の具体的な失敗理由を優先し、無い場合のみ既定文言にする。
+            if status != "failed" or not self._scan_status_message:
                 self._scan_status_message = _completion_status_message(status)
             if status == "done":
                 if self.api_progress.get("total", 0) > 0:
@@ -2998,9 +3003,11 @@ class MonitorServer:
 
     async def emit_status(self, message: str, state: str = "running"):
         # D: CI/CD API — ステータス自動更新
+        outcome = None
         if state in {"done", "aborted", "error", "failed", "incomplete"}:
             from wscan.terminal_outcome import terminal_outcome
-            canonical = terminal_outcome(state, message)["status"]
+            outcome = terminal_outcome(state, message)
+            canonical = outcome["status"]
             if (
                 self._terminal_status_event_emitted
                 and canonical == self._final_scan_status
@@ -3011,11 +3018,11 @@ class MonitorServer:
             # Set before the first await so concurrent terminal callers cannot
             # publish the same outcome twice into event_history / WebSocket.
             self._terminal_status_event_emitted = True
+            state = canonical
         elif state == "running" and self.api_scan_status == "idle":
             self._transition_scan_status("scanning")
         event = {"message": message, "state": state}
-        if state in {"done", "aborted", "error", "failed", "incomplete"}:
-            outcome = terminal_outcome(state, message)
+        if outcome is not None:
             event["terminal_outcome"] = outcome
         await self.emit("status", event)
 
