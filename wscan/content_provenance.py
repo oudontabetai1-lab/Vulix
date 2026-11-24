@@ -10,8 +10,124 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from html import escape as escape_html
+import json
 import re
+import unicodedata
 from typing import Any
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
+
+
+_PROMPT_URL_PATTERN = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s<>\"']+")
+_PROMPT_KEY_VALUE_PATTERN = re.compile(
+    r'(?P<key>[^&?=;\s"\'<>]+)=(?P<value>[^&\s]*)'
+)
+_PROMPT_JSON_FIELD_PATTERN = re.compile(
+    r'(?P<prefix>"(?P<key>(?:\\.|[^"\\])*)"\s*:\s*")'
+    r'(?P<value>(?:\\.|[^"\\])*)(?P<suffix>")'
+)
+_UNTRUSTED_CLOSER_PATTERN = re.compile(
+    r"<\s*/\s*untrusted_target_data\s*>", re.IGNORECASE
+)
+_PROMPT_SENSITIVE_KEY_TOKENS = (
+    "jwt", "auth", "authorization", "bearer", "sid", "session",
+    "apikey", "api_key", "key", "secret", "password", "passwd", "pwd",
+    "signature", "sig", "credential", "access", "refresh", "id_token",
+    "code", "otp", "token", "api-key", "client_secret", "private_key",
+)
+_JWT_VALUE_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+_BEARER_VALUE_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+
+
+def _is_sensitive_prompt_key(key: str, sensitive_tokens: tuple[str, ...]) -> bool:
+    """Match secret names as complete normalized words, including camelCase parts."""
+    decoded_key = key
+    for _ in range(3):
+        decoded = unquote_plus(decoded_key)
+        if decoded == decoded_key:
+            break
+        decoded_key = decoded
+
+    def words_for(value: str) -> list[str]:
+        normalized = unicodedata.normalize("NFKC", value)
+        normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
+        return [word.casefold() for word in re.findall(r"[^\W_]+", normalized)]
+
+    words = words_for(decoded_key)
+    if words == ["response", "code"]:
+        return False
+    aliases = [
+        words_for(name)
+        for name in (*sensitive_tokens, *_PROMPT_SENSITIVE_KEY_TOKENS)
+    ]
+    return any(
+        words[index:index + len(alias)] == alias
+        for alias in aliases if alias
+        for index in range(len(words) - len(alias) + 1)
+    )
+
+
+def _redact_prompt_origin(origin: str, url_scope) -> str:
+    """Keep URL location metadata while discarding all query and fragment values."""
+    safe = url_scope.redact_url(origin, drop_userinfo=True)
+    parts = urlsplit(safe)
+    query = "&".join(
+        f"{key}={url_scope.REDACTED}" if separator else key
+        for item in parts.query.split("&") if item
+        for key, separator, _value in [item.partition("=")]
+    )
+    fragment = url_scope.REDACTED if parts.fragment else ""
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, fragment))
+
+
+def _redact_prompt_observation(text: str, url_scope) -> str:
+    """Redact secrets in prompt observations while retaining following diagnostic text."""
+    text = url_scope.redact_secret_values(text, encoded_layers=2)
+    text = _JWT_VALUE_PATTERN.sub(url_scope.REDACTED, text)
+    text = _BEARER_VALUE_PATTERN.sub(f"Bearer {url_scope.REDACTED}", text)
+    text = _PROMPT_URL_PATTERN.sub(
+        lambda match: _redact_prompt_origin(match.group(0), url_scope), text
+    )
+    sensitive_tokens = url_scope.SENSITIVE_KEY_TOKENS
+
+    def redact_json_field(match: re.Match[str]) -> str:
+        try:
+            key = json.loads(f'"{match.group("key")}"')
+        except (json.JSONDecodeError, TypeError):
+            return match.group(0)
+        if not _is_sensitive_prompt_key(key, sensitive_tokens):
+            return match.group(0)
+        return f"{match.group('prefix')}{url_scope.REDACTED}{match.group('suffix')}"
+
+    text = _PROMPT_JSON_FIELD_PATTERN.sub(redact_json_field, text)
+
+    def redact_key_value(match: re.Match[str]) -> str:
+        key, value = match.group("key"), match.group("value")
+        if not _is_sensitive_prompt_key(key, sensitive_tokens):
+            return match.group(0)
+        trailing_semicolons = len(value) - len(value.rstrip(";"))
+        return f"{key}={url_scope.REDACTED}{';' * trailing_semicolons}"
+
+    return _PROMPT_KEY_VALUE_PATTERN.sub(redact_key_value, text)
+
+
+def _escape_nfkc_closers(text: str) -> str:
+    """Escape source delimiter characters whenever NFKC could form an envelope closer."""
+    normalized_chars: list[str] = []
+    source_indices: list[int] = []
+    for index, character in enumerate(text):
+        compatibility_form = unicodedata.normalize("NFKC", character)
+        normalized_chars.extend(compatibility_form)
+        source_indices.extend([index] * len(compatibility_form))
+
+    normalized = "".join(normalized_chars)
+    delimiter_indices: dict[int, str] = {}
+    for match in _UNTRUSTED_CLOSER_PATTERN.finditer(normalized):
+        delimiter_indices[source_indices[match.start()]] = "&lt;"
+        delimiter_indices[source_indices[match.end() - 1]] = "&gt;"
+    if not delimiter_indices:
+        return text
+    return "".join(delimiter_indices.get(index, character) for index, character in enumerate(text))
 
 
 class ContentSource(str, Enum):
@@ -22,6 +138,7 @@ class ContentSource(str, Enum):
     CONSOLE = "console"
     USER_CONFIG = "user_config"
     VULIX_POLICY = "vulix_policy"
+    WEB = "web"
 
 
 class TrustLevel(str, Enum):
@@ -48,6 +165,7 @@ _CONTROL_COMPLETION_TOKENS: tuple[str, ...] = (
 )
 
 _IGNORE_PREVIOUS_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"<\s*/?\s*(?:system|instructions?|assistant|user)\b[^>]*>", re.IGNORECASE),
     re.compile(r"(?i)\bignore\s+(?:all\s+)?(?:previous|prior|above|earlier|initial)\s+(?:instructions?|directions?|context|prompts?|rules?|guidelines?)\b"),
     re.compile(r"(?i)\bdisregard\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s*(?:instructions?|directions?|context|prompts?|rules?|guidelines?)?\b"),
     re.compile(r"(?i)\bforget\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|directions?|context|prompts?|rules?)\b"),
@@ -89,13 +207,27 @@ _SCOPE_OVERRIDE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _FAKE_COMPLETION_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?i)\bVULNERABILITY\s+FOUND\s*:"),
+    re.compile(r"(?i)\bVULNERABILITY\s+(?:FOUND|CONFIRMED)\b"),
     re.compile(r"(?i)\bWSCAN-NONCE\s*:"),
     re.compile(r"(?i)\bAUTH\s+COMPLETE\b"),
     re.compile(r"(?i)\bEXPLORATION\s+COMPLETE\b"),
     re.compile(r"(?i)\bPROBE\s+COMPLETE\b"),
     re.compile(r"(?i)\bVERIFICATION\s+COMPLETE\b"),
     re.compile(r"(?i)\bREVIEW\s+COMPLETE\b"),
+    re.compile(r"(?i)\b(?:BEGIN|END)_UNTRUSTED(?:_PAGE)?\b"),
+)
+
+_PROMPT_INJECTION_NEUTRALIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"<\s*/?\s*(?:system|instructions?|assistant|user)\b[^>]*>", re.IGNORECASE),
+    re.compile(r"(?i)\bignore\s+(?:all\s+)?(?:previous|prior|above|earlier|initial)\s+(?:instructions?|directions?|context|prompts?|rules?|guidelines?)\b"),
+    re.compile(r"(?i)\bdisregard\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s*(?:instructions?|directions?|context|prompts?|rules?|guidelines?)?\b"),
+    re.compile(r"(?i)\bforget\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|directions?|context|prompts?|rules?)\b"),
+    re.compile(r"(?i)\byou\s+are\s+now\s+(?:a|an)\b"),
+    re.compile(r"(?i)\b(?:system|new)\s+(?:prompt|instructions?)\s*[:\s]"),
+    re.compile(r"(?i)\bVULNERABILITY\s+(?:FOUND|CONFIRMED)\b"),
+    re.compile(r"(?i)\b(?:BEGIN|END)_UNTRUSTED(?:_PAGE)?\b"),
+    re.compile(r"(?:前|これまでの?|過去の?|以前の?|既存の?)(?:指示|プロンプト|命令|ルール|ガイドライン)(?:を|は)?(?:すべて|全て)?(?:無視|忘れて|破棄|リセット|無効)"),
+    re.compile(r"(?:指示|プロンプト|命令)(?:を|は)?(?:すべて|全て)?(?:無視|忘れて|破棄|リセット)"),
 )
 
 
@@ -158,19 +290,14 @@ class ProvenanceEnvelope:
     def format_tagged_block(self) -> str:
         """Format content into an untrusted target delimiter block with breakout escaping."""
         body = self.sanitized_content if self.sanitized_content != "" else self.content
-        escaped_body = re.sub(
-            r"<\s*/\s*untrusted_target_data\s*>",
-            "&lt;/untrusted_target_data&gt;",
-            body,
-            flags=re.IGNORECASE,
-        )
+        escaped_body = _escape_nfkc_closers(body)
         inj_detected = "true" if self.injection_signals else "false"
         attrs = [
-            f'source="{self.source}"',
-            f'origin="{self.origin}"',
-            f'trust="{self.trust}"',
-            f'content_type="{self.content_type}"',
-            f'correlation_id="{self.correlation_id}"',
+            f'source="{escape_html(self.source, quote=True)}"',
+            f'origin="{escape_html(self.origin, quote=True)}"',
+            f'trust="{escape_html(self.trust, quote=True)}"',
+            f'content_type="{escape_html(self.content_type, quote=True)}"',
+            f'correlation_id="{escape_html(self.correlation_id, quote=True)}"',
             f'injection_detected="{inj_detected}"',
         ]
         attr_str = " ".join(attrs)
@@ -187,19 +314,28 @@ def wrap_untrusted_observation(
     content_type: str = "observation",
     correlation_id: str = "",
     neutralize_control_tokens: bool = True,
+    neutralize_injections: bool = True,
+    max_len: int | None = None,
 ) -> ProvenanceEnvelope:
     """Wrap untrusted observation content into a ProvenanceEnvelope with sanitization."""
-    text = str(content or "")
-    signals = detect_prompt_injection(text)
-    sanitized = text
+    source_text = str(content or "")
+    signals = detect_prompt_injection(source_text)
+    from . import url_scope
+
+    raw_text = _redact_prompt_observation(source_text, url_scope)
+    safe_origin = _redact_prompt_origin(str(origin or ""), url_scope)
+
+    # Length truncation (preserve observation up to max_len)
+    if max_len is not None and max_len > 0:
+        text = raw_text[:max_len]
+    else:
+        text = raw_text
+
+    # Neutralize code fence breakout attempts
+    sanitized = text.replace("```", "'''")
 
     # Neutralize envelope closing tag breakout attempts
-    sanitized = re.sub(
-        r"<\s*/\s*untrusted_target_data\s*>",
-        "&lt;/untrusted_target_data&gt;",
-        sanitized,
-        flags=re.IGNORECASE,
-    )
+    sanitized = _escape_nfkc_closers(sanitized)
 
     # Neutralize spoofed nonce tokens: WSCAN-NONCE:... -> WSCAN-CANDIDATE
     sanitized = re.sub(
@@ -217,10 +353,15 @@ def wrap_untrusted_observation(
                 sanitized,
             )
 
+    # Neutralize prompt injection phrases when requested
+    if neutralize_injections:
+        for pat in _PROMPT_INJECTION_NEUTRALIZE_PATTERNS:
+            sanitized = pat.sub("[REDACTED]", sanitized)
+
     return ProvenanceEnvelope(
-        content=text,
+        content=raw_text,
         source=str(source),
-        origin=str(origin),
+        origin=str(safe_origin or ""),
         trust=TrustLevel.UNTRUSTED_TARGET.value,
         content_type=str(content_type),
         correlation_id=str(correlation_id),

@@ -249,13 +249,29 @@ async def generate_fix(finding: "Finding", payload_gen: "PayloadGenerator") -> t
         return static, False
 
     # LLM プロンプト構築
+    from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
+    wrapped_evidence = wrap_untrusted_observation(
+        finding.evidence or "",
+        source=ContentSource.HTTP.value,
+        origin=finding.url or "",
+        content_type=ContentType.EVIDENCE.value,
+    ).format_tagged_block()
+
+    clean_field = wrap_untrusted_observation(
+        finding.field_name or "",
+        source=ContentSource.DOM.value,
+        origin=finding.url or "",
+        content_type=ContentType.OBSERVATION.value,
+    ).format_tagged_block()
+
     prompt = (
         f"You are a web security expert. A vulnerability has been found:\n"
         f"- Type: {check_type}\n"
-        f"- URL: {finding.url}\n"
-        f"- Field: {finding.field_name}\n"
+        f"- URL: {wrap_untrusted_observation(finding.url or '', source=ContentSource.HTTP.value, origin=finding.url or '', content_type=ContentType.OBSERVATION.value).format_tagged_block()}\n"
+        f"- Field: {clean_field}\n"
         f"- Payload: {finding.payload}\n"
-        f"- Evidence: {finding.evidence}\n\n"
+        f"- Evidence:\n{wrapped_evidence}\n\n"
         f"Provide a concise remediation guide (max 150 words) in Japanese. "
         f"Include:\n"
         f"1. Root cause\n"

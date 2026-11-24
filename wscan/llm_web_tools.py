@@ -154,7 +154,16 @@ async def search_web(query: str, max_results: int = 5) -> str:
 
     if not lines:
         return "[No results found]"
-    return "\n\n".join(lines)
+
+    from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
+    raw_results = "\n\n".join(lines)
+    return wrap_untrusted_observation(
+        raw_results,
+        source=ContentSource.WEB.value,
+        origin=_DDG_ENDPOINT,
+        content_type=ContentType.TOOL_OUTPUT.value,
+    ).format_tagged_block()
 
 
 async def fetch_url(url: str, max_chars: int = 3000) -> str:
@@ -178,7 +187,16 @@ async def fetch_url(url: str, max_chars: int = 3000) -> str:
     text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    return text[:max_chars]
+
+    from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
+    return wrap_untrusted_observation(
+        text,
+        source=ContentSource.WEB.value,
+        origin=url,
+        content_type=ContentType.OBSERVATION.value,
+        max_len=max_chars,
+    ).format_tagged_block()
 
 
 async def research_vulnerability(check_type: str, context: str) -> str:

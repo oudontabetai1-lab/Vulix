@@ -9947,11 +9947,19 @@ class ScanEngine:
         if not await self.payload_gen._check_llm_available():
             return ""
 
-        findings_summary = "\n".join(
+        from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
+        findings_summary_raw = "\n".join(
             f"- [{f.severity.upper()}] {f.check_type} on {f.url} "
             f"(field: {f.field_name}): {f.evidence[:150]}"
             for f in self.all_findings[:60]
         )
+        wrapped_summary = wrap_untrusted_observation(
+            findings_summary_raw,
+            source=ContentSource.HTTP.value,
+            origin=self.target_url,
+            content_type=ContentType.EVIDENCE.value,
+        ).format_tagged_block()
 
         # ── ⑧ Chain reasoning prompt ────────────────────────────────────
         chain_section = (
@@ -9965,7 +9973,7 @@ class ScanEngine:
         prompt = (
             f"You are a security analyst reviewing findings from an automated web security scan.\n"
             f"Target: {self.target_url}\n\n"
-            f"Findings ({len(self.all_findings)} total):\n{findings_summary}\n\n"
+            f"Findings ({len(self.all_findings)} total):\n{wrapped_summary}\n\n"
             f"Please provide (in Japanese):\n"
             f"1. 全体的な攻撃シナリオのナラティブ (これらの脆弱性がどう連鎖するか)\n"
             f"2. 優先度上位3件の修正手順 (具体的なコード例を含む)\n"
@@ -9989,10 +9997,22 @@ class ScanEngine:
 
         finding_fixes: list[dict] = []
         for f in high_critical:
+            wrapped_finding_evidence = wrap_untrusted_observation(
+                f.evidence[:300],
+                source=ContentSource.HTTP.value,
+                origin=f.url,
+                content_type=ContentType.EVIDENCE.value,
+            ).format_tagged_block()
+            clean_field = wrap_untrusted_observation(
+                f.field_name or "",
+                source=ContentSource.DOM.value,
+                origin=f.url,
+                content_type=ContentType.OBSERVATION.value,
+            ).format_tagged_block()
             fix_prompt = (
                 f"Security finding: [{f.severity.upper()}] {f.check_type}\n"
-                f"URL: {f.url}  Field: {f.field_name}\n"
-                f"Evidence: {f.evidence[:300]}\n\n"
+                f"URL: {wrap_untrusted_observation(f.url or '', source=ContentSource.HTTP.value, origin=f.url or '', content_type=ContentType.OBSERVATION.value).format_tagged_block()}  Field: {clean_field}\n"
+                f"Evidence:\n{wrapped_finding_evidence}\n\n"
                 f"Please respond in Japanese with:\n"
                 f"1. ビジネス影響 (非技術者向け、2〜3文)\n"
                 f"2. 修正コード例 (推定される言語/フレームワークで)\n"

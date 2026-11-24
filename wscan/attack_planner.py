@@ -526,14 +526,50 @@ Consider stored / second-order attacks carefully:
         text_snippet = self._extract_text(page_html, max_chars=800)
         purpose_hint = self._guess_purpose(title, text_snippet, forms)
 
+        from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
+
+        wrapped_title = wrap_untrusted_observation(
+            title,
+            source=ContentSource.DOM.value,
+            origin=url,
+            content_type=ContentType.OBSERVATION.value,
+        ).format_tagged_block()
+
+        wrapped_inputs = wrap_untrusted_observation(
+            "\n".join(inputs_lines),
+            source=ContentSource.DOM.value,
+            origin=url,
+            content_type=ContentType.OBSERVATION.value,
+        ).format_tagged_block()
+
+        wrapped_sitemap = wrap_untrusted_observation(
+            site_map or "  (only this page was crawled)",
+            source=ContentSource.DOM.value,
+            origin=url,
+            content_type=ContentType.OBSERVATION.value,
+        ).format_tagged_block()
+
         prompt = self._LLM_PROMPT.format(
-            url=url,
-            title=title,
-            purpose_hint=purpose_hint,
-            inputs_desc="\n".join(inputs_lines),
+            url=wrap_untrusted_observation(
+                url, source=ContentSource.HTTP.value, origin=url,
+                content_type=ContentType.OBSERVATION.value,
+            ).format_tagged_block(),
+            title=wrapped_title,
+            purpose_hint=wrap_untrusted_observation(
+                purpose_hint,
+                source=ContentSource.DOM.value,
+                origin=url,
+                content_type=ContentType.OBSERVATION.value,
+            ).format_tagged_block(),
+            inputs_desc=wrapped_inputs,
             all_checks=", ".join(sorted(self.enabled_checks)),
-            site_map=site_map or "  (only this page was crawled)",
-            fingerprint=fingerprint or "",
+            site_map=wrapped_sitemap,
+            fingerprint=wrap_untrusted_observation(
+                fingerprint or "",
+                source=ContentSource.HTTP.value,
+                origin=url,
+                content_type=ContentType.OBSERVATION.value,
+            ).format_tagged_block(),
         )
 
         # ── Web intelligence enrichment (optional) ───────────────────────
@@ -556,6 +592,7 @@ Consider stored / second-order attacks carefully:
                 )
                 prompt = (
                     f"## Live Web Intelligence\n"
+                    # search_web already returns a provenance-tagged block.
                     f"{web_ctx}\n\n"
                     f"Use the above intelligence to inform your attack plan.\n\n"
                     f"{prompt}"
