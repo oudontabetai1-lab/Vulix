@@ -40,18 +40,31 @@ _BEARER_VALUE_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 
 
 def _is_sensitive_prompt_key(key: str, sensitive_tokens: tuple[str, ...]) -> bool:
-    """Match prompt-only aliases without broadening shared persistence key semantics."""
-    normalized = key
+    """Match secret names as complete normalized words, including camelCase parts."""
+    decoded_key = key
     for _ in range(3):
-        decoded = unquote_plus(normalized)
-        if decoded == normalized:
+        decoded = unquote_plus(decoded_key)
+        if decoded == decoded_key:
             break
-        normalized = decoded
-    normalized = unicodedata.normalize("NFKC", normalized).casefold()
-    prompt_tokens = (*sensitive_tokens, *_PROMPT_SENSITIVE_KEY_TOKENS)
-    if normalized in {"sid", "session"} or normalized.endswith(("_sid", "-sid")):
-        return True
-    return any(token.casefold() in normalized for token in prompt_tokens)
+        decoded_key = decoded
+
+    def words_for(value: str) -> list[str]:
+        normalized = unicodedata.normalize("NFKC", value)
+        normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
+        return [word.casefold() for word in re.findall(r"[^\W_]+", normalized)]
+
+    words = words_for(decoded_key)
+    if words == ["response", "code"]:
+        return False
+    aliases = [
+        words_for(name)
+        for name in (*sensitive_tokens, *_PROMPT_SENSITIVE_KEY_TOKENS)
+    ]
+    return any(
+        words[index:index + len(alias)] == alias
+        for alias in aliases if alias
+        for index in range(len(words) - len(alias) + 1)
+    )
 
 
 def _redact_prompt_origin(origin: str, url_scope) -> str:
@@ -69,7 +82,7 @@ def _redact_prompt_origin(origin: str, url_scope) -> str:
 
 def _redact_prompt_observation(text: str, url_scope) -> str:
     """Redact secrets in prompt observations while retaining following diagnostic text."""
-    text = url_scope.redact_secret_values(text)
+    text = url_scope.redact_secret_values(text, encoded_layers=2)
     text = _JWT_VALUE_PATTERN.sub(url_scope.REDACTED, text)
     text = _BEARER_VALUE_PATTERN.sub(f"Bearer {url_scope.REDACTED}", text)
     text = _PROMPT_URL_PATTERN.sub(

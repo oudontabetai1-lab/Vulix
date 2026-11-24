@@ -303,17 +303,36 @@ def collect_configured_secret_values(
     return items, cookie_names
 
 
-def redact_secret_values(text):
-    """登録済みの資格情報値（生・URL エンコード・JSON エスケープ形）を固定マーカーへ置換する。"""
+def redact_secret_values(text, *, encoded_layers=0):
+    """登録済み値と指定層までの URL encoding 形を固定マーカーへ置換する。"""
     if not isinstance(text, str) or not text or not _SECRET_VALUES:
         return text
     from urllib.parse import quote, quote_plus
     import html as _html, json as _json, shlex
+
+    def percent_case_forms(value):
+        return {
+            value,
+            re.sub(r"%[0-9A-Fa-f]{2}", lambda match: match.group(0).lower(), value),
+        }
+
     for value in sorted(_SECRET_VALUES, key=len, reverse=True):
         marker = f"[REDACTED:{_SECRET_VALUES[value]}]"
-        for form in {value, quote(value, safe=""), quote_plus(value), _json.dumps(value)[1:-1],
-                     _html.escape(value), _html.escape(value, quote=False), shlex.quote(value)[1:-1]
-                     if shlex.quote(value).startswith("'") else shlex.quote(value)}:
+        forms = {
+            value, quote(value, safe=""), quote_plus(value), _json.dumps(value)[1:-1],
+            _html.escape(value), _html.escape(value, quote=False),
+            shlex.quote(value)[1:-1] if shlex.quote(value).startswith("'") else shlex.quote(value),
+        }
+        encoded_forms = set(forms)
+        for _ in range(max(0, min(int(encoded_layers), 2))):
+            encoded_forms = {
+                encoded
+                for form in encoded_forms
+                for candidate in (quote(form, safe=""), quote_plus(form))
+                for encoded in percent_case_forms(candidate)
+            }
+            forms.update(encoded_forms)
+        for form in forms:
             if form in text:
                 text = text.replace(form, marker)
     return text

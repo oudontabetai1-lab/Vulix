@@ -1,6 +1,7 @@
 """Tests for untrusted content provenance and prompt injection guard layer."""
 
 import json
+import re
 from unittest.mock import MagicMock
 
 from wscan.content_provenance import (
@@ -271,8 +272,13 @@ def test_untrusted_observation_redacts_origin_and_body_secrets():
             f"&access%5Ftoken=encoded-origin-token-927&sid=sid-origin-927"
             f"&client_id={quote(configured_secret, safe='')}&keep=visible"
         )
+        encoded_secret = quote(quote(configured_secret, safe=""), safe="")
+        encoded_secret_lower_hex = re.sub(
+            r"%[0-9A-Fa-f]{2}", lambda match: match.group(0).lower(), encoded_secret
+        )
         body = (
             f"Reflected value context is intact; {configured_secret}; "
+            f"ref={encoded_secret} ref={encoded_secret_lower_hex}; "
             "access%5Ftoken=body-token-927;suffix-927; Database error near SELECT; "
             "sid=sid-body-927; Response continued; "
             '{"%61ccess_token":"json-body-token-927","diagnostic":"JSON response remains"}; '
@@ -294,6 +300,8 @@ def test_untrusted_observation_redacts_origin_and_body_secrets():
             "encoded-origin-token-927",
             "sid-origin-927",
             configured_secret,
+            encoded_secret,
+            encoded_secret_lower_hex,
             "body-token-927",
             "suffix-927",
             "sid-body-927",
@@ -323,10 +331,18 @@ def test_prompt_redaction_aliases_encoded_names_jwt_and_origin_allowlist():
             "signature", "sig", "credential", "access", "refresh", "id_token",
             "code", "otp",
         )
-        alias_fields = " ".join(f"{alias}={alias}-secret-927" for alias in aliases)
+        positive_names = (*aliases, "access_token", "x-api-key", "refreshToken")
+        alias_fields = " ".join(f"{alias}={alias}-secret-927" for alias in positive_names)
+        ordinary_fields = (
+            "author=Jane", "response_code=503", "authority=trusted",
+            "keyword=banana",
+        )
         jwt_value = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature927"
         double_encoded = "%2574%256f%256b%2565%256e=double-secret-927"
-        body = f"{alias_fields} {double_encoded} Authorization: Bearer bearer-secret-927 {jwt_value}"
+        body = (
+            f"{alias_fields} {' '.join(ordinary_fields)} {double_encoded} "
+            f"Authorization: Bearer bearer-secret-927 {jwt_value}"
+        )
         origin = (
             "https://user:origin-password-927@example.invalid/path"
             "?ordinary=origin-query-secret-927&jwt=origin-jwt-927#private-fragment-927"
@@ -335,7 +351,7 @@ def test_prompt_redaction_aliases_encoded_names_jwt_and_origin_allowlist():
         prompt = envelope.format_tagged_block()
 
         for secret in (
-            *(f"{alias}-secret-927" for alias in aliases),
+            *(f"{alias}-secret-927" for alias in positive_names),
             "double-secret-927", "bearer-secret-927", jwt_value,
             "origin-password-927", "origin-query-secret-927", "origin-jwt-927",
             "private-fragment-927",
@@ -343,6 +359,8 @@ def test_prompt_redaction_aliases_encoded_names_jwt_and_origin_allowlist():
             assert secret not in prompt
         assert "ordinary=&lt;redacted&gt;" in prompt
         assert "example.invalid/path" in prompt
+        for field in ordinary_fields:
+            assert field in prompt
     finally:
         url_scope.clear_secret_values()
 
