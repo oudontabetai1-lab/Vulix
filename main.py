@@ -720,7 +720,7 @@ async def _wait_for_scan_window(
             await monitor.emit_status(
                 "検査可能時間帯に到達できない設定のため、"
                 f"{phase_label} を中断しました。",
-                "error",
+                "warning",
             )
             return False
 
@@ -1068,7 +1068,8 @@ async def _emit_hybrid_incomplete_terminal(monitor, handoff):
         f"ハイブリッド偵察は不完全です ({reason})。"
         "0 件は安全・完了を意味しません。"
     )
-    await monitor.emit_status(message, "incomplete")
+    # status event は warning に留め、terminal status は scan_complete で一度だけ確定する。
+    await monitor.emit_status(message, "warning")
     await monitor.emit("scan_complete", {
         "status": "incomplete",
         "findings": [],

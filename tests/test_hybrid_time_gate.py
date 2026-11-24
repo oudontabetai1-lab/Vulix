@@ -13,10 +13,13 @@ class _Monitor:
         self.command_queue = asyncio.Queue()
         self.scan_abort_event = asyncio.Event()
         self.statuses = []
+        self.terminal_states = []
         self.api_scan_status = "scanning"
 
     async def emit_status(self, message, state="running"):
         self.statuses.append((message, state))
+        if state in {"done", "incomplete", "error", "aborted"}:
+            self.terminal_states.append(state)
         if state == "done":
             self.api_scan_status = "done"
         elif state == "error":
@@ -31,7 +34,9 @@ class _Monitor:
 
     async def emit(self, event_type, data=None):
         if event_type == "scan_complete":
-            self.api_scan_status = (data or {}).get("status", "done")
+            status = (data or {}).get("status", "done")
+            self.api_scan_status = status
+            self.terminal_states.append(status)
 
 
 def test_hybrid_recon_window_allows_immediately_inside_window():
@@ -138,6 +143,7 @@ def test_hybrid_recon_wait_can_be_aborted_from_monitor_command_queue():
     assert sleeps == [0.5]
     assert monitor.statuses[0][1] == "paused"
     assert monitor.statuses[-1][1] == "aborted"
+    assert monitor.terminal_states == ["aborted"]
 
 
 def test_agent_mode_waits_outside_window_without_real_sleep():
@@ -365,6 +371,7 @@ def test_hybrid_recon_retry_window_abort_returns_incomplete_handoff():
     assert continue_to_phase2 is False
     assert any(state == "aborted" for _message, state in monitor.statuses)
     assert not any(state == "incomplete" for _message, state in monitor.statuses)
+    assert monitor.terminal_states == ["aborted"]
 
 
 def test_hybrid_empty_handoff_is_classified_incomplete():
@@ -393,6 +400,7 @@ def test_hybrid_phase1_window_abort_keeps_aborted_terminal():
     assert monitor.api_scan_status == "aborted"
     assert monitor.statuses[-1][1] == "aborted"
     assert not any(state == "incomplete" for _message, state in monitor.statuses)
+    assert monitor.terminal_states == ["aborted"]
 
 
 def test_window_monitor_is_disabled_when_unconfigured():
