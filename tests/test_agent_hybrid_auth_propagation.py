@@ -10,6 +10,8 @@ from wscan.monitor import MonitorServer
 @pytest.mark.parametrize("mode", ["agent", "hybrid"])
 def test_agent_and_hybrid_phase1_kwargs_propagation(tmp_path, monkeypatch, mode):
     captured_kwargs = []
+    fake_scan_engines = []
+    emitted_statuses = []
     done = asyncio.Event()
     server_ref = []
 
@@ -62,17 +64,29 @@ def test_agent_and_hybrid_phase1_kwargs_propagation(tmp_path, monkeypatch, mode)
                 server_ref[0].should_exit = True
             done.set()
             from wscan.agent_engine import AgentHandoffData
-            return AgentHandoffData(discovered_urls=["http://fixture.test/"])
+            return AgentHandoffData(
+                discovered_urls=["http://fixture.test/"],
+                coverage_complete=False,
+                coverage_gaps=["network_scope_blocked: request blocked"],
+                network_guard_errors=["network_scope_blocked:out_of_scope_destination:https://outside.test/"],
+            )
 
     class FakeScanEngine:
         def __init__(self, **kwargs):
             self.output_dir = tmp_path
+            self.wave_errors = []
+            fake_scan_engines.append(self)
 
         async def run(self):
             return
 
     monkeypatch.setattr(uvicorn, "Server", FakeServer)
     monkeypatch.setattr(MonitorServer, "emit_awaiting_config", awaiting)
+    original_emit_status = MonitorServer.emit_status
+    async def capture_status(self, message, state="running"):
+        emitted_statuses.append((message, state))
+        return await original_emit_status(self, message, state)
+    monkeypatch.setattr(MonitorServer, "emit_status", capture_status)
     monkeypatch.setattr(MonitorServer, "prune_old_scans", lambda _: [])
     monkeypatch.setattr(MonitorServer, "trigger_due_schedules", lambda _: None)
     monkeypatch.setattr("wscan.agent_engine.AgentEngine", FakeAgentEngine)
@@ -91,6 +105,13 @@ def test_agent_and_hybrid_phase1_kwargs_propagation(tmp_path, monkeypatch, mode)
     assert kw["access_urls"] == ["http://fixture.test/login"]
     assert kw["exclude_urls"] == ["http://fixture.test/logout"]
     assert kw["exclude_fields"] == ["csrf_token"]
+    if mode == "hybrid":
+        assert fake_scan_engines[0].wave_errors == [
+            "hybrid_agent_recon_incomplete:coverage_incomplete",
+            "network_scope_blocked:out_of_scope_destination:https://outside.test/",
+            "hybrid_agent_recon_coverage_gap:network_scope_blocked: request blocked",
+        ]
+        assert any("0 件でも安全・完了を意味しません" in msg for msg, _ in emitted_statuses)
 
 
 def test_agent_receives_direct_totp_secret_key(tmp_path, monkeypatch):

@@ -9517,7 +9517,11 @@ class ScanEngine:
             e.startswith(("authentication_incomplete:", "authentication_unverified:"))
             for e in getattr(self, "wave_errors", [])
         )
-        return "incomplete" if auth_failed else "done"
+        recon_incomplete = any(
+            str(e).startswith(("hybrid_agent_recon_incomplete:", "hybrid_agent_recon_coverage_gap:"))
+            for e in getattr(self, "wave_errors", [])
+        )
+        return "incomplete" if auth_failed or recon_incomplete else "done"
 
     def _save_evidence(self):
         findings_dicts = [f.to_dict() for f in self.all_findings]

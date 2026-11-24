@@ -98,6 +98,47 @@ async def test_run_recon_populates_handoff_cookies_and_storage(tmp_path):
     assert "http://fixture.test/dashboard" in handoff.discovered_urls
 
 
+@pytest.mark.asyncio
+async def test_run_recon_handoff_preserves_network_guard_incomplete_state(tmp_path):
+    block = "network_scope_blocked:out_of_scope_destination:https://outside.test/"
+
+    class _MockScanner:
+        _network_guard_errors = [block]
+        captured_cookies = []
+        captured_storage_state = {}
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self):
+            result = AgentScanResult(target_url="http://fixture.test", success=True)
+            result.memory.visited_urls = ["http://fixture.test", "http://fixture.test/partial"]
+            return result
+
+    engine = AgentEngine(url="http://fixture.test", llm_provider="none", output_dir=str(tmp_path))
+    from unittest.mock import patch
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner", _MockScanner):
+        handoff = await engine.run_recon()
+
+    assert handoff.coverage_complete is False
+    assert "network_scope_blocked: one or more browser requests were blocked" in handoff.coverage_gaps
+    assert handoff.network_guard_errors == [block]
+    assert block in engine.wave_errors
+
+
+def test_hybrid_recon_incomplete_is_terminal_and_observable(tmp_path):
+    engine = ScanEngine(url="http://fixture.test", output_dir=str(tmp_path), fast_mode=True)
+    engine.wave_errors.extend([
+        "hybrid_agent_recon_incomplete:coverage_incomplete",
+        "network_scope_blocked:out_of_scope_destination:https://outside.test/",
+        "hybrid_agent_recon_coverage_gap:network_scope_blocked: one or more browser requests were blocked",
+    ])
+
+    assert engine._terminal_status() == "incomplete"
+    assert engine.observability_summary()["total"] == 3
+    assert engine.observability_summary()["by_category"]["network_scope_blocked"] == 1
+
+
 def test_handoff_cookies_scope_filtering(tmp_path):
     """Only in-scope cookies are seeded; out-of-scope third-party cookies are discarded."""
     engine = ScanEngine(

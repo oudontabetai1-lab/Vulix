@@ -152,6 +152,19 @@ class _RuntimeCommands:
         )
 
 
+class _LateRequestRuntimeCommands(_RuntimeCommands):
+    def __init__(self, request_callback):
+        super().__init__()
+        self.request_callback = request_callback
+
+    async def runIfWaitingForDebugger(self, params=None, session_id=None):
+        await super().runIfWaitingForDebugger(params=params, session_id=session_id)
+        self.request_callback({
+            "requestId": "late-teardown-request",
+            "request": {"url": "https://outside.test/late", "method": "GET"},
+        }, session_id)
+
+
 class _TargetRegistration:
     def __init__(self, registry):
         self.registry = registry
@@ -563,6 +576,29 @@ class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_teardown_drains_request_created_during_target_resume(self):
+        scanner = AgentBrowserScanner("http://fixture.test")
+        session = _RequestScopedHeaderSession()
+        self.assertTrue(await scanner._enable_request_scoped_headers(session))
+        session.runtime_commands = _LateRequestRuntimeCommands(
+            session.fetch_registration.callback
+        )
+        session._cdp_client_root.send.Runtime = session.runtime_commands
+
+        session.target_registration.callback({
+            "sessionId": "late-target-session",
+            "targetInfo": {"targetId": "late-target", "type": "page"},
+        }, "root-session")
+        await scanner._drain_browser_event_tasks(timeout=2.0)
+
+        self.assertIn(("failRequest", {
+            "requestId": "late-teardown-request",
+            "errorReason": "BlockedByClient",
+        }, "late-target-session"), session.fetch_commands.calls)
+        self.assertIn("network_scope_blocked:teardown_request_blocked", scanner._network_guard_errors[0])
+        self.assertFalse(scanner._target_event_tasks)
+        self.assertFalse(scanner._request_event_tasks)
+
     async def test_request_scoped_headers_adds_headers_for_allowed_origin(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",

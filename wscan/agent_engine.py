@@ -74,6 +74,9 @@ class AgentHandoffData:
     findings: list = field(default_factory=list)
     cookies: list = field(default_factory=list)
     storage_state: dict = field(default_factory=dict)
+    coverage_complete: bool = True
+    coverage_gaps: list = field(default_factory=list)
+    network_guard_errors: list = field(default_factory=list)
 
 # Base output directory (same convention as ScanEngine)
 OUTPUT_BASE = Path.cwd() / "output"
@@ -569,4 +572,11 @@ class AgentEngine:
             summary=result.final_summary,
             cookies=list(getattr(scanner, "captured_cookies", []) or getattr(result, "cookies", []) or []),
             storage_state=dict(getattr(scanner, "captured_storage_state", {}) or getattr(result, "storage_state", {}) or {}),
+            coverage_complete=bool(
+                result.success and not getattr(result, "coverage_gaps", [])
+            ),
+            coverage_gaps=list(getattr(result, "coverage_gaps", []) or []),
+            network_guard_errors=list(
+                getattr(result, "network_guard_errors", []) or []
+            ),
         )

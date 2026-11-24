@@ -3618,6 +3618,8 @@ async def run_serve(args):
         seed_urls: list = []
         agent_findings: list = []
         handoff = None
+        hybrid_recon_errors: list = []
+        hybrid_recon_incomplete = False
         if cfg.get("hybrid_mode"):
             from wscan.agent_engine import AgentEngine
             # 偵察側の base URL は、偵察(hybrid_llm)が openai_compatible のときだけ渡す。
@@ -3672,6 +3674,20 @@ async def run_serve(args):
                 if handoff is not None:
                     seed_urls = handoff.discovered_urls
                     agent_findings = handoff.findings
+                    hybrid_recon_incomplete = not handoff.coverage_complete
+                    hybrid_recon_errors.extend(handoff.network_guard_errors)
+                    hybrid_recon_errors.extend(
+                        f"hybrid_agent_recon_coverage_gap:{gap}"
+                        for gap in handoff.coverage_gaps
+                    )
+                    if hybrid_recon_incomplete:
+                        hybrid_recon_errors.insert(
+                            0, "hybrid_agent_recon_incomplete:coverage_incomplete"
+                        )
+                        await monitor.emit_status(
+                            "⚠ Agent偵察は不完全です。Phase 2 の結果が 0 件でも安全・完了を意味しません。",
+                            "warning",
+                        )
             except Exception as exc:
                 if _scan_abort_requested(monitor):
                     await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
@@ -3682,6 +3698,10 @@ async def run_serve(args):
                 )
                 seed_urls = []
                 agent_findings = []
+                hybrid_recon_incomplete = True
+                hybrid_recon_errors.append(
+                    "hybrid_agent_recon_incomplete:phase1_failed"
+                )
 
             # Phase 1 完了と時間枠終了が競合した場合も、Phase 2 を枠外で
             # 開始しないよう必ず直前に同じゲートを再確認する。
@@ -3697,7 +3717,9 @@ async def run_serve(args):
                 return
             await monitor.emit_status(
                 f"🔀 Phase 2: {len(seed_urls)} URL / "
-                f"{len(agent_findings)} Agent Finding 発見済み。通常スキャン開始...",
+                f"{len(agent_findings)} Agent Finding 発見済み。"
+                f"{'Phase 1 不完全（0 件でも安全を意味しません）。' if hybrid_recon_incomplete else ''}"
+                "通常スキャン開始...",
                 "running",
             )
 
@@ -3844,6 +3866,8 @@ async def run_serve(args):
                     )
                 ),
             )
+            if hybrid_recon_errors:
+                engine.wave_errors.extend(hybrid_recon_errors)
             # アウトプットフォルダに送信された設定スナップショットを保存しておく
             # (ブラウザの自動ダウンロードに頼らず、レポートと同じ場所に残す)
             try:

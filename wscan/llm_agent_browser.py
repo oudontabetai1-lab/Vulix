@@ -834,6 +834,9 @@ class AgentBrowserScanner:
         self._target_event_client = None
         self._target_event_tasks: set[asyncio.Task] = set()
         self._request_event_tasks: set[asyncio.Task] = set()
+        self._request_event_force_fail: dict[asyncio.Task, object] = {}
+        self._accept_target_events = True
+        self._accept_request_events = True
         self._headers_applied = False
         self._missing_header_url_api_warned = False
         self._header_application_failed_warned = False
@@ -1170,17 +1173,43 @@ class AgentBrowserScanner:
                     # パスワードなどの秘匿情報を漏らさず、失敗を可視化する
                     await self._warn_proxy_auth_failed(f"{type(exc).__name__}")
 
+            async def _fail_paused_request(event, event_session_id=None):
+                request = event.get("request") or {}
+                request_id = event.get("requestId") or event.get("request_id")
+                request_url = request.get("url") or ""
+                await self._record_network_guard_error("teardown_request_blocked", request_url)
+                if not request_id:
+                    await self._record_network_guard_error("teardown_request_id_missing")
+                    return
+                try:
+                    await asyncio.wait_for(
+                        fetch_commands.failRequest(
+                            params={"requestId": request_id, "errorReason": "BlockedByClient"},
+                            session_id=event_session_id or cdp_session_id,
+                        ), timeout=1.0,
+                    )
+                except Exception:
+                    await self._record_network_guard_error(
+                        "teardown_fail_request_failed", request_url
+                    )
+
             def _schedule_fetch_event(callback, event, event_session_id=None):
                 # cdp_use は event handler の await 完了まで WebSocket の受信ループを
                 # 止めるため、handler 内で CDP response を待つと deadlock する。
                 task = asyncio.create_task(callback(event, event_session_id))
                 self._request_event_tasks.add(task)
-                task.add_done_callback(self._request_event_tasks.discard)
+                if callback is _continue_paused_request:
+                    self._request_event_force_fail[task] = (
+                        lambda: _fail_paused_request(event, event_session_id)
+                    )
+                def _forget_task(done_task):
+                    self._request_event_tasks.discard(done_task)
+                    self._request_event_force_fail.pop(done_task, None)
+                task.add_done_callback(_forget_task)
 
             def _on_request_paused(event, event_session_id=None):
-                _schedule_fetch_event(
-                    _continue_paused_request, event, event_session_id
-                )
+                callback = _continue_paused_request if self._accept_request_events else _fail_paused_request
+                _schedule_fetch_event(callback, event, event_session_id)
 
             def _on_auth_challenge(event, event_session_id=None):
                 _schedule_fetch_event(
@@ -1248,6 +1277,43 @@ class AgentBrowserScanner:
             )
         except Exception:
             return False
+
+    async def _drain_browser_event_tasks(self, timeout: float = 5.0) -> None:
+        """停止事件受付後、target→request の順で期限付き drain する。"""
+        self._accept_target_events = False
+        self._accept_request_events = False
+        deadline = asyncio.get_running_loop().time() + timeout
+        for tasks, kind in (
+            (self._target_event_tasks, "target"),
+            (self._request_event_tasks, "request"),
+        ):
+            while tasks:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                done, _ = await asyncio.wait(
+                    tuple(tasks), timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                await asyncio.gather(*done, return_exceptions=True)
+            if tasks:
+                if kind == "request":
+                    for task in tuple(tasks):
+                        force_fail = self._request_event_force_fail.get(task)
+                        if force_fail is not None:
+                            try:
+                                await asyncio.wait_for(force_fail(), timeout=1.1)
+                            except Exception:
+                                await self._record_network_guard_error(
+                                    "teardown_request_unresolved"
+                                )
+                else:
+                    await self._record_network_guard_error("teardown_target_unresolved")
+                for task in tuple(tasks):
+                    task.cancel()
+                await asyncio.gather(*tuple(tasks), return_exceptions=True)
 
     async def _enable_fetch_for_attached_target(
         self,
@@ -1329,6 +1395,16 @@ class AgentBrowserScanner:
             # cdp_use 1.4.5 の EventRegistry はイベントごとに単一ハンドラ。
             # browser-use の SessionManager を壊さないよう既存ハンドラを包む。
             def _on_attached(event, event_session_id=None):
+                if not self._accept_target_events:
+                    async def _record_late_target():
+                        info = event.get("targetInfo") or {}
+                        await self._record_network_guard_error(
+                            f"target_attached_during_teardown:{info.get('type') or 'unknown'}"
+                        )
+                    task = asyncio.create_task(_record_late_target())
+                    self._target_event_tasks.add(task)
+                    task.add_done_callback(self._target_event_tasks.discard)
+                    return None
                 def _forward_existing_handler():
                     if existing_handler is None:
                         return
@@ -2280,10 +2356,7 @@ class AgentBrowserScanner:
             console.print(f"[red]エージェントスキャンエラー: {exc}[/red]")
         finally:
             if browser is not None:
-                while self._request_event_tasks:
-                    await asyncio.gather(
-                        *tuple(self._request_event_tasks), return_exceptions=True
-                    )
+                await self._drain_browser_event_tasks()
                 try:
                     await self._capture_auth_state(browser)
                 except Exception:
@@ -2293,10 +2366,8 @@ class AgentBrowserScanner:
                     await (browser.kill() if hasattr(browser, "kill") else browser.stop())
                 except Exception as exc:
                     console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
-            while self._target_event_tasks:
-                await asyncio.gather(
-                    *tuple(self._target_event_tasks), return_exceptions=True
-                )
+            # browser stop が event callback を最後に配送する場合があるため、停止後も回収する。
+            await self._drain_browser_event_tasks()
 
         if self._network_guard_failed:
             result.success = False
