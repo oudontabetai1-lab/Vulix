@@ -101,13 +101,17 @@ def _convert_agent_findings(agent_findings: list) -> list:
                 )
             ),
             verification_note=(
-                "Independent Agent dynamic replay observed; "
+                "Deterministic scanner reproduced the hypothesis and verify_finding returned true."
+                if getattr(af, "deterministic_confirmed", False)
+                else "Independent Agent dynamic replay observed; "
                 "deterministic scanner verification is still pending."
                 if getattr(af, "dynamic_verified", False)
                 else ""
             ),
-            source="agent",
+            source=getattr(af, "source", "agent"),
             agent_verified=getattr(af, "agent_verified", False),
+            confidence=("confirmed" if getattr(af, "deterministic_confirmed", False) else "tentative"),
+            verification_state=("reproduced" if getattr(af, "deterministic_confirmed", False) else "assumed"),
         )
         for af in agent_findings
     ]

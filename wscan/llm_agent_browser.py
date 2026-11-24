@@ -487,6 +487,7 @@ class AgentFinding:
     source: str = "agent"
     agent_verified: bool = False
     dynamic_verified: bool = False
+    deterministic_confirmed: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -499,6 +500,7 @@ class AgentFinding:
             "source": self.source,
             "agent_verified": self.agent_verified,
             "dynamic_verified": self.dynamic_verified,
+            "deterministic_confirmed": self.deterministic_confirmed,
         }
 
 
@@ -697,7 +699,7 @@ def _candidate_id(finding: AgentFinding) -> str:
 def _finding_from_checkpoint(data: dict) -> AgentFinding:
     fields = {
         "check_type", "severity", "url", "field_name", "payload", "evidence",
-        "source", "agent_verified", "dynamic_verified",
+        "source", "agent_verified", "dynamic_verified", "deterministic_confirmed",
     }
     return AgentFinding(**{key: value for key, value in data.items() if key in fields})
 
@@ -858,6 +860,7 @@ class AgentBrowserScanner:
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
         self._network_guard_errors: list[str] = []
+        self._scanner_tools = None
         self._network_guard_policy = ScopePolicy(
             target_urls=tuple(self.target_urls), access_urls=tuple(self.access_urls),
             exclude_urls=tuple(self.exclude_urls), login_url=self.login_url,
@@ -1906,6 +1909,12 @@ class AgentBrowserScanner:
 
         try:
             from browser_use import Agent, BrowserSession
+            try:
+                from browser_use import Controller
+            except ImportError:
+                class Controller:
+                    def action(self, _description, **_kwargs):
+                        return lambda function: function
             from browser_use.browser.profile import BrowserProfile
 
             # タスク文字列には SSRF/redirect ペイロードとして複数の URL が含まれる。
@@ -1946,6 +1955,11 @@ class AgentBrowserScanner:
                 agent_kwargs["sensitive_data"] = sensitive_data
             if self._harness:
                 agent_kwargs["register_should_stop_callback"] = self._harness_should_stop
+                from wscan.agent_scanner_tools import AgentScannerTools
+                self._scanner_tools = AgentScannerTools(self, self._harness)
+                controller = Controller()
+                self._scanner_tools.register_controller_actions(controller)
+                agent_kwargs["controller"] = controller
 
             # 通常実行でも CDP Fetch を必ず使うため、guard 対応 BrowserSession に固定する。
             browser_profile = self._build_browser_profile(BrowserProfile)
@@ -2018,6 +2032,17 @@ class AgentBrowserScanner:
                     work = self._harness.next_work()
                     if work is None:
                         break
+                    if (
+                        work.role == AgentRole.PROBE_SPECIALIST
+                        and self._scanner_tools is not None
+                        and work.target in self._scanner_tools.points
+                    ):
+                        scanner_outcome = await self._scanner_tools.run_scanner_work(work.work_id)
+                        texts.append(
+                            f"Deterministic scanner work {scanner_outcome.get('status', 'failed')}: "
+                            f"{work.check_type} ({scanner_outcome.get('verified_count', 0)} verified)"
+                        )
+                        continue
                     if work.role == AgentRole.PROBE_SPECIALIST and not self._work_target(work):
                         self._harness.finish_work(
                             work.work_id,
@@ -2093,6 +2118,8 @@ class AgentBrowserScanner:
                         for finding in episode_findings:
                             data = finding.to_dict()
                             data["candidate_id"] = _candidate_id(finding)
+                            if self._scanner_tools is not None:
+                                data["injection_point_id"] = self._scanner_tools.register_hypothesis(data)
                             self._runtime_hypotheses[data["candidate_id"]] = dict(data)
                             checkpoint_findings.append(data)
                         self._harness.note_hypotheses(checkpoint_findings)
@@ -2211,9 +2238,12 @@ class AgentBrowserScanner:
                     for item in self._harness.state.hypotheses
                 ]
                 gaps = [
+                    *self._harness.state.coverage_gaps,
+                    *[
                     f"{item.role.value}:{item.target}:{item.check_type or '-'}:{item.status.value}"
                     for item in self._harness.state.work_queue
                     if item.status != WorkStatus.COMPLETE
+                    ],
                 ]
                 if self._auth_verification is not None:
                     result.auth_verification_status = self._auth_verification.status
@@ -2382,6 +2412,16 @@ class AgentBrowserScanner:
             ]))
 
         if hasattr(result, "__dict__"):
+            if self._scanner_tools is not None:
+                existing = {
+                    (f.check_type, f.url, f.field_name, f.payload, f.source)
+                    for f in result.findings
+                }
+                for finding in self._scanner_tools.agent_findings():
+                    key = (finding.check_type, finding.url, finding.field_name, finding.payload, finding.source)
+                    if key not in existing:
+                        result.findings.append(finding)
+                        existing.add(key)
             result.cookies = self.captured_cookies
             result.storage_state = self.captured_storage_state
 
@@ -3013,6 +3053,8 @@ class AgentBrowserScanner:
         current_url = str(getattr(state, "url", "") or "")
         if current_url.startswith(("http://", "https://")) and current_url not in self._runtime_observed_urls:
             self._runtime_observed_urls.append(current_url)
+        if self._scanner_tools is not None:
+            await self._scanner_tools.observe_page(self._active_session, current_url)
         planned_actions = []
         try:
             planned_actions = (

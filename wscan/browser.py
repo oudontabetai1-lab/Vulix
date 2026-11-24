@@ -874,6 +874,7 @@ class BrowserManager:
         self.page: Optional[Page] = None
         self.request_logger = request_logger
         self.network = NetworkCapture(logger=request_logger)
+        self._runtime_scope_route = None
         self.dialog_fired: bool = False
         # 累積ダイアログ発火数（reset_dialog では戻さない）。stored-XSS flood の検知に使い、
         # 1 ページの attack で閾値超え発火したら recreate_page で wedge をクリアする。
@@ -991,6 +992,59 @@ class BrowserManager:
 
         # Set up dialog handler (for XSS detection)
         self.page.on("dialog", lambda dialog, page=self.page: self._capture_dialog(dialog, page))
+
+    async def install_runtime_scope_guard(self, policy, *, on_block=None) -> bool:
+        """Enforce target-only scope on every Playwright request and redirect hop."""
+        if self._context is None:
+            return False
+        from wscan.runtime_scope_guard import evaluate_scope, _matches_scope_list
+        from wscan.request_logger import redact_url
+
+        async def _scope_route(route):
+            try:
+                url = str(route.request.url)
+                decision = evaluate_scope(url, policy)
+                access_only = _matches_scope_list(url, policy.access_urls)
+                allowed = not access_only and decision.allowed and decision.reason in {
+                    "target_url", "target_url_no_frag", "target_url_no_query",
+                }
+                if not allowed:
+                    if on_block is not None:
+                        try:
+                            on_block(redact_url(url), "access_url" if access_only else decision.reason)
+                        except Exception:
+                            pass
+                    await route.abort()
+                    return
+                fallback = getattr(route, "fallback", None)
+                if callable(fallback):
+                    await fallback()
+                else:
+                    await route.continue_()
+            except Exception:
+                try:
+                    await route.abort()
+                except Exception:
+                    pass
+
+        try:
+            await self._context.route("**/*", _scope_route)
+            self._runtime_scope_route = (self._context, _scope_route)
+            return True
+        except Exception:
+            self._runtime_scope_route = None
+            return False
+
+    async def clear_runtime_scope_guard(self) -> None:
+        runtime_scope_route = getattr(self, "_runtime_scope_route", None)
+        if not runtime_scope_route:
+            return
+        context, handler = runtime_scope_route
+        self._runtime_scope_route = None
+        try:
+            await context.unroute("**/*", handler)
+        except Exception:
+            pass
 
     async def _on_response(self, response: Response):
         self.network.on_response(response)
@@ -3897,6 +3951,7 @@ class BrowserManager:
         from .browser_evidence import emit
         emit(self, "lifecycle", role="cleanup", outcome="skipped")
         try:
+            await self.clear_runtime_scope_guard()
             await self._deactivate_header_target_auto_attach()
             self._header_interception_closing = True
             if self._context:

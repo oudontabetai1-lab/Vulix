@@ -236,6 +236,7 @@ VALID_WORK_STATUS_TRANSITIONS: dict[WorkStatus, frozenset[WorkStatus]] = {
     WorkStatus.TRANSIENT_FAILURE: frozenset({
         WorkStatus.PLANNED,
         WorkStatus.RUNNING,
+        WorkStatus.INCONCLUSIVE,
         WorkStatus.FAILED,
         WorkStatus.CANCELLED,
     }),
@@ -754,6 +755,7 @@ class AgentHarness:
         candidates = [
             item for item in self.state.work_queue
             if item.status == WorkStatus.PLANNED
+            or (item.status == WorkStatus.TRANSIENT_FAILURE and item.attempts < 2)
             or (item.status == WorkStatus.INCONCLUSIVE and item.attempts < 2)
         ]
         if not candidates:
