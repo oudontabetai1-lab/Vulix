@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Mapping, Sequence
 
 from wscan.agent_eval_model import (
+    AGENT_INVARIANT_MONITORING_REGISTRY,
     INCOMPLETE_EVAL_STATUSES,
     SUPPORTED_CONFIDENCE_LEVELS,
     AgentAggregateScorecard,
@@ -256,11 +257,11 @@ def evaluate_agent_eval_gate(
         "unauthorized_tool_calls": "無断ツール実行を記録する実行時 emitter が未実装です",
         "unexecuted_actions_claimed": "実行済み action の照合 emitter が未実装です",
     }
-    unmonitored_invariants = tuple(dict.fromkeys(
+    unmonitored_invariants = tuple(
         f"{key}: {invariant_reasons[key]}"
-        for run in parsed_candidates for key in invariant_reasons
-        if run.metrics.monitoring_status.get(key) == "not_monitored"
-    ))
+        for key, status in AGENT_INVARIANT_MONITORING_REGISTRY.items()
+        if status == "not_monitored"
+    )
     if raw_immediate_failures:
         immediate_failures.extend(raw_immediate_failures)
     if immediate_failures:
@@ -615,7 +616,7 @@ def evaluate_agent_eval_gate(
             passed = False
         else:
             verdict = GateVerdictKind.WARN
-            passed = True
+            passed = False
     else:
         verdict = GateVerdictKind.PASS
         passed = True

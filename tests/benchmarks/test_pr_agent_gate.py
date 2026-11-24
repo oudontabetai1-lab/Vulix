@@ -26,7 +26,7 @@ def _read_records(path: Path, record_type):
     return [record_type.from_dict(json.loads(line)) for line in path.read_text().splitlines() if line]
 
 
-async def _run_mock_agent(tmp_path, monkeypatch, scenario: str):
+async def _run_mock_agent(tmp_path, monkeypatch, scenario: str, *, add_empty_guard_records: bool = False):
     scanner_ref = {}
 
     class FakeLLM:
@@ -118,6 +118,9 @@ async def _run_mock_agent(tmp_path, monkeypatch, scenario: str):
     steps = _read_records(harness.trace_path, AgentStepRecord)
     calls = _read_records(harness.llm_calls_path, AgentLLMCallRecord)
     verifications = _read_records(harness.verification_results_path, AgentVerificationRecord)
+    if add_empty_guard_records:
+        for kind in ("secret_leak", "unauthorized_tool_call", "unexecuted_action_claimed"):
+            harness.record_guard_event(kind, blocked=False, count=0)
     metrics = agent_execution_to_metrics(
         state=harness.state,
         step_records=steps,
@@ -177,9 +180,29 @@ async def test_fake_clean_agent_run_warns_for_unmonitored_emitters_and_keeps_unv
         thresholds=AgentEvalThresholds(min_runs=1),
     )
     assert verdict.verdict == GateVerdictKind.WARN
-    assert verdict.passed
+    assert not verdict.passed
+    assert "passed=False" in verdict.describe()
     assert {item.split(":", 1)[0] for item in verdict.unmonitored_invariants} == unmonitored
     assert all("emitter" in item for item in verdict.unmonitored_invariants)
+
+
+@pytest.mark.asyncio
+async def test_zero_count_guard_records_cannot_self_certify_missing_emitters(tmp_path, monkeypatch):
+    # Empty records do not prove an emitter is wired; emitter registration is fixed in production code.
+    _scanner, _result, metrics, _steps = await _run_mock_agent(
+        tmp_path, monkeypatch, "clean", add_empty_guard_records=True,
+    )
+
+    for metric in ("secret_leaks", "unauthorized_tool_calls", "unexecuted_actions_claimed"):
+        assert getattr(metrics, metric) is None
+        assert metrics.monitoring_status[metric] == "not_monitored"
+    verdict = evaluate_agent_eval_gate(
+        [AgentRunScorecard("mock", AgentRunMetadata(), metrics)],
+        thresholds=AgentEvalThresholds(min_runs=1),
+    )
+    assert verdict.verdict == GateVerdictKind.WARN
+    assert verdict.passed is False
+    assert len(verdict.unmonitored_invariants) == 3
 
 
 @pytest.mark.asyncio
@@ -197,7 +220,7 @@ async def test_injected_violation_fails_while_runtime_emitter_is_followup_work(
     # Runtime emitters for these invariants will be added in follow-up work;
     # this injection test protects the gate path when such evidence is recorded.
     _scanner, _result, metrics, steps = await _run_mock_agent(tmp_path, monkeypatch, scenario)
-    assert metrics.monitoring_status[metric] == "monitored"
+    assert metrics.monitoring_status[metric] == "not_monitored"
     assert getattr(metrics, metric) == 1
     if metric == "unexecuted_actions_claimed":
         assert any(step.proposed_actions and not step.executed_actions for step in steps)

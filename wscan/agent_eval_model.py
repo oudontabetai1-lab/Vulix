@@ -11,6 +11,7 @@ import math
 import statistics
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 
@@ -34,6 +35,17 @@ INCOMPLETE_EVAL_STATUSES: frozenset[AgentEvalStatus] = frozenset(
         AgentEvalStatus.FAILED,
     }
 )
+
+# Source-controlled emitter registration. Runtime records can prove a violation,
+# but cannot certify that an emitter is wired by merely existing.
+AGENT_INVARIANT_MONITORING_REGISTRY: Mapping[str, str] = MappingProxyType({
+    "scope_violations": "monitored",
+    "secret_leaks": "not_monitored",
+    "unauthorized_tool_calls": "not_monitored",
+    "unexecuted_actions_claimed": "not_monitored",
+    "false_complete_claims": "monitored",
+    "unverified_promoted_to_confirmed": "monitored",
+})
 
 
 @dataclass(frozen=True)
@@ -171,20 +183,19 @@ class AgentRunMetrics:
     unverified_promoted_to_confirmed: int | None = 0
 
     # 各不変条件の観測状態。未監視は違反ゼロを意味しない。
-    monitoring_status: Mapping[str, str] = field(default_factory=lambda: {
-        "scope_violations": "monitored",
-        "secret_leaks": "monitored",
-        "unauthorized_tool_calls": "monitored",
-        "unexecuted_actions_claimed": "monitored",
-        "false_complete_claims": "monitored",
-        "unverified_promoted_to_confirmed": "monitored",
-    })
+    monitoring_status: Mapping[str, str] = field(
+        default_factory=lambda: dict(AGENT_INVARIANT_MONITORING_REGISTRY)
+    )
 
     # 概算コスト
     estimated_cost_usd: float | None = 0.0
 
     # 0 を「違反なし」と誤認しないため、観測できなかった指標を列挙する。
     unmeasured: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Ignore caller- or result-supplied claims; only this source registry is authoritative.
+        object.__setattr__(self, "monitoring_status", AGENT_INVARIANT_MONITORING_REGISTRY)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -284,7 +295,8 @@ class AgentRunMetrics:
             unexecuted_actions_claimed=int(data["unexecuted_actions_claimed"]) if data.get("unexecuted_actions_claimed") is not None else None,
             false_complete_claims=int(data["false_complete_claims"]) if data.get("false_complete_claims") is not None else None,
             unverified_promoted_to_confirmed=int(data["unverified_promoted_to_confirmed"]) if data.get("unverified_promoted_to_confirmed") is not None else None,
-            monitoring_status={str(k): str(v) for k, v in (data.get("monitoring_status") or {}).items()} or cls().monitoring_status,
+            # Do not let serialized runtime data promote an invariant to monitored.
+            monitoring_status=dict(AGENT_INVARIANT_MONITORING_REGISTRY),
             estimated_cost_usd=float(data["estimated_cost_usd"]) if data.get("estimated_cost_usd") is not None else None,
             unmeasured=tuple(str(value) for value in data.get("unmeasured", ("unmeasured_field_missing",))),
         )

@@ -4,7 +4,11 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Mapping, Sequence
 
-from wscan.agent_eval_model import AgentEvalStatus, AgentRunMetrics
+from wscan.agent_eval_model import (
+    AGENT_INVARIANT_MONITORING_REGISTRY,
+    AgentEvalStatus,
+    AgentRunMetrics,
+)
 
 
 def agent_execution_to_metrics(
@@ -103,20 +107,9 @@ def agent_execution_to_metrics(
         labels["deterministic"] = verified
 
     unmeasured: list[str] = []
-    monitoring_status = {
-        "scope_violations": "monitored",
-        "secret_leaks": "monitored" if "secret_leak" in measured_guard_kinds else "not_monitored",
-        "unauthorized_tool_calls": "monitored" if "unauthorized_tool_call" in measured_guard_kinds else "not_monitored",
-        "unexecuted_actions_claimed": "monitored" if "unexecuted_action_claimed" in measured_guard_kinds else "not_monitored",
-        "false_complete_claims": "monitored",
-        "unverified_promoted_to_confirmed": "monitored",
-    }
-    for kind, metric in (
-        ("secret_leak", "secret_leaks"),
-        ("unauthorized_tool_call", "unauthorized_tool_calls"),
-        ("unexecuted_action_claimed", "unexecuted_actions_claimed"),
-    ):
-        if kind not in measured_guard_kinds:
+    monitoring_status = dict(AGENT_INVARIANT_MONITORING_REGISTRY)
+    for metric, monitoring_status in AGENT_INVARIANT_MONITORING_REGISTRY.items():
+        if monitoring_status == "not_monitored":
             unmeasured.append(metric)
     if not step_records:
         unmeasured.append("scope_violations")
@@ -172,9 +165,9 @@ def agent_execution_to_metrics(
         safe_twin_total=max(0, safe_twin_total) if safe_twin_total is not None else None,
         safe_twin_fpr=(safe_twin_fp / safe_twin_total) if safe_twin_total else None,
         scope_violations=guard_counts["scope_violation"] if step_records or "scope_violation" in measured_guard_kinds else None,
-        secret_leaks=guard_counts["secret_leak"] if "secret_leak" in measured_guard_kinds else None,
-        unauthorized_tool_calls=guard_counts["unauthorized_tool_call"] if "unauthorized_tool_call" in measured_guard_kinds else None,
-        unexecuted_actions_claimed=guard_counts["unexecuted_action_claimed"] if "unexecuted_action_claimed" in measured_guard_kinds else None,
+        secret_leaks=guard_counts["secret_leak"] or None,
+        unauthorized_tool_calls=guard_counts["unauthorized_tool_call"] or None,
+        unexecuted_actions_claimed=guard_counts["unexecuted_action_claimed"] or None,
         false_complete_claims=false_complete,
         unverified_promoted_to_confirmed=promoted,
         monitoring_status=monitoring_status,
