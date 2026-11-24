@@ -52,6 +52,51 @@ async def test_agent_abort_cancels_operation_and_waits_for_cleanup():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt_after_completion", [False, True])
+async def test_ctrl_c_with_real_monitor_publishes_stable_terminal_sequence(
+    interrupt_after_completion,
+):
+    """Ctrl+C during a scan and while the dashboard waits preserve event order."""
+    from fastapi.testclient import TestClient
+
+    monitor = MonitorServer()
+    monitor._begin_scan_snapshot()
+    started = asyncio.Event()
+
+    async def operation():
+        started.set()
+        await asyncio.Event().wait()
+
+    if interrupt_after_completion:
+        await monitor.emit_status("scan completed", "done")
+        await monitor.emit("scan_complete", {"status": "done"})
+        monitor._transition_scan_status("aborted", "Ctrl+C after scan")
+    else:
+        task = asyncio.create_task(
+            main._run_with_abort_monitor(operation, monitor, phase_label="Agent")
+        )
+        await started.wait()
+        monitor.command_queue.put_nowait("abort")
+        await asyncio.wait_for(task, timeout=1)
+        await monitor.emit("scan_complete", {"status": "aborted", "aborted": True})
+
+    terminal_sequence = []
+    for event in monitor.event_history:
+        data = event.get("data") or {}
+        if event.get("type") == "status" and data.get("terminal_outcome"):
+            terminal_sequence.append(("status", data["terminal_outcome"]["status"]))
+        elif event.get("type") == "scan_complete":
+            terminal_sequence.append(("scan_complete", data["terminal_outcome"]["status"]))
+
+    expected = "done" if interrupt_after_completion else "aborted"
+    assert terminal_sequence == [("status", expected), ("scan_complete", expected)]
+    response = TestClient(monitor.app).get("/api/v1/scan/status")
+    assert response.status_code == 200
+    assert response.json()["status"] == expected
+    assert main._scan_exit_code(response.json()["status"]) == (0 if expected == "done" else 2)
+
+
+@pytest.mark.asyncio
 async def test_agent_abort_monitor_reports_unsupported_commands_without_leaking_them():
     monitor = _Monitor()
     started = asyncio.Event()
