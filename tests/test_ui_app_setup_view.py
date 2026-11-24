@@ -22,7 +22,7 @@ import pytest
 from wscan.settings_schema import FIELDS, PROFILES, SCHEMA_VERSION, build_settings_schema
 from fastapi.testclient import TestClient
 import wscan.check_catalog as check_catalog
-from wscan.monitor import MonitorServer
+from wscan.monitor import MonitorServer, TERMINAL_SCAN_STATUSES
 from tests.ui_harness import UIHarness, require_browser
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -968,14 +968,18 @@ def test_setup_credentials_e2e_websocket_payload():
 
             def abort_and_wait(timeout_s: float = 10.0) -> None:
                 # framesent only proves the browser wrote the WebSocket frame;
-                # wait until the server has accepted this scan before aborting.
+                # wait for acceptance, unless the scan has already terminated.
                 accept_deadline = time.monotonic() + timeout_s
                 last_status = "unavailable"
+                already_terminal = False
                 while time.monotonic() < accept_deadline:
                     try:
                         with urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status", timeout=2) as resp:
                             last_status = json.loads(resp.read().decode("utf-8")).get("status", "missing")
                         if last_status == "scanning":
+                            break
+                        if last_status in TERMINAL_SCAN_STATUSES:
+                            already_terminal = True
                             break
                     except Exception:
                         pass
@@ -985,19 +989,20 @@ def test_setup_credentials_e2e_websocket_payload():
                         f"Scan was not accepted before the abort step; last status={last_status!r}"
                     )
 
-                try:
-                    req = urllib.request.Request(f"{harness.server_url}/api/v1/scan/abort", data=b"", method="POST")
-                    urllib.request.urlopen(req, timeout=2)
-                except Exception:
-                    # The scan may have completed between status polling and abort.
-                    pass
+                if not already_terminal:
+                    try:
+                        req = urllib.request.Request(f"{harness.server_url}/api/v1/scan/abort", data=b"", method="POST")
+                        urllib.request.urlopen(req, timeout=2)
+                    except Exception:
+                        # The scan may have completed between status polling and abort.
+                        pass
 
                 terminal_deadline = time.monotonic() + timeout_s
                 while time.monotonic() < terminal_deadline:
                     try:
                         with urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status", timeout=2) as resp:
                             last_status = json.loads(resp.read().decode("utf-8")).get("status", "missing")
-                            if last_status in ("idle", "done", "error", "aborted"):
+                            if last_status in TERMINAL_SCAN_STATUSES:
                                 return
                     except Exception:
                         pass

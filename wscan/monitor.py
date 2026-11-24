@@ -266,6 +266,8 @@ def due_schedule_ids(schedules: list, now_epoch: Optional[float] = None) -> list
     return [i for i in out if i]
 
 
+TERMINAL_SCAN_STATUSES = frozenset({"done", "aborted", "incomplete", "error"})
+
 _TERMINAL_STATUS_MESSAGES = {
     "done": "Scan complete",
     "aborted": "Scan aborted (partial report)",
