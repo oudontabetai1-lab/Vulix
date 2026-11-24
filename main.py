@@ -925,10 +925,19 @@ async def _run_hybrid_recon_with_retries(
 ):
     """時間帯中断された Hybrid 偵察を、次の許可枠で上限付き再実行する。
 
-    戻り値は ``(handoff, continue_to_phase2)``。再試行上限に達した場合は
-    ``(None, True)`` として seed 無しの Phase 2 へフォールバックする。
-    ゲート待機中に abort された場合だけ ``continue_to_phase2`` は ``False``。
+    戻り値は ``(handoff, continue_to_phase2)``。偵察が完了しないすべての終了経路で
+    incomplete reason を持つ handoff を返し、再試行上限時は seed 無しで Phase 2 へ進む。
+    ゲート待機中に abort された場合は incomplete handoff を返して Phase 2 を止める。
     """
+    from wscan.agent_engine import AgentHandoffData
+
+    def incomplete_handoff(reason):
+        return AgentHandoffData(
+            coverage_complete=False,
+            coverage_gaps=[f"hybrid_recon_incomplete:{reason}"],
+            incomplete_reason=reason,
+        )
+
     if max_retries is None:
         max_retries = HYBRID_RECON_MAX_RETRIES
 
@@ -957,7 +966,7 @@ async def _run_hybrid_recon_with_retries(
 
     handoff, interrupted, aborted = await run_with_monitors()
     if aborted or _scan_abort_requested(monitor):
-        return None, False
+        return incomplete_handoff("recon_aborted"), False
     retries = 0
 
     while interrupted and retries < max_retries:
@@ -974,10 +983,7 @@ async def _run_hybrid_recon_with_retries(
             now_fn=now_fn,
             sleep_fn=sleep_fn,
         ):
-            return None, False
-        if _scan_abort_requested(monitor):
-            await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
-            return None, False
+            return incomplete_handoff("retry_window_aborted"), False
         await monitor.emit_status(
             f"ハイブリッド Phase 1: 再試行 {retries}/{max_retries} を開始します。",
             "running",
@@ -986,7 +992,7 @@ async def _run_hybrid_recon_with_retries(
             on_retry()
         handoff, interrupted, aborted = await run_with_monitors()
         if aborted:
-            return None, False
+            return incomplete_handoff("recon_aborted"), False
 
     if interrupted:
         await monitor.emit_status(
@@ -995,9 +1001,80 @@ async def _run_hybrid_recon_with_retries(
             "URL シードなしで Phase 2 を続行します。",
             "warning",
         )
-        return None, True
+        return incomplete_handoff("retry_limit"), True
+
+    if handoff is None:
+        return incomplete_handoff("empty_handoff"), True
+    if (
+        hasattr(handoff, "discovered_urls")
+        and not getattr(handoff, "discovered_urls", None)
+        and not getattr(handoff, "findings", None)
+    ):
+        return incomplete_handoff("empty_handoff"), True
 
     return handoff, True
+
+
+def _mark_hybrid_handoff_incomplete(handoff, reason: str):
+    """Hybrid 偵察/時間帯ゲートの未完了理由を handoff へ集約する。"""
+    from wscan.agent_engine import AgentHandoffData
+
+    if handoff is None:
+        handoff = AgentHandoffData()
+    handoff.coverage_complete = False
+    if handoff.incomplete_reason and reason not in handoff.incomplete_reason.split(";"):
+        handoff.incomplete_reason = f"{handoff.incomplete_reason};{reason}"
+    else:
+        handoff.incomplete_reason = handoff.incomplete_reason or reason
+    marker = f"hybrid_recon_incomplete:{reason}"
+    if marker not in handoff.coverage_gaps:
+        handoff.coverage_gaps.append(marker)
+    return handoff
+
+
+def _hybrid_handoff_wave_errors(handoff) -> list[str]:
+    """handoff の incomplete 情報を Phase 2 の observability error に変換する。"""
+    if handoff is None:
+        return ["hybrid_agent_recon_incomplete:empty_handoff"]
+    urls = getattr(handoff, "discovered_urls", None) or []
+    findings = getattr(handoff, "findings", None) or []
+    network_errors = list(getattr(handoff, "network_guard_errors", []) or [])
+    gaps = list(getattr(handoff, "coverage_gaps", []) or [])
+    incomplete = (
+        not getattr(handoff, "coverage_complete", True)
+        or not urls and not findings
+        or bool(network_errors)
+    )
+    errors = []
+    if incomplete:
+        reason = getattr(handoff, "incomplete_reason", "") or (
+            "empty_handoff" if not urls and not findings else "coverage_incomplete"
+        )
+        errors.append(f"hybrid_agent_recon_incomplete:{reason}")
+    errors.extend(network_errors)
+    errors.extend(f"hybrid_agent_recon_coverage_gap:{gap}" for gap in gaps)
+    return list(dict.fromkeys(errors))
+
+
+async def _emit_hybrid_incomplete_terminal(monitor, handoff):
+    """Phase 2 を開始できない偵察終了も dashboard の terminal truth に残す。"""
+    from wscan.terminal_outcome import terminal_outcome
+
+    current = terminal_outcome(getattr(monitor, "api_scan_status", "idle"))
+    if current["status"] in {"done", "incomplete", "failed", "aborted"}:
+        return
+    reason = getattr(handoff, "incomplete_reason", "") or "recon_incomplete"
+    message = (
+        f"ハイブリッド偵察は不完全です ({reason})。"
+        "0 件は安全・完了を意味しません。"
+    )
+    await monitor.emit_status(message, "incomplete")
+    await monitor.emit("scan_complete", {
+        "status": "incomplete",
+        "findings": [],
+        "total_findings": 0,
+        "coverage_gaps": list(getattr(handoff, "coverage_gaps", []) or []),
+    })
 
 
 def _effective_totp_sources(args) -> tuple[str, str, str]:
@@ -3631,6 +3708,13 @@ async def run_serve(args):
                 cfg.get("allowed_hours") or None,
                 cfg.get("forbidden_hours") or None,
             ):
+                handoff = _mark_hybrid_handoff_incomplete(
+                    None, "phase1_window_aborted"
+                )
+                hybrid_recon_incomplete = True
+                hybrid_recon_errors = _hybrid_handoff_wave_errors(handoff)
+                if not _scan_abort_requested(monitor):
+                    await _emit_hybrid_incomplete_terminal(monitor, handoff)
                 return
             await monitor.emit_status("🔀 ハイブリッド Phase 1: Agent偵察中...", "running")
             try:
@@ -3669,25 +3753,22 @@ async def run_serve(args):
                         on_retry=lambda: setattr(recon_engine, "resume", True),
                     )
                 )
-                if not continue_to_phase2 or _scan_abort_requested(monitor):
-                    return
-                if handoff is not None:
-                    seed_urls = handoff.discovered_urls
-                    agent_findings = handoff.findings
-                    hybrid_recon_incomplete = not handoff.coverage_complete
-                    hybrid_recon_errors.extend(handoff.network_guard_errors)
-                    hybrid_recon_errors.extend(
-                        f"hybrid_agent_recon_coverage_gap:{gap}"
-                        for gap in handoff.coverage_gaps
+                if handoff is None:
+                    handoff = _mark_hybrid_handoff_incomplete(
+                        None, "empty_handoff"
                     )
-                    if hybrid_recon_incomplete:
-                        hybrid_recon_errors.insert(
-                            0, "hybrid_agent_recon_incomplete:coverage_incomplete"
-                        )
-                        await monitor.emit_status(
-                            "⚠ Agent偵察は不完全です。Phase 2 の結果が 0 件でも安全・完了を意味しません。",
-                            "warning",
-                        )
+                seed_urls = getattr(handoff, "discovered_urls", []) or []
+                agent_findings = getattr(handoff, "findings", []) or []
+                hybrid_recon_errors = _hybrid_handoff_wave_errors(handoff)
+                hybrid_recon_incomplete = any(
+                    error.startswith("hybrid_agent_recon_incomplete:")
+                    for error in hybrid_recon_errors
+                )
+                if hybrid_recon_incomplete and not _scan_abort_requested(monitor):
+                    await monitor.emit_status(
+                        "⚠ Agent偵察は不完全です。Phase 2 の結果が 0 件でも安全・完了を意味しません。",
+                        "warning",
+                    )
             except Exception as exc:
                 if _scan_abort_requested(monitor):
                     await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
@@ -3696,12 +3777,19 @@ async def run_serve(args):
                     f"[yellow]⚠ 偵察フェーズ失敗 ({exc})。"
                     f"URL シードなしで通常スキャンを続行します。[/yellow]"
                 )
+                handoff = _mark_hybrid_handoff_incomplete(
+                    None, "phase1_failed"
+                )
                 seed_urls = []
                 agent_findings = []
                 hybrid_recon_incomplete = True
-                hybrid_recon_errors.append(
-                    "hybrid_agent_recon_incomplete:phase1_failed"
-                )
+                hybrid_recon_errors = _hybrid_handoff_wave_errors(handoff)
+                continue_to_phase2 = True
+
+            if not continue_to_phase2:
+                if not _scan_abort_requested(monitor):
+                    await _emit_hybrid_incomplete_terminal(monitor, handoff)
+                return
 
             # Phase 1 完了と時間枠終了が競合した場合も、Phase 2 を枠外で
             # 開始しないよう必ず直前に同じゲートを再確認する。
@@ -3711,6 +3799,13 @@ async def run_serve(args):
                 cfg.get("forbidden_hours") or None,
                 phase_label="ハイブリッド Phase 2",
             ):
+                handoff = _mark_hybrid_handoff_incomplete(
+                    handoff, "phase2_window_aborted"
+                )
+                hybrid_recon_incomplete = True
+                hybrid_recon_errors = _hybrid_handoff_wave_errors(handoff)
+                if not _scan_abort_requested(monitor):
+                    await _emit_hybrid_incomplete_terminal(monitor, handoff)
                 return
             if _scan_abort_requested(monitor):
                 await monitor.emit_status("ハイブリッド Phase 2 を中断しました。", "aborted")
