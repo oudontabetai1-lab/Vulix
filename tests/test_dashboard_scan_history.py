@@ -92,6 +92,16 @@ def test_dashboard_scan_history_api_integration(tmp_path, monkeypatch):
         "findings": []
     }), encoding="utf-8")
 
+    scan3 = tmp_path / "20261026_120000"
+    scan3.mkdir()
+    (scan3 / "evidence.json").write_text(json.dumps({
+        "target": "http://incomplete-target.local",
+        "scan_date": "2026-10-26T12:00:00",
+        "status": "incomplete",
+        "observability": {"completion_reasons": ["coverage_gap"]},
+        "findings": []
+    }), encoding="utf-8")
+
     monkeypatch.setattr("wscan.monitor.OUTPUT_BASE", tmp_path)
 
     srv = MonitorServer()
@@ -104,6 +114,7 @@ def test_dashboard_scan_history_api_integration(tmp_path, monkeypatch):
     scans = {s["id"]: s for s in data["scans"]}
     assert "20261026_100000" in scans
     assert "20261026_110000" in scans
+    assert "20261026_120000" in scans
 
     s1 = scans["20261026_100000"]
     assert s1["target"] == "http://test-app.local"
@@ -112,6 +123,14 @@ def test_dashboard_scan_history_api_integration(tmp_path, monkeypatch):
     assert s1["severity"]["critical"] == 1
     assert s1["severity"]["high"] == 1
     assert s1["report_available"] is True
+
+    s3 = scans["20261026_120000"]
+    assert s3["status"] == "incomplete"
+    assert s3["terminal_outcome"]["status"] == "incomplete"
+    assert s3["terminal_outcome"]["label_ja"] == "スキャン不完全"
+    assert s3["terminal_outcome"]["severity"] == "warning"
+    assert s3["terminal_outcome"]["is_success"] is False
+    assert s3["terminal_outcome"]["reason"] == "coverage_gap"
 
 
 def test_dashboard_scan_history_playwright_e2e(tmp_path, monkeypatch):
@@ -662,6 +681,11 @@ def test_dashboard_scan_history_unknown_counts_playwright(tmp_path, monkeypatch)
             done_cell = findings_cell(page, "c-empty-done")
             assert "0" in done_cell
             assert "検出なし" in done_cell
+            done_status = page.locator("#historyTableBody tr").filter(
+                has_text="c-empty-done"
+            ).locator(".history-status-badge")
+            assert done_status.inner_text() == "スキャン完了"
+            assert "history-status-done" in done_status.get_attribute("class")
 
             for sid in ("c-missing", "c-malformed", "c-running"):
                 cell = findings_cell(page, sid)
@@ -672,6 +696,12 @@ def test_dashboard_scan_history_unknown_counts_playwright(tmp_path, monkeypatch)
                 cell = findings_cell(page, sid)
                 assert "0" in cell, sid
                 assert "検出なし" not in cell, sid
+
+            incomplete_status = page.locator("#historyTableBody tr").filter(
+                has_text="c-incomplete-zero"
+            ).locator(".history-status-badge")
+            assert incomplete_status.inner_text() == "スキャン不完全"
+            assert "history-status-incomplete" in incomplete_status.get_attribute("class")
 
             browser.close()
     finally:

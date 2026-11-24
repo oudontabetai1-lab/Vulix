@@ -8363,7 +8363,13 @@ function renderHistoryTable() {
     const tdStatus = document.createElement('td');
     const statusSpan = document.createElement('span');
     const outcome = scan.terminal_outcome || {};
-    const statusClass = `history-status-${outcome.severity || 'warning'}`;
+    const rawStatus = String(outcome.status || scan.status || 'incomplete').toLowerCase();
+    // Keep the existing status-specific CSS tokens; severity and status are different vocabularies.
+    const legacyCssStatus = {
+      done: 'done', scanning: 'scanning', aborted: 'aborted',
+      incomplete: 'incomplete', failed: 'error',
+    }[rawStatus] || 'incomplete';
+    const statusClass = `history-status-${legacyCssStatus}`;
     statusSpan.className = `history-status-badge ${statusClass}`;
     statusSpan.textContent = outcome.label_ja || scan.status || '—';
     statusSpan.title = outcome.reason || outcome.label_ja || '';

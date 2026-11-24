@@ -53,5 +53,12 @@ def test_dashboard_history_labels_stay_japanese():
     """レガシー履歴（/monitor）の日本語ラベルと途中件数の表記を固定する。"""
     dashboard = (ROOT / "templates/dashboard.html").read_text(encoding="utf-8")
     assert "const outcome = scan.terminal_outcome || {};" in dashboard
+    assert "const rawStatus = String(outcome.status || scan.status || 'incomplete').toLowerCase();" in dashboard
     assert "outcome.label_ja || scan.status || '—'" in dashboard
-    assert "history-status-${outcome.severity || 'warning'}" in dashboard
+    assert "const legacyCssStatus = {" in dashboard
+    assert "incomplete: 'incomplete', failed: 'error'" in dashboard
+    assert "history-status-${legacyCssStatus}" in dashboard
+    # Incomplete remains a distinct badge even though its severity is warning.
+    assert ".history-status-incomplete" in dashboard
+    assert "done: 'done'" in dashboard
+    assert "statusSpan.style.color = outcome.color" in dashboard
