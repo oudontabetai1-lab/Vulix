@@ -11,8 +11,106 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from html import escape as escape_html
+import json
 import re
+import unicodedata
 from typing import Any
+from urllib.parse import unquote_plus
+
+
+_PROMPT_URL_PATTERN = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s<>\"']+")
+_PROMPT_KEY_VALUE_PATTERN = re.compile(
+    r'(?P<key>[^&?=;\s"\'<>]+)=(?P<value>[^&\s]*)'
+)
+_PROMPT_JSON_FIELD_PATTERN = re.compile(
+    r'(?P<prefix>"(?P<key>(?:\\.|[^"\\])*)"\s*:\s*")'
+    r'(?P<value>(?:\\.|[^"\\])*)(?P<suffix>")'
+)
+_UNTRUSTED_CLOSER_PATTERN = re.compile(
+    r"<\s*/\s*untrusted_target_data\s*>", re.IGNORECASE
+)
+
+
+def _is_sensitive_prompt_key(key: str, sensitive_tokens: tuple[str, ...]) -> bool:
+    """Match prompt-only aliases without broadening shared persistence key semantics."""
+    normalized = unquote_plus(key).casefold()
+    if normalized in {"sid", "session"} or normalized.endswith(("_sid", "-sid")):
+        return True
+    return any(token.casefold() in normalized for token in sensitive_tokens)
+
+
+def _redact_prompt_query(query: str, sensitive_tokens: tuple[str, ...], redacted: str) -> str:
+    """Redact decoded sensitive query names; '&' is the only URL query separator here."""
+    parts = []
+    for part in query.split("&"):
+        key, separator, _value = part.partition("=")
+        if separator and _is_sensitive_prompt_key(key, sensitive_tokens):
+            part = f"{key}={redacted}"
+        parts.append(part)
+    return "&".join(parts)
+
+
+def _redact_prompt_origin(origin: str, url_scope) -> str:
+    """Use canonical URL redaction, then cover percent-encoded prompt-only key aliases."""
+    safe = url_scope.redact_url(origin, drop_userinfo=True)
+    if "?" in safe:
+        prefix, remainder = safe.split("?", 1)
+        query, marker, fragment = remainder.partition("#")
+        safe = f"{prefix}?{_redact_prompt_query(query, url_scope.SENSITIVE_KEY_TOKENS, url_scope.REDACTED)}"
+        if marker:
+            safe += f"#{_redact_prompt_query(fragment, url_scope.SENSITIVE_KEY_TOKENS, url_scope.REDACTED)}"
+    elif "#" in safe:
+        prefix, fragment = safe.split("#", 1)
+        safe = f"{prefix}#{_redact_prompt_query(fragment, url_scope.SENSITIVE_KEY_TOKENS, url_scope.REDACTED)}"
+    return safe
+
+
+def _redact_prompt_observation(text: str, url_scope) -> str:
+    """Redact secrets in prompt observations while retaining following diagnostic text."""
+    text = url_scope.redact_secret_values(text)
+    text = _PROMPT_URL_PATTERN.sub(
+        lambda match: _redact_prompt_origin(match.group(0), url_scope), text
+    )
+    sensitive_tokens = url_scope.SENSITIVE_KEY_TOKENS
+
+    def redact_json_field(match: re.Match[str]) -> str:
+        try:
+            key = json.loads(f'"{match.group("key")}"')
+        except (json.JSONDecodeError, TypeError):
+            return match.group(0)
+        if not _is_sensitive_prompt_key(key, sensitive_tokens):
+            return match.group(0)
+        return f"{match.group('prefix')}{url_scope.REDACTED}{match.group('suffix')}"
+
+    text = _PROMPT_JSON_FIELD_PATTERN.sub(redact_json_field, text)
+
+    def redact_key_value(match: re.Match[str]) -> str:
+        key, value = match.group("key"), match.group("value")
+        if not _is_sensitive_prompt_key(key, sensitive_tokens):
+            return match.group(0)
+        trailing_semicolons = len(value) - len(value.rstrip(";"))
+        return f"{key}={url_scope.REDACTED}{';' * trailing_semicolons}"
+
+    return _PROMPT_KEY_VALUE_PATTERN.sub(redact_key_value, text)
+
+
+def _escape_nfkc_closers(text: str) -> str:
+    """Escape source delimiter characters whenever NFKC could form an envelope closer."""
+    normalized_chars: list[str] = []
+    source_indices: list[int] = []
+    for index, character in enumerate(text):
+        compatibility_form = unicodedata.normalize("NFKC", character)
+        normalized_chars.extend(compatibility_form)
+        source_indices.extend([index] * len(compatibility_form))
+
+    normalized = "".join(normalized_chars)
+    delimiter_indices: dict[int, str] = {}
+    for match in _UNTRUSTED_CLOSER_PATTERN.finditer(normalized):
+        delimiter_indices[source_indices[match.start()]] = "&lt;"
+        delimiter_indices[source_indices[match.end() - 1]] = "&gt;"
+    if not delimiter_indices:
+        return text
+    return "".join(delimiter_indices.get(index, character) for index, character in enumerate(text))
 
 
 class ContentSource(str, Enum):
@@ -175,12 +273,7 @@ class ProvenanceEnvelope:
     def format_tagged_block(self) -> str:
         """Format content into an untrusted target delimiter block with breakout escaping."""
         body = self.sanitized_content if self.sanitized_content != "" else self.content
-        escaped_body = re.sub(
-            r"<\s*/\s*untrusted_target_data\s*>",
-            "&lt;/untrusted_target_data&gt;",
-            body,
-            flags=re.IGNORECASE,
-        )
+        escaped_body = _escape_nfkc_closers(body)
         inj_detected = "true" if self.injection_signals else "false"
         attrs = [
             f'source="{escape_html(self.source, quote=True)}"',
@@ -211,10 +304,9 @@ def wrap_untrusted_observation(
     source_text = str(content or "")
     signals = detect_prompt_injection(source_text)
     from . import url_scope
-    from .request_logger import redact_text
 
-    raw_text = redact_text(source_text)
-    safe_origin = url_scope.redact_url(str(origin or ""), drop_userinfo=True)
+    raw_text = _redact_prompt_observation(source_text, url_scope)
+    safe_origin = _redact_prompt_origin(str(origin or ""), url_scope)
 
     # Length truncation (preserve observation up to max_len)
     if max_len is not None and max_len > 0:
@@ -226,12 +318,7 @@ def wrap_untrusted_observation(
     sanitized = text.replace("```", "'''")
 
     # Neutralize envelope closing tag breakout attempts
-    sanitized = re.sub(
-        r"<\s*/\s*untrusted_target_data\s*>",
-        "&lt;/untrusted_target_data&gt;",
-        sanitized,
-        flags=re.IGNORECASE,
-    )
+    sanitized = _escape_nfkc_closers(sanitized)
 
     # Neutralize spoofed nonce tokens: WSCAN-NONCE:... -> WSCAN-CANDIDATE
     sanitized = re.sub(

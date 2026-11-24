@@ -210,11 +210,11 @@ REDACTED = "<redacted>"
 SENSITIVE_KEY_TOKENS = (
     "password", "passwd", "pwd", "secret", "token", "api_key", "apikey",
     "apitoken", "access_token", "refresh_token", "client_secret",
-    "session", "sessionid", "session_id", "csrf", "xsrf", "authenticity_token",
+    "sessionid", "session_id", "csrf", "xsrf", "authenticity_token",
 )
 KEYS_ALT = "|".join(re.escape(k) for k in SENSITIVE_KEY_TOKENS)
 # urlencoded: <key>=<value>（key が機微トークンを含むとき value をマスク）
-_RE_URLENCODED = re.compile(rf"(?i)([^&;=?\s]*(?:{KEYS_ALT})[^&;=\s]*)=[^&;\s]*")
+_RE_URLENCODED = re.compile(rf"(?i)([^&=?\s]*(?:{KEYS_ALT})[^&=]*)=[^&]*")
 # JSON: "<key>": "<value>"
 # 値は escape-aware（`\"` を含む JSON scalar 全体を伏せる。`"[^"]*"` だと `\"` で切れて末尾漏れ）
 _RE_JSON = re.compile(rf'(?i)("(?:[^"\\]*(?:{KEYS_ALT})[^"\\]*)"\s*:\s*)"(?:\\.|[^"\\])*"')
