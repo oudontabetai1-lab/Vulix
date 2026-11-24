@@ -438,6 +438,20 @@ class Finding:
     verification_state: str = None
 
     def __post_init__(self):
+        # 注入兆候はfindingを判定/格下げせず、本文を含まない位置メタデータだけ証跡へ追加。
+        try:
+            from wscan.content_provenance import (
+                detect_injection_signal_details, sanitize_injection_signal_details,
+            )
+            signal_text = str(self.evidence or "")
+            signals = detect_injection_signal_details(signal_text)
+            details = dict(self.evidence_details or {})
+            existing = sanitize_injection_signal_details(details.get("injection_signals"))
+            if signals or existing:
+                details["injection_signals"] = existing or signals
+                self.evidence_details = details
+        except Exception:
+            pass
         # record_finding を通らない直接構築（ChainScanner/GraphQL/JWT/privesc/websocket 等）も
         # 含め、生成境界で一元的に既定 state を与える（whack-a-mole 防止）。dialog 発火=scan 時点で
         # 実行確証=reproduced。それ以外=assumed（_phase_verify を通る verifiable finding は後で

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from typing import Any, Literal
 
 import httpx
@@ -11,6 +12,24 @@ from . import llm_endpoint
 
 
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504, 529}
+
+_INJECTION_SIGNAL_ATTR = re.compile(r'injection_signals="([a-z_,]*)"')
+_KNOWN_INJECTION_SIGNALS = {
+    "ignore_previous_instructions", "stop_scan_directive", "false_safe_declaration",
+    "scope_expansion_override", "fake_completion_or_nonce_spoof",
+}
+
+
+def _prompt_injection_signals(prompt) -> list[str]:
+    """Read category IDs emitted by provenance envelopes, never prompt text."""
+    if not isinstance(prompt, str):
+        return []
+    return sorted({
+        signal
+        for match in _INJECTION_SIGNAL_ATTR.finditer(prompt)
+        for signal in match.group(1).split(",")
+        if signal in _KNOWN_INJECTION_SIGNALS
+    })
 
 CompletionStatus = Literal[
     "ok", "empty", "unavailable", "transient", "permanent", "blocked"
@@ -110,6 +129,7 @@ def _retry_after_seconds(response: Any, cap: float = 8.0) -> float | None:
 def record_llm_call(
     pg, *, provider, role, model, timeout_seconds, elapsed_seconds, status,
     retries=0, prompt_chars=None, response_chars=None, caller="", exception_type=None,
+    injection_signals=(),
 ) -> None:
     """LLM 呼び出しメタデータを ``pg.request_logger`` へ記録する。
 
@@ -127,6 +147,7 @@ def record_llm_call(
             timeout_seconds=timeout_seconds, elapsed_seconds=elapsed_seconds,
             status=status, retries=retries, prompt_chars=prompt_chars,
             response_chars=response_chars, caller=caller, exception_type=exception_type,
+            injection_signals=injection_signals,
         )
     except Exception:
         pass
@@ -277,6 +298,7 @@ async def complete_text(
             prompt_chars=len(prompt) if isinstance(prompt, str) else None,
             response_chars=len(text) if isinstance(text, str) else 0,
             caller=caller, exception_type=exc_type,
+            injection_signals=_prompt_injection_signals(prompt),
         )
         # 恒久失敗（4xx・キー/クライアント不在）は可用性を倒し、以降の同一鍵（provider
         # 全体もしくは role 解決済みモデル）の呼び出しが入口で打ち切られる。

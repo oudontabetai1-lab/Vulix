@@ -38,6 +38,27 @@ _PROMPT_SENSITIVE_KEY_TOKENS = (
 _JWT_VALUE_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 _BEARER_VALUE_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 
+INJECTION_SIGNAL_NAMES = frozenset({
+    "ignore_previous_instructions", "stop_scan_directive",
+    "false_safe_declaration", "scope_expansion_override",
+    "fake_completion_or_nonce_spoof",
+})
+
+
+def sanitize_injection_signal_details(values) -> list[dict[str, int | str]]:
+    """Keep only known signal categories and non-negative character offsets."""
+    if not isinstance(values, (list, tuple)):
+        return []
+    clean = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        pattern, start, end = item.get("pattern"), item.get("start"), item.get("end")
+        if (pattern in INJECTION_SIGNAL_NAMES and type(start) is int and type(end) is int
+                and 0 <= start <= end):
+            clean.append({"pattern": pattern, "start": start, "end": end})
+    return clean
+
 
 def _is_sensitive_prompt_key(key: str, sensitive_tokens: tuple[str, ...]) -> bool:
     """Match secret names as complete normalized words, including camelCase parts."""
@@ -262,6 +283,27 @@ def detect_prompt_injection(text: str) -> list[str]:
     return signals
 
 
+def detect_injection_signal_details(text: str) -> list[dict[str, int | str]]:
+    """Return category and character offsets only; never retain matched text."""
+    if not text:
+        return []
+    checks = (
+        ("ignore_previous_instructions", _IGNORE_PREVIOUS_PATTERNS),
+        ("stop_scan_directive", _STOP_SCAN_PATTERNS),
+        ("false_safe_declaration", _FALSE_SAFE_PATTERNS),
+        ("scope_expansion_override", _SCOPE_OVERRIDE_PATTERNS),
+        ("fake_completion_or_nonce_spoof", _FAKE_COMPLETION_PATTERNS),
+    )
+    found = []
+    for category, patterns in checks:
+        for pattern in patterns:
+            match = pattern.search(text)
+            if match:
+                found.append({"pattern": category, "start": match.start(), "end": match.end()})
+                break
+    return sanitize_injection_signal_details(found)
+
+
 @dataclass
 class ProvenanceEnvelope:
     """Envelope wrapping content with provenance metadata and injection guards."""
@@ -272,6 +314,7 @@ class ProvenanceEnvelope:
     content_type: str
     correlation_id: str = ""
     injection_signals: tuple[str, ...] = ()
+    injection_signal_details: tuple[dict[str, int | str], ...] = ()
     sanitized_content: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -284,6 +327,7 @@ class ProvenanceEnvelope:
             "content_type": self.content_type,
             "correlation_id": self.correlation_id,
             "injection_signals": list(self.injection_signals),
+            "injection_signal_details": [dict(item) for item in self.injection_signal_details],
             "sanitized_content": self.sanitized_content,
         }
 
@@ -299,6 +343,7 @@ class ProvenanceEnvelope:
             f'content_type="{escape_html(self.content_type, quote=True)}"',
             f'correlation_id="{escape_html(self.correlation_id, quote=True)}"',
             f'injection_detected="{inj_detected}"',
+            f'injection_signals="{escape_html(",".join(self.injection_signals), quote=True)}"',
         ]
         attr_str = " ".join(attrs)
         if escaped_body:
@@ -366,5 +411,6 @@ def wrap_untrusted_observation(
         content_type=str(content_type),
         correlation_id=str(correlation_id),
         injection_signals=tuple(signals),
+        injection_signal_details=tuple(detect_injection_signal_details(source_text)),
         sanitized_content=sanitized,
     )

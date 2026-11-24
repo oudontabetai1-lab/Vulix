@@ -1402,8 +1402,13 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
     def _format_structured_evidence(self, finding: Finding) -> str:
         evidence_type = getattr(finding, "evidence_type", "") or finding.check_type
         details = getattr(finding, "evidence_details", {}) or {}
+        try:
+            from wscan.content_provenance import sanitize_injection_signal_details
+            injection_signals = sanitize_injection_signal_details(details.get("injection_signals"))
+        except Exception:
+            injection_signals = []
         steps = getattr(finding, "reproduction_steps", []) or []
-        if not details and not steps and not evidence_type:
+        if not details and not steps and not evidence_type and not injection_signals:
             return ""
 
         # 明示的な verification_state を legacy boolean より優先する。verified=False でも
@@ -1428,7 +1433,13 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             ("Confidence", getattr(finding, "confidence", "tentative")),
             ("Verification", v_label),
         ]
-        for key, value in list(details.items())[:8]:
+        if injection_signals:
+            labels = ", ".join(
+                f"{signal['pattern']} ({signal['start']}–{signal['end']})"
+                for signal in injection_signals
+            )
+            cells.append(("Prompt Injection Signals", labels))
+        for key, value in [(k, v) for k, v in details.items() if k != "injection_signals"][:8]:
             cells.append((str(key).replace("_", " ").title(), value))
 
         cells_html = "".join(

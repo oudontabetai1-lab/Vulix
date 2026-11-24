@@ -518,6 +518,7 @@ class RequestLogger:
         timeout_seconds=None, elapsed_seconds=None, status: str = "",
         retries=None, prompt_chars=None, response_chars=None,
         input_tokens=None, output_tokens=None, exception_type=None, caller: str = "",
+        injection_signals=None,
     ) -> None:
         """LLM 呼び出し1回のメタデータを記録する（観測性）。
 
@@ -542,6 +543,14 @@ class RequestLogger:
             "output_tokens": output_tokens,
             "exception_type": exception_type,
             "caller": caller,
+            "injection_signals": sorted({
+                str(item) for item in (injection_signals or [])
+                if str(item) in {
+                    "ignore_previous_instructions", "stop_scan_directive",
+                    "false_safe_declaration", "scope_expansion_override",
+                    "fake_completion_or_nonce_spoof",
+                }
+            }),
         }
         # 実際に永続化できた行だけ数える。失敗時に加算すると evidence.json の総数が
         # llm_calls.jsonl の実行数と食い違う。
