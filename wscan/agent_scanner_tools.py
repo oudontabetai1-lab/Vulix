@@ -26,7 +26,6 @@ class AgentScannerTools:
         self.points: dict[str, dict] = {}
         self.findings: dict[str, object] = {}
         self.work_specs: dict[str, tuple[str, str]] = {}
-        self.hypotheses: dict[str, dict] = {}
         self.points_path = Path(harness.output_dir) / "agent_scanner_points.json"
         self._load_points()
 
@@ -284,42 +283,42 @@ class AgentScannerTools:
                 timeout=180,
             )
             verified = []
+            verification_inconclusive = False
             for finding in findings:
-                if await asyncio.wait_for(scanner.verify_finding(finding), timeout=180) is True:
+                verification = await asyncio.wait_for(scanner.verify_finding(finding), timeout=180)
+                if verification is True:
                     verified.append(finding)
-            status = WorkStatus.COMPLETE
+                elif verification is None:
+                    verification_inconclusive = True
+            status = WorkStatus.INCONCLUSIVE if verification_inconclusive and not verified else WorkStatus.COMPLETE
             self.findings[work_id] = self._sanitize_findings(verified)
             self.harness.record_probe_attempt(
                 target_url=point.url, check_type=check, work_id=work_id,
-                status="completed", evidence_id=work_id,
+                status="inconclusive" if status == WorkStatus.INCONCLUSIVE else "completed",
+                evidence_id=work_id,
             )
             self.harness.finish_work(work_id, status, summary=f"deterministic scanner work finished: {len(verified)} verified findings")
-            for hypothesis_id, hypothesis in self.hypotheses.items():
+            for hypothesis in self.harness.state.hypotheses:
+                hypothesis_id = str(hypothesis.get("candidate_id", ""))
                 if hypothesis.get("injection_point_id") == point_id and hypothesis.get("check_type") == check:
-                    confirmed = bool(verified)
-                    self.harness.record_verification(
-                        hypothesis_id, reproduced=confirmed,
-                        status="reproduced" if confirmed else "not_reproduced",
-                        method="deterministic", work_id=work_id,
-                        deterministic_confirmed=confirmed,
-                        rejection_reason="" if confirmed else "deterministic scanner did not confirm the hypothesis",
+                    outcome = "confirmed" if verified else "inconclusive" if verification_inconclusive else "rejected"
+                    reason = "" if outcome == "confirmed" else (
+                        "verify_finding returned None" if outcome == "inconclusive"
+                        else "deterministic scanner did not confirm the hypothesis"
                     )
-                    self.harness.update_hypothesis(
-                        hypothesis_id,
-                        status="deterministic_confirmed" if confirmed else "agent_only",
-                        deterministic_confirmed=confirmed,
-                        source_label="agent_deterministic_confirmed" if confirmed else "agent_unverified",
-                        rejection_reason="" if confirmed else "deterministic scanner did not confirm the hypothesis",
-                    )
-            return {"status": "completed", "verified_count": len(verified), "work_id": work_id}
+                    self._record_hypothesis_outcome(hypothesis_id, outcome, reason, work_id=work_id)
+            return {
+                "status": "inconclusive" if status == WorkStatus.INCONCLUSIVE else "completed",
+                "verified_count": len(verified), "work_id": work_id,
+            }
         except asyncio.TimeoutError:
             work.transition_to(WorkStatus.TRANSIENT_FAILURE, rejection_reason="scanner timed out")
             self.harness.checkpoint()
-            self._mark_hypotheses(point_id, check, "scanner timed out")
+            self._mark_hypotheses(point_id, check, "inconclusive", "scanner timed out", work_id=work_id)
             return {"status": "timeout", "reason": "scanner timed out; the work remains eligible for resume"}
         except Exception as exc:
             self.harness.finish_work(work_id, WorkStatus.FAILED, rejection_reason=f"scanner error: {type(exc).__name__}")
-            self._mark_hypotheses(point_id, check, f"scanner failed: {type(exc).__name__}")
+            self._mark_hypotheses(point_id, check, "inconclusive", f"scanner failed: {type(exc).__name__}", work_id=work_id)
             return {"status": "failed", "reason": "scanner failed; inspect the redacted run log and retry the work"}
         finally:
             if engine is not None and getattr(engine, "_browser", None) is not None:
@@ -334,29 +333,44 @@ class AgentScannerTools:
 
     async def verify_hypothesis(self, hypothesis_id: str) -> dict:
         """Schedule deterministic verification for a known hypothesis."""
-        hypothesis = self.hypotheses.get(str(hypothesis_id))
+        hypothesis_id = str(hypothesis_id)
+        hypothesis = next((item for item in self.harness.state.hypotheses
+                           if str(item.get("candidate_id", "")) == hypothesis_id), None)
         if not hypothesis:
             return {"status": "inconclusive", "reason": "unknown hypothesis ID"}
+        recorded, ledger_error = self._verification_record(hypothesis_id)
+        if recorded is not None:
+            return self._verification_result(hypothesis_id, recorded)
+        if ledger_error:
+            reason = "deterministic verification ledger is unreadable; automatic replay was suppressed"
+            self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason)
+            return {"status": "inconclusive", "reason": reason}
+        outcome = str(hypothesis.get("verification_outcome", ""))
+        if outcome in {"confirmed", "rejected", "inconclusive"}:
+            return self._verification_result(hypothesis_id, hypothesis)
         point_id = hypothesis.get("injection_point_id", "")
         check = hypothesis.get("check_type", "")
         scheduled = self.schedule_scanner(point_id, check)
         if scheduled.get("status") not in {"planned", "already_scheduled"}:
-            self.harness.update_hypothesis(hypothesis_id, status="agent_only", source_label="agent_unverified", rejection_reason=scheduled.get("reason", "verification unavailable"))
-            return {"status": "inconclusive", "reason": scheduled.get("reason", "verification unavailable")}
+            reason = scheduled.get("reason", "verification unavailable")
+            self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason)
+            return {"status": "inconclusive", "reason": reason}
         self.work_specs[scheduled["work_id"]] = (point_id, check)
         existing = next(item for item in self.harness.state.work_queue if item.work_id == scheduled["work_id"])
         if existing.status == WorkStatus.COMPLETE:
-            confirmed = bool(self.findings.get(existing.work_id))
-            self.harness.update_hypothesis(
-                hypothesis_id,
-                status="deterministic_confirmed" if confirmed else "agent_only",
-                deterministic_confirmed=confirmed,
-                source_label="agent_deterministic_confirmed" if confirmed else "agent_unverified",
-                rejection_reason="" if confirmed else "deterministic scanner did not confirm the hypothesis",
-            )
-            return {"status": "reproduced" if confirmed else "rejected", "hypothesis_id": hypothesis_id, "work_id": existing.work_id}
+            reason = "completed scanner result is unavailable after resume; automatic replay was suppressed"
+            self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason, work_id=existing.work_id)
+            return {"status": "inconclusive", "reason": reason, "hypothesis_id": hypothesis_id, "work_id": existing.work_id}
         result = await self.run_scanner_work(scheduled["work_id"])
-        return {**result, "hypothesis_id": hypothesis_id}
+        recorded, ledger_error = self._verification_record(hypothesis_id)
+        if recorded is not None:
+            return {**self._verification_result(hypothesis_id, recorded), "work_id": scheduled["work_id"]}
+        if ledger_error:
+            reason = "deterministic verification ledger is unreadable; automatic replay was suppressed"
+        else:
+            reason = result.get("reason") or "scanner could not complete deterministic verification"
+        self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason, work_id=scheduled["work_id"])
+        return {"status": "inconclusive", "reason": reason, "hypothesis_id": hypothesis_id, "work_id": scheduled["work_id"]}
 
     def register_hypothesis(self, hypothesis: dict) -> str:
         safe = dict(hypothesis)
@@ -364,26 +378,75 @@ class AgentScannerTools:
             if raw.get("url") == safe.get("url")
             and raw.get("parameter_id") == safe.get("field_name")), "")
         hypothesis_id = str(safe.get("candidate_id") or hashlib.sha256(json.dumps(safe, sort_keys=True).encode()).hexdigest()[:20])
-        self.hypotheses[hypothesis_id] = safe
-        return hypothesis_id
+        safe["candidate_id"] = hypothesis_id
+        self.harness.note_hypotheses([safe])
+        return str(safe["injection_point_id"])
 
-    def _mark_hypotheses(self, point_id: str, check: str, reason: str) -> None:
-        for hypothesis_id, hypothesis in self.hypotheses.items():
+    def _record_hypothesis_outcome(self, hypothesis_id: str, outcome: str, reason: str, *, work_id: str = "") -> None:
+        confirmed = outcome == "confirmed"
+        self.harness.record_verification(
+            hypothesis_id, reproduced=confirmed, status=outcome,
+            method="deterministic", work_id=work_id,
+            deterministic_confirmed=confirmed, rejection_reason=reason,
+        )
+        self.harness.update_hypothesis(
+            hypothesis_id,
+            status="deterministic_confirmed" if confirmed else "agent_only",
+            verification_outcome=outcome,
+            deterministic_confirmed=confirmed,
+            source_label="agent_deterministic_confirmed" if confirmed else "agent_unverified",
+            rejection_reason=reason,
+        )
+
+    def _mark_hypotheses(self, point_id: str, check: str, outcome: str, reason: str, *, work_id: str = "") -> None:
+        for hypothesis in self.harness.state.hypotheses:
             if hypothesis.get("injection_point_id") == point_id and hypothesis.get("check_type") == check:
-                self.harness.update_hypothesis(
-                    hypothesis_id, status="agent_only", deterministic_confirmed=False,
-                    source_label="agent_unverified", rejection_reason=reason,
-                )
+                self._record_hypothesis_outcome(str(hypothesis.get("candidate_id", "")), outcome, reason, work_id=work_id)
+
+    def _verification_record(self, candidate_id: str) -> tuple[dict | None, bool]:
+        path = self.harness.verification_results_path
+        if not path.exists():
+            return None, False
+        latest = None
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if record.get("candidate_id") == candidate_id and record.get("method") == "deterministic":
+                    latest = record
+            return latest, False
+        except (OSError, ValueError, AttributeError):
+            return None, True
+
+    @staticmethod
+    def _verification_result(candidate_id: str, record: dict) -> dict:
+        outcome = record.get("status", "inconclusive")
+        if record.get("deterministic_confirmed") and record.get("reproduced"):
+            outcome = "confirmed"
+        elif outcome in {"not_reproduced", "rejected"}:
+            outcome = "rejected"
+        elif outcome not in {"confirmed", "rejected", "inconclusive"}:
+            outcome = "inconclusive"
+        result = {"status": outcome, "hypothesis_id": candidate_id}
+        if record.get("rejection_reason"):
+            result["reason"] = record["rejection_reason"]
+        return result
 
     def _already_dispatched(self, work_id: str) -> bool:
+        path = self.harness.probe_attempts_path
+        if not path.exists():
+            return False
         try:
-            for line in self.harness.probe_attempts_path.read_text(encoding="utf-8").splitlines():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
                 record = json.loads(line)
                 if record.get("work_id") == work_id and record.get("status") in {"dispatching", "sent"}:
                     return True
             return False
-        except (OSError, ValueError):
-            return False
+        except (OSError, ValueError, AttributeError):
+            return True
 
     def _record_scope_block(self, _url: str, reason: str) -> None:
         gap = f"scanner_network_scope_blocked:{reason}"

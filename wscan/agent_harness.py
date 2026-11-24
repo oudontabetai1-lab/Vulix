@@ -991,6 +991,7 @@ class AgentHarness:
         candidate_id: str,
         *,
         status: str | None = None,
+        verification_outcome: str | None = None,
         rejection_reason: str = "",
         evidence_ids: Iterable[str] = (),
         dynamic_verified: bool | None = None,
@@ -1001,6 +1002,8 @@ class AgentHarness:
             if item.get("candidate_id") == candidate_id:
                 if status is not None:
                     item["status"] = str(status)
+                if verification_outcome is not None:
+                    item["verification_outcome"] = str(verification_outcome)
                 if rejection_reason:
                     safe_reason = _redact_bounded(self._redact_runtime(str(rejection_reason)))
                     item["rejection_reason"] = safe_reason

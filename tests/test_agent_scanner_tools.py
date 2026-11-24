@@ -33,11 +33,12 @@ class _AgentScanner:
 
 
 class _FakeScanner:
-    def __init__(self, *, findings=None, error=None, api_get=False):
+    def __init__(self, *, findings=None, error=None, api_get=False, verify_result=True):
         self.findings = findings or []
         self.error = error
         self.calls = []
         self.api_get = api_get
+        self.verify_result = verify_result
 
     async def scan_field(self, *args):
         self.calls.append(args)
@@ -46,7 +47,7 @@ class _FakeScanner:
         return self.findings
 
     async def verify_finding(self, _finding):
-        return True
+        return self.verify_result
 
     def _should_route_to_api_get(self, _point):
         return self.api_get
@@ -369,6 +370,102 @@ def test_unknown_outcome_is_not_replayed_after_resume(tmp_path):
     asyncio.run(scenario())
 
 
+def test_unreadable_probe_ledger_fails_closed_without_replay(tmp_path):
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *_: pytest.fail("ledger failure must suppress replay"))
+        point_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+        work_id = tools.schedule_scanner(point_id, "xss")["work_id"]
+        harness.probe_attempts_path.write_text("corrupt ledger record\n", encoding="utf-8")
+        result = await tools.run_scanner_work(work_id)
+        assert result["status"] == "inconclusive"
+        assert harness.state.work_queue[0].status == WorkStatus.INCONCLUSIVE
+    asyncio.run(scenario())
+
+
+def test_saved_hypothesis_can_be_verified_once_after_resume(tmp_path):
+    async def scenario():
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+        first_harness = _harness(tmp_path)
+        first_tools = AgentScannerTools(scanner, first_harness)
+        point_id = first_tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+        work_id = first_tools.schedule_scanner(point_id, "xss")["work_id"]
+        candidate = {
+            "candidate_id": "saved-candidate", "check_type": "xss",
+            "url": "https://target.test/search?q=1", "field_name": "q",
+        }
+        candidate["injection_point_id"] = first_tools.register_hypothesis(candidate)
+        first_harness.note_hypotheses([candidate])
+
+        resumed_harness = _harness(tmp_path, resume=True)
+        engines = []
+        finding = SimpleNamespace(
+            check_type="xss", severity="high", url=candidate["url"],
+            field_name="q", payload="marker", evidence="reproduced",
+        )
+
+        def factory(check, handoff):
+            engine = _FakeEngine(check, handoff, finding=finding)
+            engines.append(engine)
+            return engine
+
+        resumed_tools = AgentScannerTools(scanner, resumed_harness, engine_factory=factory)
+        assert resumed_tools._resolve(point_id)[0] is not None
+        assert any(item.work_id == work_id for item in resumed_harness.state.work_queue)
+        result = await resumed_tools.verify_hypothesis("saved-candidate")
+        assert result["status"] == "confirmed", result
+        stored = next(item for item in resumed_harness.state.hypotheses if item["candidate_id"] == "saved-candidate")
+        assert stored["verification_outcome"] == "confirmed"
+        assert stored["deterministic_confirmed"] is True
+        assert stored["source_label"] == "agent_deterministic_confirmed"
+        first_result = await resumed_tools.verify_hypothesis("saved-candidate")
+        assert first_result["status"] == "confirmed"
+        assert len(engines) == 1
+        assert len(engines[0].scanner.calls) == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("verify_result", "expected"), [(False, "rejected"), (None, "inconclusive")])
+def test_resumed_hypothesis_records_rejected_and_inconclusive_labels(tmp_path, verify_result, expected):
+    async def scenario():
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+        harness = _harness(tmp_path)
+        first_tools = AgentScannerTools(scanner, harness)
+        point_id = first_tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+        candidate = {
+            "candidate_id": f"candidate-{expected}", "check_type": "xss",
+            "url": "https://target.test/search?q=1", "field_name": "q",
+        }
+        candidate["injection_point_id"] = first_tools.register_hypothesis(candidate)
+        work_id = first_tools.schedule_scanner(point_id, "xss")["work_id"]
+
+        resumed = _harness(tmp_path, resume=True)
+        finding = SimpleNamespace(
+            check_type="xss", severity="high", url=candidate["url"],
+            field_name="q", payload="marker", evidence="candidate evidence",
+        )
+        engine = _FakeEngine(
+            "xss", SimpleNamespace(cookies=[]),
+            scanner=_FakeScanner(findings=[finding], verify_result=verify_result),
+        )
+        tools = AgentScannerTools(scanner, resumed, engine_factory=lambda *_: engine)
+        result = await tools.verify_hypothesis(candidate["candidate_id"])
+        assert result["status"] == expected
+        ledger = [json.loads(line) for line in resumed.verification_results_path.read_text().splitlines()]
+        assert ledger[-1]["status"] == expected
+        assert ledger[-1]["deterministic_confirmed"] is False
+        stored = next(item for item in resumed.state.hypotheses if item["candidate_id"] == candidate["candidate_id"])
+        assert stored["verification_outcome"] == expected
+        assert stored["status"] == "agent_only"
+        assert stored["source_label"] == "agent_unverified"
+        assert stored["deterministic_confirmed"] is False
+        assert resumed.state.work_queue[0].work_id == work_id
+        if expected == "inconclusive":
+            assert resumed.state.work_queue[0].status == WorkStatus.INCONCLUSIVE
+    asyncio.run(scenario())
+
+
 def test_controller_contract_and_agent_lab_fake_llm_integration(tmp_path):
     class _Controller:
         def __init__(self):
@@ -437,5 +534,5 @@ def test_controller_contract_and_agent_lab_fake_llm_integration(tmp_path):
     assert tuple(signature(controller.actions["schedule_scanner"]["function"]).parameters) == ("injection_point_id", "check")
     assert tuple(signature(controller.actions["run_scanner_work"]["function"]).parameters) == ("work_id",)
     result = asyncio.run(_FakeLLM().use_tools(controller, point_id))
-    assert result["status"] == "reproduced"
+    assert result["status"] == "confirmed"
     assert harness.state.hypotheses[0]["deterministic_confirmed"] is True
