@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 import main
+from wscan.monitor import MonitorServer
 
 
 class _Monitor:
@@ -283,3 +284,54 @@ async def test_hybrid_abort_wins_at_time_window_boundary(race_order):
     assert monitor.scan_abort_event.is_set()
     assert monitor.command_queue.empty()
     assert monitor.statuses[-1][1] == "aborted"
+
+
+@pytest.mark.parametrize("mode", ["agent", "scan", "hybrid"])
+def test_each_mode_publishes_aborted_once(mode):
+    async def exercise():
+        monitor = MonitorServer()
+        monitor._begin_scan_snapshot()
+
+        if mode == "scan":
+            # Ordinary ScanEngine publishes its terminal state with scan_complete.
+            await monitor.emit(
+                "scan_complete", {"status": "aborted", "aborted": True}
+            )
+        else:
+            started = asyncio.Event()
+
+            async def operation():
+                started.set()
+                await asyncio.Event().wait()
+
+            if mode == "agent":
+                task = asyncio.create_task(
+                    main._run_with_abort_monitor(
+                        operation, monitor, phase_label="Agent"
+                    )
+                )
+            else:
+                task = asyncio.create_task(
+                    main._run_hybrid_recon_with_retries(operation, monitor)
+                )
+            await started.wait()
+            monitor.command_queue.put_nowait("abort")
+            await asyncio.wait_for(task, timeout=1)
+
+        aborted_events = []
+        for event in monitor.event_history:
+            data = event.get("data") or {}
+            state = (
+                data.get("state")
+                if event.get("type") == "status"
+                else data.get("status")
+                if event.get("type") == "scan_complete"
+                else None
+            )
+            if state == "aborted":
+                aborted_events.append((event["type"], data["terminal_outcome"]["status"]))
+        return aborted_events
+
+    events = asyncio.run(exercise())
+    expected_event = "scan_complete" if mode == "scan" else "status"
+    assert events == [(expected_event, "aborted")], mode

@@ -955,12 +955,10 @@ async def _run_hybrid_recon_with_retries(
         )
         if interrupted:
             if _scan_abort_requested(monitor):
-                await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
                 return None, False, True
             return None, True, False
         handoff, aborted = result
         if _scan_abort_requested(monitor) and not aborted:
-            await monitor.emit_status("ハイブリッド Phase 1 を中断しました。", "aborted")
             return None, False, True
         return handoff, False, aborted
 

@@ -341,6 +341,7 @@ class MonitorServer:
         self.api_scan_id: str = ""
         self._api_scan_status: str = "idle"
         self._final_scan_status: Optional[str] = None
+        self._terminal_status_event_emitted = False
         self._terminal_status_conflicts: list[dict] = []
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
@@ -2707,6 +2708,7 @@ class MonitorServer:
         # 各 scan lifecycle の終了値は最初の確定後に固定する。新しい snapshot の開始だけが
         # 次の lifecycle への移行を許可する。
         self._final_scan_status = None
+        self._terminal_status_event_emitted = False
         self._terminal_status_conflicts = []
         self._api_scan_status = "scanning"
         self._clear_pending_interactive()
@@ -2991,13 +2993,22 @@ class MonitorServer:
     async def emit_status(self, message: str, state: str = "running"):
         # D: CI/CD API — ステータス自動更新
         if state in {"done", "aborted", "error", "failed", "incomplete"}:
+            from wscan.terminal_outcome import terminal_outcome
+            canonical = terminal_outcome(state, message)["status"]
+            if (
+                self._terminal_status_event_emitted
+                and canonical == self._final_scan_status
+            ):
+                return
             if not self._transition_scan_status(state, message):
                 return
+            # Set before the first await so concurrent terminal callers cannot
+            # publish the same outcome twice into event_history / WebSocket.
+            self._terminal_status_event_emitted = True
         elif state == "running" and self.api_scan_status == "idle":
             self._transition_scan_status("scanning")
         event = {"message": message, "state": state}
         if state in {"done", "aborted", "error", "failed", "incomplete"}:
-            from wscan.terminal_outcome import terminal_outcome
             outcome = terminal_outcome(state, message)
             event["terminal_outcome"] = outcome
         await self.emit("status", event)

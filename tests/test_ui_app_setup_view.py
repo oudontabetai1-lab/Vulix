@@ -23,12 +23,28 @@ from wscan.settings_schema import FIELDS, PROFILES, SCHEMA_VERSION, build_settin
 from fastapi.testclient import TestClient
 import wscan.check_catalog as check_catalog
 from wscan.monitor import MonitorServer
-from wscan.terminal_outcome import terminal_outcome
 from tests.ui_harness import UIHarness, require_browser
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_MODULE_JS = ROOT / "templates" / "ui" / "setup-module.js"
 DASHBOARD_HTML = ROOT / "templates" / "dashboard.html"
+_KNOWN_TERMINAL_SCAN_STATUSES = frozenset(
+    {"done", "incomplete", "failed", "aborted"}
+)
+
+
+def _is_known_terminal_scan_status(status: str) -> bool:
+    return status in _KNOWN_TERMINAL_SCAN_STATUSES
+
+
+@pytest.mark.parametrize("status", ["missing", "unknown", "error", "complete", ""])
+def test_setup_abort_wait_rejects_unknown_statuses(status):
+    assert not _is_known_terminal_scan_status(status)
+
+
+@pytest.mark.parametrize("status", ["done", "incomplete", "failed", "aborted"])
+def test_setup_abort_wait_accepts_known_terminal_statuses(status):
+    assert _is_known_terminal_scan_status(status)
 
 
 def test_check_catalog_api_locales_and_empty_fallback(monkeypatch):
@@ -979,7 +995,7 @@ def test_setup_credentials_e2e_websocket_payload():
                             last_status = json.loads(resp.read().decode("utf-8")).get("status", "missing")
                         if last_status == "scanning":
                             break
-                        if terminal_outcome(last_status)["status"] not in {"idle", "scanning"}:
+                        if _is_known_terminal_scan_status(last_status):
                             already_terminal = True
                             break
                     except Exception:
@@ -1003,7 +1019,7 @@ def test_setup_credentials_e2e_websocket_payload():
                     try:
                         with urllib.request.urlopen(f"{harness.server_url}/api/v1/scan/status", timeout=2) as resp:
                             last_status = json.loads(resp.read().decode("utf-8")).get("status", "missing")
-                            if terminal_outcome(last_status)["status"] not in {"idle", "scanning"}:
+                            if _is_known_terminal_scan_status(last_status):
                                 return
                     except Exception:
                         pass

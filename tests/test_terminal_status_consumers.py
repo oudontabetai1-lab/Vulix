@@ -256,9 +256,12 @@ def test_terminal_conflict_redacts_unregistered_query_userinfo_and_cookie_value(
     cookie_secret = "ConfiguredCookieValue"
     monkeypatch.setitem(url_scope._SECRET_VALUES, cookie_secret, "test_cookie")
     reason = (
-        "Cookie: tenant=" + cookie_secret
-        + "; requested abort for https://alice:pass123@example.test/path"
-        "?access_token=UnregisteredAccessToken"
+        "requested abort for https://alice:pass123@example.test/path"
+        "?access_token=UnregisteredAccessToken\n"
+        "Cookie: tenant=UnregisteredCookieValue\n"
+        "Set-Cookie: session=UnregisteredSetCookieValue; HttpOnly\n"
+        "cookie=tenant=UnregisteredCookieLikeValue\n"
+        f"configured value {cookie_secret}"
     )
     monitor = MonitorServer()
     monitor.api_scan_status = "done"
@@ -267,11 +270,18 @@ def test_terminal_conflict_redacts_unregistered_query_userinfo_and_cookie_value(
         assert monitor._transition_scan_status("aborted", reason) is False
 
     recorded = repr(monitor._terminal_status_conflicts)
-    for secret in ("alice", "pass123", "UnregisteredAccessToken", cookie_secret):
+    for secret in (
+        "alice", "pass123", "UnregisteredAccessToken", cookie_secret,
+        "UnregisteredCookieValue", "UnregisteredSetCookieValue",
+        "UnregisteredCookieLikeValue",
+    ):
         assert secret not in recorded
         assert secret not in caplog.text
     assert "access_token=<redacted>" in recorded
     assert "<redacted>@example.test" in recorded
+    assert "Cookie: <redacted>" in recorded
+    assert "Set-Cookie: <redacted>" in recorded
+    assert "cookie=<redacted>" in recorded
     assert "[REDACTED:test_cookie]" in recorded
     assert "terminal_status_already_finalized" in caplog.text
 
@@ -288,6 +298,30 @@ def test_running_scan_can_still_become_aborted(mode):
     assert monitor._terminal_outcome()["exit_code"] == 2
     assert main._scan_exit_code(monitor.api_scan_status) == 2
     assert monitor._terminal_status_conflicts == []
+
+
+def test_monitor_emits_one_terminal_status_event_for_repeated_abort_calls():
+    import asyncio
+
+    monitor = MonitorServer()
+    monitor._begin_scan_snapshot()
+
+    async def publish_abort_twice():
+        await asyncio.gather(
+            monitor.emit_status("aborted by command", "aborted"),
+            monitor.emit_status("aborted by recon wrapper", "aborted"),
+        )
+
+    asyncio.run(publish_abort_twice())
+
+    terminal_statuses = [
+        event["data"]["terminal_outcome"]["status"]
+        for event in monitor.event_history
+        if event["type"] == "status"
+        and event["data"].get("state") == "aborted"
+    ]
+    assert terminal_statuses == ["aborted"]
+    assert monitor.api_scan_status == "aborted"
 
 
 @pytest.mark.parametrize(
