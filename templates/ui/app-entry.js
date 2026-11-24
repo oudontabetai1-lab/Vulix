@@ -159,11 +159,12 @@
     }
     const rawStatus = (state.status || (currentScanStatus && currentScanStatus.status) || 'idle').toLowerCase();
 
-    // Map execution status: idle | running | paused | done | aborted | error | partial | unknown
+    // Map execution status: incomplete must remain visibly non-successful.
     let execState = 'idle';
     if (/running|scanning|active/.test(rawStatus)) execState = 'running';
     else if (/paused/.test(rawStatus)) execState = 'paused';
     else if (/done|completed|success/.test(rawStatus)) execState = 'done';
+    else if (/incomplete/.test(rawStatus)) execState = 'incomplete';
     else if (/aborted|cancelled|canceled/.test(rawStatus)) execState = 'aborted';
     else if (/error|failed/.test(rawStatus)) execState = 'error';
     else if (/partial/.test(rawStatus)) execState = 'partial';
@@ -198,7 +199,7 @@
     // Freshness: fresh | stale | snapshot
     let freshness = state.freshness;
     if (!freshness) {
-      if (['done', 'aborted', 'error', 'partial'].includes(execState)) {
+      if (['done', 'aborted', 'error', 'partial', 'incomplete'].includes(execState)) {
         freshness = 'snapshot';
       } else if (connState === 'connected') {
         freshness = 'fresh';
@@ -277,6 +278,7 @@
       aborted: '⏹',
       error: '✗',
       failed: '✗',
+      incomplete: '!',
       partial: '⟲',
       stale: '⟲',
       unverified: '?',

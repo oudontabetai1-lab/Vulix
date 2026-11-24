@@ -2363,7 +2363,16 @@ def _batch_exit_code(results) -> int:
     1 件でも失敗（例外/開始不能＝``success`` が偽）があれば非0。全成功・空リストは 0。
     全対象失敗でも 0 を返し「合計0件」を成功と誤認させていた問題を防ぐ。
     """
-    return 1 if any(not getattr(r, "success", False) for r in (results or [])) else 0
+    if any(not getattr(r, "success", False) for r in (results or [])):
+        return 1
+    if any(getattr(r, "status", "done") != "done" for r in (results or [])):
+        return 2
+    return 0
+
+
+def _scan_exit_code(status: str) -> int:
+    """通常 scan の終端 status を CLI に反映する。"""
+    return 0 if status == "done" else 1 if status in {"error", "failed"} else 2
 
 
 def _llm_model_display(args) -> str:
@@ -3232,7 +3241,7 @@ async def run_scan(args):
 
         engine = ScanEngine(**_engine_kwargs(None))
         await engine.run()
-        return
+        return engine._terminal_status() if hasattr(engine, "_terminal_status") else "done"
 
     # ── With monitoring dashboard ──────────────────────────────────
     import uvicorn
@@ -4586,7 +4595,10 @@ def main():
         elif args.command in {"checks", "check"}:
             run_check_catalog(args)
         else:
-            asyncio.run(run_scan(args))
+            scan_status = asyncio.run(run_scan(args))
+            scan_exit = _scan_exit_code(scan_status) if scan_status else 0
+            if scan_exit:
+                sys.exit(scan_exit)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(0)

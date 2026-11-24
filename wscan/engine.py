@@ -2071,7 +2071,12 @@ class ScanEngine:
         data = {
             **self.observability_summary(),
             "samples": [str(note) for note in self.wave_errors[:sample_limit]],
+            "scan_status": self._terminal_status(),
         }
+        from .url_scope import redact_event_data
+        data["completion_reasons"] = redact_event_data({
+            "reasons": list(self.wave_errors)
+        })["reasons"]
         if getattr(self, "token_lifecycle_manager", False) is True:
             events = getattr(self, "_token_lifecycle_events", [])
             data["token_lifecycle"] = {
@@ -4302,6 +4307,7 @@ class ScanEngine:
                     "aborted": scan_aborted,
                     "evidence_completion": self.evidence_completion(),
                     "authentication": getattr(self, "authentication_state", {}),
+                    "completion_reasons": list(self.wave_errors),
                 })
 
     # =========================================================================
@@ -9509,7 +9515,7 @@ class ScanEngine:
         aborted を最優先し、authentication failure または unverified のとき「incomplete」に
         し、正常完了時のみ「done」とする（不一致 terminal truth を防止）。
         """
-        aborted = self.scan_aborted if scan_aborted is None else scan_aborted
+        aborted = getattr(self, "scan_aborted", False) if scan_aborted is None else scan_aborted
         if aborted:
             return "aborted"
         auth_state = getattr(self, "authentication_state", {"state": "unknown"})
@@ -9554,7 +9560,7 @@ class ScanEngine:
             "findings": findings_dicts,
             "scan_matrix": self._scan_matrix_for_display(),
             "observability": self._observability_report_data(),
-            "coverage": self.coverage_summary(),
+            "coverage": self._report_coverage_data(),
             "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
             "diff": diff_data,
             "attack_plans": [
@@ -9625,6 +9631,8 @@ class ScanEngine:
                     output_path=self.output_dir / "report.sarif",
                     lang=getattr(self, "report_lang", "ja"),
                     coverage=self.coverage_summary(),  # 検査カバレッジを SARIF へ
+                    status=terminal_status,
+                    status_reasons=list(self.wave_errors),
                 )
                 sarif_out = str(sarif_path)
                 console.print(f"  [dim]SARIF:   [/dim] {sarif_path}")
@@ -9655,6 +9663,8 @@ class ScanEngine:
                         target_url=self.target_url,
                         report_path=str(self.output_dir / "report.html"),
                         sarif_path=sarif_out,
+                        status=terminal_status,
+                        status_reason="; ".join(self.wave_errors),
                     )
                 )
             except Exception as _notify_err:
@@ -9670,6 +9680,8 @@ class ScanEngine:
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir, lang=getattr(self, "report_lang", "ja"))
         display_scan_matrix = self._scan_matrix_for_display()
+        report_coverage = getattr(self, "_report_coverage_data", None)
+        coverage_data = report_coverage() if callable(report_coverage) else self.coverage_summary()
 
         # 差分スキャン結果を読み込む (evidence.json に書き込み済み)
         diff_result = None
@@ -9694,7 +9706,7 @@ class ScanEngine:
             scan_matrix=display_scan_matrix,
             llm_summary=self._llm_runtime_summary(),
             observability=self._observability_report_data(),
-            coverage=self.coverage_summary(),
+            coverage=coverage_data,
             template="audit",
             diff_result=diff_result,
         )
@@ -9712,13 +9724,24 @@ class ScanEngine:
                     scan_matrix=display_scan_matrix,
                     llm_summary=self._llm_runtime_summary(),
                     observability=self._observability_report_data(),
-                    coverage=self.coverage_summary(),
+                    coverage=coverage_data,
                     template=tmpl,
                     diff_result=diff_result,
                 )
             except Exception:
                 pass
         return report_path
+
+    def _report_coverage_data(self) -> dict:
+        """レポート受信側に終端状態を加え、通常の coverage 集計契約を保つ。"""
+        from .url_scope import redact_event_data
+        data = self.coverage_summary()
+        status_getter = getattr(self, "_terminal_status", None)
+        data["scan_status"] = status_getter() if callable(status_getter) else "done"
+        data["completion_reasons"] = redact_event_data({
+            "reasons": list(getattr(self, "wave_errors", []) or [])
+        })["reasons"]
+        return data
 
     def _generate_report(self):
         import webbrowser

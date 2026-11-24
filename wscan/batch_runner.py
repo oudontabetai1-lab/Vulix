@@ -68,6 +68,8 @@ class BatchResult:
     output_dir: str = ""
     duration_secs: float = 0.0
     error: str = ""
+    status: str = "done"
+    status_reason: str = ""
 
     @property
     def success(self) -> bool:
@@ -207,6 +209,12 @@ class BatchRunner:
             engine = ScanEngine(**kwargs)
             await engine.run()
 
+            terminal_status = engine._terminal_status()
+            from wscan.url_scope import redact_event_data
+            terminal_reasons = redact_event_data({
+                "reasons": list(getattr(engine, "wave_errors", []) or [])
+            })["reasons"]
+
             counts: dict[str, int] = {}
             for f in engine.all_findings:
                 counts[f.severity] = counts.get(f.severity, 0) + 1
@@ -220,6 +228,8 @@ class BatchRunner:
                 low=counts.get("low", 0),
                 output_dir=out_dir,
                 duration_secs=time.time() - start,
+                status=terminal_status,
+                status_reason="; ".join(terminal_reasons),
             )
         except Exception as exc:
             # str(exc) が空の例外（bare TimeoutError() 等）でも error を必ず非空にする。
@@ -233,7 +243,9 @@ class BatchRunner:
             )
             _print(f"[Batch] エラー: {label} — {err}")
 
-        status = "✅" if result.success else "❌"
+        status = "✅" if result.success and result.status == "done" else (
+            "⚠️ 不完全" if result.success and result.status == "incomplete" else "❌"
+        )
         _print(
             f"[Batch] {status} {label} — "
             f"{result.findings_count} 件 ({result.severity_summary()}) "
@@ -255,7 +267,9 @@ class BatchRunner:
         total_findings = 0
         for r in self.results:
             label = r.target.label or r.target.url
-            status = "✅" if r.success else f"❌ ({r.error[:50]})"
+            status = ("✅" if r.success and r.status == "done" else
+                      f"⚠️ 不完全 ({r.status_reason[:120]})" if r.success and r.status == "incomplete" else
+                      f"❌ ({r.error[:50]})")
             lines.append(
                 f"  {status} {label[:40]:<40} "
                 f"Total={r.findings_count:3d}  "
@@ -264,7 +278,8 @@ class BatchRunner:
             )
             total_findings += r.findings_count
         failed = [r for r in self.results if not r.success]
-        succeeded = len(self.results) - len(failed)
+        incomplete = [r for r in self.results if r.success and r.status != "done"]
+        succeeded = len(self.results) - len(failed) - len(incomplete)
         lines.append("-" * 60)
         lines.append(f"  合計: {total_findings} 件の脆弱性が検出されました")
         if failed:
@@ -272,6 +287,9 @@ class BatchRunner:
             scope = "全対象が失敗" if succeeded == 0 else f"{len(failed)}/{len(self.results)} 対象が失敗"
             names = ", ".join((r.target.label or r.target.url)[:40] for r in failed)
             lines.append(f"  ⚠️  {scope}（成功 {succeeded} / 失敗 {len(failed)}）: {names}")
+        if incomplete:
+            names = ", ".join((r.target.label or r.target.url)[:40] for r in incomplete)
+            lines.append(f"  ⚠️  不完全 {len(incomplete)} 件（結果は未完了）: {names}")
         lines.append(f"  出力: {self.output_base}")
         return "\n".join(lines)
 
@@ -294,6 +312,8 @@ class BatchRunner:
                     "duration_secs":  round(r.duration_secs, 2),
                     "error":          r.error,
                     "success":        r.success,
+                    "status":         r.status,
+                    "status_reason":  r.status_reason,
                 }
                 for r in self.results
             ],

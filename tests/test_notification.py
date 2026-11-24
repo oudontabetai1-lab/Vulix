@@ -68,6 +68,21 @@ class NotificationManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("未確証", blob)
         self.assertIn("🔵", blob)
 
+    def test_incomplete_completion_webhook_is_not_success_and_includes_reason(self):
+        import json
+        payload = NotificationManager._build_complete_payload(
+            {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0},
+            "http://fixture.test/", "", "", status="incomplete",
+            status_reason="hybrid_agent_recon_incomplete:retry_limit",
+        )
+        blob = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(payload["event"], "scan_incomplete")
+        self.assertEqual(payload["status"], "incomplete")
+        self.assertNotIn("完了", blob)
+        self.assertNotIn("🟢", blob)
+        self.assertIn("不完全", blob)
+        self.assertIn("retry_limit", blob)
+
 
 if __name__ == "__main__":
     unittest.main()

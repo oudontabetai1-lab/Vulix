@@ -106,11 +106,16 @@ class NotificationManager:
         target_url: str = "",
         report_path: str = "",
         sarif_path: str = "",
+        status: str = "done",
+        status_reason: str = "",
     ) -> None:
         """スキャン完了通知を送信する。"""
         if not self.enabled or not self.notify_complete:
             return
-        payload = self._build_complete_payload(summary, target_url, report_path, sarif_path)
+        payload = self._build_complete_payload(
+            summary, target_url, report_path, sarif_path,
+            status=status, status_reason=status_reason,
+        )
         await self._send(payload)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -172,6 +177,8 @@ class NotificationManager:
         target_url: str,
         report_path: str,
         sarif_path: str,
+        status: str = "done",
+        status_reason: str = "",
     ) -> dict:
         """スキャン完了サマリーペイロードを生成する。"""
         total = summary.get("total", 0)
@@ -181,35 +188,62 @@ class NotificationManager:
         low = summary.get("low", 0)
         hypothesis = summary.get("hypothesis", 0)
 
-        # confirmed が無くても未確証があれば緑にせず、その存在を明示する（見落とし防止）。
+        status = str(status or "done").lower()
+        # 未確証や不完全/失敗を、finding 数だけから成功扱いしない。
         status_emoji = (
+            "⚠️" if status not in {"done", "completed"} and status not in {"aborted", "paused", "error", "failed"} else
+            "⚠️" if status == "incomplete" else
+            "⏹️" if status in {"aborted", "paused"} else
+            "❌" if status in {"error", "failed"} else
             "🔴" if critical > 0 else "🟠" if high > 0 else "🟡" if medium > 0
             else "🔵" if hypothesis > 0 else "🟢"
         )
-        text = f"{status_emoji} *スキャン完了*: {target_url}"
+        labels = {
+            "incomplete": ("スキャン不完全", "scan_incomplete", "#d69e2e"),
+            "aborted": ("スキャン中断", "scan_aborted", "#d69e2e"),
+            "paused": ("スキャン中断", "scan_aborted", "#d69e2e"),
+            "error": ("スキャン失敗", "scan_failed", "#e53e3e"),
+            "failed": ("スキャン失敗", "scan_failed", "#e53e3e"),
+        }
+        label, event, status_color = labels.get(
+            status, ("スキャン完了" if status in {"done", "completed"} else f"スキャン状態: {status}",
+                     "scan_complete" if status in {"done", "completed"} else "scan_incomplete",
+                     "" if status in {"done", "completed"} else "#d69e2e")
+        )
+        text = f"{status_emoji} *{label}*: {target_url}"
+        low_emoji = "🟢" if status in {"done", "completed"} else "⚪"
         details = [
-            f"🔴 Critical: {critical}　🟠 High: {high}　🟡 Medium: {medium}　🟢 Low: {low}",
+            f"🔴 Critical: {critical}　🟠 High: {high}　🟡 Medium: {medium}　{low_emoji} Low: {low}",
             f"確証: {total} 件　🔵 未確証(hypothesis): {hypothesis} 件",
         ]
         if report_path:
             details.append(f"レポート: `{report_path}`")
         if sarif_path:
             details.append(f"SARIF: `{sarif_path}`")
+        if status_reason:
+            try:
+                from wscan.url_scope import redact_event_data
+                status_reason = redact_event_data({"status_reason": str(status_reason)})["status_reason"]
+            except Exception:
+                status_reason = "[REDACTED]"
+            details.append(f"理由: {status_reason}")
 
-        color = "#742a2a" if critical > 0 else ("#e53e3e" if high > 0 else "#d69e2e")
+        color = status_color or ("#742a2a" if critical > 0 else ("#e53e3e" if high > 0 else "#d69e2e"))
 
         return {
             "text": text,
             "attachments": [
                 {
                     "color": color,
-                    "title": f"スキャン完了 — {target_url}",
+                    "title": f"{label} — {target_url}",
                     "text": "\n".join(details),
                     "footer": "AutoXSScheckTool",
                     "ts": int(time.time()),
                 }
             ],
-            "event":    "scan_complete",
+            "event":    event,
+            "status":   status,
+            "status_reason": status_reason,
             "target":   target_url,
             "summary":  summary,
         }

@@ -349,7 +349,7 @@ class MonitorServer:
         self.default_scan_cfg: dict = {}
         # D: CI/CD REST API state
         self.api_scan_id: str = ""
-        self.api_scan_status: str = "idle"   # idle / scanning / done / error / aborted
+        self.api_scan_status: str = "idle"   # idle / scanning / done / incomplete / error / aborted
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
         # 進捗のスナップショット（ポータルが /api/v1/scan/status でモニターを
@@ -2309,6 +2309,13 @@ class MonitorServer:
                 summary,
                 target_url=self.api_target,
                 report_path=self.api_report_path or "",
+                status=self.api_scan_status,
+                status_reason="; ".join(
+                    str(reason) for reason in (
+                        self._scan_complete_data.get("completion_reasons")
+                        or self._scan_complete_data.get("coverage_gaps") or []
+                    )
+                ) or ("Coverage did not complete" if self.api_scan_status == "incomplete" else ""),
             )
         except Exception:
             pass
@@ -2761,7 +2768,8 @@ class MonitorServer:
             for optional_key in (
                 "status", "aborted", "total_findings_count",
                 "confirmed_findings_count", "hypothesis_count",
-                "evidence_completion", "authentication",
+                "evidence_completion", "authentication", "coverage_gaps",
+                "completion_reasons",
             ):
                 if optional_key in event_data:
                     keys_to_copy.append(optional_key)

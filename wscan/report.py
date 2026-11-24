@@ -1619,6 +1619,20 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         categories = observability.get("by_category", {}) or {}
         samples = observability.get("samples", []) or []
         llm_calls = int(observability.get("llm_calls", 0) or 0)
+        scan_status = str(observability.get("scan_status") or "done").lower()
+        status_html = ""
+        if scan_status != "done":
+            label = "Scan incomplete" if scan_status == "incomplete" else f"Scan status: {scan_status}"
+            try:
+                from wscan.url_scope import redact_event_data
+                reasons = redact_event_data({"reasons": observability.get("completion_reasons", [])})["reasons"]
+            except Exception:
+                reasons = []
+            reason_text = self._escape("; ".join(str(reason) for reason in reasons))
+            status_html = (
+                f'<p style="color:#b45309;font-weight:700">{label}</p>'
+                + (f'<p style="color:#b45309">Reason: {reason_text}</p>' if reason_text else "")
+            )
         none_label = t("report.common.none")
         category_html = "".join(
             f"<li><code>{self._escape(category)}</code>: {count}</li>"
@@ -1637,7 +1651,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         return f"""
         <div class="section observability-section">
             <h2>{t('report.observability.heading')}</h2>
-            <p>{t('report.observability.dropped', total=total)}</p>
+            {status_html}<p>{t('report.observability.dropped', total=total)}</p>
             <p>{t('report.observability.llm_calls', count=llm_calls)}</p>
             {warning}
             <h3 style="margin-top:14px">by_category</h3>
@@ -1657,6 +1671,27 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         t = self._t
 
         auth_verification_status = coverage.get("auth_verification_status")
+        scan_status = str(coverage.get("scan_status") or "").lower()
+        completion_reasons = coverage.get("completion_reasons") or []
+        status_banner = ""
+        if scan_status and scan_status != "done":
+            labels = {
+                "incomplete": ("Scan incomplete", "#b45309"),
+                "aborted": ("Scan aborted", "#b45309"),
+                "error": ("Scan failed", "#b91c1c"),
+                "failed": ("Scan failed", "#b91c1c"),
+            }
+            label, color = labels.get(scan_status, (f"Scan status: {scan_status}", "#b45309"))
+            try:
+                from wscan.url_scope import redact_event_data
+                safe_reasons = redact_event_data({"reasons": completion_reasons})["reasons"]
+            except Exception:
+                safe_reasons = []
+            reasons = self._escape("; ".join(safe_reasons))
+            status_banner = (
+                f'<p style="color:{color};font-weight:700">{self._escape(label)}</p>'
+                + (f'<p style="color:{color}">Reason: {reasons}</p>' if reasons else "")
+            )
         auth_reasons = coverage.get("auth_verification_reasons") or []
         coverage_gaps = coverage.get("coverage_gaps") or []
         auth_cov_html = ""
@@ -1677,11 +1712,10 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             <h3 style="margin-top:14px">Coverage Gaps</h3>
             <ul>{gaps_items}</ul>"""
 
-        if not coverage.get("http_status") and (auth_verification_status or coverage_gaps):
+        if not coverage.get("http_status") and (auth_verification_status or coverage_gaps or status_banner):
             return f"""
         <div class="section coverage-section">
-            <h2>{t('report.coverage.heading')}</h2>
-            {auth_cov_html}
+            <h2>{t('report.coverage.heading')}</h2>{status_banner}{auth_cov_html}
             {gaps_html}
         </div>"""
 
@@ -1843,8 +1877,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         ) if transport_rows else ""
         return f"""
         <div class="section coverage-section">
-            <h2>{t('report.coverage.heading')}</h2>
-            <p>{t('report.coverage.summary', reached=reached_count, attempts=attempts, findings=findings_total)}</p>
+            <h2>{t('report.coverage.heading')}</h2>{status_banner}<p>{t('report.coverage.summary', reached=reached_count, attempts=attempts, findings=findings_total)}</p>
             {check_coverage_html}
             {completion_html}
             {prereq_html}

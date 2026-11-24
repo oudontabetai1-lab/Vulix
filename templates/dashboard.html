@@ -6116,8 +6116,11 @@ function dispatchLegacyEvent(event) {
         addEventLog('status', `Scan aborted (partial report). Report: ${data.report_path || ''}`);
         document.getElementById('statRemain').textContent = '中断';
       } else if (isIncomplete) {
-        setStatus(`Authentication unconfirmed (partial report) — ${data.total_findings} finding(s)`, 'incomplete');
-        addEventLog('status', 'Authenticated coverage is incomplete.');
+        const authUnconfirmed = data.authentication &&
+          ['incomplete', 'failure', 'configured'].includes(data.authentication.state);
+        setStatus(`${authUnconfirmed ? 'Authentication unconfirmed / scan incomplete' : 'Scan incomplete (partial report)'} — ${data.total_findings} finding(s)`, 'incomplete');
+        const reasons = data.completion_reasons || data.coverage_gaps || [];
+        addEventLog('status', `Scan coverage is incomplete${reasons.length ? `: ${reasons.join('; ')}` : '.'}`);
         document.getElementById('statRemain').textContent = '未完了';
       } else {
         const evidenceLabel = evidenceCompletion ? ` / evidence ${evidenceCompletion.status}` : '';
@@ -6766,7 +6769,7 @@ function replaceFindings(findings) {
     if (state.scanDone && (state.status === 'aborted' || state.aborted)) {
       panel.innerHTML = '<div class="no-findings-msg" style="color:var(--high)">⚠ スキャンは中断されました — 中断前に検出された脆弱性はありません (部分結果)。<br><span style="font-size:0.75rem;color:var(--text-muted)">No vulnerabilities detected before scan was aborted.</span></div>';
     } else if (state.scanDone && state.status === 'incomplete') {
-      panel.innerHTML = '<div class="no-findings-msg">Authentication unconfirmed — authenticated coverage is incomplete. No findings in the tested surface.</div>';
+      panel.innerHTML = '<div class="no-findings-msg">Scan coverage is incomplete. No findings in the tested surface do not mean the scan completed successfully.</div>';
     } else if (state.scanGapCount > 0 || Object.values(state.urlStatuses).some(s => s === 'error')) {
       const errCount = state.scanGapCount || Object.values(state.urlStatuses).filter(s => s === 'error').length;
       panel.innerHTML = `<div class="no-findings-msg">検査済み対象に脆弱性は検出されませんでした。<br><span style="color:#facc15;font-size:0.75rem">⚠ 注意: ${errCount} 件の対象/入力は未検査(エラー/除外)です。</span></div>`;

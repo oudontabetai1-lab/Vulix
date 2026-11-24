@@ -51,6 +51,13 @@ class SarifCoverageTests(unittest.TestCase):
         run = SarifExporter().export([_FINDING], coverage={})["runs"][0]
         self.assertNotIn("coverage", run["properties"])
 
+    def test_run_properties_preserve_incomplete_terminal_status(self):
+        props = SarifExporter().export(
+            [], status="incomplete", status_reasons=["hybrid_agent_recon_incomplete:retry_limit"]
+        )["runs"][0]["properties"]
+        self.assertEqual(props["scan_status"], "incomplete")
+        self.assertEqual(props["completion_reasons"], ["hybrid_agent_recon_incomplete:retry_limit"])
+
 
 if __name__ == "__main__":
     unittest.main()
