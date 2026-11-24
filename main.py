@@ -2575,6 +2575,7 @@ async def run_agent(args):
 
     async def run_agent_task():
         await asyncio.sleep(1.5)
+        completed_result = None
 
         try:
             engine = AgentEngine(
@@ -2614,6 +2615,7 @@ async def run_agent(args):
             from wscan.open_policy import open_in_browser
             open_in_browser(dashboard_url)
             result = await engine.run()
+            completed_result = result
             from wscan.terminal_outcome import agent_result_outcome
             outcome = agent_result_outcome(result)
             args._scan_terminal_status = outcome["status"]
@@ -2626,6 +2628,10 @@ async def run_agent(args):
             await asyncio.sleep(3600)
             return result
         except asyncio.CancelledError:
+            # engine.run() が返った後の Ctrl+C は dashboard 待機を終えるだけ。
+            # scan の終了値と結果は既に確定しているため、上書きしない。
+            if completed_result is not None:
+                return completed_result
             from wscan.terminal_outcome import agent_result_outcome
             result = AgentScanResult(
                 target_url=getattr(args, "url", ""),

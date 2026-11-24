@@ -226,6 +226,39 @@ def test_monitor_api_and_websocket_publish_shared_outcome(status):
     assert results.json()["terminal_outcome"] == expected
 
 
+@pytest.mark.parametrize("mode", ["agent", "scan", "hybrid"])
+def test_monitor_keeps_completed_terminal_status_after_late_abort(mode):
+    import asyncio
+
+    monitor = MonitorServer()
+    asyncio.run(monitor.emit("scan_complete", {"status": "done"}))
+    monitor.api_scan_status = "aborted"  # late Ctrl+C/abort from any mode
+
+    assert monitor.api_scan_status == "done", mode
+    assert monitor._terminal_outcome()["status"] == "done"
+    assert monitor._terminal_outcome()["exit_code"] == 0
+    assert main._scan_exit_code(monitor.api_scan_status) == 0
+    assert [event["data"]["status"] for event in monitor.event_history
+            if event["type"] == "scan_complete"] == ["done"]
+    assert monitor._terminal_status_conflicts == [
+        {"kept": "done", "rejected": "aborted", "reason": ""}
+    ]
+
+
+@pytest.mark.parametrize("mode", ["agent", "scan", "hybrid"])
+def test_running_scan_can_still_become_aborted(mode):
+    import asyncio
+
+    monitor = MonitorServer()
+    monitor._begin_scan_snapshot()
+    asyncio.run(monitor.emit_status("interrupted", "aborted"))
+
+    assert monitor.api_scan_status == "aborted", mode
+    assert monitor._terminal_outcome()["exit_code"] == 2
+    assert main._scan_exit_code(monitor.api_scan_status) == 2
+    assert monitor._terminal_status_conflicts == []
+
+
 @pytest.mark.parametrize(
     ("status", "expected_exit"),
     [("done", 0), ("incomplete", 2), ("failed", 1), ("aborted", 2)],

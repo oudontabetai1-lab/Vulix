@@ -1405,6 +1405,7 @@ class DashboardConsistencyContractTests(unittest.TestCase):
 
     def test_abort_endpoint_sets_status_aborting_and_marks_aborted_liveness(self):
         self.monitor.scan_in_progress = True
+        self.monitor._begin_scan_snapshot()
         self.monitor.api_scan_status = "scanning"
 
         r = self.client.post("/api/v1/scan/abort")

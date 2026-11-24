@@ -315,6 +315,74 @@ async def test_monitored_agent_cancel_publishes_aborted_outcome(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_monitored_agent_cancel_during_dashboard_wait_keeps_done(monkeypatch):
+    import asyncio
+    import types
+
+    completed = SimpleNamespace(
+        target_url="http://fixture.test", success=True, findings=[], harness_status="complete"
+    )
+    sleep_calls = []
+
+    async def _fake_sleep(seconds):
+        sleep_calls.append(seconds)
+        if seconds == 3600:
+            raise asyncio.CancelledError
+
+    class _FakeEngine:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self):
+            await _FakeMonitor.instances[-1].emit_status("Scan complete", "done")
+            return completed
+
+    class _FakeMonitor:
+        instances = []
+
+        def __init__(self, **_kwargs):
+            self.app = object()
+            self.events = []
+            self.__class__.instances.append(self)
+
+        async def emit_status(self, message, state):
+            self.events.append((message, state))
+
+    class _FakeConfig:
+        def __init__(self, **_kwargs):
+            pass
+
+    class _FakeServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        async def serve(self):
+            return None
+
+    args = SimpleNamespace(
+        url="http://fixture.test", llm="none", model="", ollama_url="http://localhost:11434",
+        llm_base_url="", checks=["xss"], no_headless=True, auth_user="", auth_pass="",
+        login_url="", max_steps=1, output="", open_report=False, no_open_report=True,
+        no_monitor=False, port=9099, header_file="", bearer="", header=[],
+    )
+    monkeypatch.setitem(
+        sys.modules, "uvicorn", types.SimpleNamespace(Config=_FakeConfig, Server=_FakeServer)
+    )
+    with patch("wscan.monitor.MonitorServer", _FakeMonitor), patch(
+        "wscan.agent_engine.AgentEngine", _FakeEngine
+    ), patch("main.webbrowser.open", lambda *_a, **_k: None), patch(
+        "main.asyncio.sleep", _fake_sleep
+    ):
+        result = await main.run_agent(args)
+
+    assert result is completed
+    assert args._scan_terminal_status == "done"
+    assert main._agent_exit_code(result) == 0
+    assert [state for _, state in _FakeMonitor.instances[-1].events] == ["done"]
+    assert sleep_calls == [1.5, 3600]
+
+
+@pytest.mark.asyncio
 async def test_run_recon_raises_on_hard_error_for_hybrid_fallback(tmp_path):
     # Hybrid Phase 1: browser-use 未導入等で scanner.run() が result.error を立てたとき、
     # run_recon は「偵察完了」と誤表示せず送出する。呼び出し側の Hybrid 失敗ブランチ

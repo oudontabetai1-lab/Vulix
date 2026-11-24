@@ -8,6 +8,7 @@ import copy
 import datetime
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -37,6 +38,7 @@ from wscan.eta_estimator import EtaEstimator, EtaEstimate
 
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+_logger = logging.getLogger(__name__)
 # Where ScanEngine writes each scan's artifacts (output/<timestamp>/...).
 # Defined here to avoid importing the heavy engine module (pulls in Playwright).
 OUTPUT_BASE = Path.cwd() / "output"
@@ -337,7 +339,9 @@ class MonitorServer:
         self.default_scan_cfg: dict = {}
         # D: CI/CD REST API state
         self.api_scan_id: str = ""
-        self.api_scan_status: str = "idle"   # idle / scanning / done / incomplete / error / aborted
+        self._api_scan_status: str = "idle"
+        self._final_scan_status: Optional[str] = None
+        self._terminal_status_conflicts: list[dict] = []
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
         # 進捗のスナップショット（ポータルが /api/v1/scan/status でモニターを
@@ -2700,6 +2704,11 @@ class MonitorServer:
                 "timestamp": time.time(),
             })
         self.scan_abort_event.clear()
+        # 各 scan lifecycle の終了値は最初の確定後に固定する。新しい snapshot の開始だけが
+        # 次の lifecycle への移行を許可する。
+        self._final_scan_status = None
+        self._terminal_status_conflicts = []
+        self._api_scan_status = "scanning"
         self._clear_pending_interactive()
         # 前スキャンのプラン確認状態を持ち越さない（古い編集の誤適用・即時通過の防止）。
         self.confirmed_plan_edits = {}
@@ -2722,6 +2731,42 @@ class MonitorServer:
         self.event_history.clear()
         if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
             self.eta_estimator.reset()
+
+    @property
+    def api_scan_status(self) -> str:
+        return self._api_scan_status
+
+    @api_scan_status.setter
+    def api_scan_status(self, status: str) -> None:
+        self._transition_scan_status(status)
+
+    def _transition_scan_status(self, status: str, reason: str = "") -> bool:
+        """Apply the canonical status once; terminal values are immutable per scan."""
+        from wscan.terminal_outcome import terminal_outcome
+
+        outcome = terminal_outcome(status, reason)
+        canonical = outcome["status"]
+        requested = str(status or "unknown").strip().lower()
+        display_status = requested if requested in {"aborting", "error"} else canonical
+        terminal = canonical in {"done", "incomplete", "failed", "aborted"}
+        if self._final_scan_status:
+            if canonical == self._final_scan_status:
+                return True
+            conflict = {
+                "kept": self._final_scan_status,
+                "rejected": canonical,
+                "reason": outcome["reason"],
+            }
+            self._terminal_status_conflicts.append(conflict)
+            _logger.warning(
+                "Rejected terminal scan status change %s -> %s: %s",
+                conflict["kept"], conflict["rejected"], conflict["reason"],
+            )
+            return False
+        if terminal:
+            self._final_scan_status = canonical
+        self._api_scan_status = display_status
+        return True
 
     def _scan_snapshot_event(self) -> dict:
         """Return the canonical UI state at the latest per-scan event cursor."""
@@ -2789,20 +2834,21 @@ class MonitorServer:
         # スキャンが完了したら未解決のレビュー待ちは無効化する。
         # （非serve単発や異常終了で pending が残ったまま再接続→亡霊表示を防ぐ）
         if event_type == "scan_complete":
-            self._clear_pending_interactive()
             status = event_data.get("status")
             if not status:
                 if event_data.get("aborted") or self.api_scan_status == "aborted":
                     status = "aborted"
                 else:
                     status = "done"
-            self.api_scan_status = status
             status_reason = "; ".join(
                 str(reason) for reason in (
                     event_data.get("completion_reasons")
                     or event_data.get("coverage_gaps") or []
                 )
             )
+            if not self._transition_scan_status(status, status_reason):
+                return
+            self._clear_pending_interactive()
             self._scan_status_reason = status_reason
             event_data["terminal_outcome"] = self._terminal_outcome(status, status_reason)
             if hasattr(self, "eta_estimator") and self.eta_estimator is not None:
@@ -2939,18 +2985,11 @@ class MonitorServer:
 
     async def emit_status(self, message: str, state: str = "running"):
         # D: CI/CD API — ステータス自動更新
-        if state == "done":
-            self.api_scan_status = "done"
-        elif state == "aborted":
-            self.api_scan_status = "aborted"
-        elif state == "error":
-            self.api_scan_status = "error"
-        elif state == "failed":
-            self.api_scan_status = "error"
-        elif state == "incomplete":
-            self.api_scan_status = "incomplete"
+        if state in {"done", "aborted", "error", "failed", "incomplete"}:
+            if not self._transition_scan_status(state, message):
+                return
         elif state == "running" and self.api_scan_status == "idle":
-            self.api_scan_status = "scanning"
+            self._transition_scan_status("scanning")
         event = {"message": message, "state": state}
         if state in {"done", "aborted", "error", "failed", "incomplete"}:
             from wscan.terminal_outcome import terminal_outcome
