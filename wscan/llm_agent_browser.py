@@ -1752,10 +1752,15 @@ class AgentBrowserScanner:
             # `from browser_use.llm import ...` を実行するため、後段の except ImportError より
             # 前にここへ来る。traceback で漏らさず FAILED＋非0 exit へ倒す。
             result.error = str(e) or type(e).__name__
-            console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
+            from wscan.terminal_outcome import agent_result_outcome
+            outcome = agent_result_outcome(result)
+            console.print(
+                f"[{outcome['console_style']}]{outcome['message']}"
+                f"[/{outcome['console_style']}]"
+            )
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"Agent scan FAILED: {result.error}", "error"
+                    outcome["label"], "warning" if self.recon_mode else outcome["status"]
                 )
             return result
 
@@ -2386,22 +2391,22 @@ class AgentBrowserScanner:
             result.coverage_gaps.append("vision:text_only")
             result.final_summary = text_only_note + "\n" + result.final_summary
 
+        from wscan.terminal_outcome import agent_result_outcome
+        outcome = agent_result_outcome(result)
         incomplete_empty = (
-            not result.error and not result.success and not result.findings
+            outcome["status"] in {"incomplete", "aborted"} and not result.findings
         )
+        should_return_without_report = outcome["status"] == "failed" or incomplete_empty
         # サマリー表示
-        if result.error:
-            console.print(Rule("[bold red] Agent Scan Failed [/bold red]", style="red"))
-            console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
-        elif incomplete_empty:
-            console.print(Rule("[bold yellow] Agent Scan Incomplete [/bold yellow]", style="yellow"))
+        console.print(Rule(
+            f" {outcome['label']} ", style=outcome["console_style"]
+        ))
+        if outcome["status"] != "done" and outcome["reason"]:
             console.print(
-                "[bold yellow]Agent scan INCOMPLETE: 正常に完了しませんでした"
-                "（0 findings は安全を意味しません）[/bold yellow]"
+                f"[{outcome['console_style']}]Reason: {outcome['reason']}"
+                f"[/{outcome['console_style']}]"
             )
-        else:
-            console.print(Rule("[bold magenta] Agent Scan Complete [/bold magenta]", style="magenta"))
-        if result.error or incomplete_empty:
+        if should_return_without_report:
             pass
         elif result.findings:
             console.print(
@@ -2422,19 +2427,13 @@ class AgentBrowserScanner:
             console.print("  [dim]脆弱性は検出されませんでした。[/dim]")
 
         if self.monitor:
-            if result.error:
+            if self.recon_mode:
                 await self.monitor.emit_status(
-                    f"Agent scan FAILED: {result.error}", "error"
-                )
-            elif incomplete_empty:
-                await self.monitor.emit_status(
-                    "Agent scan INCOMPLETE: 正常に完了しませんでした（0 findings は安全を意味しません）",
-                    "error",
+                    f"Agent recon phase ended ({outcome['status']}); Phase 2 determines the scan outcome.",
+                    "warning" if outcome["status"] != "done" else "running",
                 )
             else:
-                await self.monitor.emit_status(
-                    f"Agent Browser 完了: {len(result.findings)} 件検出", "done"
-                )
+                await self.monitor.emit_status(outcome["label"], outcome["status"])
 
         return result
 

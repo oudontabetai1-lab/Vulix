@@ -66,6 +66,7 @@ _OUTCOMES = {
 }
 
 _ALIASES = {
+    "complete": "done",
     "completed": "done",
     "success": "done",
     "partial": "incomplete",
@@ -110,3 +111,29 @@ def terminal_outcome(status: str, reason: str = "") -> dict:
         "reason": safe_reason,
         "message": f"{label}: {safe_reason}" if safe_reason else label,
     }
+
+
+def agent_result_outcome(result) -> dict:
+    """Interpret an Agent result through the canonical terminal outcome table."""
+    if result is None:
+        return terminal_outcome("idle")
+
+    error = str(getattr(result, "error", None) or "")
+    harness_status = str(getattr(result, "harness_status", "") or "").strip().lower()
+    successful = bool(getattr(result, "success", False))
+    reason = error or str(getattr(result, "incomplete_reason", "") or "")
+    if not reason:
+        gaps = [
+            *(getattr(result, "coverage_gaps", []) or []),
+            *(getattr(result, "network_guard_errors", []) or []),
+        ]
+        reason = "; ".join(str(gap) for gap in gaps)
+    if error:
+        return terminal_outcome("failed", reason)
+    if harness_status:
+        outcome = terminal_outcome(harness_status, reason)
+        # A contradictory harness completion cannot override a non-success result.
+        if outcome["is_success"] and not successful:
+            return terminal_outcome("incomplete", reason)
+        return outcome
+    return terminal_outcome("done" if successful else "incomplete", reason)

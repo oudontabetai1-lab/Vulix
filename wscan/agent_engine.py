@@ -301,6 +301,8 @@ class AgentEngine:
                 *result.coverage_gaps,
                 "network_scope_blocked: one or more browser requests were blocked",
             ]))
+        from wscan.terminal_outcome import agent_result_outcome
+        outcome = agent_result_outcome(result)
 
         if getattr(result, "preserve_existing_artifacts", False) or (
             self.resume and self._existing_run_dir and result.error
@@ -312,8 +314,11 @@ class AgentEngine:
             # 済みの finding を回収した後で verifier/reviewer が落ちたケースは、回収した finding を
             # 書き出すため保全せず下へ流す（さもないと stale な pre-resume 成果物が残る）。
             console.print(
-                f"[bold red]Agent scan FAILED: {result.error}[/bold red]"
+                f"[{outcome['console_style']}]{outcome['message']}"
+                f"[/{outcome['console_style']}]"
             )
+            if self.monitor:
+                await self.monitor.emit_status(outcome["label"], outcome["status"])
             return result
 
         # AgentFindings → 共通 Finding 変換は Hybrid 偵察でも同じ経路を使う。
@@ -345,6 +350,8 @@ class AgentEngine:
                 "steps_taken": result.steps_taken,
                 "success": result.success,
                 "error": result.error,
+                "status": outcome["status"],
+                "terminal_outcome": outcome,
                 "final_summary": safe_summary,
                 "harness_status": getattr(result, "harness_status", ""),
                 "coverage_gaps": getattr(result, "coverage_gaps", []),
@@ -388,21 +395,19 @@ class AgentEngine:
         # 見せない。evidence は残すが、成功レポートと完了イベントは生成しない。findings が
         # あれば不完全でも検出結果は有効なのでレポートは生成する。
         incomplete_empty = (
-            not result.error and not result.success and not result.findings
+            outcome["status"] in {"incomplete", "aborted"} and not result.findings
         )
-        if result.error or incomplete_empty:
+        if outcome["status"] == "failed" or incomplete_empty:
             if self.monitor:
-                msg = (
-                    f"Agent scan FAILED: {result.error}"
-                    if result.error
-                    else "Agent scan INCOMPLETE: 正常に完了しませんでした（0 findings は安全を意味しません）"
-                )
-                await self.monitor.emit_status(msg, "error")
+                await self.monitor.emit_status(outcome["label"], outcome["status"])
             return result
 
         # Generate HTML report
         gen = ReportGenerator(self.output_dir, lang=self.report_lang)
         report_coverage = {
+            "scan_status": outcome["status"],
+            "terminal_outcome": outcome,
+            "completion_reasons": [outcome["reason"]] if outcome["reason"] else [],
             "auth_verification_status": getattr(result, "auth_verification_status", None),
             "auth_verification_reasons": getattr(result, "auth_verification_reasons", []),
             "coverage_gaps": getattr(result, "coverage_gaps", []),
@@ -415,14 +420,14 @@ class AgentEngine:
             coverage=report_coverage,
         )
 
-        complete = getattr(result, "harness_status", "") in ("", "complete") and result.success
-        status_label = "complete" if complete else "partial"
-        status_style = "green" if complete else "yellow"
         console.print(
-            f"\n[bold {status_style}]Agent scan {status_label}![/bold {status_style}]  "
+            f"\n[{outcome['console_style']}]{outcome['label']}"
+            f"[/{outcome['console_style']}]  "
             f"[cyan]{len(findings)}[/cyan] finding(s)  "
             f"Report: [cyan]{report_path}[/cyan]"
         )
+        if outcome["reason"]:
+            console.print(f"  [{outcome['console_style']}]Reason: {outcome['reason']}[/]")
         auth_status = getattr(result, "auth_verification_status", None)
         if auth_status:
             auth_style = "green" if auth_status == "verified" else "yellow"
@@ -436,8 +441,8 @@ class AgentEngine:
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"Agent scan {status_label} — {len(findings)} finding(s)",
-                "done" if complete else "error",
+                f"{outcome['label']} — {len(findings)} finding(s)",
+                outcome["status"],
             )
             # Push findings to dashboard
             for f in findings:
@@ -518,6 +523,8 @@ class AgentEngine:
                 *result.coverage_gaps,
                 "network_scope_blocked: one or more browser requests were blocked",
             ]))
+        from wscan.terminal_outcome import agent_result_outcome
+        outcome = agent_result_outcome(result)
         if "vision:text_only" in getattr(result, "coverage_gaps", []):
             (self.output_dir / "agent_vision_note.md").write_text(
                 "model has no image input; running text-only (DOM only; visual checks unavailable)\n",
@@ -528,12 +535,12 @@ class AgentEngine:
         # 「偵察完了」と誤表示しない。呼び出し側の Hybrid 失敗ブランチ（seed 無しで Phase 2 を
         # 続行＋警告）へ委ねるため送出する。`_run_with_time_window_monitor` は
         # `operation_task.result()` で再送出し、caller の except へ伝播する。
-        if result.error:
+        if outcome["status"] == "failed":
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"Agent偵察 FAILED: {result.error}", "error"
+                    outcome["label"], "warning"
                 )
-            raise RuntimeError(f"Agent recon failed: {result.error}")
+            raise RuntimeError(f"Agent recon failed: {outcome['reason']}")
 
         findings = _convert_agent_findings(result.findings)
 
@@ -549,14 +556,16 @@ class AgentEngine:
         # 送出し、呼び出し側の Hybrid 失敗ブランチ（seed 無しで Phase 2 続行＋警告）へ委ねる
         # （run() の incomplete_empty と同型）。ただし URL を1つでも発見していれば
         # partial recon として有効なので、到達性の価値を捨てず handoff を返す。
-        if not result.success and not findings and len(all_urls) <= 1:
+        if (
+            outcome["status"] in {"incomplete", "aborted"}
+            and not findings
+            and len(all_urls) <= 1
+        ):
             if self.monitor:
                 await self.monitor.emit_status(
-                    "Agent偵察 INCOMPLETE: 正常に完了せず URL も検出できませんでした"
-                    "（0 件は安全を意味しません）",
-                    "error",
+                    outcome["label"], "warning",
                 )
-            raise RuntimeError("Agent recon incomplete: no URLs or findings")
+            raise RuntimeError(outcome["message"] or "Agent recon incomplete: no URLs or findings")
 
         console.print(
             f"\n[bold cyan]Agent偵察完了:[/bold cyan] "
@@ -574,15 +583,15 @@ class AgentEngine:
             cookies=list(getattr(scanner, "captured_cookies", []) or getattr(result, "cookies", []) or []),
             storage_state=dict(getattr(scanner, "captured_storage_state", {}) or getattr(result, "storage_state", {}) or {}),
             coverage_complete=bool(
-                result.success and not getattr(result, "coverage_gaps", [])
+                outcome["is_success"] and not getattr(result, "coverage_gaps", [])
             ),
             coverage_gaps=list(getattr(result, "coverage_gaps", []) or []),
             network_guard_errors=list(
                 getattr(result, "network_guard_errors", []) or []
             ),
             incomplete_reason=(
-                "network_guard_blocked"
-                if getattr(result, "network_guard_errors", [])
+                outcome["reason"] or "agent_recon_incomplete"
+                if outcome["status"] in {"incomplete", "aborted"}
                 else ""
             ),
         )

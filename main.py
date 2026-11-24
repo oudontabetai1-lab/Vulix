@@ -2339,25 +2339,14 @@ def _checks_display(args) -> str:
 def _agent_exit_code(result) -> int:
     """Agent 結果だけを対象に CLI 終了コードを決める純粋関数。
 
-    失敗（``error``）に加え、**正常に完了しなかった 0-findings** も非0にする。browser-use は
-    実行失敗を例外だけでなく ``history.is_successful()``（→ ``result.success``）でも報告するため、
-    success=False の空振りを「成功・0 findings」と誤表示しない。findings があれば実際に検出
-    できているので 0（不完全でも検出結果は有効）。
+    終了状態は Agent result helper を通して canonical outcome に変換する。
+    partial/incomplete に findings があっても結果は保存する一方、run が未完なら成功 exit にしない。
     """
     if result is None:
         return 0
-    from wscan.terminal_outcome import terminal_outcome
+    from wscan.terminal_outcome import agent_result_outcome
 
-    harness_status = str(getattr(result, "harness_status", "") or "").lower()
-    if getattr(result, "error", None) or (
-        not getattr(result, "success", False) and not getattr(result, "findings", None)
-    ):
-        status = "failed"
-    elif harness_status in {"partial", "evidence_incomplete", "cancelled"}:
-        status = harness_status
-    else:
-        status = "done"
-    return terminal_outcome(status, str(getattr(result, "error", "") or ""))["exit_code"]
+    return agent_result_outcome(result)["exit_code"]
 
 
 def _batch_exit_code(results) -> int:
@@ -2625,16 +2614,28 @@ async def run_agent(args):
             from wscan.open_policy import open_in_browser
             open_in_browser(dashboard_url)
             result = await engine.run()
+            from wscan.terminal_outcome import agent_result_outcome
+            outcome = agent_result_outcome(result)
+            args._scan_terminal_status = outcome["status"]
             # early-return 条件は _agent_exit_code の非0条件と一致させる。
             # incomplete-empty（success=False かつ 0 findings）でも sleep(3600) に入れず
             # result をそのまま返し、非0 exit を確実に届ける。
-            if _agent_exit_code(result):
+            if outcome["exit_code"]:
                 return result
             console.print("[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]")
             await asyncio.sleep(3600)
             return result
         except asyncio.CancelledError:
-            pass
+            from wscan.terminal_outcome import agent_result_outcome
+            result = AgentScanResult(
+                target_url=getattr(args, "url", ""),
+                success=False,
+                harness_status="cancelled",
+            )
+            outcome = agent_result_outcome(result)
+            args._scan_terminal_status = outcome["status"]
+            await monitor.emit_status(outcome["label"], outcome["status"])
+            return result
         except Exception as exc:
             from wscan.terminal_outcome import terminal_outcome
             args._scan_terminal_status = "failed"
@@ -3734,7 +3735,13 @@ async def run_serve(args):
                 _agent_result, agent_interrupted = agent_run_result
                 if agent_interrupted:
                     return
-                console.print("[dim]Agent scan finished — dashboard ready for the next scan.[/dim]")
+                from wscan.terminal_outcome import agent_result_outcome
+                agent_outcome = agent_result_outcome(_agent_result)
+                console.print(
+                    f"[{agent_outcome['console_style']}]"
+                    f"{agent_outcome['label']} — dashboard ready for the next scan."
+                    f"[/{agent_outcome['console_style']}]"
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

@@ -1,5 +1,6 @@
 import json
 import re
+import unicodedata
 from collections import Counter
 from unittest.mock import AsyncMock
 from types import SimpleNamespace
@@ -12,11 +13,72 @@ from wscan.notification import NotificationManager
 from wscan.report import ReportGenerator
 
 
+_TERMINAL_COPY = re.compile(
+    r"\b(?:agent\s+)?scan\s+(?:complete(?:d)?|incomplete|finished|failed|aborted)\b"
+    r"|\bagent\s+browser\s+(?:complete(?:d)?|finished|完了)\b"
+    r"|スキャン(?:完了|不完全|中断|失敗)",
+    re.IGNORECASE,
+)
+
+
+def _terminal_copy_counts(sources):
+    observed = Counter()
+    for path, source in sources.items():
+        normalized = unicodedata.normalize("NFKC", source)
+        for match in _TERMINAL_COPY.finditer(normalized):
+            observed[(path, match.group(0).casefold())] += 1
+    return observed
+
+
 def test_cli_scan_exit_code_does_not_treat_incomplete_as_success():
     assert main._scan_exit_code("done") == 0
     assert main._scan_exit_code("incomplete") == 2
     assert main._scan_exit_code("aborted") == 2
     assert main._scan_exit_code("failed") == 1
+
+
+@pytest.mark.parametrize(
+    ("harness_status", "success", "error", "expected_status", "expected_exit"),
+    [
+        ("partial", True, "", "incomplete", 2),
+        ("incomplete", False, "", "incomplete", 2),
+        ("failed", False, "", "failed", 1),
+        ("", False, "browser stopped", "failed", 1),
+        ("aborted", False, "", "aborted", 2),
+        ("done", True, "", "done", 0),
+        ("complete", True, "", "done", 0),
+        ("complete", False, "", "incomplete", 2),
+    ],
+)
+def test_agent_normal_and_hybrid_statuses_share_canonical_outcome(
+    harness_status, success, error, expected_status, expected_exit
+):
+    import asyncio
+    from wscan.terminal_outcome import agent_result_outcome, terminal_outcome
+
+    result = SimpleNamespace(
+        harness_status=harness_status, success=success, error=error,
+        findings=[object()] if harness_status == "partial" else [],
+        coverage_gaps=["coverage_gap"] if expected_status == "incomplete" else [],
+        network_guard_errors=[],
+    )
+    agent = agent_result_outcome(result)
+    expected = terminal_outcome(expected_status, agent["reason"])
+    assert agent == expected
+    assert main._agent_exit_code(result) == expected_exit
+    # Normal scans use the same mapping for their exit code.
+    normal = terminal_outcome(expected_status, agent["reason"])
+    assert normal == agent
+    assert main._scan_exit_code(expected_status) == expected_exit
+    # Hybrid and Agent events enter MonitorServer with the canonical status.
+    monitor = MonitorServer()
+    asyncio.run(monitor.emit("scan_complete", {
+        "status": expected_status,
+        "completion_reasons": [agent["reason"]] if agent["reason"] else [],
+    }))
+    assert monitor._terminal_outcome() == terminal_outcome(
+        expected_status, agent["reason"]
+    )
 
 
 def test_report_coverage_and_observability_label_incomplete(tmp_path):
@@ -118,7 +180,9 @@ async def test_serve_notification_uses_incomplete_status_with_mocked_transport(m
 @pytest.mark.parametrize(
     ("status", "label", "label_ja", "severity", "success", "exit_code"),
     [
+        ("complete", "Scan complete", "スキャン完了", "success", True, 0),
         ("done", "Scan complete", "スキャン完了", "success", True, 0),
+        ("partial", "Scan incomplete", "スキャン不完全", "warning", False, 2),
         ("incomplete", "Scan incomplete", "スキャン不完全", "warning", False, 2),
         ("failed", "Scan failed", "スキャン失敗", "error", False, 1),
         ("aborted", "Scan aborted (partial report)", "スキャン中断（部分レポート）", "warning", False, 2),
@@ -254,15 +318,20 @@ def test_terminal_display_copy_is_centralized_with_documented_exceptions():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    phrases = re.compile(
-        r"Scan complete|Scan incomplete|Scan aborted|Scan failed|"
-        r"スキャン完了|スキャン不完全|スキャン中断|スキャン失敗"
-    )
+    # Negative controls ensure casing and full-width forms normalize to matches.
+    probe = _terminal_copy_counts({
+        "probe.py": "Agent scan COMPLETE; Ａｇｅｎｔ　Ｓｃａｎ　Ｃｏｍｐｌｅｔｅｄ; Scan finished"
+    })
+    assert probe == Counter({
+        ("probe.py", "agent scan complete"): 1,
+        ("probe.py", "agent scan completed"): 1,
+        ("probe.py", "scan finished"): 1,
+    })
     expected = Counter({
-        ("wscan/terminal_outcome.py", "Scan complete"): 1,
-        ("wscan/terminal_outcome.py", "Scan incomplete"): 1,
-        ("wscan/terminal_outcome.py", "Scan aborted"): 1,
-        ("wscan/terminal_outcome.py", "Scan failed"): 1,
+        ("wscan/terminal_outcome.py", "scan complete"): 1,
+        ("wscan/terminal_outcome.py", "scan incomplete"): 1,
+        ("wscan/terminal_outcome.py", "scan aborted"): 1,
+        ("wscan/terminal_outcome.py", "scan failed"): 1,
         ("wscan/terminal_outcome.py", "スキャン完了"): 1,
         ("wscan/terminal_outcome.py", "スキャン不完全"): 1,
         ("wscan/terminal_outcome.py", "スキャン中断"): 1,
@@ -270,17 +339,19 @@ def test_terminal_display_copy_is_centralized_with_documented_exceptions():
         # The following are not final scan outcomes: abort causes, crawl-step/audit labels,
         # notification toggles, and scanner error descriptions.
         ("wscan/tls_scan.py", "スキャン失敗"): 1,
-        ("wscan/engine.py", "Scan aborted"): 1,
+        ("wscan/engine.py", "scan aborted"): 1,
         ("wscan/engine.py", "スキャン失敗"): 1,
-        ("wscan/intervention.py", "Scan aborted"): 5,
-        ("wscan/scanners/base.py", "Scan aborted"): 1,
+        ("wscan/intervention.py", "scan aborted"): 5,
+        ("wscan/scanners/base.py", "scan aborted"): 1,
         ("wscan/scanners/tls_config_scan.py", "スキャン失敗"): 1,
         ("templates/portal.html", "スキャン完了"): 1,
         ("templates/dashboard.html", "スキャン中断"): 1,
+        ("templates/dashboard.html", "scan completed"): 1,
         ("templates/ui/summary-modules.js", "スキャン中断"): 1,
         ("templates/ui/settings-module.js", "スキャン完了"): 1,
         ("templates/ui/crawl-module.js", "スキャン中断"): 1,
         ("templates/ui/crawl-module.js", "スキャン完了"): 1,
+        ("wscan/eta_estimator.py", "scan finished"): 1,
     })
     # Allowlist rationales are explicit so a new phrase cannot silently bypass review.
     exception_reasons = {
@@ -290,17 +361,24 @@ def test_terminal_display_copy_is_centralized_with_documented_exceptions():
         "wscan/scanners/base.py": "exception reason records the operator abort cause for the scan engine",
         "wscan/scanners/tls_config_scan.py": "scanner module documentation describes a local no-finding error behavior",
         "templates/portal.html": "checkbox names a notification trigger, not a scan result",
-        "templates/dashboard.html": "audit action log label is an operator action, not a scan result",
+        "templates/dashboard.html": "audit labels are actions; the English sentence warns that zero findings do not imply completion",
         "templates/ui/summary-modules.js": "audit action log label is an operator action, not a scan result",
         "templates/ui/settings-module.js": "checkbox names a notification trigger, not a scan result",
         "templates/ui/crawl-module.js": "crawl substep status is independent from the overall scan terminal state",
+        "wscan/eta_estimator.py": "internal estimator lifecycle docstring names its finished state; it is not user-facing status copy",
     }
-    observed = Counter()
-    for path in [root / "main.py", * (root / "wscan").rglob("*.py"),
-                 * (root / "templates").rglob("*.js"), * (root / "templates").rglob("*.html")]:
-        relative = path.relative_to(root).as_posix()
-        for phrase in phrases.findall(path.read_text(encoding="utf-8")):
-            observed[(relative, phrase)] += 1
+    source_paths = [root / "main.py", *(root / "wscan").rglob("*.py"),
+                    *(root / "templates").rglob("*.js"), *(root / "templates").rglob("*.html")]
+    sources = {
+        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+        for path in source_paths
+    }
+    observed = _terminal_copy_counts(sources)
+    assert "agent_result_outcome" in sources["wscan/llm_agent_browser.py"]
+    assert "agent_result_outcome" in sources["wscan/agent_engine.py"]
+    assert "agent_result_outcome" in sources["main.py"]
+    assert "status_label" not in sources["wscan/agent_engine.py"]
+    assert "Agent scan {" not in sources["wscan/agent_engine.py"]
     assert observed == expected
     for (path, _phrase), count in expected.items():
         if path != "wscan/terminal_outcome.py":
