@@ -322,6 +322,7 @@ class MonitorServer:
         # ── Intervention / plan-confirm channels ──────────────────────
         # Commands arriving from the web UI (pause / resume / skip_field / skip_page / abort)
         self.command_queue: asyncio.Queue = asyncio.Queue()
+        self.discarded_scan_commands: collections.deque = collections.deque(maxlen=100)
         # Persistent for the lifetime of one scan; queue consumers may drain commands.
         self.scan_abort_event: asyncio.Event = asyncio.Event()
         # Set when the operator clicks "Start Attack" in the plan review modal
@@ -668,7 +669,15 @@ class MonitorServer:
                     try:
                         raw = await asyncio.wait_for(ws.receive_text(), timeout=30)
                         ws_ip = (ws.client.host if ws.client else "") or "ws"
-                        self._handle_client_message(raw, ws_ip)
+                        rejection = self._handle_client_message(raw, ws_ip)
+                        if rejection:
+                            # Notify only the requesting tab; an idle rejection is not scan state.
+                            await ws.send_text(json.dumps({
+                                "type": "status",
+                                "timestamp": time.time(),
+                                "backend_version": self._capability_schema_version(),
+                                "data": {"message": rejection, "state": "warning"},
+                            }))
                     except asyncio.TimeoutError:
                         # Send ping to keep alive
                         await ws.send_text(json.dumps({"type": "ping"}))
@@ -2489,7 +2498,7 @@ class MonitorServer:
     # Client message handler (called from WebSocket coroutine)
     # ------------------------------------------------------------------
 
-    def _handle_client_message(self, raw: str, client_ip: str = "ws") -> None:
+    def _handle_client_message(self, raw: str, client_ip: str = "ws") -> Optional[str]:
         """Parse and dispatch a JSON message sent from the browser."""
         try:
             msg = json.loads(raw)
@@ -2503,6 +2512,8 @@ class MonitorServer:
             cmd = msg.get("command", "")
             if cmd:
                 if str(cmd).lower().strip() in ("abort", "q"):
+                    if not self.scan_in_progress and not self.scan_request_event.is_set():
+                        return "実行中のスキャンがありません。中断要求は受け付けませんでした。"
                     self.request_abort()
                 else:
                     self.command_queue.put_nowait(cmd)
@@ -2632,6 +2643,18 @@ class MonitorServer:
 
     def _begin_scan_snapshot(self) -> None:
         """Start a new live-state generation without changing the public scan ID."""
+        # 前回 run の未処理コマンドを新しいスキャンへ持ち越さない。
+        while True:
+            try:
+                command = self.command_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self.discarded_scan_commands.append({
+                "run_id": self._scan_run_id,
+                "command": str(command)[:64],
+                "reason": "new_scan_started",
+                "timestamp": time.time(),
+            })
         self.scan_abort_event.clear()
         self._clear_pending_interactive()
         # 前スキャンのプラン確認状態を持ち越さない（古い編集の誤適用・即時通過の防止）。
