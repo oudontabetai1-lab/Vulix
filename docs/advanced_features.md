@@ -130,6 +130,8 @@ WordPress, Drupal, Django, Laravel, EC-CUBE, Joomla, Magento
 
 - `terminal_outcome`: 終端 status の共通解釈。`label`、`severity`、`color`、`is_success`、`exit_code` を含みます。正常完了 (`done`) 以外は成功として扱いません。
 
+このリリースから、公開 REST API と WebSocket のスキャン終了 status は `error` から `failed` に統一されます。連携先は `failed` を確認し、旧サーバーとの移行期間には `error` も失敗として受け付けてください。
+
 - `total_findings_count`: 発見された全 Finding 件数（未確証の仮説・Agent 由来を含む）。
 - `confirmed_findings_count`: 再現・確証された脆弱性の件数 (`finding_dict_confirmed(f)` が True のもの)。
 - `hypothesis_count`: 未確証の仮説件数 (`total_findings_count - confirmed_findings_count`)。

@@ -983,6 +983,8 @@ python3 main.py scan https://example.com \
 
 `serve` は `/api/v1/scan`、`/api/v1/scan/status`、`/api/v1/scan/findings`、`/api/v1/scan/results`、`/api/v1/scans`、認証必須の `/api/v1/upload`、スケジュール・履歴・手動巡回 API と `/ws` を提供します。トークン設定時は Bearer 認証が必要です。`/health` は稼働確認に使えます。
 
+このリリースから、スキャン終了を表す公開 REST API と WebSocket の status は `error` ではなく `failed` を返します（`terminal_outcome.status` と同じ値です）。連携先は `failed` を失敗として判定してください。旧サーバーとの移行期間は、後方互換性のため `error` も失敗として受け付けると、どちらのバージョンにも対応できます。
+
 ### batch
 
 `batch` は YAML に定義した複数 URL を順次実行し、個別成果物と統合サマリーを `output/batch_<timestamp>/` に保存します。

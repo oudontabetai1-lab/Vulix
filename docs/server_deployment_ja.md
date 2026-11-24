@@ -195,6 +195,8 @@ curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/scan/status"
 curl -s -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/scan/results"
 ```
 
+このリリースから、スキャン終了 status は REST API と WebSocket の両方で `error` ではなく `failed` を返します。CI や外部連携は `failed` を確認してください。旧サーバーとの移行期間には、`error` も失敗として受け付けることで新旧両方に対応できます。
+
 非ブラウザの WebSocket クライアントは `ws://<host>:<port>/ws?token=<token>` で接続できます。
 `/health` のみ認証不要です（コンテナのヘルスチェック用）。
 

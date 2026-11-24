@@ -201,6 +201,8 @@ UI スクリプト（`templates/ui/*.js`）から実際に呼び出されるサ�
 | `GET` | `/api/v1/scans/{id}/crawl-graph`<br>`/api/v1/scan/crawl-graph` | `crawl-module.js` | 指定スキャンまたは現行スキャンの巡回ノード・エッジ・完了状態を返却。 |
 | `GET` | `/api/v1/scans/{id}/traffic?limit=500`<br>`/api/v1/scan/traffic?limit=500` | `traffic-module.js` | 記録された HTTP リクエスト/レスポンス履歴（`http_requests.jsonl`）を返却。 |
 
+スキャン終了時の公開 status は、HTTP API の status snapshot と WebSocket の `status` / `scan_complete` イベントで共通です。このリリースから `error` は `failed` として返ります。連携先では `failed` を失敗として判定し、旧サーバーとの移行期間には `error` も受け付けてください。
+
 ### 2.2 WebSocket イベントストリーム (`/ws`)
 
 リアルタイム通知は `wscan/monitor.py:600` の `@app.websocket("/ws")` エンドポイントで提供され、クライアント側は `templates/ui/event-stream.js` が接続と投影を管理します。
