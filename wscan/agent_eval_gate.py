@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from wscan.agent_eval_model import (
     INCOMPLETE_EVAL_STATUSES,
+    SUPPORTED_CONFIDENCE_LEVELS,
     AgentAggregateScorecard,
     AgentEvalStatus,
     AgentRunMetrics,
@@ -257,9 +258,9 @@ def evaluate_agent_eval_gate(
 
     n_runs = len(parsed_candidates)
 
-    if not 0.0 < cfg.confidence_level < 1.0 or not math.isfinite(cfg.confidence_level):
+    if not math.isfinite(cfg.confidence_level) or cfg.confidence_level not in SUPPORTED_CONFIDENCE_LEVELS:
         return AgentEvalVerdict(verdict=GateVerdictKind.INCONCLUSIVE, passed=False, warning=False,
-                                reasons=("confidence_level は 0 と 1 の間の有限値である必要があります",))
+                                reasons=(f"confidence_level は {SUPPORTED_CONFIDENCE_LEVELS} のいずれかである必要があります",))
     for idx, run in enumerate(parsed_candidates):
         m = run.metrics
         numeric = (m.input_tokens, m.output_tokens, m.total_tokens, m.duration_seconds, m.llm_calls,
@@ -280,6 +281,15 @@ def evaluate_agent_eval_gate(
         if m.safe_twin_fpr is not None and not 0.0 <= m.safe_twin_fpr <= 1.0:
             return AgentEvalVerdict(verdict=GateVerdictKind.INCONCLUSIVE, passed=False, warning=False,
                                     reasons=(f"Run[{idx}] safe_twin_fpr が 0..1 の範囲外です",))
+        if m.recall is None:
+            return AgentEvalVerdict(verdict=GateVerdictKind.INCONCLUSIVE, passed=False, warning=False,
+                                    reasons=(f"Run[{idx}] に必須の recall がありません",))
+        if m.safe_twin_total <= 0 or m.safe_twin_fp > m.safe_twin_total:
+            return AgentEvalVerdict(verdict=GateVerdictKind.INCONCLUSIVE, passed=False, warning=False,
+                                    reasons=(f"Run[{idx}] safe-twin 分母が0以下、またはFP数が分母を超えています",))
+        if m.status not in {status.value for status in AgentEvalStatus}:
+            return AgentEvalVerdict(verdict=GateVerdictKind.INCONCLUSIVE, passed=False, warning=False,
+                                    reasons=(f"Run[{idx}] status が未知です: {m.status}",))
 
     # ---------------------------------------------------------------------
     # 3. 評価不能・全 run 脱落チェック

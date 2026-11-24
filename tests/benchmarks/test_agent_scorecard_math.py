@@ -94,6 +94,19 @@ def test_distribution_confidence_level_changes_interval():
     assert ci90.ci_lower > ci99.ci_lower
 
 
+@pytest.mark.parametrize("df,critical", [(1, 63.657), (2, 9.925), (5, 4.032), (30, 2.750)])
+def test_distribution_99_percent_t_critical_values_and_width(df, critical):
+    values = [float(i) for i in range(df + 1)]
+    dist = compute_distribution(values, confidence_level=0.99)
+    expected_width = 2 * critical * math.sqrt((df + 2) / 12)
+    assert math.isclose(dist.ci_upper - dist.ci_lower, expected_width, rel_tol=1e-4)
+
+
+def test_distribution_99_percent_df2_matches_student_t_reference():
+    dist = compute_distribution([0.0, 1.0, 2.0], confidence_level=0.99)
+    assert math.isclose(dist.ci_upper - dist.ci_lower, 11.4604, rel_tol=1e-4)
+
+
 @pytest.mark.parametrize("values", [[float("nan")], [float("inf")], [-float("inf")]])
 def test_distribution_rejects_nonfinite_values(values):
     with pytest.raises(ValueError, match="finite"):
@@ -102,7 +115,7 @@ def test_distribution_rejects_nonfinite_values(values):
 
 def test_distribution_rejects_invalid_confidence_level():
     with pytest.raises(ValueError, match="confidence_level"):
-        compute_distribution([1.0, 2.0], confidence_level=1.0)
+        compute_distribution([1.0, 2.0], confidence_level=0.92)
 
 
 def test_metadata_serialization():

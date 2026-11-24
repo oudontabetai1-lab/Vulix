@@ -231,6 +231,44 @@ def test_gate_zero_ground_truth_denominator_in_any_run_is_inconclusive():
     assert verdict.passed is False
 
 
+def test_gate_zero_safe_twin_denominator_is_inconclusive():
+    runs = [_make_run(f"c_{i}") for i in range(3)]
+    runs[0] = replace(runs[0], metrics=replace(
+        runs[0].metrics, safe_twin_total=0, safe_twin_fp=0, safe_twin_fpr=None
+    ))
+    verdict = evaluate_agent_eval_gate(runs)
+    assert verdict.verdict == GateVerdictKind.INCONCLUSIVE
+    assert verdict.passed is False
+    assert any("safe-twin" in reason for reason in verdict.reasons)
+
+
+def test_gate_missing_recall_is_inconclusive():
+    runs = [_make_run(f"c_{i}") for i in range(3)]
+    runs[0] = replace(runs[0], metrics=replace(runs[0].metrics, recall=None))
+    verdict = evaluate_agent_eval_gate(runs)
+    assert verdict.verdict == GateVerdictKind.INCONCLUSIVE
+    assert verdict.passed is False
+    assert any("recall" in reason for reason in verdict.reasons)
+
+
+def test_gate_unknown_status_is_inconclusive():
+    run_data = _make_run().to_dict()
+    run_data["metrics"]["status"] = "bogus"
+    verdict = evaluate_agent_eval_gate([run_data] * 3)
+    assert verdict.verdict == GateVerdictKind.INCONCLUSIVE
+    assert verdict.passed is False
+    assert any("未知" in reason for reason in verdict.reasons)
+
+
+def test_gate_unsupported_confidence_level_is_inconclusive():
+    verdict = evaluate_agent_eval_gate(
+        [_make_run(f"c_{i}") for i in range(3)],
+        thresholds=AgentEvalThresholds(confidence_level=0.92),
+    )
+    assert verdict.verdict == GateVerdictKind.INCONCLUSIVE
+    assert verdict.passed is False
+
+
 def test_gate_zero_denominator():
     """分母 0 (ground_truth_total == 0) の場合は空虚合格にせず INCONCLUSIVE (passed=False)。"""
     runs = [_make_run(f"c_{i}") for i in range(3)]

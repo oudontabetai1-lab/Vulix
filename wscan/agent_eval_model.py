@@ -302,51 +302,29 @@ class AgentRunScorecard:
 # 統計計算（標準ライブラリ statistics / math のみ使用）
 # =========================================================================
 
-# 両側 95% 信頼係数 (t-distribution critical values for df = 1..30)
-# alpha = 0.05 -> t_{0.025, df}
-_T_CRITICAL_95: tuple[float, ...] = (
-    0.0,      # df=0 (dummy)
-    12.706,   # df=1 (N=2)
-    4.303,    # df=2 (N=3)
-    3.182,    # df=3 (N=4)
-    2.776,    # df=4 (N=5)
-    2.571,    # df=5 (N=6)
-    2.447,    # df=6
-    2.365,    # df=7
-    2.306,    # df=8
-    2.262,    # df=9
-    2.228,    # df=10
-    2.201,    # df=11
-    2.179,    # df=12
-    2.160,    # df=13
-    2.145,    # df=14
-    2.131,    # df=15
-    2.120,    # df=16
-    2.110,    # df=17
-    2.101,    # df=18
-    2.093,    # df=19
-    2.086,    # df=20
-    2.080,    # df=21
-    2.074,    # df=22
-    2.069,    # df=23
-    2.064,    # df=24
-    2.060,    # df=25
-    2.056,    # df=26
-    2.052,    # df=27
-    2.048,    # df=28
-    2.045,    # df=29
-    2.042,    # df=30
-)
-_Z_CRITICAL_95: float = 1.960  # df > 30 (正規分布近似)
+# Two-sided Student-t critical values for df=1..30. For higher df, df=30
+# remains a conservative table bound instead of switching to a normal quantile.
+SUPPORTED_CONFIDENCE_LEVELS = (0.90, 0.95, 0.99)
+_T_CRITICAL: dict[float, tuple[float, ...]] = {
+    0.90: (0, 6.314, 2.920, 2.353, 2.132, 2.015, 1.943, 1.895, 1.860, 1.833, 1.812,
+           1.796, 1.782, 1.771, 1.761, 1.753, 1.746, 1.740, 1.734, 1.729, 1.725,
+           1.721, 1.717, 1.714, 1.711, 1.708, 1.706, 1.703, 1.701, 1.699, 1.697),
+    0.95: (0, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
+           2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086,
+           2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042),
+    0.99: (0, 63.657, 9.925, 5.841, 4.604, 4.032, 3.707, 3.499, 3.355, 3.250, 3.169,
+           3.106, 3.055, 3.012, 2.977, 2.947, 2.921, 2.898, 2.878, 2.861, 2.845,
+           2.831, 2.819, 2.807, 2.797, 2.787, 2.779, 2.771, 2.763, 2.756, 2.750),
+}
 
 
-def _get_t_critical_95(df: int) -> float:
-    """自由度 df に対する 95% 信頼係数 t を取得する（純粋）。"""
+def _get_t_critical(df: int, confidence_level: float) -> float:
+    """自由度と信頼水準に対応する両側 Student-t 臨界値を取得する。"""
+    if confidence_level not in _T_CRITICAL:
+        raise ValueError(f"unsupported confidence_level: {confidence_level}")
     if df <= 0:
-        return 0.0
-    if df < len(_T_CRITICAL_95):
-        return _T_CRITICAL_95[df]
-    return _Z_CRITICAL_95
+        raise ValueError("degrees of freedom must be positive")
+    return _T_CRITICAL[confidence_level][min(df, 30)]
 
 
 @dataclass(frozen=True)
@@ -399,10 +377,10 @@ def compute_distribution(
     N=0: 全て 0.0
     N=1: mean=min=max=ci_lower=ci_upper=val, stddev=variance=0.0
     分散0（全値一致）: stddev=variance=0.0, ci_lower=ci_upper=mean
-    N>=2: t分布または正規分布による両側 95% 信頼区間
+    N>=2: 表の Student-t 臨界値による両側信頼区間
     """
-    if not math.isfinite(confidence_level) or not 0.0 < confidence_level < 1.0:
-        raise ValueError("confidence_level must be finite and between 0 and 1")
+    if not math.isfinite(confidence_level) or confidence_level not in SUPPORTED_CONFIDENCE_LEVELS:
+        raise ValueError(f"unsupported confidence_level: {confidence_level}")
     n = len(values)
     if n == 0:
         return MetricDistribution(
@@ -455,13 +433,7 @@ def compute_distribution(
         )
 
     df = n - 1
-    if confidence_level == 0.95:
-        t_val = _get_t_critical_95(df)
-    else:
-        # Cornish-Fisher expansion of the Student-t quantile around the
-        # normal quantile; it supports arbitrary confidence levels without a dependency.
-        z = statistics.NormalDist().inv_cdf((1.0 + confidence_level) / 2.0)
-        t_val = z + (z**3 + z) / (4 * df) + (5*z**5 + 16*z**3 + 3*z) / (96 * df**2)
+    t_val = _get_t_critical(df, confidence_level)
     standard_error = stdev_val / math.sqrt(n)
     margin_of_error = t_val * standard_error
 
