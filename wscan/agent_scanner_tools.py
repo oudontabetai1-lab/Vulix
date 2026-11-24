@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
@@ -61,6 +62,10 @@ class AgentScannerTools:
     def add_point(self, point: InjectionPoint, field: dict | None = None) -> str:
         point_id = self._point_id(point)
         current = self.points.get(point_id)
+        if isinstance(current, dict) and not current.get("resume_unavailable"):
+            existing, _ = self._resolve(point_id)
+            if existing is not None and existing.stable_key_parts() != point.stable_key_parts():
+                raise ValueError("injection point ID collision; rediscover the input point before scheduling")
         if current is None or current.get("resume_unavailable"):
             self.points[point_id] = {
                 "location": point.location, "url": point.url, "parameter_id": point.parameter_id,
@@ -76,16 +81,21 @@ class AgentScannerTools:
             return None, None
         if item.get("resume_unavailable"):
             return None, item
-        carrier = "query" if item.get("location") == "url_param" else item.get("location")
-        if carrier not in _SUPPORTED_CARRIERS:
+        try:
+            carrier = "query" if item.get("location") == "url_param" else item.get("location")
+            if carrier not in _SUPPORTED_CARRIERS:
+                return None, item
+            if carrier == "query":
+                point = InjectionPoint.for_url_param(item["url"], item["parameter_id"])
+            else:
+                point = InjectionPoint.for_form(
+                    item["url"], item["parameter_id"], int(item.get("form_index", 0)),
+                    method=item.get("method", ""), action=item.get("action", ""),
+                )
+        except (KeyError, TypeError, ValueError):
             return None, item
-        if carrier == "query":
-            point = InjectionPoint.for_url_param(item["url"], item["parameter_id"])
-        else:
-            point = InjectionPoint.for_form(
-                item["url"], item["parameter_id"], int(item.get("form_index", 0)),
-                method=item.get("method", ""), action=item.get("action", ""),
-            )
+        if self._point_id(point) != str(point_id):
+            return None, item
         return point, item
 
     def _scope_reason(self, point: InjectionPoint, field_name: str = "") -> str:
@@ -339,34 +349,36 @@ class AgentScannerTools:
         if not hypothesis:
             return {"status": "inconclusive", "reason": "unknown hypothesis ID"}
         recorded, ledger_error = self._verification_record(hypothesis_id)
-        if recorded is not None:
+        if recorded is not None and self._verification_is_trustworthy(recorded, hypothesis):
+            self._restore_hypothesis_outcome(hypothesis_id, recorded)
             return self._verification_result(hypothesis_id, recorded)
-        if ledger_error:
-            reason = "deterministic verification ledger is unreadable; automatic replay was suppressed"
-            self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason)
-            return {"status": "inconclusive", "reason": reason}
-        outcome = str(hypothesis.get("verification_outcome", ""))
-        if outcome in {"confirmed", "rejected", "inconclusive"}:
-            return self._verification_result(hypothesis_id, hypothesis)
+        unverifiable_checkpoint = bool(
+            recorded is not None or ledger_error or self._checkpoint_claims_confirmation(hypothesis)
+        )
+        if unverifiable_checkpoint:
+            self._downgrade_unverifiable(hypothesis_id)
         point_id = hypothesis.get("injection_point_id", "")
         check = hypothesis.get("check_type", "")
         scheduled = self.schedule_scanner(point_id, check)
         if scheduled.get("status") not in {"planned", "already_scheduled"}:
             reason = scheduled.get("reason", "verification unavailable")
+            if unverifiable_checkpoint:
+                reason = f"unverifiable_checkpoint: {reason}"
             self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason)
             return {"status": "inconclusive", "reason": reason}
         self.work_specs[scheduled["work_id"]] = (point_id, check)
         existing = next(item for item in self.harness.state.work_queue if item.work_id == scheduled["work_id"])
         if existing.status == WorkStatus.COMPLETE:
-            reason = "completed scanner result is unavailable after resume; automatic replay was suppressed"
-            self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason, work_id=existing.work_id)
+            reason = "unverifiable_checkpoint: completed scanner result has no valid deterministic evidence; replay was suppressed"
+            self._downgrade_unverifiable(hypothesis_id, reason)
             return {"status": "inconclusive", "reason": reason, "hypothesis_id": hypothesis_id, "work_id": existing.work_id}
         result = await self.run_scanner_work(scheduled["work_id"])
         recorded, ledger_error = self._verification_record(hypothesis_id)
-        if recorded is not None:
+        if recorded is not None and self._verification_is_trustworthy(recorded, hypothesis):
+            self._restore_hypothesis_outcome(hypothesis_id, recorded)
             return {**self._verification_result(hypothesis_id, recorded), "work_id": scheduled["work_id"]}
-        if ledger_error:
-            reason = "deterministic verification ledger is unreadable; automatic replay was suppressed"
+        if recorded is not None or ledger_error:
+            reason = "unverifiable_checkpoint: deterministic verification ledger is unreadable or inconsistent; automatic replay was suppressed"
         else:
             reason = result.get("reason") or "scanner could not complete deterministic verification"
         self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason, work_id=scheduled["work_id"])
@@ -374,19 +386,40 @@ class AgentScannerTools:
 
     def register_hypothesis(self, hypothesis: dict) -> str:
         safe = dict(hypothesis)
-        safe["injection_point_id"] = next((pid for pid, raw in self.points.items()
-            if raw.get("url") == safe.get("url")
-            and raw.get("parameter_id") == safe.get("field_name")), "")
+        requested_point_id = str(safe.get("injection_point_id", ""))
+        if requested_point_id:
+            point, _ = self._resolve(requested_point_id)
+            safe["injection_point_id"] = requested_point_id if point is not None else ""
+        else:
+            matches = [pid for pid, raw in self.points.items()
+                       if isinstance(raw, dict) and raw.get("url") == safe.get("url")
+                       and raw.get("parameter_id") == safe.get("field_name")
+                       and self._resolve(pid)[0] is not None]
+            safe["injection_point_id"] = matches[0] if len(matches) == 1 else ""
         hypothesis_id = str(safe.get("candidate_id") or hashlib.sha256(json.dumps(safe, sort_keys=True).encode()).hexdigest()[:20])
         safe["candidate_id"] = hypothesis_id
         self.harness.note_hypotheses([safe])
         return str(safe["injection_point_id"])
 
-    def _record_hypothesis_outcome(self, hypothesis_id: str, outcome: str, reason: str, *, work_id: str = "") -> None:
+    def _record_hypothesis_outcome(
+        self, hypothesis_id: str, outcome: str, reason: str, *, work_id: str = "",
+        injection_point_id: str = "",
+    ) -> None:
         confirmed = outcome == "confirmed"
+        point_id = injection_point_id or next((str(item.get("injection_point_id", ""))
+            for item in self.harness.state.hypotheses
+            if str(item.get("candidate_id", "")) == hypothesis_id), "")
+        head_id = self._current_head_id()
+        if confirmed and (not work_id or not point_id or not head_id):
+            confirmed = False
+            outcome = "inconclusive"
+            reason = reason or "unverifiable_checkpoint: verification identifiers are incomplete"
+        evidence_ids = (work_id,) if work_id else ()
         self.harness.record_verification(
             hypothesis_id, reproduced=confirmed, status=outcome,
             method="deterministic", work_id=work_id,
+            scan_id=self.harness.state.run_id, head_id=head_id,
+            injection_point_id=point_id, evidence_ids=evidence_ids,
             deterministic_confirmed=confirmed, rejection_reason=reason,
         )
         self.harness.update_hypothesis(
@@ -397,6 +430,115 @@ class AgentScannerTools:
             source_label="agent_deterministic_confirmed" if confirmed else "agent_unverified",
             rejection_reason=reason,
         )
+
+    def _current_head_id(self) -> str:
+        try:
+            return subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1],
+                stderr=subprocess.DEVNULL, text=True, timeout=2,
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    @staticmethod
+    def _checkpoint_claims_confirmation(hypothesis: dict) -> bool:
+        return bool(
+            hypothesis.get("deterministic_confirmed")
+            or hypothesis.get("verification_outcome") == "confirmed"
+            or hypothesis.get("status") in {"confirmed", "deterministic_confirmed", "reproduced"}
+            or hypothesis.get("source_label") == "agent_deterministic_confirmed"
+        )
+
+    def _downgrade_unverifiable(self, hypothesis_id: str, reason: str = "unverifiable_checkpoint: deterministic ledger evidence is missing or inconsistent") -> None:
+        self.harness.update_hypothesis(
+            hypothesis_id, status="agent_only", verification_outcome="inconclusive",
+            deterministic_confirmed=False, source_label="agent_unverified",
+            rejection_reason=reason,
+        )
+
+    def _restore_hypothesis_outcome(self, hypothesis_id: str, record: dict) -> None:
+        outcome = str(record.get("status", "inconclusive"))
+        confirmed = outcome == "confirmed"
+        self.harness.update_hypothesis(
+            hypothesis_id,
+            status="deterministic_confirmed" if confirmed else "agent_only",
+            verification_outcome=outcome,
+            deterministic_confirmed=confirmed,
+            source_label="agent_deterministic_confirmed" if confirmed else "agent_unverified",
+            rejection_reason=str(record.get("rejection_reason", "")),
+        )
+
+    def _verification_is_trustworthy(self, record: dict, hypothesis: dict) -> bool:
+        point_id = str(hypothesis.get("injection_point_id", ""))
+        point, _ = self._resolve(point_id)
+        if point is None:
+            return False
+        evidence_ids = record.get("evidence_ids")
+        if (
+            not isinstance(record.get("verification_id"), str) or not record.get("verification_id")
+            or not isinstance(evidence_ids, list) or not evidence_ids
+            or not all(isinstance(item, str) for item in evidence_ids)
+            or not isinstance(record.get("work_id"), str) or not record.get("work_id")
+            or record.get("work_id") not in evidence_ids
+            or record.get("candidate_id") != hypothesis.get("candidate_id")
+            or record.get("injection_point_id") != point_id
+            or record.get("scan_id") != self.harness.state.run_id
+            or record.get("run_id") != self.harness.state.run_id
+            or not record.get("head_id") or record.get("head_id") != self._current_head_id()
+            or record.get("method") != "deterministic"
+        ):
+            return False
+        work = next((item for item in self.harness.state.work_queue if item.work_id == record.get("work_id")), None)
+        if (
+            work is None or work.target != point_id
+            or work.check_type != hypothesis.get("check_type")
+        ):
+            return False
+        outcome = record.get("status")
+        if outcome == "confirmed":
+            return (
+                work.status == WorkStatus.COMPLETE
+                and record.get("reproduced") is True
+                and record.get("deterministic_confirmed") is True
+                and self._probe_evidence_matches(record, outcome="completed")
+            )
+        if outcome == "rejected":
+            return (
+                work.status == WorkStatus.COMPLETE
+                and record.get("reproduced") is False
+                and record.get("deterministic_confirmed") is False
+                and self._probe_evidence_matches(record, outcome="completed")
+            )
+        return (
+            outcome == "inconclusive"
+            and record.get("reproduced") is False
+            and record.get("deterministic_confirmed") is False
+            and self._probe_evidence_matches(record, outcome=None)
+        )
+
+    def _probe_evidence_matches(self, verification: dict, *, outcome: str | None) -> bool:
+        path = self.harness.probe_attempts_path
+        if not path.exists():
+            return False
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                attempt = json.loads(line)
+                if (
+                    attempt.get("run_id") == self.harness.state.run_id
+                    and attempt.get("work_id") == verification.get("work_id")
+                    and attempt.get("check_type") == next(
+                        (item.get("check_type") for item in self.harness.state.hypotheses
+                         if item.get("candidate_id") == verification.get("candidate_id")), None
+                    )
+                    and attempt.get("evidence_id") == verification.get("work_id")
+                    and (outcome is None or attempt.get("status") == outcome)
+                ):
+                    return True
+            return False
+        except (OSError, ValueError, AttributeError):
+            return False
 
     def _mark_hypotheses(self, point_id: str, check: str, outcome: str, reason: str, *, work_id: str = "") -> None:
         for hypothesis in self.harness.state.hypotheses:
@@ -421,13 +563,7 @@ class AgentScannerTools:
 
     @staticmethod
     def _verification_result(candidate_id: str, record: dict) -> dict:
-        outcome = record.get("status", "inconclusive")
-        if record.get("deterministic_confirmed") and record.get("reproduced"):
-            outcome = "confirmed"
-        elif outcome in {"not_reproduced", "rejected"}:
-            outcome = "rejected"
-        elif outcome not in {"confirmed", "rejected", "inconclusive"}:
-            outcome = "inconclusive"
+        outcome = str(record.get("status", "inconclusive"))
         result = {"status": outcome, "hypothesis_id": candidate_id}
         if record.get("rejection_reason"):
             result["reason"] = record["rejection_reason"]

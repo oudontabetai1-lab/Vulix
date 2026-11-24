@@ -42,6 +42,9 @@ _INTERNAL_ID_KEYS = frozenset({
     "step_id",
     "episode_id",
     "run_id",
+    "scan_id",
+    "head_id",
+    "injection_point_id",
     "parent_step_id",
     "parent_hypothesis_id",
 })
@@ -537,6 +540,9 @@ class AgentVerificationRecord:
     verification_id: str
     run_id: str
     candidate_id: str
+    scan_id: str = ""
+    head_id: str = ""
+    injection_point_id: str = ""
     episode_id: str = ""
     step_id: str = ""
     work_id: str = ""
@@ -1140,6 +1146,9 @@ class AgentHarness:
         episode_id: str = "",
         step_id: str = "",
         work_id: str = "",
+        scan_id: str = "",
+        head_id: str = "",
+        injection_point_id: str = "",
         correlation_id: str = "",
         evidence_ids: Iterable[str] = (),
         rejection_reason: str = "",
@@ -1156,6 +1165,9 @@ class AgentHarness:
             verification_id=verification_id,
             run_id=self.state.run_id,
             candidate_id=str(candidate_id),
+            scan_id=str(scan_id or self.state.run_id),
+            head_id=str(head_id or ""),
+            injection_point_id=str(injection_point_id or ""),
             episode_id=str(episode_id or ""),
             step_id=str(step_id or ""),
             work_id=str(work_id or ""),

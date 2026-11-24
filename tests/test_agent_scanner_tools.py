@@ -203,6 +203,14 @@ def test_queue_deduplicates_and_verified_scanner_uses_latest_handoff_without_sec
     asyncio.run(scenario())
 
 
+def test_injection_point_hash_collision_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(AgentScannerTools, "_point_id", staticmethod(lambda _point: "same-point-id"))
+    tools = AgentScannerTools(_AgentScanner([]), _harness(tmp_path))
+    tools.add_point(InjectionPoint.for_url_param("https://target.test/one?q=1", "q"))
+    with pytest.raises(ValueError, match="ID collision"):
+        tools.add_point(InjectionPoint.for_url_param("https://target.test/two?q=1", "q"))
+
+
 @pytest.mark.parametrize("check", ["xss", "sqli", "os"])
 def test_each_supported_check_runs_through_scanner_queue(tmp_path, check):
     async def scenario():
@@ -419,10 +427,162 @@ def test_saved_hypothesis_can_be_verified_once_after_resume(tmp_path):
         assert stored["verification_outcome"] == "confirmed"
         assert stored["deterministic_confirmed"] is True
         assert stored["source_label"] == "agent_deterministic_confirmed"
+        record = json.loads(resumed_harness.verification_results_path.read_text().splitlines()[-1])
+        assert record["verification_id"]
+        assert record["evidence_ids"] == [work_id]
+        assert record["head_id"] == resumed_tools._current_head_id()
+        assert record["scan_id"] == resumed_harness.state.run_id
+        assert record["injection_point_id"] == point_id
         first_result = await resumed_tools.verify_hypothesis("saved-candidate")
         assert first_result["status"] == "confirmed"
         assert len(engines) == 1
         assert len(engines[0].scanner.calls) == 1
+
+        reloaded_harness = _harness(tmp_path, resume=True)
+        reloaded_tools = AgentScannerTools(scanner, reloaded_harness, engine_factory=lambda *_: pytest.fail("valid ledger should not dispatch again"))
+        persisted_result = await reloaded_tools.verify_hypothesis("saved-candidate")
+        assert persisted_result["status"] == "confirmed"
+        stored_again = reloaded_harness.state.hypotheses[0]
+        assert stored_again["status"] == "deterministic_confirmed"
+        assert stored_again["source_label"] == "agent_deterministic_confirmed"
+    asyncio.run(scenario())
+
+
+def test_tampered_confirmation_without_ledger_and_invalid_point_is_downgraded(tmp_path):
+    scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+    harness = _harness(tmp_path)
+    tools = AgentScannerTools(scanner, harness)
+    point_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+    candidate = {
+        "candidate_id": "tampered-candidate", "check_type": "xss",
+        "url": "https://target.test/search?q=1", "field_name": "q",
+        "injection_point_id": point_id,
+    }
+    harness.note_hypotheses([candidate])
+    saved = harness.state.hypotheses[0]
+    saved.update({
+        "status": "confirmed", "verification_outcome": "confirmed",
+        "deterministic_confirmed": True, "source_label": "agent_deterministic_confirmed",
+        "injection_point_id": "not-in-the-point-table",
+    })
+    harness.checkpoint()
+    harness.verification_results_path.unlink(missing_ok=True)
+
+    resumed = _harness(tmp_path, resume=True)
+    resumed_tools = AgentScannerTools(scanner, resumed, engine_factory=lambda *_: pytest.fail("invalid point must not reach scanner"))
+    result = asyncio.run(resumed_tools.verify_hypothesis("tampered-candidate"))
+    assert result["status"] == "inconclusive"
+    stored = resumed.state.hypotheses[0]
+    assert stored["status"] == "agent_only"
+    assert stored["verification_outcome"] == "inconclusive"
+    assert stored["deterministic_confirmed"] is False
+    assert stored["source_label"] == "agent_unverified"
+    assert "unverifiable_checkpoint" in stored["rejection_reason"]
+    assert "unknown injection point" in stored["rejection_reason"]
+
+
+def test_corrupt_verification_ledger_downgrades_checkpoint_claim(tmp_path):
+    scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+    harness = _harness(tmp_path)
+    tools = AgentScannerTools(scanner, harness)
+    point_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+    candidate = {
+        "candidate_id": "corrupt-ledger-candidate", "check_type": "xss",
+        "url": "https://target.test/search?q=1", "field_name": "q",
+        "injection_point_id": point_id,
+    }
+    harness.note_hypotheses([candidate])
+    harness.state.hypotheses[0].update({
+        "status": "confirmed", "verification_outcome": "confirmed",
+        "deterministic_confirmed": True, "source_label": "agent_deterministic_confirmed",
+    })
+    harness.checkpoint()
+    harness.verification_results_path.write_text("{damaged json\n", encoding="utf-8")
+
+    resumed = _harness(tmp_path, resume=True)
+    finding = SimpleNamespace(
+        check_type="xss", severity="high", url=candidate["url"], field_name="q",
+        payload="marker", evidence="reproduced",
+    )
+    engine = _FakeEngine("xss", SimpleNamespace(cookies=[]), finding=finding)
+    resumed_tools = AgentScannerTools(scanner, resumed, engine_factory=lambda *_: engine)
+    result = asyncio.run(resumed_tools.verify_hypothesis("corrupt-ledger-candidate"))
+    assert result["status"] == "inconclusive"
+    assert engine.scanner.calls
+    stored = resumed.state.hypotheses[0]
+    assert stored["status"] == "agent_only"
+    assert stored["verification_outcome"] == "inconclusive"
+    assert stored["deterministic_confirmed"] is False
+    assert stored["source_label"] == "agent_unverified"
+    assert "unverifiable_checkpoint" in stored["rejection_reason"]
+
+
+def test_verification_from_another_scan_is_not_trusted(tmp_path):
+    async def scenario():
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+        harness = _harness(tmp_path)
+        tools = AgentScannerTools(scanner, harness)
+        point_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+        candidate = {
+            "candidate_id": "cross-scan-candidate", "check_type": "xss",
+            "url": "https://target.test/search?q=1", "field_name": "q",
+            "injection_point_id": point_id,
+        }
+        harness.note_hypotheses([candidate])
+        work_id = tools.schedule_scanner(point_id, "xss")["work_id"]
+        finding = SimpleNamespace(
+            check_type="xss", severity="high", url=candidate["url"], field_name="q",
+            payload="marker", evidence="reproduced",
+        )
+        engine = _FakeEngine("xss", SimpleNamespace(cookies=[]), finding=finding)
+        tools.engine_factory = lambda *_: engine
+        assert (await tools.verify_hypothesis("cross-scan-candidate"))["status"] == "confirmed"
+        record = json.loads(harness.verification_results_path.read_text().splitlines()[-1])
+        record["scan_id"] = "another-scan"
+        harness.verification_results_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        resumed = _harness(tmp_path, resume=True)
+        resumed_tools = AgentScannerTools(scanner, resumed, engine_factory=lambda *_: pytest.fail("stale scan record must suppress replay"))
+        result = await resumed_tools.verify_hypothesis("cross-scan-candidate")
+        assert result["status"] == "inconclusive"
+        stored = resumed.state.hypotheses[0]
+        assert stored["status"] == "agent_only"
+        assert stored["deterministic_confirmed"] is False
+        assert stored["source_label"] == "agent_unverified"
+        assert "unverifiable_checkpoint" in stored["rejection_reason"]
+        assert resumed.state.work_queue[0].work_id == work_id
+    asyncio.run(scenario())
+
+
+def test_confirmation_requires_matching_probe_evidence_after_resume(tmp_path):
+    async def scenario():
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+        harness = _harness(tmp_path)
+        tools = AgentScannerTools(scanner, harness)
+        point_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+        candidate = {
+            "candidate_id": "missing-evidence-candidate", "check_type": "xss",
+            "url": "https://target.test/search?q=1", "field_name": "q",
+            "injection_point_id": point_id,
+        }
+        harness.note_hypotheses([candidate])
+        finding = SimpleNamespace(
+            check_type="xss", severity="high", url=candidate["url"], field_name="q",
+            payload="marker", evidence="reproduced",
+        )
+        tools.engine_factory = lambda *_: _FakeEngine("xss", SimpleNamespace(cookies=[]), finding=finding)
+        assert (await tools.verify_hypothesis("missing-evidence-candidate"))["status"] == "confirmed"
+        harness.probe_attempts_path.unlink()
+
+        resumed = _harness(tmp_path, resume=True)
+        resumed_tools = AgentScannerTools(scanner, resumed, engine_factory=lambda *_: pytest.fail("missing evidence must not trigger an untracked replay"))
+        result = await resumed_tools.verify_hypothesis("missing-evidence-candidate")
+        assert result["status"] == "inconclusive"
+        stored = resumed.state.hypotheses[0]
+        assert stored["verification_outcome"] == "inconclusive"
+        assert stored["deterministic_confirmed"] is False
+        assert stored["source_label"] == "agent_unverified"
+        assert "unverifiable_checkpoint" in stored["rejection_reason"]
     asyncio.run(scenario())
 
 

@@ -75,6 +75,7 @@ stdlib_imports:
 - socket
 - ssl
 - statistics
+- subprocess
 - string
 - struct
 - sys
