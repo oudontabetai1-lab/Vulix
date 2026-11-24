@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from wscan.payload_encoder import expand_payloads
-from wscan.payload_gen import PayloadGenerator
+from wscan.payload_gen import PayloadGenerator, baseline_status_requires_resume
 
 
 class _Response:
@@ -98,7 +98,7 @@ class PayloadGenerationRetryTests(unittest.TestCase):
         with patch.object(
             generator, "_check_llm_available", new=AsyncMock(return_value=True)
         ), patch.object(
-            generator, "_call_llm", new=AsyncMock(return_value=["generated"])
+            generator, "_call_llm", new=AsyncMock(return_value=(["generated"], "ok"))
         ) as call_llm:
             asyncio.run(generator.generate(
                 "xss",
@@ -132,6 +132,39 @@ class PayloadGenerationRetryTests(unittest.TestCase):
 
         self.assertEqual(payloads, ["only-this"])
         self.assertEqual(calls, [])
+
+    def test_call_llm_preserves_all_completion_statuses(self):
+        for status in ("transient", "empty", "unavailable", "permanent", "blocked"):
+            with self.subTest(status=status):
+                with patch.object(
+                    __import__("wscan.payload_gen", fromlist=["complete_text"]),
+                    "complete_text", new=AsyncMock(return_value=(None, status)),
+                ):
+                    result = asyncio.run(self._generator()._call_llm("prompt", return_status=True))
+                self.assertEqual(result, (None, status))
+
+    def test_only_transient_and_empty_status_require_resume(self):
+        for status in ("transient", "empty", "unavailable", "permanent", "blocked"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    baseline_status_requires_resume(status),
+                    status in {"transient", "empty"},
+                )
+
+    def test_generation_keeps_fallback_payloads_and_reports_status(self):
+        for status in ("transient", "empty", "unavailable", "permanent", "blocked"):
+            with self.subTest(status=status):
+                generator = self._generator()
+                with patch.object(
+                    generator, "_check_llm_available", new=AsyncMock(return_value=True)
+                ), patch.object(
+                    generator, "_call_llm", new=AsyncMock(return_value=(None, status))
+                ):
+                    payloads, observed_status = asyncio.run(generator.generate(
+                        "xss", "query", "https://target.test/", return_status=True
+                    ))
+                self.assertTrue(payloads)  # fallback scan still runs immediately
+                self.assertEqual(observed_status, status)
 
 
 if __name__ == "__main__":

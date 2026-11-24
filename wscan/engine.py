@@ -7876,6 +7876,7 @@ class ScanEngine:
         # tested/checkpoint 完了化される偽陰性を防ぐため、check 毎に bracket して回復する。
         # 回復不能なら残 check と adaptive を未 checkpoint のまま打ち切る（resume で回収）。
         field_unhealthy = False
+        baseline_recovery_blocked_checks: set[str] = set()
         _target_page = SimpleNamespace(url=url)
         for check_name in ordered_checks:
             scanner = self.scanners.get(check_name)
@@ -7914,7 +7915,89 @@ class ScanEngine:
                 )
                 checks_skipped_done += 1
                 continue
+            # Budget gate precedes fingerprint initialization: a check skipped before
+            # dispatch has no sent-history to protect and must not leave an incomplete
+            # fingerprint record that would make a later resume fail closed.
+            _budget_gate = getattr(scanner, "_field_budget_gate", None)
+            if callable(_budget_gate) and _budget_gate():
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="partial",
+                    location=location,
+                    note="field attack budget exceeded before scan (time-box)",
+                )
+                continue
             _checkpoint_state = getattr(self, "checkpoint", None)
+            if _checkpoint_state is not None:
+                has_fingerprint_record = _checkpoint_state.has_payload_fingerprint_record_ip(
+                    ip, check_name
+                )
+                needs_baseline_recovery = (
+                    _checkpoint_state.is_baseline_unrecovered_ip(ip, check_name)
+                    or has_fingerprint_record
+                )
+                prior_legacy_attempt = False
+                if (
+                    not has_fingerprint_record
+                    and _checkpoint_state.source_version < 11
+                ):
+                    from wscan import url_scope
+                    from wscan.url_normalize import key_url
+                    expected_url = url_scope.redact_url_values(url)
+                    prior_legacy_attempt = any(
+                        isinstance(row, dict)
+                        and row.get("check") == check_name
+                        and row.get("field_name") == field_name
+                        and row.get("location") == location
+                        and key_url(row.get("url", "")) == key_url(expected_url)
+                        and row.get("status") != "skipped"
+                        for row in (_checkpoint_state.scan_matrix or [])
+                    )
+                    needs_baseline_recovery = needs_baseline_recovery or prior_legacy_attempt
+                if needs_baseline_recovery:
+                    complete, _, reason = _checkpoint_state.get_payload_fingerprints_ip(
+                        ip, check_name
+                    )
+                    if not complete:
+                        blocked_reason = reason or "fingerprints_missing"
+                        baseline_recovery_blocked_checks.add(check_name)
+                        self._record_scan_matrix(
+                            url=url,
+                            field_name=field_name,
+                            check_name=check_name,
+                            status="error",
+                            location=location,
+                            note=f"Baseline recovery blocked: {blocked_reason}.",
+                        )
+                        self.wave_errors.append(
+                            f"baseline_llm_recovery_blocked:{check_name}:{blocked_reason}"
+                        )
+                        continue
+                    _checkpoint_state.mark_baseline_unrecovered_ip(ip, check_name)
+                elif not _checkpoint_state.begin_payload_fingerprints_ip(ip, check_name):
+                    baseline_recovery_blocked_checks.add(check_name)
+                    self._record_scan_matrix(
+                        url=url, field_name=field_name, check_name=check_name,
+                        status="error", location=location,
+                        note="Baseline recovery blocked: fingerprint checkpoint unavailable.",
+                    )
+                    self.wave_errors.append(
+                        f"baseline_llm_recovery_blocked:{check_name}:fingerprints_unavailable"
+                    )
+                    continue
+                elif not self._save_checkpoint():
+                    baseline_recovery_blocked_checks.add(check_name)
+                    self._record_scan_matrix(
+                        url=url, field_name=field_name, check_name=check_name,
+                        status="error", location=location,
+                        note="Baseline recovery blocked: incomplete marker could not be saved.",
+                    )
+                    self.wave_errors.append(
+                        f"baseline_llm_recovery_blocked:{check_name}:checkpoint_write"
+                    )
+                    continue
             if (_checkpoint_state is not None
                     and _checkpoint_state.is_truncation_exhausted_ip(ip, check_name + ":probe")):
                 self._record_scan_matrix(
@@ -7965,22 +8048,6 @@ class ScanEngine:
                 checks_skipped_done += 1
                 continue
 
-            # 中央 budget gate: 予算超過後は scanner を呼ばない（_apply_ip を経由しない legacy 直送
-            # scanner も一律保護）。gate が truncated 集合へ入れるため checkpoint は完了化されず
-            # resume で再試行される。executed 計上前に continue（adaptive 条件と整合）。
-            # deadline 未超過なら False で従来と完全同一。per-scanner の gate は冪等の保険として残す。
-            _budget_gate = getattr(scanner, "_field_budget_gate", None)
-            if callable(_budget_gate) and _budget_gate():
-                self._record_scan_matrix(
-                    url=url,
-                    field_name=field_name,
-                    check_name=check_name,
-                    status="partial",
-                    location=location,
-                    note="field attack budget exceeded before scan (time-box)",
-                )
-                continue
-
             # 注意: 以前はこのフィールドで critical finding が確定すると残りの
             # チェックをスキップしていた。しかし critical が過検知（false positive）
             # の場合、他の本物の脆弱性を取りこぼしてしまう。過検知の可能性がある以上、
@@ -8005,6 +8072,8 @@ class ScanEngine:
             probe_failures = set()
             probe_failure_token = _FIELD_PROBE_FAILURES.set(probe_failures)
             checks_executed += 1
+            from .payload_gen import _baseline_completion_status
+            _baseline_completion_status.set("ok")
             _dlg_check = getattr(self.browser, "dialog_total", 0)
             _begin_observation = getattr(scanner, "_begin_evolution_observation", None)
             _observation_scope = _begin_observation() if callable(_begin_observation) else None
@@ -8014,6 +8083,14 @@ class ScanEngine:
                 with ScanEngine._evidence_scope(self, CheckpointState._candidate_unit_key(ip, check_name), check_name,
                                                 rules=(f"{check_name}_payload_oracle",) if check_name in {"sqli", "xss", "dom_xss"} else ()):
                     findings = await scanner.scan_injection_point(ip, field)
+                if (
+                    _checkpoint_state is not None
+                    and not any(
+                        note.startswith("baseline_llm_recovery_blocked:")
+                        for note in self.wave_errors[_scan_note_start:]
+                    )
+                ):
+                    _checkpoint_state.mark_payload_fingerprints_complete_ip(ip, check_name)
                 if getattr(self, "enable_evolution_observation_reuse", False):
                     _get_observation = getattr(scanner, "_get_evolution_observation", None)
                     _observation = (
@@ -8152,6 +8229,21 @@ class ScanEngine:
                         self.wave_errors.append(
                             f"candidate_phase_unreached:{check_name}:{','.join(sorted(_candidate_phase_gaps))}"
                         )
+                _baseline_status = _baseline_completion_status.get()
+                from .payload_gen import baseline_status_requires_resume
+                if baseline_status_requires_resume(_baseline_status):
+                    check_errored = True
+                    if _checkpoint_state is not None:
+                        _checkpoint_state.mark_baseline_unrecovered_ip(ip, check_name)
+                        _checkpoint_state.clear_candidate_snapshots_ip(ip, check_name, {"baseline"})
+                    if not any(
+                        note.startswith(f"baseline_llm_unrecovered:{check_name}:")
+                        for note in self.wave_errors[_scan_note_start:]
+                    ):
+                        self.wave_errors.append(f"baseline_llm_unrecovered:{check_name}:{_baseline_status}")
+                elif _baseline_status in {"unavailable", "permanent", "ok"}:
+                    if _checkpoint_state is not None:
+                        _checkpoint_state.clear_baseline_unrecovered_ip(ip, check_name)
                 if _field_check_checkpointable(
                     check_errored, check_name in _truncated, check_wedged
                 ):
@@ -8205,6 +8297,7 @@ class ScanEngine:
             check_name for check_name in ordered_checks
             if check_name in self.scanners
             and check_name not in _ADAPTIVE_PAGE_LEVEL_CHECKS
+            and check_name not in baseline_recovery_blocked_checks
         ]
         adaptive_pending = any(
             not self._checkpoint_is_done_ip(
@@ -8226,7 +8319,7 @@ class ScanEngine:
                 form_index,
                 field,
                 is_url_param,
-                ordered_checks,
+                [check for check in ordered_checks if check not in baseline_recovery_blocked_checks],
                 field_plan,
                 dom_index=dom_index,
                 crawl_html=crawl_html,
@@ -8615,6 +8708,9 @@ class ScanEngine:
                 else:
                     if _candidate_state is not None:
                         _candidate_state.clear_candidate_snapshots_ip(ip, check_name, {"adaptive"})
+                        _candidate_state.mark_payload_fingerprints_complete_ip(
+                            ip, check_name, "adaptive"
+                        )
                     self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
                     # 後続 check の失敗やプロセス中断でも部分成功を保持する。
                     self._save_checkpoint()

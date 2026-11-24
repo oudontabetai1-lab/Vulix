@@ -12,6 +12,8 @@ default → evolution → mutation → adaptive の各波が同じ注入点へ�
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Optional
 
@@ -126,7 +128,6 @@ class AttemptLedger:
     def history(self, ip_key: tuple, check_type: str) -> list[Attempt]:
         """当該 (注入点, check) の試行履歴（時系列）を返す。無ければ空。"""
         return list(self._store.get(self._key(ip_key, check_type), []))
-
     def to_dict(self) -> dict:
         """checkpoint 永続化用のシリアライズ（純粋・応答本文は保持しない compact 形）。
 
@@ -178,6 +179,29 @@ class AttemptLedger:
             except Exception:
                 continue
         return led
+
+
+def payload_fingerprint(payload, unit_key: str, check_type: str) -> str:
+    """送信内容を永続化せず識別する、unit/check に束縛された固定長指紋。"""
+    encoded = json.dumps(
+        ["payload-v1", str(unit_key), str(check_type), str(payload)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8", "surrogatepass")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def untried_payloads(
+    candidates: list[str], fingerprints: set[str] | None,
+    unit_key: str, check_type: str,
+) -> list[str]:
+    """完全な送信指紋集合で候補を差分化。不明なら fail closed で空列を返す。"""
+    if fingerprints is None:
+        return []
+    return [
+        payload for payload in candidates
+        if payload_fingerprint(payload, unit_key, check_type) not in fingerprints
+    ]
 
 
 def unique_payloads(attempts: list[Attempt], already: set) -> list[str]:
