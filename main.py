@@ -825,15 +825,24 @@ async def _run_with_abort_monitor(operation, monitor, *, phase_label: str):
     Agent 実行中は通常スキャンの command consumer が動かないため、この境界で abort を
     消費する。キャンセル後に operation の cleanup が完了してから terminal 状態を通知する。
     """
-    deferred_commands = []
     operation_task = asyncio.create_task(operation())
+    unsupported_command_reported = False
+
+    async def report_unsupported_command():
+        nonlocal unsupported_command_reported
+        await monitor.emit_status(
+            "Agent モードでは一時停止・再開はできません。実行中のスキャンは中断できます。",
+            "running",
+        )
+        unsupported_command_reported = True
 
     async def wait_for_abort():
         while True:
             command = await monitor.command_queue.get()
             if str(command).lower().strip() in ("abort", "q"):
                 return
-            deferred_commands.append(command)
+            if not unsupported_command_reported:
+                await report_unsupported_command()
 
     abort_task = asyncio.create_task(wait_for_abort())
     try:
@@ -851,11 +860,21 @@ async def _run_with_abort_monitor(operation, monitor, *, phase_label: str):
         )
         return None, True
     finally:
+        if not operation_task.done():
+            operation_task.cancel()
         if not abort_task.done():
             abort_task.cancel()
-        await asyncio.gather(abort_task, return_exceptions=True)
-        for command in deferred_commands:
-            monitor.command_queue.put_nowait(command)
+        await asyncio.gather(operation_task, abort_task, return_exceptions=True)
+        unsupported_command_pending = False
+        while True:
+            try:
+                command = monitor.command_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if str(command).lower().strip() not in ("abort", "q"):
+                unsupported_command_pending = True
+        if unsupported_command_pending and not unsupported_command_reported:
+            await report_unsupported_command()
 
 
 async def _run_hybrid_recon_with_retries(
@@ -878,15 +897,26 @@ async def _run_hybrid_recon_with_retries(
     if max_retries is None:
         max_retries = HYBRID_RECON_MAX_RETRIES
 
-    handoff, interrupted = await _run_with_time_window_monitor(
-        operation,
-        monitor,
-        allowed_hours,
-        forbidden_hours,
-        phase_label="ハイブリッド Phase 1",
-        now_fn=now_fn,
-        sleep_fn=sleep_fn,
-    )
+    async def run_with_monitors():
+        result, interrupted = await _run_with_time_window_monitor(
+            lambda: _run_with_abort_monitor(
+                operation, monitor, phase_label="ハイブリッド Phase 1"
+            ),
+            monitor,
+            allowed_hours,
+            forbidden_hours,
+            phase_label="ハイブリッド Phase 1",
+            now_fn=now_fn,
+            sleep_fn=sleep_fn,
+        )
+        if interrupted:
+            return None, True, False
+        handoff, aborted = result
+        return handoff, False, aborted
+
+    handoff, interrupted, aborted = await run_with_monitors()
+    if aborted:
+        return None, False
     retries = 0
 
     while interrupted and retries < max_retries:
@@ -910,15 +940,9 @@ async def _run_hybrid_recon_with_retries(
         )
         if on_retry:
             on_retry()
-        handoff, interrupted = await _run_with_time_window_monitor(
-            operation,
-            monitor,
-            allowed_hours,
-            forbidden_hours,
-            phase_label="ハイブリッド Phase 1",
-            now_fn=now_fn,
-            sleep_fn=sleep_fn,
-        )
+        handoff, interrupted, aborted = await run_with_monitors()
+        if aborted:
+            return None, False
 
     if interrupted:
         await monitor.emit_status(
