@@ -350,6 +350,36 @@ def test_monitor_allows_terminal_events_again_for_the_next_scan_lifecycle():
     assert second == [("status", "failed"), ("scan_complete", "failed")]
 
 
+def test_monitor_suppresses_duplicate_scan_complete_with_same_terminal_status():
+    import asyncio
+
+    monitor = MonitorServer()
+
+    async def publish_completion_twice():
+        monitor._begin_scan_snapshot()
+        await monitor.emit_status("scan succeeded", "done")
+        completion = {"status": "done", "report_path": "/tmp/scan.html"}
+        await monitor.emit("scan_complete", completion)
+        # A repeated finalizer can publish the same completion more than once.
+        await monitor.emit("scan_complete", completion)
+
+    asyncio.run(publish_completion_twice())
+
+    terminal_statuses = [
+        event["data"]["terminal_outcome"]["status"]
+        for event in monitor.event_history
+        if event["type"] == "status" and event["data"].get("terminal_outcome")
+    ]
+    completions = [
+        event
+        for event in monitor.event_history
+        if event["type"] == "scan_complete"
+    ]
+    assert terminal_statuses == ["done"]
+    assert len(completions) == 1
+    assert completions[0]["data"]["terminal_outcome"]["status"] == "done"
+
+
 @pytest.mark.parametrize(
     ("status", "expected_exit"),
     [("done", 0), ("incomplete", 2), ("failed", 1), ("aborted", 2)],

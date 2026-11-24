@@ -363,6 +363,8 @@ def test_each_mode_publishes_terminal_status_and_scan_complete_once(
             "report_path": "/tmp/terminal-report.html",
         }
         await monitor.emit("scan_complete", completion)
+        # Reproduce duplicate completion from a repeated cleanup/finalizer call.
+        await monitor.emit("scan_complete", completion)
         # Duplicate producers and a conflicting late producer must not add a second
         # terminal event or mutate the first canonical outcome.
         await monitor.emit_status("duplicate terminal status", terminal_status)
@@ -372,21 +374,27 @@ def test_each_mode_publishes_terminal_status_and_scan_complete_once(
             "scan_complete", {**completion, "status": rejected_status}
         )
 
-        aborted_events = []
+        terminal_status_events = []
+        scan_complete_events = []
+        event_sequence = []
         for event in monitor.event_history:
             data = event.get("data") or {}
             if event.get("type") == "status" and data.get("terminal_outcome"):
-                aborted_events.append(
-                    ("status", data["terminal_outcome"]["status"])
-                )
+                state = data["terminal_outcome"]["status"]
+                terminal_status_events.append(state)
+                event_sequence.append(("status", state))
             elif event.get("type") == "scan_complete":
-                aborted_events.append(
-                    ("scan_complete", data["terminal_outcome"]["status"])
-                )
-        return monitor, aborted_events
+                state = data["terminal_outcome"]["status"]
+                scan_complete_events.append(state)
+                event_sequence.append(("scan_complete", state))
+        return monitor, terminal_status_events, scan_complete_events, event_sequence
 
-    monitor, events = asyncio.run(exercise())
-    assert events == [
+    monitor, status_events, completion_events, event_sequence = asyncio.run(exercise())
+    assert len(status_events) == 1, (mode, terminal_status, status_events)
+    assert len(completion_events) == 1, (mode, terminal_status, completion_events)
+    assert status_events == [terminal_status]
+    assert completion_events == [terminal_status]
+    assert event_sequence == [
         ("status", terminal_status),
         ("scan_complete", terminal_status),
     ], (mode, terminal_status)
