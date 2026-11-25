@@ -182,13 +182,16 @@ class OSInjectionScanner(BaseScanner):
 
         # Baseline: capture pre-existing patterns and response time
         # baseline もフィールドへの投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        fp = self._payload_fingerprint(ip, "baseline_os_test")
         await self.log_payload_test(
-            field_name, "baseline_os_test", "os_baseline", ip.url
+            field_name, "baseline_os_test", "os_baseline", ip.url, payload_fingerprint=fp
         )
         # typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
         # source が非空のことがある。state で分岐して捨てず判定は従来どおり source/pair のみ）。
-        baseline_result = await self.dispatch(ip, "baseline_os_test")
+        baseline_result = await self.dispatch(ip, "baseline_os_test", probe_role="baseline")
         baseline_source, baseline_pair = baseline_result.source, baseline_result.pair
+        bound = baseline_pair.get("_probe_evidence")
+        baseline_ids = (bound[1],) if bound and len(bound) > 1 and bound[1] else ()
         _b_req = baseline_pair.get("request", {})
         _b_resp = baseline_pair.get("response", {})
         _b_ts_req = _b_req.get("timestamp", 0)
@@ -201,14 +204,24 @@ class OSInjectionScanner(BaseScanner):
         # Threshold = baseline + 2.8 s (injected sleep) with 0.5 s margin
         time_threshold = max(2.8, baseline_time + 2.8)
 
+        planned_standard_count = len(payloads)
+        executed_standard_count = 0
+        auth_lost = [False]
+
         async def _test_payload(
             payload: str, check_label: str = "os", echo_baseline: str = ""
         ) -> bool:
-            await self.log_payload_test(field_name, payload, check_label, ip.url)
+            wave = "standard" if check_label == "os" else ("evolution" if check_label == "os_evolved" else "mutation")
+            fp = self._payload_fingerprint(ip, payload)
+            await self.log_payload_test(field_name, payload, check_label, ip.url, payload_fingerprint=fp)
 
             # Apply payload
-            result = await self.dispatch(ip, payload)
+            result = await self.dispatch(
+                ip, payload, probe_role="attack", probe_wave=wave, baseline_attempt_ids=baseline_ids
+            )
             source, pair = result.source, result.pair
+            if pair.get("_authentication_lost"):
+                auth_lost[0] = True
 
             # --- Check 1: Command output in response (not pre-existing in baseline) ---
             match = self.check_response_for_patterns(source, OS_OUTPUT_PATTERNS)
@@ -249,6 +262,11 @@ class OSInjectionScanner(BaseScanner):
                         baseline_source, OS_OUTPUT_PATTERNS
                     )
                     if not baseline_match:
+                        self._probe_decision(
+                            pair, True, "os_payload_oracle",
+                            baseline_attempt_ids=baseline_ids,
+                            rationale=f"OS command output detected: {match}",
+                        )
                         finding = await self.record_finding(
                             url=ip.url,
                             field_name=field_name,
@@ -267,6 +285,11 @@ class OSInjectionScanner(BaseScanner):
             # （community・進化wave 由来）でも遅延判定を行う。
             if payload in TIME_BASED_PAYLOADS or _is_time_based_os(payload):
                 if self.response_time_exceeded(pair, threshold=time_threshold):
+                    self._probe_decision(
+                        pair, True, "os_payload_oracle",
+                        baseline_attempt_ids=baseline_ids,
+                        rationale=f"time-based blind OS injection delay observed (>{time_threshold:.1f}s)",
+                    )
                     finding = await self.record_finding(
                         url=ip.url,
                         field_name=field_name,
@@ -279,12 +302,30 @@ class OSInjectionScanner(BaseScanner):
                     findings.append(finding)
                     return True
 
+            self._probe_decision(
+                pair, False, "os_payload_oracle",
+                baseline_attempt_ids=baseline_ids,
+                rationale="no OS injection command output or timing delay observed",
+            )
             await asyncio.sleep(0.2 * self.sleep_factor)
             return False
 
         for payload in payloads:
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
             if await _test_payload(payload):
                 break
+
+        # ── probe ledger 整合性検証（os standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
 
         # evolution wave は legacy browser transport(is_url_param 前提)。json_body では
         # ip.legacy_is_url_param() が例外になり、かつ適用不能なので skip する（json は標準 payload のみ）。

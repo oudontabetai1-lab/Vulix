@@ -124,20 +124,33 @@ class PathTraversalScanner(BaseScanner):
 
         # Baseline: capture what patterns already appear in a neutral response
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        fp = self._payload_fingerprint(ip, "baseline_test_value")
         await self.log_payload_test(
-            field_name, "baseline_test_value", "path_traversal_baseline", ip.url
+            field_name, "baseline_test_value", "path_traversal_baseline", ip.url, payload_fingerprint=fp
         )
         # typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま
         # 取り出す（非 SENT でも source が非空のことがある＝pair 未捕捉のフォーム送信。
         # state で分岐して捨てると偽陰性になるため判定は従来どおり source/pair のみ）。
-        baseline_result = await self.dispatch(ip, "baseline_test_value")
+        baseline_result = await self.dispatch(ip, "baseline_test_value", probe_role="baseline")
         baseline_source, baseline_pair = baseline_result.source, baseline_result.pair
+        bound = baseline_pair.get("_probe_evidence")
+        baseline_ids = (bound[1],) if bound and len(bound) > 1 and bound[1] else ()
+
+        planned_standard_count = len(payloads)
+        executed_standard_count = 0
+        auth_lost = [False]
 
         async def _test_payload(payload: str, check_label: str = "path_traversal") -> bool:
-            await self.log_payload_test(field_name, payload, check_label, ip.url)
+            wave = "standard" if check_label == "path_traversal" else ("evolution" if check_label == "path_traversal_evolved" else "mutation")
+            fp = self._payload_fingerprint(ip, payload)
+            await self.log_payload_test(field_name, payload, check_label, ip.url, payload_fingerprint=fp)
 
-            result = await self.dispatch(ip, payload)
+            result = await self.dispatch(
+                ip, payload, probe_role="attack", probe_wave=wave, baseline_attempt_ids=baseline_ids
+            )
             source, pair = result.source, result.pair
+            if pair.get("_authentication_lost"):
+                auth_lost[0] = True
             await asyncio.sleep(0.2 * self.sleep_factor)
 
             match = self.check_response_for_patterns(source, PATH_TRAVERSAL_PATTERNS)
@@ -152,13 +165,28 @@ class PathTraversalScanner(BaseScanner):
                         f"baseline_unavailable:{self.CHECK_TYPE}: "
                         f"suppressed match '{match}' at {ip.url}"
                     )
+                    self._probe_decision(
+                        pair, False, "path_traversal_oracle",
+                        baseline_attempt_ids=baseline_ids,
+                        rationale="baseline unavailable, suppressed match",
+                    )
                     return False
                 baseline_match = self.check_response_for_patterns(
                     baseline_source, PATH_TRAVERSAL_PATTERNS
                 )
                 if baseline_match:
+                    self._probe_decision(
+                        pair, False, "path_traversal_oracle",
+                        baseline_attempt_ids=baseline_ids,
+                        rationale="pattern pre-existed in baseline response",
+                    )
                     return False  # Pattern pre-existed — not caused by our payload
 
+                self._probe_decision(
+                    pair, True, "path_traversal_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale=f"Path traversal successful — file content in response: '{match}'",
+                )
                 finding = await self.record_finding(
                     url=ip.url,
                     field_name=field_name,
@@ -173,11 +201,30 @@ class PathTraversalScanner(BaseScanner):
                 )
                 findings.append(finding)
                 return True
+
+            self._probe_decision(
+                pair, False, "path_traversal_oracle",
+                baseline_attempt_ids=baseline_ids,
+                rationale="no path traversal file content observed",
+            )
             return False
 
         for payload in payloads:
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
             if await _test_payload(payload):
                 break
+
+        # ── probe ledger 整合性検証（path_traversal standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
 
         # evolution wave は legacy browser transport(is_url_param 前提)。json_body では
         # ip.legacy_is_url_param() が例外になり、かつ適用不能なので skip する（json は標準 payload のみ）。

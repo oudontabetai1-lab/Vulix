@@ -128,16 +128,24 @@ class SSTIScanner(BaseScanner):
 
         # Baseline: submit a neutral value to capture any pre-existing numbers in the response.
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        fp = self._payload_fingerprint(ip, "wscan_ssti_baseline")
         await self.log_payload_test(
-            field_name, "wscan_ssti_baseline", "ssti_baseline", ip.url
+            field_name, "wscan_ssti_baseline", "ssti_baseline", ip.url, payload_fingerprint=fp
         )
         # typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
         # source が非空のことがある。state で分岐して捨てず判定は従来どおり source/pair のみ）。
-        baseline = await self.dispatch(ip, "wscan_ssti_baseline")
+        baseline = await self.dispatch(ip, "wscan_ssti_baseline", probe_role="baseline")
         baseline_source = _retrieved_source(baseline.source, baseline.pair)
         if baseline_source is None:
             self._record_scan_note("baseline_unavailable:ssti")
             return findings
+
+        bound = baseline.pair.get("_probe_evidence")
+        baseline_ids = (bound[1],) if bound and len(bound) > 1 and bound[1] else ()
+
+        planned_standard_count = len(SSTI_PROBES)
+        executed_standard_count = 0
+        auth_lost = [False]
 
         async def _test_payload(
             payload: str,
@@ -146,17 +154,33 @@ class SSTIScanner(BaseScanner):
             check_label: str = "ssti",
             confidence: str = "confirmed",
         ) -> bool:
-            await self.log_payload_test(field_name, payload, check_label, ip.url)
+            wave = "standard" if check_label == "ssti" else ("evolution" if check_label == "ssti_evolved" else "auxiliary")
+            fp = self._payload_fingerprint(ip, payload)
+            await self.log_payload_test(field_name, payload, check_label, ip.url, payload_fingerprint=fp)
 
-            result = await self.dispatch(ip, payload)
+            result = await self.dispatch(
+                ip, payload, probe_role="attack", probe_wave=wave, baseline_attempt_ids=baseline_ids
+            )
             source, pair = _retrieved_source(result.source, result.pair), result.pair
+            if pair.get("_authentication_lost"):
+                auth_lost[0] = True
 
             await asyncio.sleep(0.2 * self.sleep_factor)
 
             if not source:
+                self._probe_decision(
+                    pair, False, "ssti_payload_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale="empty response source",
+                )
                 return False
             count = source.count(expected)
             if not count:
+                self._probe_decision(
+                    pair, False, "ssti_payload_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale=f"expected template output '{expected}' not in response",
+                )
                 return False
 
             # Reduce false positives: only skip if baseline already contained the
@@ -164,8 +188,18 @@ class SSTIScanner(BaseScanner):
             # any appearance after injection is evidence of SSTI.
             base_count = baseline_source.count(expected)
             if count <= base_count:
+                self._probe_decision(
+                    pair, False, "ssti_payload_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale=f"expected template output count ({count}) does not exceed baseline ({base_count})",
+                )
                 return False
 
+            self._probe_decision(
+                pair, True, "ssti_payload_oracle",
+                baseline_attempt_ids=baseline_ids,
+                rationale=f"SSTI detected ({engine_name}): evaluated to '{expected}'",
+            )
             finding = await self.record_finding(
                 url=ip.url,
                 field_name=field_name,
@@ -190,8 +224,21 @@ class SSTIScanner(BaseScanner):
             return True
 
         for payload, expected, engine_name in SSTI_PROBES:
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
             if await _test_payload(payload, expected, engine_name):
                 break  # Confirmed - no need to test more probes
+
+        # ── probe ledger 整合性検証（ssti standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
 
         # evolution wave は legacy browser transport(is_url_param 前提)。json_body では
         # ip.legacy_is_url_param() が例外になり、かつ適用不能なので skip する（json は標準 payload のみ）。

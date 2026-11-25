@@ -824,6 +824,15 @@ class BaseScanner(ABC):
         elif not findings_count and not stopped_early and executed_count != planned_count:
             self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:{wave}:count_mismatch")
 
+    def _payload_fingerprint(self, ip: Optional["InjectionPoint"], payload: Any) -> str:
+        """InjectionPoint と payload から probe ledger / attempt ledger 用の指紋を算出する。"""
+        if ip is None:
+            return ""
+        from wscan.attempt_ledger import payload_fingerprint
+        from wscan.checkpoint import CheckpointState
+        unit_key = CheckpointState._candidate_unit_key(ip, self.CHECK_TYPE)
+        return payload_fingerprint(payload, unit_key, self.CHECK_TYPE) if unit_key else ""
+
     def _observe_token_lifecycle(
         self,
         ip: InjectionPoint,
@@ -1187,10 +1196,7 @@ class BaseScanner(ABC):
                 raise BaselineRecoveryBlocked(
                     "probe blocked because its sent-payload fingerprint was not durable"
                 ) from exc
-        from wscan.attempt_ledger import payload_fingerprint
-        from wscan.checkpoint import CheckpointState
-        unit_key = CheckpointState._candidate_unit_key(ip, self.CHECK_TYPE) if ip is not None else ""
-        fp = payload_fingerprint(payload, unit_key, self.CHECK_TYPE) if unit_key else ""
+        fp = self._payload_fingerprint(ip, payload)
         source, pair = await self._send_probe(
             ip, lambda: self._apply_ip_unrecorded(ip, payload), role=probe_role, wave=probe_wave,
             baseline_attempt_ids=baseline_attempt_ids, control_attempt_ids=control_attempt_ids,
@@ -2324,7 +2330,17 @@ class BaseScanner(ABC):
         self._record_attempt(ip, payload, source, pair)
         return source, pair
 
-    async def dispatch(self, ip: "InjectionPoint", payload) -> "DispatchResult":
+    async def dispatch(
+        self,
+        ip: "InjectionPoint",
+        payload,
+        *,
+        probe_role: str = "attack",
+        probe_wave: str = "standard",
+        baseline_attempt_ids: tuple = (),
+        control_attempt_ids: tuple = (),
+        parent_attempt_id: str = "",
+    ) -> "DispatchResult":
         """既存 _apply_ip をラップし typed DispatchResult を返す facade（加算）。
 
         挙動は _apply_ip と同一（送信・例外伝播・attempt 記録は _apply_ip に委譲）。
@@ -2379,7 +2395,18 @@ class BaseScanner(ABC):
             )
 
         # 送信・例外伝播・attempt 記録は _dispatch_send（既定は _apply_ip）へ委譲する。
-        source, pair = await self._dispatch_send(ip, payload)
+        try:
+            source, pair = await self._dispatch_send(
+                ip,
+                payload,
+                probe_role=probe_role,
+                probe_wave=probe_wave,
+                baseline_attempt_ids=baseline_attempt_ids,
+                control_attempt_ids=control_attempt_ids,
+                parent_attempt_id=parent_attempt_id,
+            )
+        except TypeError:
+            source, pair = await self._dispatch_send(ip, payload)
         return self._finalize_dispatch(carrier, source, pair)
 
     def _dispatch_driver_available(self, ip: "InjectionPoint") -> bool:
@@ -2402,14 +2429,14 @@ class BaseScanner(ABC):
             return bool(self.SUPPORTS_XML_BODY)
         return callable(getattr(self, "_apply_payload", None))
 
-    async def _dispatch_send(self, ip: "InjectionPoint", payload) -> tuple[str, dict]:
+    async def _dispatch_send(self, ip: "InjectionPoint", payload, **kwargs) -> tuple[str, dict]:
         """dispatch facade の送信プリミティブ（既定は標準 _apply_ip）。
 
         独自 transport の scanner（DOMXSSScanner 等・_apply_payload のシグネチャが標準と
         異なり _apply_ip を通らない）はこのメソッドだけ override すれば、gate/capability/
         分類は base の dispatch() を共有できる。
         """
-        return await self._apply_ip(ip, payload)
+        return await self._apply_ip(ip, payload, **kwargs)
 
     def _finalize_dispatch(self, carrier, source: str, pair: dict) -> "DispatchResult":
         """(source, pair) を DispatchResult へ分類する共通ヘルパ（純粋）。

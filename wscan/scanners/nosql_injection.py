@@ -201,37 +201,57 @@ class NoSQLInjectionScanner(BaseScanner):
 
         # ── Baseline request ──────────────────────────────────────────
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        fp_b1 = self._payload_fingerprint(ip, "baseline_value_wscan")
         await self.log_payload_test(
-            field_name, "baseline_value_wscan", "nosql_baseline", ip.url
+            field_name, "baseline_value_wscan", "nosql_baseline", ip.url, payload_fingerprint=fp_b1
         )
         try:
             baseline_src, baseline_pair = await self._apply_ip(
-                ip, "baseline_value_wscan"
+                ip, "baseline_value_wscan", probe_role="baseline"
             )
         except Exception:
             return []
 
+        bound = baseline_pair.get("_probe_evidence")
+        baseline_ids = (bound[1],) if bound and len(bound) > 1 and bound[1] else ()
+
         baseline_len = len(baseline_src)
         baseline_src2 = ""
+        fp_b2 = self._payload_fingerprint(ip, "baseline_value_wscan_2")
         await self.log_payload_test(
-            field_name, "baseline_value_wscan_2", "nosql_baseline_2", ip.url
+            field_name, "baseline_value_wscan_2", "nosql_baseline_2", ip.url, payload_fingerprint=fp_b2
         )
         try:
             baseline_src2, _ = await self._apply_ip(
-                ip, "baseline_value_wscan_2"
+                ip, "baseline_value_wscan_2", probe_role="baseline"
             )
         except Exception:
             baseline_src2 = ""
 
+        planned_standard_count = len(_PARAM_PAYLOADS)
+        executed_standard_count = 0
+        auth_lost = [False]
+
         async def _test_param_payload(payload: str, check_label: str = "nosql") -> bool:
-            await self.log_payload_test(field_name, payload, check_label, ip.url)
+            wave = "standard" if check_label == "nosql" else ("evolution" if check_label == "nosql_evolved" else "auxiliary")
+            fp = self._payload_fingerprint(ip, payload)
+            await self.log_payload_test(field_name, payload, check_label, ip.url, payload_fingerprint=fp)
             try:
                 # url_param の ``field[$ne]`` 変換は既存 _apply_payload に委譲する。
-                src, pair = await self._apply_ip(ip, payload)
+                src, pair = await self._apply_ip(
+                    ip, payload, probe_role="attack", probe_wave=wave, baseline_attempt_ids=baseline_ids
+                )
+                if pair.get("_authentication_lost"):
+                    auth_lost[0] = True
 
                 # Check for error patterns
                 err = self.check_response_for_patterns(src, _NOSQL_ERROR_PATTERNS)
                 if err:
+                    self._probe_decision(
+                        pair, True, "nosql_payload_oracle",
+                        baseline_attempt_ids=baseline_ids,
+                        rationale=f"NoSQL injection error response: '{err[:150]}'",
+                    )
                     finding = await self.record_finding(
                         url=ip.url,
                         field_name=field_name,
@@ -257,6 +277,11 @@ class NoSQLInjectionScanner(BaseScanner):
                     baseline_src2,
                 )
                 if expanded:
+                    self._probe_decision(
+                        pair, True, "nosql_payload_oracle",
+                        baseline_attempt_ids=baseline_ids,
+                        rationale=f"NoSQL boolean-based injection: response size increased by {details['delta']} bytes",
+                    )
                     finding = await self.record_finding(
                         url=ip.url,
                         field_name=field_name,
@@ -283,6 +308,12 @@ class NoSQLInjectionScanner(BaseScanner):
                     findings.append(finding)
                     return True
 
+                self._probe_decision(
+                    pair, False, "nosql_payload_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale="no NoSQL error or boolean expansion observed",
+                )
+
             except Exception as exc:
                 self._record_scan_note(
                     f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
@@ -297,8 +328,21 @@ class NoSQLInjectionScanner(BaseScanner):
 
         # ── Parameter pollution payloads ──────────────────────────────
         for payload in _PARAM_PAYLOADS:
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
             if await _test_param_payload(payload):
                 break
+
+        # ── probe ledger 整合性検証（nosql standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
 
         # evolution wave は legacy browser transport 専用なので JSON では実行しない。
         if not findings and ip.location != "json_body":
@@ -324,33 +368,58 @@ class NoSQLInjectionScanner(BaseScanner):
         self, ip: InjectionPoint, field_name: str
     ) -> list[Finding]:
         """JSON 値を `{"$ne": ...}` 等の演算子 object に置換して送り、決定論判定する。"""
+        planned_standard_count = len(_JSON_BODY_PAYLOADS)
+        executed_standard_count = 0
+        auth_lost = [False]
+        findings = []
+
         try:
+            fp_b1 = self._payload_fingerprint(ip, "baseline_value_wscan")
             await self.log_payload_test(
-                field_name, "baseline_value_wscan", "nosql_baseline", ip.url
+                field_name, "baseline_value_wscan", "nosql_baseline", ip.url, payload_fingerprint=fp_b1
             )
-            baseline = response_of(*await self._apply_ip(ip, "baseline_value_wscan"))
+            b_src, b_pair = await self._apply_ip(ip, "baseline_value_wscan", probe_role="baseline")
+            baseline = response_of(b_src, b_pair)
+            bound = b_pair.get("_probe_evidence")
+            baseline_ids = (bound[1],) if bound and len(bound) > 1 and bound[1] else ()
+
+            fp_b2 = self._payload_fingerprint(ip, "baseline_value_wscan_2")
             await self.log_payload_test(
-                field_name, "baseline_value_wscan_2", "nosql_baseline_2", ip.url
+                field_name, "baseline_value_wscan_2", "nosql_baseline_2", ip.url, payload_fingerprint=fp_b2
             )
-            baseline2 = response_of(*await self._apply_ip(ip, "baseline_value_wscan_2"))
+            b_src2, b_pair2 = await self._apply_ip(ip, "baseline_value_wscan_2", probe_role="baseline")
+            baseline2 = response_of(b_src2, b_pair2)
         except Exception as exc:
             self._record_scan_note(f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}")
             return []
 
         for operator in _JSON_BODY_PAYLOADS:
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
             payload = json.dumps(operator)
-            await self.log_payload_test(field_name, payload, "nosql", ip.url)
+            fp = self._payload_fingerprint(ip, operator)
+            await self.log_payload_test(field_name, payload, "nosql", ip.url, payload_fingerprint=fp)
             try:
-                source, pair = await self._apply_ip(ip, operator)
+                source, pair = await self._apply_ip(
+                    ip, operator, probe_role="attack", probe_wave="standard", baseline_attempt_ids=baseline_ids
+                )
             except Exception as exc:
                 self._record_scan_note(
                     f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
                 )
                 continue
+            if pair.get("_authentication_lost"):
+                auth_lost[0] = True
             verdict = nosql_json_verdict(
                 baseline, baseline2, response_of(source, pair), _NOSQL_ERROR_PATTERNS
             )
             if verdict:
+                self._probe_decision(
+                    pair, True, "nosql_json_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale=verdict.evidence,
+                )
                 finding = await self.record_finding(
                     url=ip.url,
                     field_name=field_name,
@@ -363,9 +432,26 @@ class NoSQLInjectionScanner(BaseScanner):
                     evidence_details={**verdict.details, "injected_param": field_name},
                     injection_point=ip,
                 )
-                return [finding] if finding else []
+                if finding:
+                    findings.append(finding)
+                break
+            else:
+                self._probe_decision(
+                    pair, False, "nosql_json_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale="no NoSQL error or boolean differential in JSON response",
+                )
             await asyncio.sleep(0.2 * self.sleep_factor)
-        return []
+
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
+        return findings
 
     async def scan_field(
         self,
