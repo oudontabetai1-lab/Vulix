@@ -487,13 +487,12 @@ class AdaptivePayloadEngine:
             origin=url,
             content_type=ContentType.EVIDENCE.value,
         ).format_tagged_block()
-        payloads_list = "\n".join(f"  {p}" for p in payloads_tried[:30]) or "  (none recorded)"
-        payloads_list = wrap_untrusted_observation(
-            payloads_list,
-            source=ContentSource.HTTP.value,
-            origin=url,
-            content_type=ContentType.EVIDENCE.value,
-        ).format_tagged_block()
+        from .content_provenance import _redact_prompt_observation, _redact_prompt_origin
+        from . import url_scope
+
+        payloads_list = "\n".join(
+            f"  {_redact_prompt_observation(p, url_scope)}" for p in payloads_tried[:30]
+        ) or "  (none recorded)"
         # Sanitize attacker-controlled HTML before injecting into the LLM prompt
         # so that crafted pages cannot exfiltrate the system prompt or redirect
         # the model with instructions like "ignore previous directions".
@@ -508,28 +507,12 @@ class AdaptivePayloadEngine:
                 f"Known bypass techniques for {waf_name}:\n{hints_text}\n"
                 f"You MUST incorporate these evasion strategies into your payloads."
             )
-            waf_section = wrap_untrusted_observation(
-                waf_section,
-                source=ContentSource.HTTP.value,
-                origin=url,
-                content_type=ContentType.OBSERVATION.value,
-            ).format_tagged_block()
         else:
             waf_section = "No WAF detected — focus on application-level filtering bypasses."
 
         prompt = _ADAPTIVE_PROMPT.format(
-            url=wrap_untrusted_observation(
-                url,
-                source=ContentSource.HTTP.value,
-                origin=url,
-                content_type=ContentType.OBSERVATION.value,
-            ).format_tagged_block(),
-            field_name=wrap_untrusted_observation(
-                field_name,
-                source=ContentSource.DOM.value,
-                origin=url,
-                content_type=ContentType.OBSERVATION.value,
-            ).format_tagged_block(),
+            url=_redact_prompt_origin(url, url_scope),
+            field_name=_redact_prompt_observation(str(field_name or ""), url_scope),
             check_type=check_type,
             cheatsheet=cheatsheet,
             waf_section=waf_section,
