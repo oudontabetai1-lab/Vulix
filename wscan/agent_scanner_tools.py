@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import subprocess
 from pathlib import Path
@@ -58,14 +59,45 @@ def _leaf_is_secret(value, key: str) -> bool:
     )
 
 
+# 機微トークンを部分文字列として含むが資格情報ではない語（max_tokens・secretary 等）。
+_BENIGN_WORDS = frozenset({"tokens", "secretary", "secretaries", "secretariat"})
+# 直前にこの語がある "token" はページ送りカーソル（page_token・nextPageToken 等）。
+_CURSOR_QUALIFIERS = frozenset({"page", "next", "prev", "previous", "continuation", "pagination", "cursor", "sync"})
+
+
+def _key_words(key: str) -> list[str]:
+    """キー名を語に分ける（snake/kebab/camelCase）。末尾の数字は語の一部とみなさない。"""
+    import unicodedata
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", unicodedata.normalize("NFKC", str(key)))
+    return [w.casefold().rstrip("0123456789") for w in re.findall(r"[^\W_]+", normalized)]
+
+
 def _key_is_sensitive(key: str) -> bool:
+    """既存 redaction と同じ機微トークン集合を、語の境界で判定する。
+
+    語の中の部分一致（csrfmiddlewaretoken・mypassword）は従来どおり機微とし、
+    資格情報でない既知の語（tokens・secretary）とページ送りの token だけを除く。"""
     from wscan import url_scope
     from wscan.request_logger import is_sensitive_header
     low = str(key).lower()
-    return bool(low) and (
-        is_sensitive_header(low) or any(token in low for token in url_scope.SENSITIVE_KEY_TOKENS)
-        or low in ("cookie", "authorization")
-    )
+    if not low:
+        return False
+    if is_sensitive_header(low) or low in ("cookie", "authorization"):
+        return True
+    words = _key_words(key)
+    for alias in url_scope.SENSITIVE_KEY_TOKENS:
+        parts = alias.split("_")
+        if len(parts) > 1 and any(words[i:i + len(parts)] == parts for i in range(len(words))):
+            return True
+    singles = [t for t in url_scope.SENSITIVE_KEY_TOKENS if "_" not in t]
+    for i, word in enumerate(words):
+        if word in _BENIGN_WORDS:
+            continue
+        if word == "token" and i and words[i - 1] in _CURSOR_QUALIFIERS:
+            continue
+        if any(t in word for t in singles):
+            return True
+    return False
 
 
 def _redact_json_leaves(value, key: str = ""):
@@ -97,6 +129,10 @@ def sanitize_template(template: dict) -> tuple[dict, bool]:
     safe = dict(template)
     headers = safe.get("headers")
     if isinstance(headers, dict):
+        # Bearer 認証の API だったことだけ残す（値は残さない）。送信時に新しい Bearer を付け直す。
+        if any(str(k).lower() == "authorization" and str(v).strip().lower().startswith("bearer ")
+               for k, v in headers.items()):
+            safe["auth_scheme"] = "bearer"
         safe["headers"] = {
             k: v for k, v in headers.items()
             if not _key_is_sensitive(str(k)) and not _leaf_is_secret(v, "")
@@ -105,6 +141,53 @@ def sanitize_template(template: dict) -> tuple[dict, bool]:
     if "json_body" in safe:
         safe["json_body"], body_secret = _redact_json_leaves(safe["json_body"])
     return safe, body_secret
+
+
+_BEARER_VALUE = re.compile(r"[A-Za-z0-9._~+/=-]{8,}")
+_BEARER_UNAVAILABLE = "bearer authentication unavailable in the agent session"
+
+
+def select_session_bearer(items) -> str:
+    """Agent セッションの storage 項目から Bearer に使う値を 1 つ選ぶ（純粋）。
+
+    token/JWT らしい値だけを候補にし、refresh/CSRF 用は除く。候補が 1 つでなければ、
+    access を含むキーが 1 つのときだけそれを選ぶ。曖昧なら空文字（推測で送らない）。"""
+    from wscan.content_provenance import _JWT_VALUE_PATTERN
+    found: dict[str, list[str]] = {}
+
+    def visit(key: str, value) -> None:
+        if isinstance(value, str) and value.lstrip().startswith("{"):
+            try:
+                obj = json.loads(value)
+            except ValueError:
+                obj = None
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    visit(str(k), v)
+                return
+        if not isinstance(value, str):
+            return
+        words = _key_words(key)
+        if {"refresh", "csrf", "xsrf"} & set(words):
+            return
+        val = value.strip()
+        if val.lower().startswith("bearer "):
+            val = val[7:].strip()
+        if not _BEARER_VALUE.fullmatch(val):
+            return
+        token_key = bool({"jwt", "bearer"} & set(words)) or (
+            _key_is_sensitive(key) and any("token" in w for w in words)
+        )
+        if token_key or _JWT_VALUE_PATTERN.fullmatch(val):
+            found.setdefault(val, words)
+
+    for item in items or ():
+        if isinstance(item, dict):
+            visit(str(item.get("key") or item.get("name") or ""), item.get("value"))
+    if len(found) == 1:
+        return next(iter(found))
+    access = [v for v, words in found.items() if "access" in words]
+    return access[0] if len(access) == 1 else ""
 
 
 def _verification_consistency_reason(
@@ -599,6 +682,29 @@ class AgentScannerTools:
             )
             self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="authentication state unavailable")
             return {"status": "blocked", "reason": "current authentication state is unavailable; re-authenticate and retry"}
+        bearer = ""
+        tmpl_meta = metadata.get("template") if isinstance(metadata.get("template"), dict) else {}
+        if (
+            point.location in ("json_body", "json") and tmpl_meta.get("auth_scheme") == "bearer"
+            and not any(str(k).lower() == "authorization" for k in (getattr(self.scanner, "extra_headers", None) or {}))
+        ):
+            # 保存した template の Bearer は捨てている。Agent セッションから新しい値を得られる場合だけ送る。
+            capture = getattr(self.scanner, "_capture_tokens", None)
+            try:
+                bearer = select_session_bearer(await capture(self.scanner._active_session)) if callable(capture) else ""
+            except Exception:
+                bearer = ""
+            if not bearer:
+                self.harness.record_dispatch_event(
+                    event_type="authorization_decision",
+                    tool_name="run_scanner_work",
+                    work_id=work_id,
+                    correlation_id=corr_id,
+                    allowed=False,
+                    reason=_BEARER_UNAVAILABLE,
+                )
+                self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason=_BEARER_UNAVAILABLE)
+                return {"status": "blocked", "reason": f"{_BEARER_UNAVAILABLE}; sign in through the agent session or set an Authorization header and retry"}
         engine = None
         from wscan import url_scope
         secret_registry = getattr(url_scope, "_SECRET_VALUES", None)
@@ -625,6 +731,8 @@ class AgentScannerTools:
                         if not _key_is_sensitive(str(k)) and not _leaf_is_secret(v, "")
                     },
                 }
+                if bearer:
+                    template_dict["headers"]["Authorization"] = f"Bearer {bearer}"
                 if not hasattr(engine, "injection_templates") or engine.injection_templates is None:
                     engine.injection_templates = {}
                 engine.injection_templates[point.template_id] = template_dict
@@ -668,6 +776,8 @@ class AgentScannerTools:
                 self.harness.finish_work(work_id, WorkStatus.SCOPE_BLOCKED, rejection_reason="engine scope guard rejected injection point")
                 return {"status": "blocked", "reason": "engine scope policy rejected the injection point"}
             url_scope.register_secret_values((f"agent_cookie_{i}", c.get("value", "")) for i, c in enumerate(cookies) if isinstance(c, dict))
+            if bearer:
+                url_scope.register_secret_values([("agent_bearer", bearer)])
             await engine._browser.init()
             from wscan.runtime_scope_guard import ScopePolicy
             install_guard = getattr(engine._browser, "install_runtime_scope_guard", None)

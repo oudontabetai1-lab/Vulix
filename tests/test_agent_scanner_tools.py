@@ -1159,12 +1159,20 @@ def test_template_auth_headers_are_not_persisted_and_resume_uses_fresh_auth(tmp_
 
         # resume: 保存済み template から復元し、認証は新しいセッションから受け取る
         scanner.cookies = [{"name": "session", "value": "fresh-session-value-2", "domain": "target.test"}]
+        fresh_bearer = "fresh-bearer-value-5555"
+
+        async def capture_tokens(_session):
+            return [{"storage": "local", "key": "access_token", "value": fresh_bearer}]
+
+        scanner._capture_tokens = capture_tokens
         resumed = AgentScannerTools(scanner, _harness(tmp_path, resume=True), engine_factory=factory)
         work_id = resumed.schedule_scanner(point_id, "sqli")["work_id"]
         outputs = [await resumed.run_scanner_work(work_id), await resumed.list_scanner_capabilities()]
         sent = engines[-1].injection_templates["tmpl_h"]["headers"]
-        assert sent == {"Content-Type": "application/json"}
+        # 古い template の Bearer は送らず、Agent セッションの新しい Bearer だけを付ける
+        assert sent == {"Content-Type": "application/json", "Authorization": f"Bearer {fresh_bearer}"}
         assert not any(_SECRET_AUTH in str(v) or _SECRET_COOKIE in str(v) for v in sent.values())
+        assert fresh_bearer not in _all_persisted(tmp_path)
         assert "fresh-session-value-2" in json.dumps(engines[-1].handoff.__dict__, default=str)
         assert "fresh-session-value-1" not in json.dumps(engines[-1].handoff.__dict__, default=str)
         blob = json.dumps(outputs, default=str) + _all_persisted(tmp_path)
@@ -1234,3 +1242,81 @@ def test_runtime_template_url_gate_blocks_before_send(tmp_path):
         assert not engines[0].scanner.calls
         assert harness.state.work_queue[0].status == WorkStatus.SCOPE_BLOCKED
     asyncio.run(scenario())
+
+
+def test_bearer_template_without_session_token_is_blocked_with_reason(tmp_path):
+    """Bearer 認証の API で Agent セッションから Bearer を得られなければ、未認証で送らず BLOCKED にする。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-6", "domain": "target.test"}])
+        engines = []
+
+        def factory(check, handoff):
+            engines.append(_FakeEngine(check, handoff))
+            return engines[-1]
+
+        tools = AgentScannerTools(scanner, harness, engine_factory=factory)
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/items", "/q", template_id="tmpl_b")
+        point_id = tools.add_point(point, {"template": {
+            "url": "https://target.test/api/items", "json_body": {"q": "x"},
+            "headers": {"Authorization": _SECRET_AUTH},
+        }})
+        work_id = tools.schedule_scanner(point_id, "sqli")["work_id"]
+        result = await tools.run_scanner_work(work_id)
+        assert result["status"] == "blocked" and "bearer" in result["reason"]
+        assert engines == []  # engine も scanner も起動せず、要求を送らない
+        work = harness.state.work_queue[0]
+        assert work.status == WorkStatus.BLOCKED and "bearer" in work.rejection_reason
+        assert any(e.get("reason") == "bearer authentication unavailable in the agent session"
+                   for e in harness.state.events)
+
+        # operator が Authorization ヘッダを設定していれば、engine 側がそれを付けるので送る
+        scanner.extra_headers = {"Authorization": "Bearer operator-configured-7777"}
+        tools2 = AgentScannerTools(scanner, _harness(tmp_path / "op"), engine_factory=factory)
+        point_id2 = tools2.add_point(point, {"template": {
+            "url": "https://target.test/api/items", "json_body": {"q": "x"},
+            "headers": {"Authorization": _SECRET_AUTH},
+        }})
+        result2 = await tools2.run_scanner_work(tools2.schedule_scanner(point_id2, "sqli")["work_id"])
+        assert result2["status"] == "completed"
+        assert "Authorization" not in engines[-1].injection_templates["tmpl_b"]["headers"]
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("key", [
+    "max_tokens", "max_output_tokens", "page_token", "nextPageToken", "next_token", "secretary", "q", "author",
+])
+def test_ordinary_json_keys_are_not_secret(key):
+    from wscan.agent_scanner_tools import _key_is_sensitive, sanitize_template
+    assert not _key_is_sensitive(key)
+    _, body_secret = sanitize_template({"json_body": {key: 10, "q": "sample"}})
+    assert body_secret is False
+
+
+@pytest.mark.parametrize("key", [
+    "password", "newPassword", "password1", "passwd", "pwd", "secret", "clientSecret", "secret_key",
+    "token", "access_token", "accessToken", "id_token", "auth_token", "csrf_token", "csrfmiddlewaretoken",
+    "XSRF-TOKEN", "authenticity_token", "api_key", "apiKey", "x-api-key", "sessionid", "sessionId",
+    "Authorization", "Cookie",
+])
+def test_credential_keys_stay_secret(key):
+    from wscan.agent_scanner_tools import _key_is_sensitive, sanitize_template
+    assert _key_is_sensitive(key)
+    safe, body_secret = sanitize_template({"json_body": {key: "value-1234"}})
+    assert body_secret is True and "value-1234" not in json.dumps(safe)
+
+
+@pytest.mark.parametrize(("items", "expected"), [
+    ([{"key": "access_token", "value": "abcdefgh1234"}], "abcdefgh1234"),
+    ([{"key": "auth", "value": json.dumps({"accessToken": "abcdefgh1234", "refreshToken": "zzzzzzzz9999"})}], "abcdefgh1234"),
+    ([{"key": "session", "value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sigsigsig"}],
+     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sigsigsig"),
+    ([{"key": "access_token", "value": "aaaaaaaa1111"}, {"key": "id_token", "value": "bbbbbbbb2222"}], "aaaaaaaa1111"),
+    ([{"key": "token_a", "value": "aaaaaaaa1111"}, {"key": "token_b", "value": "bbbbbbbb2222"}], ""),  # 曖昧
+    ([{"key": "refresh_token", "value": "zzzzzzzz9999"}, {"key": "csrf_token", "value": "cccccccc3333"}], ""),
+    ([{"key": "page_token", "value": "pppppppp4444"}, {"key": "theme", "value": "dark"}], ""),
+    ([], ""),
+])
+def test_select_session_bearer(items, expected):
+    from wscan.agent_scanner_tools import select_session_bearer
+    assert select_session_bearer(items) == expected
