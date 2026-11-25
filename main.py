@@ -4327,9 +4327,11 @@ async def run_setup(args):
     # 「利用不可」と誤誘導して不完全な設定を生む。
     from wscan.scanners import SCANNERS as _SCANNERS_FOR_PROMPT
     _available_checks = ", ".join(sorted(_SCANNERS_FOR_PROMPT))
+    from wscan import auto_config as _auto_config
+    wrapped_description, secrets_redacted = _auto_config._wrap_user_context(description)
     prompt = (
         f"You are a web security scanner configuration assistant.\n"
-        f"The user wants to scan this target: {description}\n\n"
+        f"The user wants to scan this target: {wrapped_description}\n\n"
         f"Available checks: {_available_checks}\n\n"
         f"Based on the description, suggest the optimal scan command. "
         f"Return a JSON object with these fields:\n"
@@ -4356,8 +4358,6 @@ async def run_setup(args):
     # LLM 障害・provider=none）明示的にヒューリスティックへ fallback する。両経路とも
     # 最終的に checks/depth/flags を確定させ、後段のコマンド生成へ渡す。
     from wscan.scanners import SCANNERS
-    from wscan import auto_config as _auto_config
-
     # ウィザード既定の system プロンプト（_SYSTEM_PROMPT）は checks/depth のみの別スキーマを
     # 要求し flags/reason を含まないため、その system のままだとモデルが setup 用の追加項目を
     # 落とす。setup のスキーマに一致する system を渡す。
@@ -4366,6 +4366,8 @@ async def run_setup(args):
         "Follow the user's message exactly and return only the JSON object it specifies "
         "(fields: checks, depth, reason, flags). Do not add or omit fields."
     )
+    if secrets_redacted:
+        console.print(f"[cyan]{_auto_config._PRIVACY_NOTICE}[/cyan]")
     suggestion = None
     if await pg._check_llm_available():
         try:

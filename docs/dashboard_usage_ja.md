@@ -176,6 +176,8 @@ Findings の詳細では、検査種別の「i」ボタンから同じカタロ�
 | Agent Browser | LLM 自律操作モード |
 | ハイブリッド | Agent 偵察から通常スキャンへ引き渡すモード |
 
+AI設定生成の説明文は、設定済み資格情報や password/token/Cookie/Authorization、URL の userinfo/query に見える値を検知すると、共通の伏せ字処理を通してから LLM に送ります。伏せ字が行われた場合は生成後のステータスに通知を表示します。提案に使うホスト名・パスや技術スタックなどは文脈として残ります。
+
 機能フラグの「SPA自動有効化（検出時）」は既定 ON です。初回ページに Angular / React / Next.js / Vue / Nuxt の固有マーカーがある場合だけ「SPA クロール」を自動で有効化し、通常層の確実性を保つため一般的なページ構成だけでは有効化しません。CLI の opt-out は `--no-auto-spa` です。「SPA クロール (React/Vue/Angular)」を明示的に ON にした場合は自動判定の設定より優先されます。
 
 「状態変更プローブ許可」トグル（`allow_state_changing_probes`）は既定 OFF です。有効にすると、垂直・水平権限昇格検査における POST/PUT/PATCH 等のメソッド改ざんプローブや、SPA 自動クロール時のクリック探索および観測非GET body の注入再送を許可します。対象サーバの状態を変更する可能性があるため、変更を加えても安全なステージングやテスト環境などの検証環境に限定して有効化してください。CLI のオプションは `--allow-state-changing-probes` です。
