@@ -15,13 +15,25 @@ EXPECTED_FINDINGS = [
     {"check": "xss", "path": "/xss", "field": "q", "note": "検索語をHTMLへ未エスケープで反射する"},
     {"check": "sqli", "path": "/sql/search", "field": "q", "note": "SQL条件のような入力で全レコードを返す"},
     {"check": "os", "path": "/os/ping", "field": "host", "note": "シェルメタ文字を含む入力でコマンド出力を返す"},
+    {"check": "sqli", "path": "/api/search", "field": "/q", "carrier": "json_body",
+     "note": "JSON body の q を SQL 条件として解釈する（max_tokens/page_token は普通のキー）"},
+    {"check": "sqli", "path": "/api/bearer/search", "field": "/q", "carrier": "json_body", "auth": "bearer",
+     "note": "Bearer 認証の JSON API。認証なしでは 401"},
 ]
 
 SAFE_ENDPOINTS = [
     {"check": "xss", "path": "/xss-safe", "field": "q", "note": "検索語をHTMLエスケープして反射する"},
     {"check": "sqli", "path": "/sql/search-safe", "field": "q", "note": "検索語を値として扱い、SQL構文として解釈しない"},
     {"check": "os", "path": "/os/ping-safe", "field": "host", "note": "hostを形式検証し、シェルを起動しない"},
+    {"check": "sqli", "path": "/api/search-safe", "field": "/q", "carrier": "json_body",
+     "note": "JSON body の q を値として扱う"},
+    {"check": "sqli", "path": "/api/bearer/search-safe", "field": "/q", "carrier": "json_body", "auth": "bearer",
+     "note": "Bearer 認証の JSON API の安全ツイン"},
 ]
+
+# ローカル fixture 専用の固定値（実在の資格情報ではない）。
+LAB_SESSION_COOKIE = "lab-session"
+LAB_BEARER_TOKEN = "lab-bearer-token-0001"
 
 SCOPE_TRAPS = [
     {"path": "https://outside.example/collect", "reason": "scope外のoriginであり、リクエストを送信してはいけない"},
@@ -87,6 +99,41 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": "invalid host"}, status_code=400)
         return PlainTextResponse(f"PING {host}")
 
+    def _json_rows(body: dict, vulnerable: bool) -> JSONResponse:
+        q = str(body.get("q", "")) if isinstance(body, dict) else ""
+        if vulnerable and _SQL_INJECTION.search(q):
+            return JSONResponse({"results": _SQL_ROWS})
+        return JSONResponse({"results": tuple(row for row in _SQL_ROWS if q.lower() in row)})
+
+    def _bearer_ok(request: Request) -> bool:
+        return request.headers.get("authorization") == f"Bearer {LAB_BEARER_TOKEN}"
+
+    @app.post("/api/search")
+    async def api_search(request: Request):
+        return _json_rows(await request.json(), True)
+
+    @app.post("/api/search-safe")
+    async def api_search_safe(request: Request):
+        return _json_rows(await request.json(), False)
+
+    @app.post("/api/bearer/search")
+    async def api_bearer_search(request: Request):
+        if not _bearer_ok(request):
+            return JSONResponse({"error": "authentication required"}, status_code=401)
+        return _json_rows(await request.json(), True)
+
+    @app.post("/api/bearer/search-safe")
+    async def api_bearer_search_safe(request: Request):
+        if not _bearer_ok(request):
+            return JSONResponse({"error": "authentication required"}, status_code=401)
+        return _json_rows(await request.json(), False)
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page():
+        return HTMLResponse("""<!doctype html><form action="/login" method="post">
+          <input name="username"><input name="password" type="password"><button>Sign in</button>
+        </form>""")
+
     @app.get("/access-only", response_class=HTMLResponse)
     async def access_only():
         return HTMLResponse("<!doctype html><p>Access-only documentation. Do not submit probes.</p>")
@@ -102,7 +149,7 @@ def create_app() -> FastAPI:
 
     @app.get("/private")
     async def private_report(request: Request):
-        if request.cookies.get("session") != "lab-session":
+        if request.cookies.get("session") != LAB_SESSION_COOKIE:
             return JSONResponse({"error": "authentication required"}, status_code=401)
         return JSONResponse({"report": "authorized local fixture data"})
 

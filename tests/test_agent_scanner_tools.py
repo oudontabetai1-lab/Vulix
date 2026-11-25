@@ -73,6 +73,14 @@ class _FakeBrowser:
         return True
 
 
+class _PageSession:
+    def __init__(self, url):
+        self.page = SimpleNamespace(url=url)
+
+    async def get_current_page(self):
+        return self.page
+
+
 class _FakeEngine:
     def __init__(self, check, handoff, finding=None, error=None, auth=True, scanner=None):
         self.handoff = handoff
@@ -1159,12 +1167,21 @@ def test_template_auth_headers_are_not_persisted_and_resume_uses_fresh_auth(tmp_
 
         # resume: 保存済み template から復元し、認証は新しいセッションから受け取る
         scanner.cookies = [{"name": "session", "value": "fresh-session-value-2", "domain": "target.test"}]
+        fresh_bearer = "fresh-bearer-value-5555"
+
+        async def capture_tokens(_session):
+            return [{"storage": "local", "key": "access_token", "value": fresh_bearer}]
+
+        scanner._capture_tokens = capture_tokens
+        scanner._active_session = _PageSession("https://target.test/app")
         resumed = AgentScannerTools(scanner, _harness(tmp_path, resume=True), engine_factory=factory)
         work_id = resumed.schedule_scanner(point_id, "sqli")["work_id"]
         outputs = [await resumed.run_scanner_work(work_id), await resumed.list_scanner_capabilities()]
         sent = engines[-1].injection_templates["tmpl_h"]["headers"]
-        assert sent == {"Content-Type": "application/json"}
+        # 古い template の Bearer は送らず、Agent セッションの新しい Bearer だけを付ける
+        assert sent == {"Content-Type": "application/json", "Authorization": f"Bearer {fresh_bearer}"}
         assert not any(_SECRET_AUTH in str(v) or _SECRET_COOKIE in str(v) for v in sent.values())
+        assert fresh_bearer not in _all_persisted(tmp_path)
         assert "fresh-session-value-2" in json.dumps(engines[-1].handoff.__dict__, default=str)
         assert "fresh-session-value-1" not in json.dumps(engines[-1].handoff.__dict__, default=str)
         blob = json.dumps(outputs, default=str) + _all_persisted(tmp_path)
@@ -1233,4 +1250,147 @@ def test_runtime_template_url_gate_blocks_before_send(tmp_path):
         assert result["status"] == "blocked"
         assert not engines[0].scanner.calls
         assert harness.state.work_queue[0].status == WorkStatus.SCOPE_BLOCKED
+    asyncio.run(scenario())
+
+
+def test_bearer_template_without_session_token_is_blocked_with_reason(tmp_path):
+    """Bearer 認証の API で Agent セッションから Bearer を得られなければ、未認証で送らず BLOCKED にする。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-6", "domain": "target.test"}])
+        engines = []
+
+        def factory(check, handoff):
+            engines.append(_FakeEngine(check, handoff))
+            return engines[-1]
+
+        tools = AgentScannerTools(scanner, harness, engine_factory=factory)
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/items", "/q", template_id="tmpl_b")
+        point_id = tools.add_point(point, {"template": {
+            "url": "https://target.test/api/items", "json_body": {"q": "x"},
+            "headers": {"Authorization": _SECRET_AUTH},
+        }})
+        work_id = tools.schedule_scanner(point_id, "sqli")["work_id"]
+        result = await tools.run_scanner_work(work_id)
+        assert result["status"] == "blocked" and "bearer" in result["reason"]
+        assert engines == []  # engine も scanner も起動せず、要求を送らない
+        work = harness.state.work_queue[0]
+        assert work.status == WorkStatus.BLOCKED and "bearer" in work.rejection_reason
+        assert any(e.get("reason") == "bearer authentication unavailable in the agent session"
+                   for e in harness.state.events)
+
+        # operator が Authorization ヘッダを設定していれば、engine 側がそれを付けるので送る
+        scanner.extra_headers = {"Authorization": "Bearer operator-configured-7777"}
+        tools2 = AgentScannerTools(scanner, _harness(tmp_path / "op"), engine_factory=factory)
+        point_id2 = tools2.add_point(point, {"template": {
+            "url": "https://target.test/api/items", "json_body": {"q": "x"},
+            "headers": {"Authorization": _SECRET_AUTH},
+        }})
+        result2 = await tools2.run_scanner_work(tools2.schedule_scanner(point_id2, "sqli")["work_id"])
+        assert result2["status"] == "completed"
+        assert "Authorization" not in engines[-1].injection_templates["tmpl_b"]["headers"]
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("key", [
+    "max_tokens", "maxTokens", "max-tokens", "max_output_tokens", "num_tokens", "total_tokens", "token_count",
+    "page_token", "pageToken", "next_page_token", "nextPageToken", "next_token", "secretary", "q", "author",
+])
+def test_ordinary_json_keys_are_not_secret(key):
+    from wscan.agent_scanner_tools import _key_is_sensitive, sanitize_template
+    assert not _key_is_sensitive(key)
+    _, body_secret = sanitize_template({"json_body": {key: 10, "q": "sample"}})
+    assert body_secret is False
+
+
+@pytest.mark.parametrize("key", [
+    "password", "newPassword", "password1", "passwd", "pwd", "secret", "clientSecret", "secret_key",
+    "token", "access_token", "accessToken", "id_token", "auth_token", "csrf_token", "csrfmiddlewaretoken",
+    "XSRF-TOKEN", "authenticity_token", "api_key", "apiKey", "x-api-key", "sessionid", "sessionId",
+    "Authorization", "Cookie",
+    "tokens", "accessTokens", "refresh_tokens", "auth_tokens", "apiKeys", "api_keys", "session_ids", "sessionIds",
+])
+def test_credential_keys_stay_secret(key):
+    from wscan.agent_scanner_tools import _key_is_sensitive, sanitize_template
+    assert _key_is_sensitive(key)
+    safe, body_secret = sanitize_template({"json_body": {key: "value-1234"}})
+    assert body_secret is True and "value-1234" not in json.dumps(safe)
+
+
+@pytest.mark.parametrize(("items", "expected"), [
+    ([{"key": "access_token", "value": "abcdefgh1234"}], "abcdefgh1234"),
+    ([{"key": "auth", "value": json.dumps({"accessToken": "abcdefgh1234", "refreshToken": "zzzzzzzz9999"})}], "abcdefgh1234"),
+    ([{"key": "session", "value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sigsigsig"}],
+     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sigsigsig"),
+    ([{"key": "access_token", "value": "aaaaaaaa1111"}, {"key": "id_token", "value": "bbbbbbbb2222"}], "aaaaaaaa1111"),
+    ([{"key": "token_a", "value": "aaaaaaaa1111"}, {"key": "token_b", "value": "bbbbbbbb2222"}], ""),  # 曖昧
+    ([{"key": "refresh_token", "value": "zzzzzzzz9999"}, {"key": "csrf_token", "value": "cccccccc3333"}], ""),
+    ([{"key": "page_token", "value": "pppppppp4444"}, {"key": "theme", "value": "dark"}], ""),
+    # 資格情報を示さないキーの JWT 形の値（同 origin のウィジェット等）は送らない
+    ([{"key": "widget_state", "value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sigsigsig"}], ""),
+    ([], ""),
+])
+def test_select_session_bearer(items, expected):
+    from wscan.agent_scanner_tools import select_session_bearer
+    assert select_session_bearer(items) == expected
+
+
+def test_session_bearer_from_another_origin_is_not_forwarded(tmp_path):
+    """storage の token は現在ページの origin のもの。送信先と origin が違えば付けずに BLOCKED にする。"""
+    async def scenario():
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-8", "domain": "target.test"}])
+
+        async def capture_tokens(_session):
+            return [{"storage": "local", "key": "access_token", "value": "other-origin-token-8888"}]
+
+        scanner._capture_tokens = capture_tokens
+        engines = []
+
+        def factory(check, handoff):
+            engines.append(_FakeEngine(check, handoff))
+            return engines[-1]
+
+        template = {"url": "https://target.test/api/items", "json_body": {"q": "x"},
+                    "headers": {"Authorization": _SECRET_AUTH}}
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/items", "/q", template_id="tmpl_o")
+        for page_url, expected in (("https://idp.example/login", "blocked"), ("https://target.test/app", "completed")):
+            scanner._active_session = _PageSession(page_url)
+            tools = AgentScannerTools(scanner, _harness(tmp_path / expected), engine_factory=factory)
+            point_id = tools.add_point(point, {"template": template})
+            result = await tools.run_scanner_work(tools.schedule_scanner(point_id, "sqli")["work_id"])
+            assert result["status"] == expected
+        assert len(engines) == 1  # 他 origin の token では engine を起動せず送らない
+        assert engines[0].injection_templates["tmpl_o"]["headers"]["Authorization"] == "Bearer other-origin-token-8888"
+    asyncio.run(scenario())
+
+
+_REVIEW_TOKEN_KEYS = [
+    "oauth_tokens", "oauthTokens", "oauth-tokens", "github_tokens", "githubTokens", "bot_tokens", "app_tokens",
+    "jwt_tokens", "jwtTokens", "service_tokens", "serviceTokens", "service-tokens", "private_tokens",
+    "device_tokens", "push_tokens", "my_tokens",
+]
+
+
+@pytest.mark.parametrize("key", _REVIEW_TOKEN_KEYS)
+def test_plural_token_keys_are_not_persisted_or_output_in_plain_text(tmp_path, key):
+    """任意の語 + tokens のキーは秘密。値は points.json・ツール出力・イベントに残らず、body_secret が付く。"""
+    async def scenario():
+        secret_value = "opaqueVal12345-plural"
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-9", "domain": "target.test"}])
+        engines = []
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *a: engines.append(a) or _FakeEngine(*a))
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/x", "/q", template_id="tmpl_p")
+        header = "X-" + key.replace("_", "-")
+        point_id = tools.add_point(point, {"template": {
+            "url": "https://target.test/api/x", "json_body": {"q": "x", key: secret_value},
+            "headers": {header: secret_value},
+        }})
+        saved = json.loads((tmp_path / "agent_scanner_points.json").read_text(encoding="utf-8"))
+        assert saved[point_id]["body_secret"] is True
+        outputs = [tools.schedule_scanner(point_id, "sqli"), await tools.list_scanner_capabilities()]
+        assert outputs[0]["status"] == "unsupported"
+        assert engines == []
+        blob = json.dumps(outputs, default=str) + json.dumps(harness.state.events, default=str) + _all_persisted(tmp_path)
+        assert secret_value not in blob
     asyncio.run(scenario())
