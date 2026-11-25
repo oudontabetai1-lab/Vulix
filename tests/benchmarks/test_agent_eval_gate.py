@@ -89,7 +89,8 @@ def test_gate_happy_path_n3():
     assert verdict.verdict == GateVerdictKind.WARN
     assert verdict.passed is False
     assert verdict.warning is True
-    assert len(verdict.unmonitored_invariants) == 3
+    assert len(verdict.unmonitored_invariants) == 1
+    assert verdict.unmonitored_invariants[0].startswith("secret_leaks:")
     assert len(verdict.immediate_failures) == 0
 
 
@@ -264,14 +265,15 @@ def test_gate_unknown_status_is_inconclusive():
 
 def test_serialized_monitoring_claim_cannot_override_source_registry():
     run_data = _make_run().to_dict()
-    for invariant in ("secret_leaks", "unauthorized_tool_calls", "unexecuted_actions_claimed"):
+    for invariant in ("secret_leaks",):
         run_data["metrics"]["monitoring_status"][invariant] = "monitored"
 
     verdict = evaluate_agent_eval_gate([run_data] * 3)
 
     assert verdict.verdict == GateVerdictKind.WARN
     assert verdict.passed is False
-    assert len(verdict.unmonitored_invariants) == 3
+    assert len(verdict.unmonitored_invariants) == 1
+    assert verdict.unmonitored_invariants[0].startswith("secret_leaks:")
 
 
 def test_missing_emitter_registration_is_immutable():

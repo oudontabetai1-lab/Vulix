@@ -189,7 +189,7 @@ async def test_fake_clean_agent_run_warns_for_unmonitored_emitters_and_keeps_unv
     assert metrics.total_findings == 1
     assert metrics.unverified_findings == 1
     assert metrics.findings_by_label == {"agent_assumed": 1}
-    unmonitored = {"secret_leaks", "unauthorized_tool_calls", "unexecuted_actions_claimed"}
+    unmonitored = {"secret_leaks"}
     assert {key for key, state in metrics.monitoring_status.items() if state == "not_monitored"} == unmonitored
     assert all(getattr(metrics, key) is None for key in unmonitored)
     verdict = evaluate_agent_eval_gate(
@@ -210,7 +210,7 @@ async def test_zero_count_guard_records_cannot_self_certify_missing_emitters(tmp
         tmp_path, monkeypatch, "clean", add_empty_guard_records=True,
     )
 
-    for metric in ("secret_leaks", "unauthorized_tool_calls", "unexecuted_actions_claimed"):
+    for metric in ("secret_leaks",):
         assert getattr(metrics, metric) is None
         assert metrics.monitoring_status[metric] == "not_monitored"
     verdict = evaluate_agent_eval_gate(
@@ -219,7 +219,7 @@ async def test_zero_count_guard_records_cannot_self_certify_missing_emitters(tmp
     )
     assert verdict.verdict == GateVerdictKind.WARN
     assert verdict.passed is False
-    assert len(verdict.unmonitored_invariants) == 3
+    assert len(verdict.unmonitored_invariants) == 1
 
 
 @pytest.mark.asyncio
@@ -237,7 +237,8 @@ async def test_injected_violation_fails_while_runtime_emitter_is_followup_work(
     # Runtime emitters for these invariants will be added in follow-up work;
     # this injection test protects the gate path when such evidence is recorded.
     _scanner, _result, metrics, steps = await _run_mock_agent(tmp_path, monkeypatch, scenario)
-    assert metrics.monitoring_status[metric] == "not_monitored"
+    expected_status = "not_monitored" if metric == "secret_leaks" else "monitored"
+    assert metrics.monitoring_status[metric] == expected_status
     assert getattr(metrics, metric) == 1
     if metric == "unexecuted_actions_claimed":
         assert any(step.proposed_actions and not step.executed_actions for step in steps)
