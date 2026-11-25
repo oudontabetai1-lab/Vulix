@@ -43,6 +43,8 @@ class ApiSeedData:
     cookies: list[dict] = field(default_factory=list)
     headers: dict[str, str] = field(default_factory=dict)
     requests: list[RequestTemplate] = field(default_factory=list)
+    rejected_scope_count: int = 0
+    rejected_scope_reasons: dict[str, int] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         return (
