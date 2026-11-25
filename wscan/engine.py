@@ -2241,8 +2241,15 @@ class ScanEngine:
                             ledger.manifest.note_gap(f"scope_blocked:{dest}")
                         except Exception:
                             pass
+                cb = getattr(self, "_runtime_scope_block_callback", None)
+                if callable(cb):
+                    try:
+                        cb(dest, decision.reason)
+                    except Exception:
+                        pass
 
-            request_hooks.insert(0, RuntimeScopeGuardHook(scope_policy, on_block=_on_scope_block))
+            target_only = bool(overrides.get("target_only", getattr(self, "target_only", False)))
+            request_hooks.insert(0, RuntimeScopeGuardHook(scope_policy, on_block=_on_scope_block, target_only=target_only))
 
         # Remove Scope-guard-only overrides before passing to httpx.Client/AsyncClient
         for key in (
@@ -2252,6 +2259,7 @@ class ScanEngine:
             "access_urls",
             "exclude_urls",
             "allowed_external_origins",
+            "target_only",
         ):
             kwargs.pop(key, None)
 
