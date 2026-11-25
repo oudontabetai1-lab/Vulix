@@ -18,6 +18,20 @@ from wscan.url_normalize import endpoint_identity
 from wscan.url_scope import same_origin as url_scope_same_origin
 
 
+class WrappedToolResult(dict):
+    """Tool output dictionary with untrusted ProvenanceEnvelope tagged block formatting."""
+
+    def __init__(self, data: dict, wrapped_output: str, envelope=None):
+        payload = dict(data)
+        payload["wrapped_output"] = wrapped_output
+        super().__init__(payload)
+        self.wrapped_output = wrapped_output
+        self.envelope = envelope
+
+    def __str__(self) -> str:
+        return self.wrapped_output
+
+
 _BODY_SECRET_REASON = "json body contains credentials that are not stored; it cannot be replayed safely"
 SUPPORTED_CHECKS = frozenset({"xss", "sqli", "os"})
 _SUPPORTED_CARRIERS = frozenset({"form", "query", "json_body", "json"})
@@ -1754,18 +1768,49 @@ class AgentScannerTools:
     def agent_findings(self) -> list:
         return [finding for findings in self.findings.values() for finding in findings]
 
+    def wrap_tool_output(self, result: dict, *, tool_name: str = "", correlation_id: str = "") -> WrappedToolResult:
+        """Wrap tool return dictionary into an untrusted ProvenanceEnvelope tagged block."""
+        from wscan.content_provenance import (
+            ContentSource,
+            ContentType,
+            wrap_untrusted_observation,
+        )
+        try:
+            raw_text = json.dumps(result, default=str, ensure_ascii=False)
+        except Exception:
+            raw_text = str(result)
+        state = getattr(getattr(self, "harness", None), "state", None)
+        corr = str(correlation_id or (state and getattr(state, "run_id", "")) or "")
+        scanner = getattr(self, "scanner", None)
+        origin = str((scanner and getattr(scanner, "target_url", "")) or "")
+        envelope = wrap_untrusted_observation(
+            raw_text,
+            source=ContentSource.WEBMCP.value,
+            origin=origin,
+            content_type=ContentType.TOOL_OUTPUT.value,
+            correlation_id=corr,
+            neutralize_control_tokens=True,
+            neutralize_injections=True,
+        )
+        tagged_block = envelope.format_tagged_block()
+        return WrappedToolResult(result, tagged_block, envelope=envelope)
+
     def register_controller_actions(self, controller) -> None:
-        async def list_scanner_capabilities() -> dict:
-            return await self.list_scanner_capabilities()
+        async def list_scanner_capabilities() -> WrappedToolResult:
+            res = await self.list_scanner_capabilities()
+            return self.wrap_tool_output(res, tool_name="list_scanner_capabilities")
 
-        def schedule_scanner(injection_point_id: str, check: str) -> dict:
-            return self.schedule_scanner(injection_point_id, check)
+        def schedule_scanner(injection_point_id: str, check: str) -> WrappedToolResult:
+            res = self.schedule_scanner(injection_point_id, check)
+            return self.wrap_tool_output(res, tool_name="schedule_scanner")
 
-        async def run_scanner_work(work_id: str) -> dict:
-            return await self.run_scanner_work(work_id)
+        async def run_scanner_work(work_id: str) -> WrappedToolResult:
+            res = await self.run_scanner_work(work_id)
+            return self.wrap_tool_output(res, tool_name="run_scanner_work")
 
-        async def verify_hypothesis(hypothesis_id: str) -> dict:
-            return await self.verify_hypothesis(hypothesis_id)
+        async def verify_hypothesis(hypothesis_id: str) -> WrappedToolResult:
+            res = await self.verify_hypothesis(hypothesis_id)
+            return self.wrap_tool_output(res, tool_name="verify_hypothesis")
 
         controller.action("List server-discovered scanner injection points and capabilities.")(list_scanner_capabilities)
         controller.action("Queue deterministic scanner work by injection point ID and check name.")(schedule_scanner)
@@ -1793,27 +1838,32 @@ class AgentScannerTools:
                 allowed=False,
                 reason=f"unauthorized tool: {tool_name}",
             )
-            return {"status": "blocked", "reason": f"unauthorized tool: {tool_name}"}
+            blocked_dict = {"status": "blocked", "reason": f"unauthorized tool: {tool_name}"}
+            return self.wrap_tool_output(blocked_dict, tool_name=tool_name, correlation_id=corr_id)
 
         if tool_name == "list_scanner_capabilities":
-            return await self.list_scanner_capabilities(correlation_id=corr_id)
+            res = await self.list_scanner_capabilities(correlation_id=corr_id)
         elif tool_name == "schedule_scanner":
-            return self.schedule_scanner(
+            res = self.schedule_scanner(
                 str(kwargs.get("injection_point_id", "")),
                 str(kwargs.get("check", "")),
                 correlation_id=corr_id,
             )
         elif tool_name == "run_scanner_work":
-            return await self.run_scanner_work(
+            res = await self.run_scanner_work(
                 str(kwargs.get("work_id", "")),
                 correlation_id=corr_id,
             )
         elif tool_name == "verify_hypothesis":
-            return await self.verify_hypothesis(
+            res = await self.verify_hypothesis(
                 str(kwargs.get("hypothesis_id", "")),
                 correlation_id=corr_id,
             )
-        return {"status": "blocked", "reason": "unknown tool"}
+        else:
+            res = {"status": "blocked", "reason": "unknown tool"}
+        if isinstance(res, dict) and not isinstance(res, WrappedToolResult):
+            return self.wrap_tool_output(res, tool_name=tool_name, correlation_id=corr_id)
+        return res
 
     async def observe_page(self, browser=None, current_url: str = "") -> None:
         browser = browser or self.scanner._active_session

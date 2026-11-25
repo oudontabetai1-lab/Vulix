@@ -103,6 +103,21 @@ def test_evaluate_scope_malformed_and_empty():
     assert evaluate_scope("file:///etc/passwd", policy).allowed is False
 
 
+def test_evaluate_scope_normalizes_backslashes():
+    policy = ScopePolicy(target_urls=("http://target.local:8080/app",))
+    # WHATWG URL standard treats backslashes in http/https schemes as slashes
+    dec_evil = evaluate_scope("http://evil.test\\@target.local:8080/app", policy)
+    assert dec_evil.allowed is False
+    assert dec_evil.reason == "out_of_scope_destination"
+
+    dec_schemeless = evaluate_scope("\\\\evil.com/leak", policy)
+    assert dec_schemeless.allowed is False
+    assert dec_schemeless.reason == "unsupported_scheme"
+
+    dec_in_scope = evaluate_scope("http://target.local:8080/app\\subpath", policy)
+    assert dec_in_scope.allowed is True
+
+
 def test_evaluate_scope_allow_external():
     policy = ScopePolicy(target_urls=("http://example.com",), allow_external=True)
     dec = evaluate_scope("https://external-api.com/v1", policy)

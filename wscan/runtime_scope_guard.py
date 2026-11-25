@@ -155,7 +155,7 @@ def evaluate_scope(url: str, policy: ScopePolicy) -> ScopeDecision:
 
     Fail-closed: Unparseable URLs or non-HTTP schemes are rejected when policy is configured.
     """
-    clean_url = str(url or "").strip()
+    clean_url = str(url or "").strip().replace("\\", "/")
     if not clean_url:
         return ScopeDecision(False, "empty_url", clean_url)
 
