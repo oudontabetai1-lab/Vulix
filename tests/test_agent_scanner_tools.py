@@ -1117,3 +1117,120 @@ def test_httpx_carrier_unsupported_xml_coverage_gap(tmp_path):
         assert res["status"] == "unsupported"
         assert harness.state.work_queue[-1].status == WorkStatus.BLOCKED
     asyncio.run(scenario())
+
+
+_SECRET_AUTH = "Bearer tpl-auth-secret-AAAA1111"
+_SECRET_COOKIE = "sid=tpl-cookie-secret-BBBB2222"
+_SECRET_BODY = "tpl-body-secret-CCCC3333"
+_SECRET_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sigsigsigsig"
+
+
+def _all_persisted(path) -> str:
+    return "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in path.rglob("*") if p.is_file())
+
+
+def test_template_auth_headers_are_not_persisted_and_resume_uses_fresh_auth(tmp_path):
+    """template の Authorization/Cookie は checkpoint・出力・イベントに残さず、送信は新しい認証状態で行う。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-1", "domain": "target.test"}])
+        engines = []
+
+        def factory(check, handoff):
+            engine = _FakeEngine(check, handoff)
+            engines.append(engine)
+            return engine
+
+        tools = AgentScannerTools(scanner, harness, engine_factory=factory)
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/submit", "/user/name", template_id="tmpl_h")
+        template = {
+            "url": "https://target.test/api/submit",
+            "json_body": {"user": {"name": "test"}},
+            "headers": {
+                "Authorization": _SECRET_AUTH, "Cookie": _SECRET_COOKIE,
+                "X-Custom": f"Bearer {_SECRET_BODY}", "Content-Type": "application/json",
+            },
+        }
+        point_id = tools.add_point(point, {"template": template})
+        persisted = (tmp_path / "agent_scanner_points.json").read_text(encoding="utf-8")
+        for secret in (_SECRET_AUTH, _SECRET_COOKIE, _SECRET_BODY, "tpl-auth-secret", "tpl-cookie-secret"):
+            assert secret not in persisted
+        assert "application/json" in persisted  # 送信に要る非認証ヘッダは残す
+
+        # resume: 保存済み template から復元し、認証は新しいセッションから受け取る
+        scanner.cookies = [{"name": "session", "value": "fresh-session-value-2", "domain": "target.test"}]
+        resumed = AgentScannerTools(scanner, _harness(tmp_path, resume=True), engine_factory=factory)
+        work_id = resumed.schedule_scanner(point_id, "sqli")["work_id"]
+        outputs = [await resumed.run_scanner_work(work_id), await resumed.list_scanner_capabilities()]
+        sent = engines[-1].injection_templates["tmpl_h"]["headers"]
+        assert sent == {"Content-Type": "application/json"}
+        assert not any(_SECRET_AUTH in str(v) or _SECRET_COOKIE in str(v) for v in sent.values())
+        assert "fresh-session-value-2" in json.dumps(engines[-1].handoff.__dict__, default=str)
+        assert "fresh-session-value-1" not in json.dumps(engines[-1].handoff.__dict__, default=str)
+        blob = json.dumps(outputs, default=str) + _all_persisted(tmp_path)
+        for secret in ("tpl-auth-secret", "tpl-cookie-secret", _SECRET_BODY):
+            assert secret not in blob
+    asyncio.run(scenario())
+
+
+def test_template_json_body_secret_is_not_persisted_and_not_replayed(tmp_path):
+    """秘密を含む json_body の template は保存せず、伏せた値を送らず UNSUPPORTED として理由を残す。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-3", "domain": "target.test"}])
+        engines = []
+
+        def factory(check, handoff):
+            engine = _FakeEngine(check, handoff)
+            engines.append(engine)
+            return engine
+
+        tools = AgentScannerTools(scanner, harness, engine_factory=factory)
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/login", "/user/name", template_id="tmpl_s")
+        template = {
+            "url": "https://target.test/api/login",
+            "json_body": {"user": {"name": "test"}, "password": _SECRET_BODY, "session": _SECRET_JWT},
+            "headers": {"Authorization": _SECRET_AUTH, "Cookie": _SECRET_COOKIE},
+        }
+        point_id = tools.add_point(point, {"template": template})
+        persisted = _all_persisted(tmp_path)
+        for secret in (_SECRET_BODY, _SECRET_JWT, _SECRET_AUTH, _SECRET_COOKIE):
+            assert secret not in persisted
+
+        for instance in (tools, AgentScannerTools(scanner, _harness(tmp_path, resume=True), engine_factory=factory)):
+            sched = instance.schedule_scanner(point_id, "sqli")
+            assert sched["status"] == "unsupported"
+            assert "credentials" in sched["reason"]
+            caps = await instance.list_scanner_capabilities()
+            entry = next(c for c in caps["capabilities"] if c["injection_point_id"] == point_id)
+            assert entry["status"] == "unsupported" and "credentials" in entry["reason"]
+        assert engines == []  # 伏せ字の body を誤って送る経路に入らない
+        assert any(f"unsupported_secret_body:{point_id}" in gap for gap in harness.state.coverage_gaps)
+        blob = json.dumps(caps, default=str) + _all_persisted(tmp_path)
+        for secret in (_SECRET_BODY, _SECRET_JWT, _SECRET_AUTH, _SECRET_COOKIE):
+            assert secret not in blob
+    asyncio.run(scenario())
+
+
+def test_runtime_template_url_gate_blocks_before_send(tmp_path):
+    """schedule 後に engine 側 scope が変わり template URL だけ範囲外になった場合、送信前に拒否する。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-4", "domain": "target.test"}])
+        engines = []
+
+        def factory(check, handoff):
+            engine = _FakeEngine(check, handoff)
+            engine.target_urls = ["https://target.test/api/submit"]
+            engines.append(engine)
+            return engine
+
+        tools = AgentScannerTools(scanner, harness, engine_factory=factory)
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/submit", "/user/name", template_id="tmpl_u")
+        point_id = tools.add_point(point, {"template": {"url": "https://target.test/other/endpoint", "json_body": {"user": {"name": "t"}}}})
+        work_id = tools.schedule_scanner(point_id, "sqli")["work_id"]
+        result = await tools.run_scanner_work(work_id)
+        assert result["status"] == "blocked"
+        assert not engines[0].scanner.calls
+        assert harness.state.work_queue[0].status == WorkStatus.SCOPE_BLOCKED
+    asyncio.run(scenario())
