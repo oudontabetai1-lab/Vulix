@@ -87,39 +87,45 @@ def summarize_structure(value):
 
 
 def _sanitize_url_query_for_persistence(url: str) -> tuple[str, list[str]]:
-    """URL の scheme, host, path, およびクエリのキー名のみを残し、クエリの値を一切除外する。
+    """URL の scheme, host, port, path, およびクエリのキー名のみを残し、
+    userinfo（ユーザー名・パスワード）およびクエリの値を一切除外する。
 
     戻り値: (値を除去した安全な URL, クエリキー名のリスト)
-    例: "https://target.test/api/search?q=1&access_token=secret123&page=2"
-    -> ("https://target.test/api/search?access_token=&page=&q=", ["access_token", "page", "q"])
+    例: "https://admin:pass@target.test:8080/api/search?q=1&access_token=secret123&page=2"
+    -> ("https://target.test:8080/api/search?access_token=&page=&q=", ["access_token", "page", "q"])
     """
     if not url:
         return "", []
     import urllib.parse
     parsed = urllib.parse.urlsplit(str(url))
-    if not parsed.query:
-        return urllib.parse.urlunsplit(parsed._replace(fragment="")), []
-    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    query_keys = sorted(set(str(k) for k, _ in pairs))
-    safe_query = urllib.parse.urlencode([(k, "") for k in query_keys])
-    safe_url = urllib.parse.urlunsplit(parsed._replace(query=safe_query, fragment=""))
+    safe_netloc = parsed.netloc.rpartition("@")[2]
+    query_keys = []
+    safe_query = ""
+    if parsed.query:
+        pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        query_keys = sorted(set(str(k) for k, _ in pairs))
+        safe_query = urllib.parse.urlencode([(k, "") for k in query_keys])
+    safe_url = urllib.parse.urlunsplit((parsed.scheme, safe_netloc, parsed.path, safe_query, ""))
     return safe_url, query_keys
 
 
 def _endpoint_base(url: str) -> str:
-    """URL の scheme, host, path 部分を返す（クエリやフラグメントは除外）。"""
+    """URL の scheme, host, port, path 部分を返す（userinfo, クエリ, フラグメントは除外）。"""
     if not url:
         return ""
     from urllib.parse import urlsplit, urlunsplit
     parsed = urlsplit(str(url))
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    safe_netloc = parsed.netloc.rpartition("@")[2]
+    return urlunsplit((parsed.scheme, safe_netloc, parsed.path, "", ""))
 
 
-def _structure_hash(body=None, query_keys: list[str] | None = None) -> str:
+def _structure_hash(body=None, query_keys: list[str] | None = None, *, body_structure=None) -> str:
     """JSON body および URL クエリキー名の構造要約から決定論的ハッシュを生成する。値は含めない。"""
     summary: dict = {}
     if body is not None:
         summary["body"] = summarize_structure(body)
+    elif body_structure is not None:
+        summary["body"] = body_structure
     if query_keys:
         summary["query_keys"] = sorted(set(str(k) for k in query_keys))
     if not summary:
@@ -284,15 +290,17 @@ def _redact_json_leaves(value, key: str = ""):
 
 
 def sanitize_template(template: dict) -> tuple[dict, bool]:
-    """永続化用に template からヘッダ値、body 値、URL クエリ値を一切除き、
+    """永続化用に template からヘッダ値、body 値、URL クエリ値、userinfo を一切除き、
     識別に必要な構造要約と非秘密メタ情報だけ残す。
 
-    戻り値は (安全な template, body/header/query に秘密があったかの多層防御フラグ)。
+    戻り値は (安全な template, body/header/query/userinfo に秘密があったかの多層防御フラグ)。
     値は秘密かどうかに関係なく、永続化用 template には一切残さない。"""
     if not isinstance(template, dict):
         return {}, False
     raw_url = str(template.get("url") or "")
     safe_url, query_keys = _sanitize_url_query_for_persistence(raw_url)
+    if not query_keys and "query_keys" in template:
+        query_keys = sorted(set(str(k) for k in template["query_keys"]))
     safe = {
         "url": safe_url,
         "method": str(template.get("method") or "POST").upper(),
@@ -322,19 +330,19 @@ def sanitize_template(template: dict) -> tuple[dict, bool]:
             for k, v in body.items():
                 if _key_is_sensitive(str(k)) or _leaf_is_secret(v, str(k)):
                     body_secret = True
+    elif "body_structure" in template:
+        safe["body_structure"] = template["body_structure"]
+        if "body_keys" in template:
+            safe["body_keys"] = sorted(str(k) for k in template["body_keys"])
 
-    if body is not None or query_keys:
-        safe["structure_hash"] = _structure_hash(body=body, query_keys=query_keys)
+    body_struct = safe.get("body_structure")
+    if body_struct is not None or query_keys:
+        safe["structure_hash"] = _structure_hash(
+            query_keys=query_keys,
+            body_structure=body_struct,
+        )
     elif "structure_hash" in template:
         safe["structure_hash"] = str(template["structure_hash"])
-        if "body_structure" in template:
-            safe["body_structure"] = template["body_structure"]
-        if "body_keys" in template:
-            safe["body_keys"] = template["body_keys"]
-        if "query_keys" in template:
-            safe["query_keys"] = template["query_keys"]
-
-    return safe, body_secret
 
     return safe, body_secret
 
@@ -1212,7 +1220,7 @@ class AgentScannerTools:
                 self.harness.checkpoint()
             from wscan.request_logger import redact_url
             self.harness.record_probe_attempt(
-                target_url=redact_url(str(target_send_url)), check_type=check, work_id=work_id,
+                target_url=redact_url(str(point.url)), check_type=check, work_id=work_id,
                 correlation_id=corr_id,
                 status="dispatching", binding=binding, binding_digest=binding_digest,
             )
@@ -1239,7 +1247,7 @@ class AgentScannerTools:
             )
             self.findings[work_id] = sanitized_findings
             self.harness.record_probe_attempt(
-                target_url=redact_url(str(target_send_url)), check_type=check, work_id=work_id,
+                target_url=redact_url(str(point.url)), check_type=check, work_id=work_id,
                 correlation_id=corr_id,
                 status="inconclusive" if status == WorkStatus.INCONCLUSIVE else "completed",
                 evidence_id=work_id, binding=binding, binding_digest=binding_digest,

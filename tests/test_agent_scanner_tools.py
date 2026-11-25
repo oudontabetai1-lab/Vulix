@@ -1823,3 +1823,163 @@ def test_api_get_bearer_blocked_when_origin_mismatches(tmp_path):
         assert "bearer" in result["reason"]
         assert len(engines) == 0
     asyncio.run(scenario())
+
+
+def test_sanitize_template_idempotence_property():
+    """sanitize_template は任意の組み合わせ（クエリあり/なし、userinfo あり/なし、JSON/GET）で
+    完全に冪等であり、2回目以降の sanitize でも構造ハッシュおよびメタ情報が変化しない。"""
+    from wscan.agent_scanner_tools import sanitize_template
+    import itertools
+
+    url_variants = [
+        "https://target.test/api/items",
+        "https://target.test/api/search?q=hello&page=2",
+        "https://admin:SecretPass123@target.test:8080/api/items",
+        "https://admin:SecretPass123@target.test:8080/api/search?q=hello&access_token=SecretTok99&page=2",
+    ]
+    body_variants = [
+        None,
+        {"q": "search", "sort_key": "asc"},
+        {"nested": {"items": [1, 2, 3], "flag": True}},
+    ]
+    header_variants = [
+        None,
+        {"Authorization": "Bearer secret-token-xyz", "Content-Type": "application/json"},
+        {"Accept": "application/json", "X-Custom": "custom-val"},
+    ]
+
+    for url, body, headers in itertools.product(url_variants, body_variants, header_variants):
+        raw = {"url": url, "method": "POST" if body else "GET"}
+        if body is not None:
+            raw["json_body"] = body
+        if headers is not None:
+            raw["headers"] = headers
+
+        t1, _ = sanitize_template(raw)
+        t2, _ = sanitize_template(t1)
+        t3, _ = sanitize_template(t2)
+
+        # 冪等性: sanitize(sanitize(t)) == sanitize(t)
+        assert t1 == t2, f"Idempotence failed between t1 and t2 for {raw}"
+        assert t2 == t3, f"Idempotence failed between t2 and t3 for {raw}"
+        assert t1.get("structure_hash") == t2.get("structure_hash") == t3.get("structure_hash")
+        assert t1["url"] == t2["url"] == t3["url"]
+
+        # 秘密値の除去
+        assert "SecretPass123" not in t1["url"]
+        assert "admin@" not in t1["url"]
+        assert "SecretTok99" not in t1["url"]
+        assert "hello" not in t1["url"]
+
+
+def test_json_template_with_query_url_same_run_and_resume_can_reobtain_and_send(tmp_path):
+    """クエリ付き URL を持つ JSON template が、同一実行内でも resume 時でも live セッションから
+    再取得されて正常に送信され、live テンプレート構造不一致時は BLOCKED になる。"""
+    async def scenario():
+        engines = []
+        def factory(check, handoff):
+            engine = _FakeEngine(check, handoff)
+            engines.append(engine)
+            return engine
+
+        raw_url = "https://target.test/api/search?q=hello&page=2"
+        scanner = _AgentScanner([{"name": "session", "value": "c1", "domain": "target.test"}])
+        tools = AgentScannerTools(scanner, _harness(tmp_path), engine_factory=factory)
+        tmpl = {"url": raw_url, "method": "POST", "json_body": {"q": "x", "sort_key": "asc"}}
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/search", "/q", template_id="tmpl_jq")
+        pid = tools.add_point(point, {"name": "/q", "template": tmpl})
+
+        # 1. 同一実行内での送信: live template から再取得されて completed
+        work_id1 = tools.schedule_scanner(pid, "sqli")["work_id"]
+        res1 = await tools.run_scanner_work(work_id1)
+        assert res1["status"] == "completed"
+        sent_tmpl1 = engines[-1].injection_templates["tmpl_jq"]
+        assert sent_tmpl1["url"] == raw_url
+        assert sent_tmpl1["json_body"] == {"q": "x", "sort_key": "asc"}
+
+        # 2. resume (live ソースなし): テンプレート取得不可のため BLOCKED
+        resumed_no_source = AgentScannerTools(
+            _AgentScanner([{"name": "session", "value": "c2", "domain": "target.test"}]),
+            _harness(tmp_path, resume=True),
+            engine_factory=factory,
+        )
+        work_id2 = resumed_no_source.schedule_scanner(pid, "xss")["work_id"]
+        res2 = await resumed_no_source.run_scanner_work(work_id2)
+        assert res2["status"] == "blocked"
+        assert "live request template is unavailable" in res2["reason"]
+
+        # 3. resume (live ソース一致): captured_templates から再取得されて completed
+        scanner_live = _AgentScanner([{"name": "session", "value": "c3", "domain": "target.test"}])
+        scanner_live.captured_templates = {pid: dict(tmpl, url="https://target.test/api/search?q=world&page=2")}
+        resumed_live = AgentScannerTools(scanner_live, _harness(tmp_path, resume=True), engine_factory=factory)
+        work_id3 = resumed_live.schedule_scanner(pid, "os")["work_id"]
+        res3 = await resumed_live.run_scanner_work(work_id3)
+        assert res3["status"] == "completed"
+        sent_tmpl3 = engines[-1].injection_templates["tmpl_jq"]
+        assert sent_tmpl3["url"] == "https://target.test/api/search?q=world&page=2"
+        assert sent_tmpl3["json_body"] == {"q": "x", "sort_key": "asc"}
+
+        # 4. resume (live ソースのクエリキー構造不一致): BLOCKED
+        scanner_mismatch = _AgentScanner([{"name": "session", "value": "c4", "domain": "target.test"}])
+        d_mismatch = tmp_path / "mismatch"
+        d_mismatch.mkdir()
+        tools_m = AgentScannerTools(scanner_mismatch, _harness(d_mismatch), engine_factory=factory)
+        pid_m = tools_m.add_point(point, {"name": "/q", "template": tmpl})
+        tools_m._live_templates.clear()
+        # add_point の後に captured_templates を不一致クエリ (page キー欠落) に書き換える
+        scanner_mismatch.captured_templates = {pid_m: dict(tmpl, url="https://target.test/api/search?q=1")}
+        work_id4 = tools_m.schedule_scanner(pid_m, "sqli")["work_id"]
+        res4 = await tools_m.run_scanner_work(work_id4)
+        assert res4["status"] == "blocked"
+        assert "structure does not match" in res4["reason"]
+
+    asyncio.run(scenario())
+
+
+def test_userinfo_credentials_never_appear_in_persisted_files(tmp_path):
+    """Template URL の userinfo (ユーザー名・パスワード) は points, state, events, probe_attempts
+    のいずれにも一切平文保存されず、送信時は Agent セッションから再取得される。"""
+    async def scenario():
+        engines = []
+        def factory(check, handoff):
+            engine = _FakeEngine(check, handoff)
+            engine.target_urls = ["https://target.test:8080/"]
+            engines.append(engine)
+            return engine
+
+        secret_user = "TargetAdminUser77"
+        secret_pass = "SuperSecretPassword9988"
+        raw_url = f"https://{secret_user}:{secret_pass}@target.test:8080/api/submit?q=1&token=SecretTok771"
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-1", "domain": "target.test"}])
+        scanner.target_urls = ["https://target.test:8080/"]
+        scanner.target_url = "https://target.test:8080/"
+        tools = AgentScannerTools(scanner, _harness(tmp_path), engine_factory=factory)
+
+        tmpl = {"url": raw_url, "method": "POST", "json_body": {"q": "x"}}
+        point = InjectionPoint.for_json_body("POST", "https://target.test:8080/api/submit", "/q", template_id="tmpl_uinfo")
+        point_id = tools.add_point(point, {"name": "/q", "template": tmpl})
+
+        # 1. agent_scanner_points.json の検査
+        points_text = (tmp_path / "agent_scanner_points.json").read_text(encoding="utf-8")
+        assert secret_user not in points_text
+        assert secret_pass not in points_text
+        assert "SecretTok771" not in points_text
+        assert "target.test:8080" in points_text
+
+        # 2. スキャン実行
+        work_id = tools.schedule_scanner(point_id, "sqli")["work_id"]
+        res = await tools.run_scanner_work(work_id)
+        assert res["status"] == "completed"
+
+        # 3. points, state, events, probe_attempts の全ファイル検査
+        all_text = " ".join(_all_persisted(tmp_path))
+        assert secret_user not in all_text
+        assert secret_pass not in all_text
+        assert "SecretTok771" not in all_text
+
+        # 4. 送信時は live template から再取得された URL が使われる
+        assert len(engines) == 1
+        sent_tmpl = engines[0].injection_templates["tmpl_uinfo"]
+        assert sent_tmpl["url"] == raw_url
+
+    asyncio.run(scenario())
