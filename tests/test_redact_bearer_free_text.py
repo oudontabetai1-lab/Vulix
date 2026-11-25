@@ -161,25 +161,25 @@ def test_attack_payload_and_ordinary_query_not_broken():
 def test_header_line_auth_no_catastrophic_backtracking():
     """ヘッダ区切り文字に続く空白でバックトラック爆発が起きず、高速に完了すること。
 
-    所有格数量子がない場合（修正前）は n=40000 で約 16 秒以上を要するが、
-    修正後は数ミリ秒（0.5 秒以下）で完了する。
+    所有格数量子がない場合（修正前）は n=50000 で約 23 秒以上を要するが、
+    修正後は数ミリ秒（0.5 秒以下、上限 2.0 秒）で完了する。
     """
     import time
 
-    n = 40000
+    n = 50000
     start = time.perf_counter()
     res = redact_text("a:" + "\n" * n + "}")
     elapsed = time.perf_counter() - start
 
     assert res == "a:" + "\n" * n + "}"
-    assert elapsed < 10.0, f"header line backtracking took too long: {elapsed:.2f}s"
+    assert elapsed < 2.0, f"header line backtracking took too long: {elapsed:.2f}s"
 
 
 def test_linear_performance_with_mass_bearer_tokens():
     """敵性サイトが数 MB で数千回の Bearer を含む応答を返しても、局所窓により高速に完了すること。
 
-    全文走査のままの場合（修正前）は n=5000 で約 23 秒以上を要するが、
-    64 文字の局所窓により 0.5 秒以下で完了する。
+    全文走査のままの場合（修正前）は n=5000 で約 110 秒以上を要するが、
+    64 文字の局所窓により 0.5 秒以下（上限 2.0 秒）で完了する。
     """
     import time
 
@@ -192,14 +192,14 @@ def test_linear_performance_with_mass_bearer_tokens():
 
     assert "x_secret_token_12345" not in res
     assert "Bearer <redacted>" in res
-    assert elapsed < 10.0, f"mass bearer redaction took too long: {elapsed:.2f}s"
+    assert elapsed < 2.0, f"mass bearer redaction took too long: {elapsed:.2f}s"
 
 
 def test_urlencoded_no_catastrophic_scanning():
     """urlencoded のキー走査で二乗走査が発生せず、高速に完了すること。
 
-    先頭境界条件がない場合（修正前）は n=15000 で約 22 秒以上を要するが、
-    修正後は数ミリ秒（0.5 秒以下）で完了する。
+    先頭境界条件や所有格数量子がない場合（修正前）は n=20000 で約 12〜16 秒以上を要するが、
+    修正後は数ミリ秒（0.5 秒以下、上限 2.0 秒）で完了する。
     """
     import time
     from wscan.url_scope import redact_kv_values
@@ -210,10 +210,40 @@ def test_urlencoded_no_catastrophic_scanning():
         == "user_password=<redacted>&other=safe"
     )
 
-    n = 15000
+    n = 20000
+    # ケース1: キー境界のない単一文字の繰り返し
     start = time.perf_counter()
     res = redact_kv_values("x" * n)
     elapsed = time.perf_counter() - start
+    assert res == "x" * n
+    assert elapsed < 2.0, f"urlencoded scanning (x) took too long: {elapsed:.2f}s"
+
+    # ケース2: 機微キー語の連続（区切りなし）
+    start = time.perf_counter()
+    res_token = redact_kv_values("token" * n)
+    elapsed_token = time.perf_counter() - start
+    assert res_token == "token" * n
+    assert elapsed_token < 2.0, f"urlencoded scanning (token) took too long: {elapsed_token:.2f}s"
+
+
+def test_url_userinfo_no_catastrophic_scanning():
+    """URL の userinfo 走査で二乗走査が発生せず、高速に完了すること。
+
+    先頭境界条件や所有格数量子がない場合（修正前）は n=50000 で約 18 秒以上を要するが、
+    修正後は数ミリ秒（0.5 秒以下、上限 2.0 秒）で完了する。
+    """
+    import time
+
+    # 正しい伏せ字化が行われることの検証
+    assert (
+        redact_text("http://user:pass@example.com/api")
+        == "http://<redacted>@example.com/api"
+    )
+
+    n = 50000
+    start = time.perf_counter()
+    res = redact_text("x" * n)
+    elapsed = time.perf_counter() - start
 
     assert res == "x" * n
-    assert elapsed < 10.0, f"urlencoded scanning took too long: {elapsed:.2f}s"
+    assert elapsed < 2.0, f"url userinfo scanning took too long: {elapsed:.2f}s"
