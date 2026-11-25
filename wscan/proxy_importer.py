@@ -183,7 +183,7 @@ def parse_burp_xml(data: bytes | str, *, target_urls: list[str], access_urls: li
     try:
         guard.Parse(raw, True)
         root = ET.fromstring(raw)
-    except (ET.ParseError, expat.ExpatError, ValueError) as exc:
+    except (ET.ParseError, expat.ExpatError, ValueError, RecursionError) as exc:
         raise ValueError("Burp XML を解析できません") from exc
     items = []
     for node in root.findall(".//item")[:MAX_ITEMS]:
@@ -222,6 +222,9 @@ def parse_burp_xml(data: bytes | str, *, target_urls: list[str], access_urls: li
                 body = parsed if isinstance(parsed, dict) else None
             except json.JSONDecodeError:
                 pass
+            except RecursionError:
+                items.append({"parse_error": "json_depth_exceeded"})
+                continue
         items.append({"url": url, "method": match.group(1), "headers": headers, "body": body})
     return _make_seed(items, target_urls, access_urls or [], exclude_urls or [])
 
@@ -237,6 +240,6 @@ def load_proxy_export(path: str, *, target_urls: list[str], access_urls: list[st
         return parse_burp_xml(raw, target_urls=target_urls, access_urls=access_urls, exclude_urls=exclude_urls)
     try:
         data = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         raise ValueError("ZAP JSON を解析できません") from exc
     return parse_zap_json(data, target_urls=target_urls, access_urls=access_urls, exclude_urls=exclude_urls)

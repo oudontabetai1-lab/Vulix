@@ -3,7 +3,7 @@ import json
 import pytest
 
 from wscan import url_scope
-from wscan.proxy_importer import MAX_IMPORT_BYTES, parse_burp_xml, parse_zap_json
+from wscan.proxy_importer import MAX_IMPORT_BYTES, load_proxy_export, parse_burp_xml, parse_zap_json
 
 
 def test_zap_har_seed_scope_and_secrets():
@@ -96,12 +96,43 @@ def test_zap_bad_port_drops_only_invalid_item_and_records_reason():
 
 
 def test_zap_deep_json_body_drops_only_invalid_item():
-    nested_json = '{"x":' * 1500 + '0' + '}' * 1500
+    nested_json_1500 = '{"x":' * 1500 + '0' + '}' * 1500
+    nested_json_10000 = '{"x":' * 10000 + '0' + '}' * 10000
     seed = parse_zap_json({"log": {"entries": [
-        {"request": {"url": "https://example.test/api/deep", "method": "POST",
-                      "postData": {"mimeType": "application/json", "text": nested_json}}},
+        {"request": {"url": "https://example.test/api/deep1", "method": "POST",
+                      "postData": {"mimeType": "application/json", "text": nested_json_1500}}},
+        {"request": {"url": "https://example.test/api/deep2", "method": "POST",
+                      "postData": {"mimeType": "application/json", "text": nested_json_10000}}},
         {"request": {"url": "https://example.test/api/ok", "method": "GET"}},
     ]}}, target_urls=["https://example.test/"])
+    assert seed.urls == ["https://example.test/api/ok"]
+    assert seed.rejected_scope_reasons == {"json_depth_exceeded": 2}
+
+
+def test_burp_deep_json_body_drops_only_invalid_item():
+    deep_json = '{"x":' * 10000 + '0' + '}' * 10000
+    req1 = f"POST /api/deep HTTP/1.1\r\nHost: example.test\r\nContent-Type: application/json\r\n\r\n{deep_json}"
+    req2 = "GET /api/ok HTTP/1.1\r\nHost: example.test\r\n\r\n"
+    xml = f"<items><item><host>example.test</host><request><![CDATA[{req1}]]></request></item><item><host>example.test</host><request><![CDATA[{req2}]]></request></item></items>".encode()
+    seed = parse_burp_xml(xml, target_urls=["https://example.test/"])
+    assert seed.urls == ["https://example.test/api/ok"]
+    assert seed.rejected_scope_reasons == {"json_depth_exceeded": 1}
+
+
+def test_load_proxy_export_rejects_deep_json_file(tmp_path):
+    json_file = tmp_path / "deep.json"
+    json_file.write_text('{"x":' * 10000 + '0' + '}' * 10000, encoding="utf-8")
+    with pytest.raises(ValueError, match="ZAP JSON を解析できません"):
+        load_proxy_export(str(json_file), target_urls=["https://example.test/"])
+
+
+def test_load_proxy_export_burp_xml_handles_deep_json_item(tmp_path):
+    deep_json = '{"x":' * 10000 + '0' + '}' * 10000
+    req1 = f"POST /api/deep HTTP/1.1\r\nHost: example.test\r\nContent-Type: application/json\r\n\r\n{deep_json}"
+    req2 = "GET /api/ok HTTP/1.1\r\nHost: example.test\r\n\r\n"
+    xml_file = tmp_path / "export.xml"
+    xml_file.write_bytes(f"<items><item><host>example.test</host><request><![CDATA[{req1}]]></request></item><item><host>example.test</host><request><![CDATA[{req2}]]></request></item></items>".encode())
+    seed = load_proxy_export(str(xml_file), target_urls=["https://example.test/"])
     assert seed.urls == ["https://example.test/api/ok"]
     assert seed.rejected_scope_reasons == {"json_depth_exceeded": 1}
 
