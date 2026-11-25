@@ -455,46 +455,42 @@ def filter_probe_actions(
             blocked_reasons.append({"action": action_name, "reason": "unauthorized_tool_call", "details": action_params})
             continue
 
-        # 3. 認証情報の外部送信遮断
-        if secret_values:
-            params_str = json.dumps(action_params, default=str) if isinstance(action_params, (dict, list)) else str(action_params)
-            leaked_secret = next((s for s in secret_values if s in params_str), None)
-            if leaked_secret is not None:
-                is_auth_input = (
-                    action_name in _AUTH_INPUT_ACTIONS
-                    and _is_allowed_auth_input(action_name, action_params, auth_values)
-                )
-                if not is_auth_input:
-                    blocked += 1
-                    blocked_reasons.append({"action": action_name, "reason": "credential_exfiltration_blocked", "details": "secret detected in action parameters"})
-                    continue
-
-        # 4. 外部 URL へのナビゲーション遮断
-        if action_name in _NAVIGATION_ACTIONS:
+        # 3. 宛先 URL のスコープ検証および認証情報の外部送信遮断
+        if action_name in _NAVIGATION_ACTIONS or (isinstance(action_params, dict) and "url" in action_params):
             nav_url = ""
             if isinstance(action_params, dict):
                 nav_url = str(action_params.get("url") or "")
             elif isinstance(action_params, str):
                 nav_url = action_params
 
-            if nav_url:
-                if nav_url == "about:blank":
-                    allowed.append(action)
+            clean_nav = nav_url.strip().replace("\\", "/")
+            if not clean_nav:
+                if action_name in ("navigate", "go_to_url"):
+                    blocked += 1
+                    blocked_reasons.append({
+                        "action": action_name,
+                        "reason": "out_of_scope_navigation",
+                        "details": "empty_url",
+                    })
                     continue
-
-                nav_lower = nav_url.lower().strip()
+            elif clean_nav == "about:blank":
+                allowed.append(action)
+                continue
+            else:
+                nav_lower = clean_nav.lower()
                 if nav_lower.startswith(("javascript:", "file:", "data:", "view-source:", "vbscript:")):
                     blocked += 1
-                    blocked_reasons.append({"action": action_name, "reason": "out_of_scope_navigation", "details": f"unsupported scheme: {nav_url}"})
+                    blocked_reasons.append({
+                        "action": action_name,
+                        "reason": "out_of_scope_navigation",
+                        "details": f"unsupported scheme: {nav_url}",
+                    })
                     continue
 
+                decision = None
                 if scope_policy is not None:
                     from wscan.runtime_scope_guard import evaluate_scope
-                    decision = evaluate_scope(nav_url, scope_policy)
-                    if not decision.allowed:
-                        blocked += 1
-                        blocked_reasons.append({"action": action_name, "reason": "out_of_scope_navigation", "details": decision.reason})
-                        continue
+                    decision = evaluate_scope(clean_nav, scope_policy)
                 elif target_urls:
                     from wscan.runtime_scope_guard import ScopePolicy, evaluate_scope
                     temp_policy = ScopePolicy(
@@ -502,13 +498,30 @@ def filter_probe_actions(
                         access_urls=tuple(access_urls),
                         exclude_urls=tuple(exclude_urls),
                     )
-                    decision = evaluate_scope(nav_url, temp_policy)
-                    if not decision.allowed:
-                        blocked += 1
-                        blocked_reasons.append({"action": action_name, "reason": "out_of_scope_navigation", "details": decision.reason})
-                        continue
+                    decision = evaluate_scope(clean_nav, temp_policy)
 
-        # 5. 未許可ドメインへの probe（非ターゲットページでの mutation 遮断）
+                if decision is not None and not decision.allowed:
+                    # 外部/スコープ外宛先への遷移。認証情報またはプレースホルダが含まれる場合は漏洩として遮断
+                    exfil_markers = ("WSCAN_AUTH_", "WSCAN_bu_", "WSCAN_MFA_")
+                    has_credential = any(marker in clean_nav for marker in exfil_markers) or (
+                        bool(secret_values) and any(s in clean_nav for s in secret_values)
+                    )
+                    blocked += 1
+                    if has_credential:
+                        blocked_reasons.append({
+                            "action": action_name,
+                            "reason": "credential_exfiltration_blocked",
+                            "details": f"credential or placeholder targeted out-of-scope destination: {nav_url}",
+                        })
+                    else:
+                        blocked_reasons.append({
+                            "action": action_name,
+                            "reason": "out_of_scope_navigation",
+                            "details": decision.reason,
+                        })
+                    continue
+
+        # 4. 未許可ドメインへの probe（非ターゲットページでの mutation 遮断）
         if action_name in _PROBE_MUTATING_ACTIONS:
             if not allow_mutation:
                 if _is_allowed_auth_input(
@@ -3162,7 +3175,7 @@ class AgentBrowserScanner:
             secrets_list.append(self.auth_pass)
         if self.totp_secret and len(self.totp_secret) >= 4:
             secrets_list.append(self.totp_secret)
-        for c in getattr(self, "cookies", []) or []:
+        for c in (getattr(self, "captured_cookies", []) or getattr(self, "cookies", []) or []):
             val = c.get("value") if isinstance(c, dict) else getattr(c, "value", None)
             if val and len(str(val)) >= 6:
                 secrets_list.append(str(val))
