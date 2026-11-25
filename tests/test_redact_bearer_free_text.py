@@ -154,3 +154,22 @@ def test_attack_payload_and_ordinary_query_not_broken():
     assert redact_text(sqli) == sqli
     assert redact_text(xss) == xss
     assert redact_text(ordinary_json) == ordinary_json
+
+
+# --- 7. 性能回帰テスト（線形時間検証） ---
+
+def test_linear_performance_with_mass_bearer_tokens():
+    """敵性サイトが数 MB で数万回の Bearer を含む応答を返しても、局所窓により線形時間で完了すること。"""
+    import time
+
+    chunk = ("payload_data " * 10) + "Bearer x_secret_token_12345 "
+    data = chunk * 20000  # ~3.0 MB, 20,000 matches
+
+    start = time.perf_counter()
+    result = redact_text(data)
+    elapsed = time.perf_counter() - start
+
+    assert "x_secret_token_12345" not in result
+    assert "Bearer <redacted>" in result
+    # O(N*M) の全走査だと数十秒〜分単位でタイムアウトするが、64文字の局所窓により安定して完了する
+    assert elapsed < 15.0, f"redact_text took too long: {elapsed:.2f}s"

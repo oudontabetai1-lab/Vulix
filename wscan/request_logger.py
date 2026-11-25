@@ -195,7 +195,7 @@ def _redact_auth_text(text: str) -> str:
 
     def _sub_raw(m):
         start_pos = m.start()
-        prefix_text = text[:start_pos]
+        prefix_text = text[max(0, start_pos - 64):start_pos]
         prev_m = re.search(r"(\b\w+)\s*$", prefix_text)
         prev_word = prev_m.group(1).lower() if prev_m else ""
         if prev_word in _DETERMINERS_BEFORE_BEARER:
