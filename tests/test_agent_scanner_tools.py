@@ -85,6 +85,7 @@ class _FakeEngine:
     def __init__(self, check, handoff, finding=None, error=None, auth=True, scanner=None):
         self.handoff = handoff
         self._browser = _FakeBrowser()
+        self.headers = {}
         self.scanner = scanner or _FakeScanner(findings=[finding] if finding else [], error=error)
         self.scanners = {check: self.scanner}
         self.auth = auth
@@ -1393,4 +1394,159 @@ def test_plural_token_keys_are_not_persisted_or_output_in_plain_text(tmp_path, k
         assert engines == []
         blob = json.dumps(outputs, default=str) + json.dumps(harness.state.events, default=str) + _all_persisted(tmp_path)
         assert secret_value not in blob
+    asyncio.run(scenario())
+
+
+def test_context_keys_with_ordinary_values_are_supported(tmp_path):
+    """sort_key/key/session/auth などを含む普通の JSON body は秘密扱いせず supported にする。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-ctx", "domain": "target.test"}])
+        engines = []
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *a: engines.append(_FakeEngine(*a)) or engines[-1])
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/items", "/q", template_id="tmpl_items")
+        body = {
+            "q": "search-query",
+            "sort_key": "asc",
+            "key": "title",
+            "session": 1,
+            "session_name": "active",
+            "auth": "local",
+        }
+        point_id = tools.add_point(point, {"template": {
+            "url": "https://target.test/api/items",
+            "json_body": body,
+        }})
+        saved = json.loads((tmp_path / "agent_scanner_points.json").read_text(encoding="utf-8"))
+        assert saved[point_id].get("body_secret") is not True
+
+        sched = tools.schedule_scanner(point_id, "sqli")
+        assert sched["status"] == "planned"
+
+        caps = await tools.list_scanner_capabilities()
+        cap_entry = next(c for c in caps["capabilities"] if c["injection_point_id"] == point_id)
+        assert cap_entry["status"] == "supported"
+
+        res = await tools.run_scanner_work(sched["work_id"])
+        assert res["status"] == "completed"
+        assert len(engines) == 1
+        assert engines[0].injection_templates["tmpl_items"]["json_body"] == body
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("key", "val"), [
+    ("key", "sk-1234567890abcdef1234567890abcdef"),
+    ("session", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sigsigsigsig"),
+    ("session", "4f8a9b2c3d4e5f6a7b8c9d0e1f2a3b4c"),
+    ("auth", "Bearer fresh-token-value-12345"),
+])
+def test_ambiguous_keys_with_secret_values_are_redacted_and_unsupported(tmp_path, key, val):
+    """曖昧なキーでも値が秘密（APIキー、JWT、Bearer、高エントロピー）なら秘密として扱う。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-sec", "domain": "target.test"}])
+        tools = AgentScannerTools(scanner, harness)
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/sec", "/q", template_id="tmpl_sec")
+        point_id = tools.add_point(point, {"template": {
+            "url": "https://target.test/api/sec",
+            "json_body": {"q": "x", key: val},
+        }})
+        saved = json.loads((tmp_path / "agent_scanner_points.json").read_text(encoding="utf-8"))
+        assert saved[point_id]["body_secret"] is True
+        sched = tools.schedule_scanner(point_id, "sqli")
+        assert sched["status"] == "unsupported"
+        assert "credentials" in sched["reason"]
+        persisted = _all_persisted(tmp_path)
+        assert val not in persisted
+    asyncio.run(scenario())
+
+
+def test_api_get_bearer_fresh_token_attached_when_origin_matches(tmp_path):
+    """API GET carrier でも、対象と同じ origin のセッションから新しい Bearer を付け直す。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-auth", "domain": "target.test"}])
+        fresh_bearer = "fresh-bearer-api-get-9999"
+
+        async def capture_tokens(_session):
+            return [{"storage": "local", "key": "access_token", "value": fresh_bearer}]
+
+        scanner._capture_tokens = capture_tokens
+        scanner._active_session = _PageSession("https://target.test/app")
+        engines = []
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *a: engines.append(_FakeEngine(*a)) or engines[-1])
+
+        # API GET query injection point with template containing old Authorization
+        point = InjectionPoint.for_url_param("https://target.test/api/search?q=1", "q")
+        template = {
+            "url": "https://target.test/api/search?q=1",
+            "headers": {"Authorization": _SECRET_AUTH, "Accept": "application/json"},
+        }
+        point_id = tools.add_point(point, {"template": template})
+        persisted = (tmp_path / "agent_scanner_points.json").read_text(encoding="utf-8")
+        assert _SECRET_AUTH not in persisted
+        assert "application/json" in persisted
+
+        work_id = tools.schedule_scanner(point_id, "xss")["work_id"]
+        result = await tools.run_scanner_work(work_id)
+        assert result["status"] == "completed"
+        assert len(engines) == 1
+        assert engines[0].headers.get("Authorization") == f"Bearer {fresh_bearer}"
+        assert getattr(engines[0], "_synced_token", {}).get("headers", {}).get("Authorization") == f"Bearer {fresh_bearer}"
+        assert fresh_bearer not in _all_persisted(tmp_path)
+    asyncio.run(scenario())
+
+
+def test_api_get_bearer_blocked_when_token_unavailable(tmp_path):
+    """API GET carrier で Bearer が得られなければ未認証で送らず BLOCKED にして理由を記録する。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-none", "domain": "target.test"}])
+        scanner._active_session = _PageSession("https://target.test/app")
+        engines = []
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *a: engines.append(_FakeEngine(*a)) or engines[-1])
+
+        point = InjectionPoint.for_url_param("https://target.test/api/search?q=1", "q")
+        template = {
+            "url": "https://target.test/api/search?q=1",
+            "headers": {"Authorization": _SECRET_AUTH},
+        }
+        point_id = tools.add_point(point, {"template": template})
+        work_id = tools.schedule_scanner(point_id, "xss")["work_id"]
+        result = await tools.run_scanner_work(work_id)
+        assert result["status"] == "blocked"
+        assert "bearer" in result["reason"]
+        assert len(engines) == 0  # 送信せず engine も起動しない
+        assert harness.state.work_queue[-1].status == WorkStatus.BLOCKED
+        assert "bearer" in harness.state.work_queue[-1].rejection_reason
+        assert any(e.get("reason") == "bearer authentication unavailable in the agent session"
+                   for e in harness.state.events)
+    asyncio.run(scenario())
+
+
+def test_api_get_bearer_blocked_when_origin_mismatches(tmp_path):
+    """API GET carrier で現在のページ origin が送信先と異なれば Bearer を付けずに BLOCKED にする。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-diff", "domain": "target.test"}])
+
+        async def capture_tokens(_session):
+            return [{"storage": "local", "key": "access_token", "value": "other-token-value"}]
+
+        scanner._capture_tokens = capture_tokens
+        scanner._active_session = _PageSession("https://other-origin.example/page")
+        engines = []
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *a: engines.append(_FakeEngine(*a)) or engines[-1])
+
+        point = InjectionPoint.for_url_param("https://target.test/api/search?q=1", "q")
+        template = {
+            "url": "https://target.test/api/search?q=1",
+            "headers": {"Authorization": _SECRET_AUTH},
+        }
+        point_id = tools.add_point(point, {"template": template})
+        work_id = tools.schedule_scanner(point_id, "xss")["work_id"]
+        result = await tools.run_scanner_work(work_id)
+        assert result["status"] == "blocked"
+        assert "bearer" in result["reason"]
+        assert len(engines) == 0
     asyncio.run(scenario())

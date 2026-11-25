@@ -83,6 +83,28 @@ def test_bearer_without_session_token_is_blocked_with_reason(replay_results):
     assert any(o.get("status") == "blocked" and "bearer" in o.get("reason", "") for o in result["outputs"])
 
 
+def test_llm_claims_complete_with_partial_harness_is_not_treated_as_success(replay_results):
+    """LLM が完了を主張しても harness が PARTIAL なら 0 finding の成功に丸めない。"""
+    result = replay_results["llm_claims_complete_with_partial_harness"]
+    assert result["harness_status"] == "partial"
+    assert result["outcome_success"] is False
+
+
+def test_gate_detects_context_keys_regression(tmp_path, monkeypatch):
+    """sort_key や context keys を無条件に秘密扱いすると gate が FAIL になる。"""
+    from wscan import agent_scanner_tools
+    _OLD_SECRET_WORDS = frozenset({"key", "keys", "session", "auth"})
+    orig = agent_scanner_tools._key_is_sensitive
+    monkeypatch.setattr(
+        agent_scanner_tools, "_key_is_sensitive",
+        lambda key: orig(key) or any(w in _OLD_SECRET_WORDS for w in agent_scanner_tools._key_words(key)),
+    )
+    results = _run_all(tmp_path, [sc for sc in SCENARIOS if sc["name"] == "json_body_with_sort_key_and_context_keys"])
+    verdict = evaluate_replay_gate(results)
+    assert verdict.verdict == GateVerdictKind.FAIL
+    assert verdict.metric_diffs["recall"] == 0.0
+
+
 def test_gate_detects_regressions_in_the_fixed_carrier(tmp_path, monkeypatch):
     """修正前の挙動（部分一致の秘密判定・Bearer の付け直しなし）に戻すと gate が FAIL になる。"""
     from wscan import agent_scanner_tools, url_scope

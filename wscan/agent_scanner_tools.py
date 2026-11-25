@@ -39,27 +39,6 @@ def _default_json_body_for_pointer(pointer: str) -> dict | list:
 _REDACTED_LEAF = "<redacted>"
 
 
-def _leaf_is_secret(value, key: str) -> bool:
-    """template の葉が秘密か。キー名・値の形・登録済み資格情報値の既存判定を共有する。"""
-    if isinstance(value, bool) or value is None:
-        return False
-    if isinstance(value, (int, float)):
-        return _key_is_sensitive(key)
-    if not isinstance(value, str) or not value:
-        return False
-    from wscan import url_scope
-    from wscan.content_provenance import _BEARER_VALUE_PATTERN, _JWT_VALUE_PATTERN
-    from wscan.request_logger import redact_text
-    return (
-        _key_is_sensitive(key)
-        or bool(_JWT_VALUE_PATTERN.search(value))
-        or bool(_BEARER_VALUE_PATTERN.search(value))
-        or url_scope.has_secret_marker(value)
-        or url_scope.redact_secret_values(value) != value
-        or redact_text(value) != value
-    )
-
-
 # 既定は秘密。資格情報ではないと明らかな「キー名全体」だけを例外にする（迷う語は秘密の側）。
 # 照合は語に分けて "_" でつないだ形（maxTokens・max-tokens も max_tokens になる）。
 _NON_SECRET_KEYS = frozenset({
@@ -68,11 +47,23 @@ _NON_SECRET_KEYS = frozenset({
     "token_count", "page_token", "next_page_token", "prev_page_token", "next_token", "continuation_token",
     "secretary",
 })
-# SENSITIVE_KEY_TOKENS（部分一致）に加えて、語として現れたら秘密とみなす語。
-_SECRET_WORDS = frozenset({
-    "key", "keys", "session", "sessions", "cookie", "cookies", "auth", "oauth", "authorization",
-    "bearer", "jwt", "credential", "credentials",
+
+# key/sort_key/session/auth など、文脈や値によって秘密にも非秘密にもなる語。
+_AMBIGUOUS_CREDENTIAL_WORDS = frozenset({
+    "key", "keys", "session", "sessions", "auth", "oauth", "credential", "credentials",
+    "bearer", "jwt",
 })
+
+# 短い列挙値やソート方向など、明らかに秘密ではない代表的な値。
+_KNOWN_NON_SECRET_VALUES = frozenset({
+    "asc", "desc", "ascending", "descending", "none", "null", "all", "any", "true", "false",
+    "default", "local", "ldap", "saml", "basic", "bearer", "digest", "oauth", "password",
+    "user", "admin", "guest", "test", "sample", "text", "json", "xml", "active", "inactive",
+    "enabled", "disabled", "created_at", "updated_at", "id", "name", "title", "date",
+    "first", "last", "prev", "next", "open", "close", "start", "stop",
+})
+
+_API_KEY_PREFIXES = ("sk-", "ghp_", "gho_", "glpat-", "xoxb-", "xoxp-", "AKIA", "AIza")
 
 
 def _key_words(key: str) -> list[str]:
@@ -82,9 +73,8 @@ def _key_words(key: str) -> list[str]:
     return [w.casefold().rstrip("0123456789") for w in re.findall(r"[^\W_]+", normalized)]
 
 
-def _key_is_sensitive(key: str) -> bool:
-    """キー名が資格情報を示すか。既存 redaction の部分一致を既定とし、明示した例外だけ外す。"""
-    from wscan import url_scope
+def _is_unambiguous_secret_key(key: str) -> bool:
+    """明確に資格情報を示すキー名か。値によらず常に秘密として扱う。"""
     from wscan.request_logger import is_sensitive_header
     low = str(key).lower()
     if not low:
@@ -94,11 +84,103 @@ def _key_is_sensitive(key: str) -> bool:
     words = _key_words(key)
     if "_".join(words) in _NON_SECRET_KEYS:
         return False
-    joined = "".join(words)
-    return (
-        any(token in low or token.replace("_", "") in joined for token in url_scope.SENSITIVE_KEY_TOKENS)
-        or any(word in _SECRET_WORDS for word in words)
-    )
+    # パスワード系
+    if any(p in low for p in ("password", "passwd", "pwd")):
+        return True
+    # シークレット系
+    if "secret" in low or any(w in ("secret", "secrets") for w in words):
+        return True
+    # トークン系（_NON_SECRET_KEYS 以外）
+    if any("token" in w for w in words):
+        return True
+    # API キー系
+    if "api_key" in low or "apikey" in low or "x-api-key" in low or ("api" in words and any(k in words for k in ("key", "keys"))):
+        return True
+    # セッション ID 系（bare session は曖昧枠で値も合わせて判定）
+    if "sessionid" in low or "session_id" in low or ("session" in words and any(k in words for k in ("id", "ids"))):
+        return True
+    # CSRF / XSRF 系
+    if any(c in low for c in ("csrf", "xsrf", "authenticity_token")):
+        return True
+    return False
+
+
+def _key_is_sensitive(key: str) -> bool:
+    """キー名が明確な資格情報を示すか。"""
+    return _is_unambiguous_secret_key(key)
+
+
+def _is_ambiguous_credential_key(key: str) -> bool:
+    """key/sort_key/session/auth などの文脈によって秘密にも非秘密にもなるキーか。"""
+    words = _key_words(key)
+    if not words or "_".join(words) in _NON_SECRET_KEYS:
+        return False
+    if _is_unambiguous_secret_key(key):
+        return False
+    return any(w in _AMBIGUOUS_CREDENTIAL_WORDS for w in words)
+
+
+def _shannon_entropy(data: str) -> float:
+    import math
+    from collections import Counter
+    if not data:
+        return 0.0
+    counts = Counter(data)
+    length = len(data)
+    return -sum((c / length) * math.log2(c / length) for c in counts.values())
+
+
+def _value_looks_like_secret(val: str) -> bool:
+    """曖昧なキーに対する値が秘密らしいか。十分な長さ・エントロピーや既知の認証形式を検査する。"""
+    if not isinstance(val, str) or not val:
+        return False
+    cleaned = val.strip()
+    if cleaned.lower() in _KNOWN_NON_SECRET_VALUES:
+        return False
+    if cleaned.startswith(_API_KEY_PREFIXES):
+        return True
+    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", cleaned):
+        return True
+    if len(cleaned) < 16:
+        return False
+    # 空白や複数の単語区切り（snake_case の自然言語語句）は秘密とみなさない
+    if " " in cleaned or bool(re.search(r"[a-z]{3,}_[a-z]{3,}", cleaned)):
+        return False
+    ent = _shannon_entropy(cleaned)
+    if re.fullmatch(r"[0-9a-fA-F]{24,}", cleaned) and ent >= 3.0:
+        return True
+    if re.fullmatch(r"[A-Za-z0-9+/=_-]{20,}", cleaned) and ent >= 3.4:
+        has_digits = any(c.isdigit() for c in cleaned)
+        has_letters = any(c.isalpha() for c in cleaned)
+        if has_digits and has_letters:
+            return True
+    return False
+
+
+def _leaf_is_secret(value, key: str) -> bool:
+    """template の葉が秘密か。明確な秘密キーは値によらず秘密とし、曖昧なキーは値の形も合わせて判定する。"""
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return _key_is_sensitive(key)
+    if not isinstance(value, str) or not value:
+        return False
+    if _key_is_sensitive(key):
+        return True
+    from wscan import url_scope
+    from wscan.content_provenance import _BEARER_VALUE_PATTERN, _JWT_VALUE_PATTERN
+    from wscan.request_logger import redact_text
+    if (
+        bool(_JWT_VALUE_PATTERN.search(value))
+        or bool(_BEARER_VALUE_PATTERN.search(value))
+        or url_scope.has_secret_marker(value)
+        or url_scope.redact_secret_values(value) != value
+        or redact_text(value) != value
+    ):
+        return True
+    if _is_ambiguous_credential_key(key):
+        return _value_looks_like_secret(value)
+    return False
 
 
 def _redact_json_leaves(value, key: str = ""):
@@ -176,10 +258,11 @@ def select_session_bearer(items) -> str:
             val = val[7:].strip()
         if not _BEARER_VALUE.fullmatch(val):
             return
+        is_cred_key = _is_unambiguous_secret_key(key) or _is_ambiguous_credential_key(key)
         token_key = bool({"jwt", "bearer"} & set(words)) or (
-            _key_is_sensitive(key) and any("token" in w for w in words)
+            is_cred_key and any("token" in w for w in words)
         )
-        if token_key or (_JWT_VALUE_PATTERN.fullmatch(val) and _key_is_sensitive(key)):
+        if token_key or (_JWT_VALUE_PATTERN.fullmatch(val) and is_cred_key):
             found.setdefault(val, words)
 
     for item in items or ():
@@ -335,7 +418,12 @@ class AgentScannerTools:
                 template = dict(field["template"])
             elif getattr(point, "template", None) and isinstance(point.template, dict):
                 template = dict(point.template)
-            self.points[point_id] = {
+            auth_scheme = ""
+            if isinstance(field, dict):
+                auth_scheme = str(field.get("auth_scheme") or field.get("auth") or "")
+            if not auth_scheme and template:
+                auth_scheme = str(template.get("auth_scheme") or "")
+            item_data = {
                 "location": point.location, "url": point.url, "parameter_id": point.parameter_id,
                 "display_name": point.display_name,
                 "form_index": point.form_index, "field": dict(field or {"name": point.parameter_id}),
@@ -343,6 +431,9 @@ class AgentScannerTools:
                 "template_id": point.template_id,
                 "template": template or {},
             }
+            if auth_scheme:
+                item_data["auth_scheme"] = auth_scheme
+            self.points[point_id] = item_data
         self._save_points()
         return point_id
 
@@ -685,10 +776,16 @@ class AgentScannerTools:
             return {"status": "blocked", "reason": "current authentication state is unavailable; re-authenticate and retry"}
         bearer = ""
         tmpl_meta = metadata.get("template") if isinstance(metadata.get("template"), dict) else {}
-        if (
-            point.location in ("json_body", "json") and tmpl_meta.get("auth_scheme") == "bearer"
+        is_bearer_carrier = (
+            (point.location in ("json_body", "json") or point.location in ("url_param", "query"))
+            and (
+                tmpl_meta.get("auth_scheme") == "bearer"
+                or metadata.get("auth_scheme") == "bearer"
+                or (metadata.get("field") or {}).get("auth_scheme") == "bearer"
+            )
             and not any(str(k).lower() == "authorization" for k in (getattr(self.scanner, "extra_headers", None) or {}))
-        ):
+        )
+        if is_bearer_carrier:
             # 保存した template の Bearer は捨てている。Agent セッションから新しい値を得られる場合だけ送る。
             # storage は origin ごとなので、現在のページが送信先と同じ origin のときだけ読む（他 origin の token を送らない）。
             capture = getattr(self.scanner, "_capture_tokens", None)
@@ -743,6 +840,12 @@ class AgentScannerTools:
                 if not hasattr(engine, "injection_templates") or engine.injection_templates is None:
                     engine.injection_templates = {}
                 engine.injection_templates[point.template_id] = template_dict
+            elif bearer:
+                from wscan.engine import _store_synced_token
+                send_url = str(tmpl_meta.get("url") or point.url)
+                _store_synced_token(engine, send_url, {"Authorization": f"Bearer {bearer}"})
+                if hasattr(engine, "headers") and isinstance(engine.headers, dict):
+                    engine.headers["Authorization"] = f"Bearer {bearer}"
             from wscan.llm_agent_browser import security_probe_allowed
             tmpl_url = (metadata.get("template") or {}).get("url") if isinstance(metadata.get("template"), dict) else ""
             if (

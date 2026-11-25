@@ -372,9 +372,10 @@ async def run_scenario(scenario: dict, out_dir: Path) -> dict:
         )
     findings.extend(tools.agent_findings())
     complete = harness.coverage_complete
-    status = harness.finalize(success=complete, coverage_complete=complete)
+    llm_success = scenario.get("llm_success", complete)
+    status = harness.finalize(success=llm_success, coverage_complete=complete)
     outcome = agent_result_outcome(SimpleNamespace(
-        success=complete, error=None, harness_status=status.value, findings=findings,
+        success=llm_success, error=None, harness_status=status.value, findings=findings,
         coverage_gaps=list(harness.state.coverage_gaps), incomplete_reason="",
     ))
     kept = {h.get("candidate_id") for h in harness.state.hypotheses}
@@ -407,6 +408,7 @@ _RUN_ALL = {"tool": "run_scanner_work", "work": "*"}
 _TWIN_PAGES = ["/xss?q=sample", "/xss-safe?q=sample", "/sql/search?q=sample",
                "/sql/search-safe?q=sample", "/os/ping?host=localhost", "/os/ping-safe?host=localhost"]
 _JSON_BODY = {"q": "sample", "max_tokens": 10, "page_token": "p2", "secretary": "none"}
+_JSON_BODY_WITH_CONTEXT_KEYS = {"q": "sample", "sort_key": "asc", "key": "title", "session": 1, "auth": "local"}
 
 SCENARIOS: list[dict] = [
     {
@@ -533,5 +535,29 @@ SCENARIOS: list[dict] = [
         ],
         "ground_truth": set(), "safe": set(),
         "expect_status": "partial",  # 認証を得られない送信は BLOCKED として残す（0 finding の成功にしない）
+    },
+    {
+        "name": "json_body_with_sort_key_and_context_keys",
+        "events": [
+            {"observe_json": {"path": "/api/search", "pointer": "/q", "body": _JSON_BODY_WITH_CONTEXT_KEYS}},
+            {"observe_json": {"path": "/api/search-safe", "pointer": "/q", "body": _JSON_BODY_WITH_CONTEXT_KEYS}},
+            {"tool": "schedule_scanner", "point": ["json", "/api/search", "/q"], "check": "sqli"},
+            {"tool": "schedule_scanner", "point": ["json", "/api/search-safe", "/q"], "check": "sqli"},
+            _RUN_ALL,
+        ],
+        "ground_truth": {"/api/search"}, "safe": {"/api/search-safe"},
+        "expect_status": "complete",
+    },
+    {
+        "name": "llm_claims_complete_with_partial_harness",
+        "llm_success": True,  # LLM は完了を主張
+        "events": [
+            {"visit": "/login"},  # access-only のページ（gap が残る）
+            {"visit": "/xss-safe?q=sample"},  # 安全ツインのみ訪問（0 finding）
+            _RUN_ALL,
+            {"final": "Assessment finished successfully. PROBE COMPLETE"},
+        ],
+        "ground_truth": set(), "safe": {"/xss-safe"},
+        "expect_status": "partial",  # 未到達/gap が残るため harness は PARTIAL（0 finding の成功に丸めない）
     },
 ]
