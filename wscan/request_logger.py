@@ -11,8 +11,10 @@
 いずれも 1 行 1 レコードの JSON Lines 形式。ログ書き込みはスキャン本体を
 妨げないよう、失敗しても例外を握りつぶす（ベストエフォート）。
 """
+import collections
 import json
 import httpx
+import math
 import re
 import threading
 import time
@@ -97,7 +99,7 @@ def clear_sensitive_headers() -> None:
 
 
 def _is_sensitive_header(name) -> bool:
-    normalized = str(name).lower()
+    normalized = str(name).strip("\"'").lower()
     return (
         normalized in _SENSITIVE_HEADERS
         or normalized in _RUNTIME_SENSITIVE_HEADERS
@@ -166,6 +168,35 @@ _RAW_BEARER_PATTERN = re.compile(
 )
 
 
+def _shannon_entropy(text: str) -> float:
+    """文字列のシャノンエントロピー（bit/char）を計算する。"""
+    if not text:
+        return 0.0
+    counts = collections.Counter(text)
+    n = len(text)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def _is_likely_token(token: str) -> bool:
+    """トークンが認証情報（API キー/JWT/ハッシュ等）らしい形状か判定する。
+
+    直前に「the」「valid」等の決定詞がある文脈でも、トークンらしい形状
+    （数字や記号を含む、大小混在、または一定長以上かつ高エントロピー）であれば
+    普通文と区別して伏せ字化の対象とする。
+    """
+    if not token or token == _REDACTED or token.lower() in _PROSE_WORDS:
+        return False
+    if any(c.isdigit() or c in "._~+/=-" for c in token):
+        return True
+    has_upper = any(c.isupper() for c in token)
+    has_lower = any(c.islower() for c in token)
+    if has_upper and has_lower and len(token) >= 6:
+        return True
+    if len(token) >= 12 and _shannon_entropy(token) >= 3.2:
+        return True
+    return False
+
+
 def _redact_auth_text(text: str) -> str:
     """自由テキスト中の Authorization / Bearer / Basic / Token を伏せる。"""
     if not isinstance(text, str) or not text:
@@ -174,7 +205,7 @@ def _redact_auth_text(text: str) -> str:
     def _sub_header(m):
         hdr, sep, q1, scheme, sp, token, q2 = m.groups()
         norm = hdr.strip("\"'").lower()
-        if norm in ("cookie", "set-cookie") or not _is_sensitive_header(hdr):
+        if norm in ("cookie", "set-cookie") or not _is_sensitive_header(norm):
             return m.group(0)
         token_clean = token.rstrip()
         trailing_space = token[len(token_clean):]
@@ -200,8 +231,6 @@ def _redact_auth_text(text: str) -> str:
         prefix_text = text[max(0, start_pos - 64):start_pos]
         prev_m = re.search(r"(\b\w+)\s*$", prefix_text)
         prev_word = prev_m.group(1).lower() if prev_m else ""
-        if prev_word in _DETERMINERS_BEFORE_BEARER:
-            return m.group(0)
 
         prefix, token = m.groups()
         if token == _REDACTED:
@@ -211,6 +240,8 @@ def _redact_auth_text(text: str) -> str:
             punct = token[-1] + punct
             token = token[:-1]
         if not token or token == _REDACTED or token.lower() in _PROSE_WORDS:
+            return m.group(0)
+        if prev_word in _DETERMINERS_BEFORE_BEARER and not _is_likely_token(token):
             return m.group(0)
         return f"{prefix} {_REDACTED}{punct}"
 
