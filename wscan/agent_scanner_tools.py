@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -39,27 +40,6 @@ def _default_json_body_for_pointer(pointer: str) -> dict | list:
 _REDACTED_LEAF = "<redacted>"
 
 
-def _leaf_is_secret(value, key: str) -> bool:
-    """template の葉が秘密か。キー名・値の形・登録済み資格情報値の既存判定を共有する。"""
-    if isinstance(value, bool) or value is None:
-        return False
-    if isinstance(value, (int, float)):
-        return _key_is_sensitive(key)
-    if not isinstance(value, str) or not value:
-        return False
-    from wscan import url_scope
-    from wscan.content_provenance import _BEARER_VALUE_PATTERN, _JWT_VALUE_PATTERN
-    from wscan.request_logger import redact_text
-    return (
-        _key_is_sensitive(key)
-        or bool(_JWT_VALUE_PATTERN.search(value))
-        or bool(_BEARER_VALUE_PATTERN.search(value))
-        or url_scope.has_secret_marker(value)
-        or url_scope.redact_secret_values(value) != value
-        or redact_text(value) != value
-    )
-
-
 # 既定は秘密。資格情報ではないと明らかな「キー名全体」だけを例外にする（迷う語は秘密の側）。
 # 照合は語に分けて "_" でつないだ形（maxTokens・max-tokens も max_tokens になる）。
 _NON_SECRET_KEYS = frozenset({
@@ -68,11 +48,93 @@ _NON_SECRET_KEYS = frozenset({
     "token_count", "page_token", "next_page_token", "prev_page_token", "next_token", "continuation_token",
     "secretary",
 })
-# SENSITIVE_KEY_TOKENS（部分一致）に加えて、語として現れたら秘密とみなす語。
-_SECRET_WORDS = frozenset({
-    "key", "keys", "session", "sessions", "cookie", "cookies", "auth", "oauth", "authorization",
-    "bearer", "jwt", "credential", "credentials",
+
+# key/sort_key/session/auth など、文脈や値によって秘密にも非秘密にもなる語。
+_AMBIGUOUS_CREDENTIAL_WORDS = frozenset({
+    "key", "keys", "session", "sessions", "auth", "oauth", "credential", "credentials",
+    "bearer", "jwt",
 })
+
+# 短い列挙値やソート方向など、明らかに秘密ではない代表的な値。
+_KNOWN_NON_SECRET_VALUES = frozenset({
+    "asc", "desc", "ascending", "descending", "none", "null", "all", "any", "true", "false",
+    "default", "local", "ldap", "saml", "basic", "bearer", "digest", "oauth", "password",
+    "user", "admin", "guest", "test", "sample", "text", "json", "xml", "active", "inactive",
+    "enabled", "disabled", "created_at", "updated_at", "id", "name", "title", "date",
+    "first", "last", "prev", "next", "open", "close", "start", "stop",
+})
+
+_API_KEY_PREFIXES = ("sk-", "ghp_", "gho_", "glpat-", "xoxb-", "xoxp-", "AKIA", "AIza")
+
+
+def summarize_structure(value):
+    """JSON 値の型・構造の要約を返す（秘密値は含まない）。"""
+    if isinstance(value, dict):
+        return {str(k): summarize_structure(v) for k, v in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [summarize_structure(v) for v in value]
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+    if value is None:
+        return "null"
+    return "any"
+
+
+def _sanitize_url_query_for_persistence(url: str) -> tuple[str, list[str]]:
+    """URL の scheme, host, port, path, およびクエリのキー名のみを残し、
+    userinfo（ユーザー名・パスワード）およびクエリの値を一切除外する。
+
+    戻り値: (値を除去した安全な URL, クエリキー名のリスト)
+    例: "https://admin:pass@target.test:8080/api/search?q=1&access_token=secret123&page=2"
+    -> ("https://target.test:8080/api/search?access_token=&page=&q=", ["access_token", "page", "q"])
+    """
+    if not url:
+        return "", []
+    import urllib.parse
+    parsed = urllib.parse.urlsplit(str(url))
+    safe_netloc = parsed.netloc.rpartition("@")[2]
+    query_keys = []
+    safe_query = ""
+    if parsed.query:
+        pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        query_keys = sorted(set(str(k) for k, _ in pairs))
+        safe_query = urllib.parse.urlencode([(k, "") for k in query_keys])
+    safe_url = urllib.parse.urlunsplit((parsed.scheme, safe_netloc, parsed.path, safe_query, ""))
+    return safe_url, query_keys
+
+
+def _endpoint_base(url: str) -> str:
+    """URL の scheme, host, port, path 部分を返す（userinfo, クエリ, フラグメントは除外）。"""
+    if not url:
+        return ""
+    from urllib.parse import urlsplit, urlunsplit
+    parsed = urlsplit(str(url))
+    safe_netloc = parsed.netloc.rpartition("@")[2]
+    return urlunsplit((parsed.scheme, safe_netloc, parsed.path, "", ""))
+
+
+def _structure_hash(body=None, query_keys: list[str] | None = None, *, body_structure=None) -> str:
+    """JSON body および URL クエリキー名の構造要約から決定論的ハッシュを生成する。値は含めない。"""
+    summary: dict = {}
+    if body is not None:
+        summary["body"] = summarize_structure(body)
+    elif body_structure is not None:
+        summary["body"] = body_structure
+    if query_keys:
+        summary["query_keys"] = sorted(set(str(k) for k in query_keys))
+    if not summary:
+        return ""
+    if "body" in summary and "query_keys" not in summary:
+        canonical = json.dumps(summary["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    else:
+        canonical = json.dumps(summary, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
 
 def _key_words(key: str) -> list[str]:
@@ -82,23 +144,128 @@ def _key_words(key: str) -> list[str]:
     return [w.casefold().rstrip("0123456789") for w in re.findall(r"[^\W_]+", normalized)]
 
 
-def _key_is_sensitive(key: str) -> bool:
-    """キー名が資格情報を示すか。既存 redaction の部分一致を既定とし、明示した例外だけ外す。"""
-    from wscan import url_scope
+def _is_unambiguous_secret_key(key: str) -> bool:
+    """明確に資格情報を示すキー名か。多層防御の伏せ字判定に用いる。"""
     from wscan.request_logger import is_sensitive_header
     low = str(key).lower()
     if not low:
         return False
-    if is_sensitive_header(low) or low in ("cookie", "authorization"):
+    if is_sensitive_header(low) or low in ("cookie", "cookies", "authorization", "proxyauthorization", "proxy-authorization", "proxy_authorization"):
         return True
     words = _key_words(key)
     if "_".join(words) in _NON_SECRET_KEYS:
         return False
-    joined = "".join(words)
-    return (
-        any(token in low or token.replace("_", "") in joined for token in url_scope.SENSITIVE_KEY_TOKENS)
-        or any(word in _SECRET_WORDS for word in words)
-    )
+    # クッキー / 認可 / プロキシ認可ヘッダ系
+    if any(w in words for w in ("cookie", "cookies", "authorization", "proxyauthorization")):
+        return True
+    # パスワード系
+    if any(p in low for p in ("password", "passwd", "pwd")):
+        return True
+    # シークレット系
+    if "secret" in low or any(w in ("secret", "secrets") for w in words):
+        return True
+    # トークン系（_NON_SECRET_KEYS 以外）
+    if any("token" in w for w in words):
+        return True
+    # API キー系
+    if "api_key" in low or "apikey" in low or "x-api-key" in low or ("api" in words and any(k in words for k in ("key", "keys"))):
+        return True
+    # セッション ID 系
+    if "sessionid" in low or "session_id" in low or ("session" in words and any(k in words for k in ("id", "ids"))):
+        return True
+    # CSRF / XSRF 系
+    if any(c in low for c in ("csrf", "xsrf", "authenticity_token")):
+        return True
+    return False
+
+
+def _key_is_sensitive(key: str) -> bool:
+    """キー名が明確な資格情報を示すか。多層防御の伏せ字判定に用いる。"""
+    low = str(key).lower()
+    words = _key_words(key)
+    if any(w in words for w in ("auth", "session", "token", "secret", "cookie", "cookies", "credential", "credentials")):
+        if "_".join(words) not in _NON_SECRET_KEYS:
+            return True
+    return _is_unambiguous_secret_key(key)
+
+
+def _is_ambiguous_credential_key(key: str) -> bool:
+    """key/sort_key/session/auth などの文脈によって秘密にも非秘密にもなるキーか。"""
+    words = _key_words(key)
+    if not words or "_".join(words) in _NON_SECRET_KEYS:
+        return False
+    if _is_unambiguous_secret_key(key):
+        return False
+    return any(w in _AMBIGUOUS_CREDENTIAL_WORDS for w in words)
+
+
+def _shannon_entropy(data: str) -> float:
+    import math
+    from collections import Counter
+    if not data:
+        return 0.0
+    counts = Counter(data)
+    length = len(data)
+    return -sum((c / length) * math.log2(c / length) for c in counts.values())
+
+
+def _value_looks_like_secret(val: str) -> bool:
+    """値が秘密らしいか。PEM 形式、既知プレフィックス、エントロピーを多層防御で検査する。"""
+    if not isinstance(val, str) or not val:
+        return False
+    cleaned = val.strip()
+    # PEM 形式の秘密鍵（空白・改行を含む）
+    if "BEGIN" in cleaned and "PRIVATE KEY" in cleaned:
+        return True
+    # Stripe 等の API キープレフィックス
+    if re.match(r"^(sk|rk|pk)_(live|test)_[A-Za-z0-9]{8,}", cleaned):
+        return True
+    if cleaned.lower() in _KNOWN_NON_SECRET_VALUES:
+        return False
+    if cleaned.startswith(_API_KEY_PREFIXES):
+        return True
+    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", cleaned):
+        return True
+    if len(cleaned) < 16:
+        return False
+    # 空白や複数の単語区切り（snake_case の自然言語語句）は秘密とみなさない
+    if " " in cleaned or bool(re.search(r"[a-z]{3,}_[a-z]{3,}", cleaned)):
+        return False
+    ent = _shannon_entropy(cleaned)
+    if re.fullmatch(r"[0-9a-fA-F]{24,}", cleaned) and ent >= 3.0:
+        return True
+    if re.fullmatch(r"[A-Za-z0-9+/=_-]{20,}", cleaned) and ent >= 3.4:
+        has_digits = any(c.isdigit() for c in cleaned)
+        has_letters = any(c.isalpha() for c in cleaned)
+        if has_digits and has_letters:
+            return True
+    return False
+
+
+def _leaf_is_secret(value, key: str = "") -> bool:
+    """多層防御: 値が秘密か。伏せ字処理にのみ用いる。"""
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return _key_is_sensitive(key)
+    if not isinstance(value, str) or not value:
+        return False
+    if key and _key_is_sensitive(key):
+        return True
+    from wscan import url_scope
+    from wscan.content_provenance import _BEARER_VALUE_PATTERN, _JWT_VALUE_PATTERN
+    from wscan.request_logger import redact_text
+    if (
+        "BEGIN" in value and "PRIVATE KEY" in value
+        or re.match(r"^(sk|rk|pk)_(live|test)_[A-Za-z0-9]{8,}", value.strip())
+        or bool(_JWT_VALUE_PATTERN.search(value))
+        or bool(_BEARER_VALUE_PATTERN.search(value))
+        or url_scope.has_secret_marker(value)
+        or url_scope.redact_secret_values(value) != value
+        or redact_text(value) != value
+    ):
+        return True
+    return _value_looks_like_secret(value)
 
 
 def _redact_json_leaves(value, key: str = ""):
@@ -123,24 +290,60 @@ def _redact_json_leaves(value, key: str = ""):
 
 
 def sanitize_template(template: dict) -> tuple[dict, bool]:
-    """永続化用に template から認証ヘッダと秘密の body 値を除く。
+    """永続化用に template からヘッダ値、body 値、URL クエリ値、userinfo を一切除き、
+    識別に必要な構造要約と非秘密メタ情報だけ残す。
 
-    戻り値は (安全な template, body に秘密があったか)。ヘッダは秘密の名前・値の形のものを落とし、
-    Content-Type 等の送信に要る非秘密ヘッダだけ残す。認証は resume 時に毎回セッションから受け取る。"""
-    safe = dict(template)
-    headers = safe.get("headers")
+    戻り値は (安全な template, body/header/query/userinfo に秘密があったかの多層防御フラグ)。
+    値は秘密かどうかに関係なく、永続化用 template には一切残さない。"""
+    if not isinstance(template, dict):
+        return {}, False
+    raw_url = str(template.get("url") or "")
+    safe_url, query_keys = _sanitize_url_query_for_persistence(raw_url)
+    if not query_keys and "query_keys" in template:
+        query_keys = sorted(set(str(k) for k in template["query_keys"]))
+    safe = {
+        "url": safe_url,
+        "method": str(template.get("method") or "POST").upper(),
+        "content_type": str(template.get("content_type") or "application/json"),
+    }
+    if query_keys:
+        safe["query_keys"] = query_keys
+
+    auth_scheme = str(template.get("auth_scheme") or "")
+    headers = template.get("headers")
+    has_secret_header = False
     if isinstance(headers, dict):
-        # Bearer 認証の API だったことだけ残す（値は残さない）。送信時に新しい Bearer を付け直す。
-        if any(str(k).lower() == "authorization" and str(v).strip().lower().startswith("bearer ")
-               for k, v in headers.items()):
-            safe["auth_scheme"] = "bearer"
-        safe["headers"] = {
-            k: v for k, v in headers.items()
-            if not _key_is_sensitive(str(k)) and not _leaf_is_secret(v, "")
-        }
-    body_secret = False
-    if "json_body" in safe:
-        safe["json_body"], body_secret = _redact_json_leaves(safe["json_body"])
+        for k, v in headers.items():
+            if str(k).lower() == "authorization" and str(v).strip().lower().startswith("bearer "):
+                auth_scheme = "bearer"
+            if _key_is_sensitive(str(k)) or _leaf_is_secret(v, str(k)):
+                has_secret_header = True
+    if auth_scheme:
+        safe["auth_scheme"] = auth_scheme
+
+    body_secret = has_secret_header
+    body = template.get("json_body") if "json_body" in template else None
+    if body is not None:
+        safe["body_structure"] = summarize_structure(body)
+        if isinstance(body, dict):
+            safe["body_keys"] = sorted(str(k) for k in body.keys())
+            for k, v in body.items():
+                if _key_is_sensitive(str(k)) or _leaf_is_secret(v, str(k)):
+                    body_secret = True
+    elif "body_structure" in template:
+        safe["body_structure"] = template["body_structure"]
+        if "body_keys" in template:
+            safe["body_keys"] = sorted(str(k) for k in template["body_keys"])
+
+    body_struct = safe.get("body_structure")
+    if body_struct is not None or query_keys:
+        safe["structure_hash"] = _structure_hash(
+            query_keys=query_keys,
+            body_structure=body_struct,
+        )
+    elif "structure_hash" in template:
+        safe["structure_hash"] = str(template["structure_hash"])
+
     return safe, body_secret
 
 
@@ -176,10 +379,11 @@ def select_session_bearer(items) -> str:
             val = val[7:].strip()
         if not _BEARER_VALUE.fullmatch(val):
             return
+        is_cred_key = _is_unambiguous_secret_key(key) or _is_ambiguous_credential_key(key)
         token_key = bool({"jwt", "bearer"} & set(words)) or (
-            _key_is_sensitive(key) and any("token" in w for w in words)
+            is_cred_key and any("token" in w for w in words)
         )
-        if token_key or (_JWT_VALUE_PATTERN.fullmatch(val) and _key_is_sensitive(key)):
+        if token_key or (_JWT_VALUE_PATTERN.fullmatch(val) and is_cred_key):
             found.setdefault(val, words)
 
     for item in items or ():
@@ -269,6 +473,7 @@ class AgentScannerTools:
         self.points: dict[str, dict] = {}
         self.findings: dict[str, object] = {}
         self.work_specs: dict[str, tuple[str, str]] = {}
+        self._live_templates: dict[str, dict] = {}
         self.points_path = Path(harness.output_dir) / "agent_scanner_points.json"
         self._load_points()
 
@@ -276,22 +481,8 @@ class AgentScannerTools:
         try:
             data = json.loads(self.points_path.read_text(encoding="utf-8"))
             self.points = data if isinstance(data, dict) else {}
-            for item in self.points.values():
-                if isinstance(item, dict) and self._sanitize_item(item):
-                    item["body_secret"] = True
         except (OSError, ValueError):
             self.points = {}
-
-    @staticmethod
-    def _sanitize_item(item: dict) -> bool:
-        """item の template（field 内の複製も）を永続化用に伏せる。body に秘密があれば True。"""
-        found = bool(item.get("body_secret"))
-        field = item.get("field")
-        for holder in (item, field if isinstance(field, dict) else None):
-            if holder is not None and isinstance(holder.get("template"), dict):
-                holder["template"], hit = sanitize_template(holder["template"])
-                found = found or hit
-        return found
 
     def _save_points(self):
         tmp = self.points_path.with_suffix(".tmp")
@@ -306,11 +497,12 @@ class AgentScannerTools:
                         saved["resume_unavailable"] = True
                     saved[key] = redacted
             tmpl = saved.get("template")
-            if isinstance(tmpl, dict) and tmpl.get("url"):
-                if redact_url(str(tmpl["url"])) != tmpl["url"]:
-                    saved["resume_unavailable"] = True
-            if self._sanitize_item(saved):
-                saved["body_secret"] = True
+            if isinstance(tmpl, dict):
+                saved["template"], _ = sanitize_template(tmpl)
+            f = saved.get("field")
+            if isinstance(f, dict) and isinstance(f.get("template"), dict):
+                saved["field"] = dict(f)
+                saved["field"]["template"], _ = sanitize_template(f["template"])
             self.points[point_id] = saved
             safe[point_id] = saved
         tmp.write_text(json.dumps(safe, ensure_ascii=False, sort_keys=True), encoding="utf-8")
@@ -329,20 +521,47 @@ class AgentScannerTools:
             existing, _ = self._resolve(point_id)
             if existing is not None and existing.stable_key_parts() != point.stable_key_parts():
                 raise ValueError("injection point ID collision; rediscover the input point before scheduling")
+        template = None
+        if isinstance(field, dict) and isinstance(field.get("template"), dict):
+            template = dict(field["template"])
+        elif getattr(point, "template", None) and isinstance(point.template, dict):
+            template = dict(point.template)
+
+        if template:
+            if not hasattr(self, "_live_templates"):
+                self._live_templates = {}
+            self._live_templates[point_id] = dict(template)
+            if self.scanner is not None:
+                if not hasattr(self.scanner, "captured_templates") or not isinstance(self.scanner.captured_templates, dict):
+                    try:
+                        self.scanner.captured_templates = {}
+                    except Exception:
+                        pass
+                if isinstance(getattr(self.scanner, "captured_templates", None), dict):
+                    self.scanner.captured_templates[point_id] = dict(template)
+                    self.scanner.captured_templates[str(template.get("url") or point.url)] = dict(template)
+
         if current is None or current.get("resume_unavailable"):
-            template = None
-            if isinstance(field, dict) and isinstance(field.get("template"), dict):
-                template = dict(field["template"])
-            elif getattr(point, "template", None) and isinstance(point.template, dict):
-                template = dict(point.template)
-            self.points[point_id] = {
+            auth_scheme = ""
+            if isinstance(field, dict):
+                auth_scheme = str(field.get("auth_scheme") or field.get("auth") or "")
+            sanitized_template, _ = sanitize_template(template) if template else ({}, False)
+            if not auth_scheme and sanitized_template:
+                auth_scheme = str(sanitized_template.get("auth_scheme") or "")
+            sanitized_field = dict(field or {"name": point.parameter_id})
+            if "template" in sanitized_field and isinstance(sanitized_field["template"], dict):
+                sanitized_field["template"], _ = sanitize_template(sanitized_field["template"])
+            item_data = {
                 "location": point.location, "url": point.url, "parameter_id": point.parameter_id,
                 "display_name": point.display_name,
-                "form_index": point.form_index, "field": dict(field or {"name": point.parameter_id}),
+                "form_index": point.form_index, "field": sanitized_field,
                 "method": point.method, "action": point.action,
                 "template_id": point.template_id,
-                "template": template or {},
+                "template": sanitized_template,
             }
+            if auth_scheme:
+                item_data["auth_scheme"] = auth_scheme
+            self.points[point_id] = item_data
         self._save_points()
         return point_id
 
@@ -350,7 +569,10 @@ class AgentScannerTools:
         item = self.points.get(str(point_id))
         if not isinstance(item, dict):
             return None, None
-        if item.get("resume_unavailable") or item.get("body_secret"):
+        if item.get("resume_unavailable"):
+            return None, item
+        # レガシーな body_secret かつ structure_hash が未記録の古い checkpoint だけ除外する
+        if item.get("body_secret") and not (item.get("template") or {}).get("structure_hash"):
             return None, item
         try:
             carrier = "query" if item.get("location") == "url_param" else item.get("location")
@@ -378,6 +600,110 @@ class AgentScannerTools:
         if self._point_id(point) != str(point_id):
             return None, item
         return point, item
+
+    async def _reobtain_live_template(self, point: InjectionPoint, metadata: dict) -> tuple[dict | None, str]:
+        """送信直前に、現在のページや捕捉したリクエスト・セッションから同じ構造の template を取り直す。
+
+        戻り値は (template, reason)。構造ハッシュが一致したときだけ template を返し、
+        取り直せない場合や一致しない場合は (None, reason) を返す。
+        """
+        point_id = self._point_id(point)
+        meta_tmpl = metadata.get("template") if isinstance(metadata.get("template"), dict) else {}
+        expected_hash = meta_tmpl.get("structure_hash") or ""
+        expected_url = str(meta_tmpl.get("url") or point.url)
+        expected_base = _endpoint_base(expected_url)
+        expected_endpoint = endpoint_identity(expected_url)
+        expected_method = str(meta_tmpl.get("method") or point.method or "POST").upper()
+
+        candidates: list[dict] = []
+        if hasattr(self, "_live_templates") and point_id in self._live_templates:
+            candidates.append(self._live_templates[point_id])
+
+        scanner = self.scanner
+        if scanner is not None:
+            for attr in ("_live_templates", "captured_templates", "injection_templates"):
+                val = getattr(scanner, attr, None)
+                if isinstance(val, dict):
+                    if point_id in val and isinstance(val[point_id], dict) and val[point_id] not in candidates:
+                        candidates.append(val[point_id])
+                    for k, t in val.items():
+                        if isinstance(t, dict) and t not in candidates:
+                            t_url = str(t.get("url") or "")
+                            if t_url and (t_url == expected_url or _endpoint_base(t_url) == expected_base or endpoint_identity(t_url) == expected_endpoint):
+                                candidates.append(t)
+
+            captured_reqs = (
+                getattr(scanner, "captured_requests", None)
+                or getattr(getattr(scanner, "_active_session", None), "captured_requests", None)
+                or getattr(scanner, "_captured_requests", None)
+            )
+            if isinstance(captured_reqs, list):
+                for req in reversed(captured_reqs):
+                    if not isinstance(req, dict):
+                        continue
+                    r_url = str(req.get("url") or "")
+                    r_method = str(req.get("method") or "POST").upper()
+                    if (r_url == expected_url or _endpoint_base(r_url) == expected_base or endpoint_identity(r_url) == expected_endpoint) and r_method == expected_method:
+                        body = req.get("json_body")
+                        if body is None and req.get("post_data"):
+                            try:
+                                body = json.loads(req["post_data"])
+                            except Exception:
+                                body = None
+                        if isinstance(body, (dict, list)):
+                            candidates.append({
+                                "url": r_url,
+                                "method": r_method,
+                                "json_body": body,
+                                "headers": dict(req.get("headers") or {}),
+                                "content_type": str(req.get("content_type") or "application/json"),
+                            })
+
+            if callable(getattr(scanner, "get_template_for_point", None)):
+                try:
+                    res = await scanner.get_template_for_point(point_id)
+                    if isinstance(res, dict) and res not in candidates:
+                        candidates.append(res)
+                except Exception:
+                    pass
+            elif callable(getattr(scanner, "capture_template", None)):
+                try:
+                    res = await scanner.capture_template(expected_url, point.parameter_id)
+                    if isinstance(res, dict) and res not in candidates:
+                        candidates.append(res)
+                except Exception:
+                    pass
+
+        if not candidates:
+            if not expected_hash:
+                default_body = _default_json_body_for_pointer(point.parameter_id)
+                return {
+                    "url": expected_url,
+                    "method": expected_method,
+                    "json_body": default_body,
+                    "content_type": "application/json",
+                    "headers": {},
+                }, ""
+            return None, "live request template is unavailable in the current agent session"
+
+        matched = None
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            cand_url = str(cand.get("url") or "")
+            if expected_base and _endpoint_base(cand_url) != expected_base:
+                continue
+            cand_body = cand.get("json_body")
+            _, cand_query_keys = _sanitize_url_query_for_persistence(cand_url)
+            cand_hash = _structure_hash(body=cand_body, query_keys=cand_query_keys)
+            if not expected_hash or cand_hash == expected_hash:
+                matched = cand
+                break
+
+        if matched is None:
+            return None, "live request template structure does not match the registered injection point"
+
+        return matched, ""
 
     def _scope_reason(self, point: InjectionPoint, field_name: str = "", template: dict | None = None) -> str:
         engine_args = self.scanner
@@ -685,10 +1011,16 @@ class AgentScannerTools:
             return {"status": "blocked", "reason": "current authentication state is unavailable; re-authenticate and retry"}
         bearer = ""
         tmpl_meta = metadata.get("template") if isinstance(metadata.get("template"), dict) else {}
-        if (
-            point.location in ("json_body", "json") and tmpl_meta.get("auth_scheme") == "bearer"
+        is_bearer_carrier = (
+            (point.location in ("json_body", "json") or point.location in ("url_param", "query"))
+            and (
+                tmpl_meta.get("auth_scheme") == "bearer"
+                or metadata.get("auth_scheme") == "bearer"
+                or (metadata.get("field") or {}).get("auth_scheme") == "bearer"
+            )
             and not any(str(k).lower() == "authorization" for k in (getattr(self.scanner, "extra_headers", None) or {}))
-        ):
+        )
+        if is_bearer_carrier:
             # 保存した template の Bearer は捨てている。Agent セッションから新しい値を得られる場合だけ送る。
             # storage は origin ごとなので、現在のページが送信先と同じ origin のときだけ読む（他 origin の token を送らない）。
             capture = getattr(self.scanner, "_capture_tokens", None)
@@ -712,6 +1044,32 @@ class AgentScannerTools:
                 )
                 self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason=_BEARER_UNAVAILABLE)
                 return {"status": "blocked", "reason": f"{_BEARER_UNAVAILABLE}; sign in through the agent session or set an Authorization header and retry"}
+        meta_tmpl = metadata.get("template") if isinstance(metadata.get("template"), dict) else {}
+        has_template_req = bool(
+            point.location in ("json_body", "json")
+            or meta_tmpl.get("structure_hash")
+            or meta_tmpl.get("query_keys")
+        )
+        live_tmpl = None
+        if has_template_req:
+            import inspect
+            reobtain_res = self._reobtain_live_template(point, metadata)
+            if inspect.isawaitable(reobtain_res):
+                live_tmpl, tmpl_reason = await reobtain_res
+            else:
+                live_tmpl, tmpl_reason = reobtain_res
+            if live_tmpl is None:
+                self.harness.record_dispatch_event(
+                    event_type="authorization_decision",
+                    tool_name="run_scanner_work",
+                    work_id=work_id,
+                    correlation_id=corr_id,
+                    allowed=False,
+                    reason=tmpl_reason,
+                )
+                self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason=tmpl_reason)
+                return {"status": "blocked", "reason": tmpl_reason}
+        target_send_url = str((live_tmpl or {}).get("url") or meta_tmpl.get("url") or point.url)
         engine = None
         from wscan import url_scope
         secret_registry = getattr(url_scope, "_SECRET_VALUES", None)
@@ -722,27 +1080,54 @@ class AgentScannerTools:
             engine = self.engine_factory(check, handoff)
             engine.target_only = True
             engine._runtime_scope_block_callback = self._record_scope_block
+
+            if is_bearer_carrier:
+                env_scope = os.environ.get("WSCAN_HEADER_SCOPE_ENFORCE", "")
+                if (
+                    getattr(engine, "header_scope_enforce", True) is False
+                    or (env_scope and env_scope.strip().lower() in ("0", "false", "no", "off"))
+                ):
+                    reason = "header scope enforcement is disabled; bearer token was withheld"
+                    self.harness.record_dispatch_event(
+                        event_type="authorization_decision",
+                        tool_name="run_scanner_work",
+                        work_id=work_id,
+                        correlation_id=corr_id,
+                        allowed=False,
+                        reason=reason,
+                    )
+                    self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason=reason)
+                    return {"status": "blocked", "reason": reason}
+
             if point.location in ("json_body", "json"):
-                tmpl_data = metadata.get("template") if isinstance(metadata.get("template"), dict) else {}
+                tmpl_data = live_tmpl or {}
                 json_body = tmpl_data.get("json_body")
                 if json_body is None:
                     json_body = _default_json_body_for_pointer(point.parameter_id)
+                clean_headers = {
+                    k: v for k, v in (tmpl_data.get("headers") or {}).items()
+                    if not _key_is_sensitive(str(k)) and not _leaf_is_secret(v, str(k))
+                }
+                if tmpl_data.get("content_type"):
+                    clean_headers.setdefault("Content-Type", str(tmpl_data.get("content_type")))
+                elif "Content-Type" not in clean_headers:
+                    clean_headers["Content-Type"] = "application/json"
+                if bearer:
+                    clean_headers["Authorization"] = f"Bearer {bearer}"
                 template_dict = {
                     "method": str(tmpl_data.get("method") or point.method or "POST").upper(),
-                    "url": str(tmpl_data.get("url") or point.url),
-                    "endpoint": endpoint_identity(str(tmpl_data.get("url") or point.url)),
+                    "url": target_send_url,
+                    "endpoint": endpoint_identity(target_send_url),
                     "json_body": json_body,
-                    "content_type": str(tmpl_data.get("content_type") or "application/json"),
-                    "headers": {
-                        k: v for k, v in dict(tmpl_data.get("headers") or {}).items()
-                        if not _key_is_sensitive(str(k)) and not _leaf_is_secret(v, "")
-                    },
+                    "content_type": str(tmpl_data.get("content_type") or clean_headers.get("Content-Type") or "application/json"),
+                    "headers": clean_headers,
                 }
-                if bearer:
-                    template_dict["headers"]["Authorization"] = f"Bearer {bearer}"
                 if not hasattr(engine, "injection_templates") or engine.injection_templates is None:
                     engine.injection_templates = {}
                 engine.injection_templates[point.template_id] = template_dict
+            if bearer:
+                from wscan.engine import _store_synced_token
+                _store_synced_token(engine, target_send_url, {"Authorization": f"Bearer {bearer}"})
             from wscan.llm_agent_browser import security_probe_allowed
             tmpl_url = (metadata.get("template") or {}).get("url") if isinstance(metadata.get("template"), dict) else ""
             if (
@@ -814,7 +1199,7 @@ class AgentScannerTools:
                 return {"status": "blocked", "reason": "authentication could not be verified; re-authenticate and retry"}
             scanner = engine.scanners[check]
             if point.location not in ("json_body", "json"):
-                await engine._browser.navigate(point.url)
+                await engine._browser.navigate(target_send_url)
             self.harness.record_dispatch_event(
                 event_type="authorization_decision",
                 tool_name="run_scanner_work",
@@ -833,8 +1218,9 @@ class AgentScannerTools:
                 work.transition_to(WorkStatus.RUNNING)
                 work.attempts += 1
                 self.harness.checkpoint()
+            from wscan.request_logger import redact_url
             self.harness.record_probe_attempt(
-                target_url=point.url, check_type=check, work_id=work_id,
+                target_url=redact_url(str(point.url)), check_type=check, work_id=work_id,
                 correlation_id=corr_id,
                 status="dispatching", binding=binding, binding_digest=binding_digest,
             )
@@ -842,9 +1228,9 @@ class AgentScannerTools:
                 if callable(getattr(scanner, "scan_injection_point", None)):
                     scan_coro = scanner.scan_injection_point(point, metadata["field"])
                 else:
-                    scan_coro = scanner.scan_field(point.url, point.form_index, metadata["field"], False)
+                    scan_coro = scanner.scan_field(target_send_url, point.form_index, metadata["field"], False)
             else:
-                scan_coro = scanner.scan_field(point.url, point.form_index, metadata["field"], point.legacy_is_url_param())
+                scan_coro = scanner.scan_field(target_send_url, point.form_index, metadata["field"], point.legacy_is_url_param())
             findings = await asyncio.wait_for(scan_coro, timeout=180)
             verified = []
             verification_inconclusive = False
@@ -861,7 +1247,7 @@ class AgentScannerTools:
             )
             self.findings[work_id] = sanitized_findings
             self.harness.record_probe_attempt(
-                target_url=point.url, check_type=check, work_id=work_id,
+                target_url=redact_url(str(point.url)), check_type=check, work_id=work_id,
                 correlation_id=corr_id,
                 status="inconclusive" if status == WorkStatus.INCONCLUSIVE else "completed",
                 evidence_id=work_id, binding=binding, binding_digest=binding_digest,
@@ -1471,8 +1857,9 @@ class AgentScannerTools:
 
     def _new_engine(self, check, handoff):
         from wscan.engine import ScanEngine
+        extra_headers = getattr(self.scanner, "extra_headers", None) or {}
         headers = {
-            key: value for key, value in self.scanner.extra_headers.items()
+            key: value for key, value in extra_headers.items()
             if str(key).lower() != "cookie"
         }
         return ScanEngine(
