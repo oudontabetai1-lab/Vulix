@@ -41,8 +41,8 @@ INCOMPLETE_EVAL_STATUSES: frozenset[AgentEvalStatus] = frozenset(
 AGENT_INVARIANT_MONITORING_REGISTRY: Mapping[str, str] = MappingProxyType({
     "scope_violations": "monitored",
     "secret_leaks": "not_monitored",
-    "unauthorized_tool_calls": "not_monitored",
-    "unexecuted_actions_claimed": "not_monitored",
+    "unauthorized_tool_calls": "monitored",
+    "unexecuted_actions_claimed": "monitored",
     "false_complete_claims": "monitored",
     "unverified_promoted_to_confirmed": "monitored",
 })

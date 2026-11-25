@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import secrets
 import subprocess
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
@@ -203,8 +204,26 @@ class AgentScannerTools:
                 return "scope_blocked" if action_decision.reason != "excluded_url" else "excluded_url"
         return ""
 
-    async def list_scanner_capabilities(self) -> dict:
+    async def list_scanner_capabilities(self, *, correlation_id: str = "") -> dict:
         """Return discovered injection points and their carrier/check support."""
+        corr_id = str(correlation_id or f"corr_cap_{secrets.token_hex(4)}")
+        self.harness.record_dispatch_event(
+            event_type="tool_request",
+            tool_name="list_scanner_capabilities",
+            correlation_id=corr_id,
+        )
+        self.harness.record_dispatch_event(
+            event_type="authorization_decision",
+            tool_name="list_scanner_capabilities",
+            correlation_id=corr_id,
+            allowed=True,
+            reason="authorized",
+        )
+        self.harness.record_dispatch_event(
+            event_type="dispatch_start",
+            tool_name="list_scanner_capabilities",
+            correlation_id=corr_id,
+        )
         await self.observe_page()
         items = []
         gaps = []
@@ -225,27 +244,81 @@ class AgentScannerTools:
             items.append({"injection_point_id": point_id, "carrier": carrier, "checks": sorted(SUPPORTED_CHECKS), "status": status, "reason": reason})
         if gaps:
             self.harness.note_coverage(coverage_gaps=[*self.harness.state.coverage_gaps, *gaps])
+        self.harness.record_dispatch_event(
+            event_type="dispatch_end",
+            tool_name="list_scanner_capabilities",
+            correlation_id=corr_id,
+            status="completed",
+        )
         return {"capabilities": items}
 
-    def schedule_scanner(self, injection_point_id: str, check: str) -> dict:
+    def schedule_scanner(self, injection_point_id: str, check: str, *, correlation_id: str = "") -> dict:
         """Queue an additional scanner work item without sending a request."""
+        corr_id = str(correlation_id or f"corr_sched_{secrets.token_hex(4)}")
+        self.harness.record_dispatch_event(
+            event_type="tool_request",
+            tool_name="schedule_scanner",
+            correlation_id=corr_id,
+            details={"injection_point_id": injection_point_id, "check": check},
+        )
         check = str(check or "").lower()
         point, metadata = self._resolve(injection_point_id)
         if check not in SUPPORTED_CHECKS:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="schedule_scanner",
+                correlation_id=corr_id,
+                allowed=False,
+                reason="check must be one of xss, sqli, os",
+            )
             return {"status": "unsupported", "reason": "check must be one of xss, sqli, os"}
         if point is None or metadata is None:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="schedule_scanner",
+                correlation_id=corr_id,
+                allowed=False,
+                reason="unknown injection point ID",
+            )
             return {"status": "unsupported", "reason": "unknown injection point ID"}
         reason = self._scope_reason(point, str(metadata.get("parameter_id", "")))
         if reason:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="schedule_scanner",
+                correlation_id=corr_id,
+                allowed=False,
+                reason=reason,
+            )
             self.harness.note_coverage(coverage_gaps=[*self.harness.state.coverage_gaps, f"{reason}:{injection_point_id}"])
             return {"status": "blocked", "reason": reason}
+        self.harness.record_dispatch_event(
+            event_type="authorization_decision",
+            tool_name="schedule_scanner",
+            correlation_id=corr_id,
+            allowed=True,
+            reason="authorized",
+        )
+        self.harness.record_dispatch_event(
+            event_type="dispatch_start",
+            tool_name="schedule_scanner",
+            correlation_id=corr_id,
+        )
         existing = next((item for item in self.harness.state.work_queue
                          if item.role == AgentRole.PROBE_SPECIALIST
                          and item.target == injection_point_id
                          and item.check_type == check), None)
-        work = self.harness.enqueue(AgentRole.PROBE_SPECIALIST, injection_point_id, check_type=check)
+        work = self.harness.enqueue(AgentRole.PROBE_SPECIALIST, injection_point_id, check_type=check, correlation_id=corr_id)
         self.work_specs[work.work_id] = (injection_point_id, check)
-        return {"work_id": work.work_id, "status": "already_scheduled" if existing else "planned"}
+        status = "already_scheduled" if existing else "planned"
+        self.harness.record_dispatch_event(
+            event_type="dispatch_end",
+            tool_name="schedule_scanner",
+            correlation_id=corr_id,
+            work_id=work.work_id,
+            status=status,
+        )
+        return {"work_id": work.work_id, "status": status}
 
     def schedule_baselines(self, *, point_ids=None) -> int:
         """Deterministically queue every supported point/check pair."""
@@ -260,12 +333,35 @@ class AgentScannerTools:
                 count += queued.get("status") == "planned"
         return count
 
-    async def run_scanner_work(self, work_id: str) -> dict:
+    async def run_scanner_work(self, work_id: str, *, correlation_id: str = "") -> dict:
         """Execute a queued item with a fresh, verified handoff session."""
         work = next((item for item in self.harness.state.work_queue if item.work_id == work_id), None)
+        corr_id = str(correlation_id or (getattr(work, "correlation_id", "") if work else "") or f"corr_work_{work_id}_{secrets.token_hex(4)}")
+        self.harness.record_dispatch_event(
+            event_type="tool_request",
+            tool_name="run_scanner_work",
+            work_id=work_id,
+            correlation_id=corr_id,
+        )
         if work is None:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=False,
+                reason="unknown work ID; schedule the scanner work first",
+            )
             return {"status": "failed", "reason": "unknown work ID; schedule the scanner work first"}
         if work.status not in {WorkStatus.PLANNED, WorkStatus.RUNNING, WorkStatus.INCONCLUSIVE, WorkStatus.TRANSIENT_FAILURE}:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=False,
+                reason="work is already running or complete; schedule new work to retry",
+            )
             return {"status": "blocked", "reason": "work is already running or complete; schedule new work to retry"}
         was_claimed = work.status == WorkStatus.RUNNING
         spec = self.work_specs.get(work_id)
@@ -275,22 +371,62 @@ class AgentScannerTools:
             except Exception:
                 spec = None
         if not spec:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=False,
+                reason="scanner work metadata is unavailable; schedule it again",
+            )
             self.harness.finish_work(work_id, WorkStatus.FAILED, rejection_reason="scanner work cannot be resumed; schedule it again")
             return {"status": "failed", "reason": "scanner work metadata is unavailable; schedule it again"}
         point_id, check = spec
         point, metadata = self._resolve(point_id)
         if point is None or check not in SUPPORTED_CHECKS:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=False,
+                reason="unsupported carrier or check",
+            )
             self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="unsupported carrier or check")
             return {"status": "unsupported", "reason": "this carrier or check is not supported"}
         reason = self._scope_reason(point, str(metadata.get("parameter_id", "")))
         if reason:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=False,
+                reason=reason,
+            )
             self.harness.finish_work(work_id, WorkStatus.SCOPE_BLOCKED, rejection_reason=reason)
             return {"status": "blocked", "reason": reason}
         if self.harness.remaining_steps <= 0:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=False,
+                reason="scanner work budget exhausted",
+            )
             self.harness.note_coverage(coverage_gaps=[*self.harness.state.coverage_gaps, f"scanner_budget_exhausted:{point_id}:{check}"])
             self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="scanner work budget exhausted")
             return {"status": "blocked", "reason": "scanner work budget is exhausted; increase the run budget and retry"}
         if self._already_dispatched(work_id):
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=False,
+                reason="prior dispatch outcome is unknown; automatic replay was suppressed",
+            )
             self.harness.finish_work(work_id, WorkStatus.INCONCLUSIVE, rejection_reason="prior dispatch outcome is unknown; automatic replay was suppressed")
             return {"status": "inconclusive", "reason": "a prior attempt may have reached the target; automatic replay was suppressed"}
         binding = self._verification_binding(point, metadata, check)
@@ -300,6 +436,14 @@ class AgentScannerTools:
         except Exception:
             cookies = None
         if not cookies:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=False,
+                reason="authentication state unavailable",
+            )
             self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="authentication state unavailable")
             return {"status": "blocked", "reason": "current authentication state is unavailable; re-authenticate and retry"}
         engine = None
@@ -329,6 +473,14 @@ class AgentScannerTools:
                     or engine._is_url_excluded(point.action)
                 ))
             ):
+                self.harness.record_dispatch_event(
+                    event_type="authorization_decision",
+                    tool_name="run_scanner_work",
+                    work_id=work_id,
+                    correlation_id=corr_id,
+                    allowed=False,
+                    reason="engine scope guard rejected injection point",
+                )
                 self.harness.finish_work(work_id, WorkStatus.SCOPE_BLOCKED, rejection_reason="engine scope guard rejected injection point")
                 return {"status": "blocked", "reason": "engine scope policy rejected the injection point"}
             url_scope.register_secret_values((f"agent_cookie_{i}", c.get("value", "")) for i, c in enumerate(cookies) if isinstance(c, dict))
@@ -338,25 +490,64 @@ class AgentScannerTools:
             if not callable(install_guard) or not await install_guard(
                 ScopePolicy.from_engine(engine), on_block=self._record_scope_block,
             ):
+                self.harness.record_dispatch_event(
+                    event_type="authorization_decision",
+                    tool_name="run_scanner_work",
+                    work_id=work_id,
+                    correlation_id=corr_id,
+                    allowed=False,
+                    reason="runtime scope guard unavailable",
+                )
                 self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="runtime scope guard unavailable")
                 return {"status": "blocked", "reason": "runtime scope guard could not be enabled; scanner work was not sent"}
             if not await engine._seed_and_verify_handoff_cookies(engine._browser):
+                self.harness.record_dispatch_event(
+                    event_type="authorization_decision",
+                    tool_name="run_scanner_work",
+                    work_id=work_id,
+                    correlation_id=corr_id,
+                    allowed=False,
+                    reason="authentication unverified",
+                )
                 self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="authentication unverified")
                 return {"status": "blocked", "reason": "authentication could not be verified; re-authenticate and retry"}
-            if not was_claimed:
-                work.transition_to(WorkStatus.RUNNING)
-                work.attempts += 1
-                self.harness.checkpoint()
             scanner = engine.scanners[check]
             # BaseScanner reroutes selected SPA/API GET query points through HTTPX.
             # Preflight on the guarded WScan browser and fail closed before payload dispatch.
             await engine._browser.navigate(point.url)
             if scanner._should_route_to_api_get(point):
+                self.harness.record_dispatch_event(
+                    event_type="authorization_decision",
+                    tool_name="run_scanner_work",
+                    work_id=work_id,
+                    correlation_id=corr_id,
+                    allowed=False,
+                    reason="HTTPX API GET carrier unsupported",
+                )
                 self.harness.note_coverage(coverage_gaps=[f"unsupported_carrier:query_api_get:{point_id}"])
                 self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="HTTPX API GET carrier unsupported")
                 return {"status": "unsupported", "reason": "this query input uses HTTPX transport; only Playwright form and query inputs are supported"}
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=True,
+                reason="authorized",
+            )
+            self.harness.record_dispatch_event(
+                event_type="dispatch_start",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+            )
+            if not was_claimed:
+                work.transition_to(WorkStatus.RUNNING)
+                work.attempts += 1
+                self.harness.checkpoint()
             self.harness.record_probe_attempt(
                 target_url=point.url, check_type=check, work_id=work_id,
+                correlation_id=corr_id,
                 status="dispatching", binding=binding, binding_digest=binding_digest,
             )
             findings = await asyncio.wait_for(
@@ -379,8 +570,24 @@ class AgentScannerTools:
             self.findings[work_id] = sanitized_findings
             self.harness.record_probe_attempt(
                 target_url=point.url, check_type=check, work_id=work_id,
+                correlation_id=corr_id,
                 status="inconclusive" if status == WorkStatus.INCONCLUSIVE else "completed",
                 evidence_id=work_id, binding=binding, binding_digest=binding_digest,
+            )
+            self.harness.record_dispatch_event(
+                event_type="executed_scanner_work",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                executed_work_id=work_id,
+            )
+            self.harness.record_dispatch_event(
+                event_type="dispatch_end",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                status="completed" if status == WorkStatus.COMPLETE else status.value,
+                executed_work_id=work_id,
             )
             self.harness.finish_work(
                 work_id, status,
@@ -401,11 +608,27 @@ class AgentScannerTools:
                 "verified_count": len(verified), "work_id": work_id,
             }
         except asyncio.TimeoutError:
+            self.harness.record_dispatch_event(
+                event_type="dispatch_end",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                status="timeout",
+                reason="scanner timed out",
+            )
             work.transition_to(WorkStatus.TRANSIENT_FAILURE, rejection_reason="scanner timed out")
             self.harness.checkpoint()
             self._mark_hypotheses(point_id, check, "inconclusive", "scanner timed out", work_id=work_id)
             return {"status": "timeout", "reason": "scanner timed out; the work remains eligible for resume"}
         except Exception as exc:
+            self.harness.record_dispatch_event(
+                event_type="dispatch_end",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                status="failed",
+                reason=f"scanner error: {type(exc).__name__}",
+            )
             self.harness.finish_work(work_id, WorkStatus.FAILED, rejection_reason=f"scanner error: {type(exc).__name__}")
             self._mark_hypotheses(point_id, check, "inconclusive", f"scanner failed: {type(exc).__name__}", work_id=work_id)
             return {"status": "failed", "reason": "scanner failed; inspect the redacted run log and retry the work"}
@@ -420,18 +643,51 @@ class AgentScannerTools:
                 secret_registry.update(secret_snapshot)
                 url_scope.skipped_secret_labels[:] = skipped_snapshot
 
-    async def verify_hypothesis(self, hypothesis_id: str) -> dict:
+    async def verify_hypothesis(self, hypothesis_id: str, *, correlation_id: str = "") -> dict:
         """Schedule deterministic verification for a known hypothesis."""
+        corr_id = str(correlation_id or f"corr_ver_{secrets.token_hex(4)}")
+        self.harness.record_dispatch_event(
+            event_type="tool_request",
+            tool_name="verify_hypothesis",
+            correlation_id=corr_id,
+            details={"hypothesis_id": str(hypothesis_id)},
+        )
         hypothesis_id = str(hypothesis_id)
         hypothesis = next((item for item in self.harness.state.hypotheses
                            if str(item.get("candidate_id", "")) == hypothesis_id), None)
         if not hypothesis:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="verify_hypothesis",
+                correlation_id=corr_id,
+                allowed=False,
+                reason="unknown hypothesis ID",
+            )
             return {"status": "inconclusive", "reason": "unknown hypothesis ID"}
+        self.harness.record_dispatch_event(
+            event_type="authorization_decision",
+            tool_name="verify_hypothesis",
+            correlation_id=corr_id,
+            allowed=True,
+            reason="authorized",
+        )
+        self.harness.record_dispatch_event(
+            event_type="dispatch_start",
+            tool_name="verify_hypothesis",
+            correlation_id=corr_id,
+        )
         recorded, ledger_error = self._verification_record(hypothesis_id)
         record_reason = self._verification_consistency_reason(recorded, hypothesis) if recorded is not None else ""
         if recorded is not None and not record_reason:
             self._restore_hypothesis_outcome(hypothesis_id, recorded)
-            return self._verification_result(hypothesis_id, recorded)
+            res = self._verification_result(hypothesis_id, recorded)
+            self.harness.record_dispatch_event(
+                event_type="dispatch_end",
+                tool_name="verify_hypothesis",
+                correlation_id=corr_id,
+                status=res.get("status", "inconclusive"),
+            )
+            return res
         unverifiable_checkpoint = bool(
             recorded is not None or ledger_error or self._checkpoint_claims_confirmation(hypothesis)
         )
@@ -442,12 +698,19 @@ class AgentScannerTools:
             )
         point_id = hypothesis.get("injection_point_id", "")
         check = hypothesis.get("check_type", "")
-        scheduled = self.schedule_scanner(point_id, check)
+        scheduled = self.schedule_scanner(point_id, check, correlation_id=corr_id)
         if scheduled.get("status") not in {"planned", "already_scheduled"}:
             reason = scheduled.get("reason", "verification unavailable")
             if unverifiable_checkpoint:
                 reason = f"unverifiable_checkpoint: {reason}"
             self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason)
+            self.harness.record_dispatch_event(
+                event_type="dispatch_end",
+                tool_name="verify_hypothesis",
+                correlation_id=corr_id,
+                status="inconclusive",
+                reason=reason,
+            )
             return {"status": "inconclusive", "reason": reason}
         self.work_specs[scheduled["work_id"]] = (point_id, check)
         existing = next(item for item in self.harness.state.work_queue if item.work_id == scheduled["work_id"])
@@ -458,13 +721,27 @@ class AgentScannerTools:
                 "unverifiable_checkpoint: completed scanner result has no valid deterministic evidence; replay was suppressed"
             )
             self._downgrade_unverifiable(hypothesis_id, reason)
+            self.harness.record_dispatch_event(
+                event_type="dispatch_end",
+                tool_name="verify_hypothesis",
+                correlation_id=corr_id,
+                status="inconclusive",
+                reason=reason,
+            )
             return {"status": "inconclusive", "reason": reason, "hypothesis_id": hypothesis_id, "work_id": existing.work_id}
-        result = await self.run_scanner_work(scheduled["work_id"])
+        result = await self.run_scanner_work(scheduled["work_id"], correlation_id=corr_id)
         recorded, ledger_error = self._verification_record(hypothesis_id)
         record_reason = self._verification_consistency_reason(recorded, hypothesis) if recorded is not None else ""
         if recorded is not None and not record_reason:
             self._restore_hypothesis_outcome(hypothesis_id, recorded)
-            return {**self._verification_result(hypothesis_id, recorded), "work_id": scheduled["work_id"]}
+            res = {**self._verification_result(hypothesis_id, recorded), "work_id": scheduled["work_id"]}
+            self.harness.record_dispatch_event(
+                event_type="dispatch_end",
+                tool_name="verify_hypothesis",
+                correlation_id=corr_id,
+                status=res.get("status", "inconclusive"),
+            )
+            return res
         if record_reason:
             reason = f"inconsistent_verification_record: {record_reason}; automatic replay was suppressed"
         elif recorded is not None or ledger_error:
@@ -472,6 +749,13 @@ class AgentScannerTools:
         else:
             reason = result.get("reason") or "scanner could not complete deterministic verification"
         self._record_hypothesis_outcome(hypothesis_id, "inconclusive", reason, work_id=scheduled["work_id"])
+        self.harness.record_dispatch_event(
+            event_type="dispatch_end",
+            tool_name="verify_hypothesis",
+            correlation_id=corr_id,
+            status="inconclusive",
+            reason=reason,
+        )
         return {"status": "inconclusive", "reason": reason, "hypothesis_id": hypothesis_id, "work_id": scheduled["work_id"]}
 
     def register_hypothesis(self, hypothesis: dict) -> str:
@@ -793,10 +1077,65 @@ class AgentScannerTools:
         return [finding for findings in self.findings.values() for finding in findings]
 
     def register_controller_actions(self, controller) -> None:
-        controller.action("List server-discovered scanner injection points and capabilities.")(self.list_scanner_capabilities)
-        controller.action("Queue deterministic scanner work by injection point ID and check name.")(self.schedule_scanner)
-        controller.action("Run queued scanner work by work ID.")(self.run_scanner_work)
-        controller.action("Queue deterministic verification for a hypothesis ID.")(self.verify_hypothesis)
+        async def list_scanner_capabilities() -> dict:
+            return await self.list_scanner_capabilities()
+
+        def schedule_scanner(injection_point_id: str, check: str) -> dict:
+            return self.schedule_scanner(injection_point_id, check)
+
+        async def run_scanner_work(work_id: str) -> dict:
+            return await self.run_scanner_work(work_id)
+
+        async def verify_hypothesis(hypothesis_id: str) -> dict:
+            return await self.verify_hypothesis(hypothesis_id)
+
+        controller.action("List server-discovered scanner injection points and capabilities.")(list_scanner_capabilities)
+        controller.action("Queue deterministic scanner work by injection point ID and check name.")(schedule_scanner)
+        controller.action("Run queued scanner work by work ID.")(run_scanner_work)
+        controller.action("Queue deterministic verification for a hypothesis ID.")(verify_hypothesis)
+
+    async def dispatch_tool(self, tool_name: str, **kwargs) -> dict:
+        """Route tool invocation through authorization and lifecycle telemetry."""
+        corr_id = str(kwargs.get("correlation_id") or f"corr_{secrets.token_hex(4)}")
+        if tool_name not in {
+            "list_scanner_capabilities",
+            "schedule_scanner",
+            "run_scanner_work",
+            "verify_hypothesis",
+        }:
+            self.harness.record_dispatch_event(
+                event_type="tool_request",
+                tool_name=tool_name,
+                correlation_id=corr_id,
+            )
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name=tool_name,
+                correlation_id=corr_id,
+                allowed=False,
+                reason=f"unauthorized tool: {tool_name}",
+            )
+            return {"status": "blocked", "reason": f"unauthorized tool: {tool_name}"}
+
+        if tool_name == "list_scanner_capabilities":
+            return await self.list_scanner_capabilities(correlation_id=corr_id)
+        elif tool_name == "schedule_scanner":
+            return self.schedule_scanner(
+                str(kwargs.get("injection_point_id", "")),
+                str(kwargs.get("check", "")),
+                correlation_id=corr_id,
+            )
+        elif tool_name == "run_scanner_work":
+            return await self.run_scanner_work(
+                str(kwargs.get("work_id", "")),
+                correlation_id=corr_id,
+            )
+        elif tool_name == "verify_hypothesis":
+            return await self.verify_hypothesis(
+                str(kwargs.get("hypothesis_id", "")),
+                correlation_id=corr_id,
+            )
+        return {"status": "blocked", "reason": "unknown tool"}
 
     async def observe_page(self, browser=None, current_url: str = "") -> None:
         browser = browser or self.scanner._active_session

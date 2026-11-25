@@ -31,6 +31,7 @@ MANIFEST_FILENAME = "agent_manifest.json"
 LLM_CALLS_FILENAME = "llm_calls.jsonl"
 PROBE_ATTEMPTS_FILENAME = "probe_attempts.jsonl"
 VERIFICATION_RESULTS_FILENAME = "verification_results.jsonl"
+EVENTS_FILENAME = "agent_events.jsonl"
 SCHEMA_VERSION = 1
 _INTERNAL_ID_KEYS = frozenset({
     "candidate_id",
@@ -38,6 +39,7 @@ _INTERNAL_ID_KEYS = frozenset({
     "call_id",
     "probe_id",
     "verification_id",
+    "event_id",
     "correlation_id",
     "step_id",
     "episode_id",
@@ -400,6 +402,7 @@ class AgentRunState:
     work_queue: list[AgentWorkItem] = field(default_factory=list)
     hypotheses: list[dict] = field(default_factory=list)
     scanner_evidence: list[dict] = field(default_factory=list)
+    events: list[dict] = field(default_factory=list)
     guard_records: list[dict] = field(default_factory=list)
     # 認証秘密の resume 同一性。per-run salt 付き scrypt（_auth_fingerprint）で、spec_hash には
     # 秘密を入れない（無塩 SHA-256 だと artifact から低エントロピー password を辞書攻撃できる）。
@@ -428,6 +431,8 @@ class AgentRunState:
         ]
         scanner_evidence = values.get("scanner_evidence", [])
         values["scanner_evidence"] = scanner_evidence if isinstance(scanner_evidence, list) else []
+        events = values.get("events", [])
+        values["events"] = events if isinstance(events, list) else []
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in values.items() if k in known})
 
@@ -579,6 +584,33 @@ class AgentVerificationRecord:
         return cls(**{k: v for k, v in values.items() if k in known})
 
 
+@dataclass(frozen=True)
+class AgentDispatchEvent:
+    event_id: str
+    run_id: str
+    event_type: str  # "tool_request", "authorization_decision", "dispatch_start", "dispatch_end", "work_terminal_status", "executed_scanner_work"
+    tool_name: str
+    correlation_id: str = ""
+    work_id: str = ""
+    episode_id: str = ""
+    step_id: str = ""
+    allowed: bool | None = None
+    reason: str = ""
+    status: str = ""
+    terminal_status: str = ""
+    executed_work_id: str = ""
+    timestamp: float = 0.0
+    details: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentDispatchEvent":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
 def _unique(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -640,6 +672,7 @@ class AgentHarness:
         self.llm_calls_path = self.output_dir / LLM_CALLS_FILENAME
         self.probe_attempts_path = self.output_dir / PROBE_ATTEMPTS_FILENAME
         self.verification_results_path = self.output_dir / VERIFICATION_RESULTS_FILENAME
+        self.events_path = self.output_dir / EVENTS_FILENAME
         self._base_consumed = 0
         self._last_signature = None
         self._last_episode_id = None
@@ -818,6 +851,15 @@ class AgentHarness:
                     item.evidence_ids = tuple(dict.fromkeys(
                         item.evidence_ids + tuple(self._redact_runtime(str(e)) for e in evidence_ids if str(e))
                     ))
+                self.record_dispatch_event(
+                    event_type="work_terminal_status",
+                    tool_name="scanner_work",
+                    work_id=work_id,
+                    correlation_id=item.correlation_id or work_id,
+                    terminal_status=target_status.value,
+                    executed_work_id=work_id if target_status in {WorkStatus.COMPLETE, WorkStatus.REPRODUCED} else "",
+                    reason=safe_reason,
+                )
                 self.checkpoint()
                 return
         raise KeyError(work_id)
@@ -1223,6 +1265,50 @@ class AgentHarness:
             pass
         return record
 
+    def record_dispatch_event(
+        self,
+        event_type: str,
+        tool_name: str,
+        *,
+        correlation_id: str = "",
+        work_id: str = "",
+        episode_id: str = "",
+        step_id: str = "",
+        allowed: bool | None = None,
+        reason: str = "",
+        status: str = "",
+        terminal_status: str = "",
+        executed_work_id: str = "",
+        details: dict | None = None,
+    ) -> AgentDispatchEvent:
+        event_id = f"evt-{secrets.token_hex(8)}"
+        corr_id = str(correlation_id or work_id or step_id or event_id)
+        safe_reason = _redact_bounded(self._redact_runtime(str(reason or "")))
+        safe_details = self._sanitize_value(dict(details or {}))
+        for k in list(safe_details.keys()):
+            if any(s in k.lower() for s in ("cookie", "auth", "token", "pass", "secret", "header", "credential")):
+                del safe_details[k]
+        record = AgentDispatchEvent(
+            event_id=event_id,
+            run_id=self.state.run_id,
+            event_type=str(event_type or ""),
+            tool_name=str(tool_name or ""),
+            correlation_id=corr_id,
+            work_id=str(work_id or ""),
+            episode_id=str(episode_id or ""),
+            step_id=str(step_id or ""),
+            allowed=allowed,
+            reason=safe_reason,
+            status=str(status or ""),
+            terminal_status=str(terminal_status or ""),
+            executed_work_id=str(executed_work_id or ""),
+            timestamp=time.time(),
+            details=safe_details,
+        )
+        self.state.events.append(record.to_dict())
+        self._append_jsonl(self.events_path, record.to_dict())
+        return record
+
     def _append_jsonl(self, path: Path, data: dict) -> None:
         if self._evidence_failed:
             return
@@ -1384,5 +1470,6 @@ class AgentHarness:
             "llm_calls": LLM_CALLS_FILENAME,
             "probe_attempts": PROBE_ATTEMPTS_FILENAME,
             "verification_results": VERIFICATION_RESULTS_FILENAME,
+            "events": EVENTS_FILENAME,
         }
         return self._atomic_write_json(self.manifest_path, payload)
