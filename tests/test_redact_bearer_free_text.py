@@ -194,6 +194,13 @@ def test_attack_payload_and_ordinary_query_not_broken():
         ("export API_TOKEN = secret-tok-123", "export API_TOKEN =<redacted>"),
         ("const USER_PASSWORD = 'secret-val'", "const USER_PASSWORD =<redacted>"),
         ("let session_id\t=\t12345678", "let session_id\t=<redacted>"),
+        ("secret key=X", "secret key=<redacted>"),
+        ("Client Secret ID=X", "Client Secret ID=<redacted>"),
+        ("token value=X", "token value=<redacted>"),
+        ("password\n= X", "password\n=<redacted>"),
+        ("token?x=X", "token?x=<redacted>"),
+        ("password hash = X", "password hash =<redacted>"),
+        ("my token here=X", "my token here=<redacted>"),
     ],
 )
 def test_assignment_style_key_redaction(text, expected):
@@ -270,6 +277,19 @@ def test_urlencoded_no_catastrophic_scanning():
     assert res_token == "token" * n
     assert elapsed_token < 2.0, f"urlencoded scanning (token) took too long: {elapsed_token:.2f}s"
 
+    # ケース3: 機微キー語＋空白の連続（未境界・空白スキップ時の二乗走査防止）
+    start = time.perf_counter()
+    res_sp = redact_kv_values("token " * n)
+    elapsed_sp = time.perf_counter() - start
+    assert res_sp == "token " * n
+    assert elapsed_sp < 2.0, f"urlencoded scanning (token space) took too long: {elapsed_sp:.2f}s"
+
+    # ケース4: 代入形式の連続（所有格数量子の境界と上限256の検証）
+    start = time.perf_counter()
+    res_assign = redact_kv_values("token = " * n)
+    elapsed_assign = time.perf_counter() - start
+    assert elapsed_assign < 2.0, f"urlencoded scanning (token assign) took too long: {elapsed_assign:.2f}s"
+
 
 def test_url_userinfo_no_catastrophic_scanning():
     """URL の userinfo 走査で二乗走査が発生せず、高速に完了すること。
@@ -295,47 +315,63 @@ def test_url_userinfo_no_catastrophic_scanning():
 
 
 def test_urlencoded_property_no_regression_against_main():
-    """多数のランダムなパラメータ・代入形式で、main 以上の伏せ字量を維持すること。"""
+    """多数のランダムなパラメータ・代入形式で、main 以上の伏せ字量を維持すること。
+
+    キーに複数語、空白、タブ、改行、?、大文字小文字の混在を含め、
+    main の実装と比較して伏せる量が少ないケースが 0 件であることを検証する。
+    """
     import random
     import string
     import re
     from wscan import url_scope
-    from wscan.url_scope import KEYS_ALT, REDACTED
+    from wscan.url_scope import SENSITIVE_KEY_TOKENS, KEYS_ALT, REDACTED
 
     # main (38753de) の正規表現パターン
     p_main = re.compile(
         rf"(?i)(?<![^&=?\s])([^&=?\s]*(?:{KEYS_ALT})[^&=]*)=[^&\r\n]*"
     )
 
-    tokens = [
-        "token", "password", "secret", "api_key", "csrf",
-        "session_id", "access_token", "client_secret",
-    ]
+    tokens = list(SENSITIVE_KEY_TOKENS)
     key_chars = string.ascii_letters + string.digits + "_-."
     val_chars = string.ascii_letters + string.digits + "._~+/=-@:;,!$"
+    separators = [" ", "  ", "\t", "\n", "?x", " - ", " ID ", " hash = ", "?/="]
+    prefixes = [
+        "", "export ", "const ", "let ", "var ", "set ", "?", "&", " ",
+        "Client ", "The ", "admin ", "app.", "my ",
+    ]
 
     rng = random.Random(42)  # 固定シードで再現性を確保
 
-    for _ in range(2000):
-        prefix = rng.choice(["", "export ", "const ", "let ", "var ", "set ", "?", "&", " "])
+    less_redacted_cases = []
+
+    for _ in range(5000):
+        pfx = rng.choice(prefixes)
         k = rng.choice(tokens)
         if rng.random() < 0.5:
-            k = k + "".join(rng.choices(key_chars, k=rng.randint(1, 6)))
+            # 大文字・小文字の混在
+            k = "".join(c.upper() if rng.random() < 0.5 else c.lower() for c in k)
         if rng.random() < 0.5:
-            k = "".join(rng.choices(key_chars, k=rng.randint(1, 6))) + "_" + k
+            # 複数語・空白・タブ・改行・? を含むキーサフィックス
+            k = k + rng.choice(separators) + rng.choice(["key", "value", "token", "id", "123", ""])
+        if rng.random() < 0.3:
+            k = rng.choice(["my ", "app.", "auth_"]) + k
 
-        sp_before = rng.choice(["", " ", "  ", "\t", " \t "])
+        sp_before = rng.choice(["", " ", "  ", "\t", "\n", " \t "])
         sp_after = rng.choice(["", " ", "  ", "\t"])
         val = "".join(rng.choices(val_chars, k=rng.randint(1, 16)))
 
-        s = f"{prefix}{k}{sp_before}={sp_after}{val}"
+        s = f"{pfx}{k}{sp_before}={sp_after}{val}"
         if rng.random() < 0.5:
-            k2 = "".join(rng.choices(key_chars, k=5))
-            s += f"&{k2}=safe_val"
+            rand_k = "".join(rng.choices(key_chars, k=5))
+            s += f"&other={rand_k}"
 
         rm = p_main.sub(lambda m: f"{m.group(1)}={REDACTED}", s)
         rc = url_scope._RE_URLENCODED.sub(lambda m: f"{m.group(1)}={REDACTED}", s)
 
-        assert rc.count(REDACTED) >= rm.count(REDACTED), (
-            f"New pattern redacted less than main on {s!r}:\n  main: {rm!r}\n  new:  {rc!r}"
-        )
+        if rc.count(REDACTED) < rm.count(REDACTED):
+            less_redacted_cases.append((s, rm, rc))
+
+    assert not less_redacted_cases, (
+        f"Found {len(less_redacted_cases)} cases where new pattern redacted less than main:\n"
+        f"  Sample: {less_redacted_cases[:5]}"
+    )
