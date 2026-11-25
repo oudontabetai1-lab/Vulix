@@ -248,6 +248,8 @@ class LabAgent:
         self.cookies = [{"name": "session", "value": LAB_SESSION_COOKIE, "domain": "lab.test"}]
         self.tokens = list(tokens)
         self.extra_headers = dict(extra_headers or {})
+        self.captured_templates = {}
+        self.captured_requests = []
         self._active_session = _FakeSession()
 
     async def _capture_cookies(self, _session):
@@ -301,7 +303,10 @@ async def _replay_events(events, *, net, agent, harness, tools, outputs, hypothe
             spec = event["observe_json"]
             template = {"url": _abs(spec["path"]), "method": "POST", "json_body": spec["body"],
                         "headers": dict(spec.get("headers") or {})}
-            tools.add_point(_point(["json", spec["path"], spec["pointer"]]), {"name": spec["pointer"], "template": template})
+            pid = tools.add_point(_point(["json", spec["path"], spec["pointer"]]), {"name": spec["pointer"], "template": template})
+            if hasattr(agent, "captured_templates"):
+                agent.captured_templates[pid] = dict(template)
+                agent.captured_templates[_abs(spec["path"])] = dict(template)
         if "hypothesis" in event:
             hyp = dict(event["hypothesis"], url=_abs(event["hypothesis"]["url"]))
             tools.register_hypothesis(hyp)

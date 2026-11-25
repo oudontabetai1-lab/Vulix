@@ -91,14 +91,15 @@ def test_llm_claims_complete_with_partial_harness_is_not_treated_as_success(repl
 
 
 def test_gate_detects_context_keys_regression(tmp_path, monkeypatch):
-    """sort_key や context keys を無条件に秘密扱いすると gate が FAIL になる。"""
+    """sort_key や context keys の template 取り直しが失敗すると gate が FAIL になる。"""
     from wscan import agent_scanner_tools
-    _OLD_SECRET_WORDS = frozenset({"key", "keys", "session", "auth"})
-    orig = agent_scanner_tools._key_is_sensitive
-    monkeypatch.setattr(
-        agent_scanner_tools, "_key_is_sensitive",
-        lambda key: orig(key) or any(w in _OLD_SECRET_WORDS for w in agent_scanner_tools._key_words(key)),
-    )
+    orig = agent_scanner_tools.AgentScannerTools._reobtain_live_template
+    async def mock_reobtain(self, point, metadata):
+        if "search" in point.url:
+            return None, "simulated regression"
+        return await orig(self, point, metadata)
+
+    monkeypatch.setattr(agent_scanner_tools.AgentScannerTools, "_reobtain_live_template", mock_reobtain)
     results = _run_all(tmp_path, [sc for sc in SCENARIOS if sc["name"] == "json_body_with_sort_key_and_context_keys"])
     verdict = evaluate_replay_gate(results)
     assert verdict.verdict == GateVerdictKind.FAIL
@@ -106,16 +107,11 @@ def test_gate_detects_context_keys_regression(tmp_path, monkeypatch):
 
 
 def test_gate_detects_regressions_in_the_fixed_carrier(tmp_path, monkeypatch):
-    """修正前の挙動（部分一致の秘密判定・Bearer の付け直しなし）に戻すと gate が FAIL になる。"""
-    from wscan import agent_scanner_tools, url_scope
+    """修正前の挙動（Bearer の付け直しなし）に戻すと gate が FAIL になる。"""
+    from wscan import agent_scanner_tools
 
-    monkeypatch.setattr(
-        agent_scanner_tools, "_key_is_sensitive",
-        lambda key: any(t in str(key).lower() for t in url_scope.SENSITIVE_KEY_TOKENS)
-        or str(key).lower() in ("cookie", "authorization"),
-    )
     monkeypatch.setattr(agent_scanner_tools, "select_session_bearer", lambda _items: "")
-    names = {"json_body_with_ordinary_keys", "bearer_api_with_session_token"}
+    names = {"bearer_api_with_session_token"}
     results = _run_all(tmp_path, [sc for sc in SCENARIOS if sc["name"] in names])
     verdict = evaluate_replay_gate(results)
     assert verdict.verdict == GateVerdictKind.FAIL
