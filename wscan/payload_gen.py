@@ -409,8 +409,17 @@ class PayloadGenerator:
                 if attempt_history:
                     try:
                         from .attempt_ledger import format_history_for_prompt
+                        from .content_provenance import (
+                            ContentSource, ContentType, wrap_untrusted_observation,
+                        )
                         history_block = format_history_for_prompt(attempt_history)
                         if history_block:
+                            history_block = wrap_untrusted_observation(
+                                history_block,
+                                source=ContentSource.HTTP.value,
+                                origin=url,
+                                content_type=ContentType.EVIDENCE.value,
+                            ).format_tagged_block()
                             prompt = prompt + "\n\n" + history_block
                     except Exception:
                         pass
@@ -424,6 +433,15 @@ class PayloadGenerator:
                     try:
                         learning_summary = learning_summary_provider()
                         if learning_summary:
+                            from .content_provenance import (
+                                ContentSource, ContentType, wrap_untrusted_observation,
+                            )
+                            learning_summary = wrap_untrusted_observation(
+                                learning_summary,
+                                source=ContentSource.HTTP.value,
+                                origin=url,
+                                content_type=ContentType.EVIDENCE.value,
+                            ).format_tagged_block()
                             prompt = prompt + "\n\n" + learning_summary
                     except Exception:
                         pass

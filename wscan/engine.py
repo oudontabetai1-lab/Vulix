@@ -10107,7 +10107,7 @@ class ScanEngine:
 
         prompt = (
             f"You are a security analyst reviewing findings from an automated web security scan.\n"
-            f"Target: {self.target_url}\n\n"
+            f"Target: {wrap_untrusted_observation(self.target_url, source=ContentSource.HTTP.value, origin=self.target_url, content_type=ContentType.OBSERVATION.value).format_tagged_block()}\n\n"
             f"Findings ({len(self.all_findings)} total):\n{wrapped_summary}\n\n"
             f"Please provide (in Japanese):\n"
             f"1. 全体的な攻撃シナリオのナラティブ (これらの脆弱性がどう連鎖するか)\n"
