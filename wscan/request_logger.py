@@ -119,7 +119,9 @@ _SENSITIVE_BODY_KEYS = url_scope.SENSITIVE_KEY_TOKENS
 _KEYS_ALT = url_scope.KEYS_ALT
 
 # RFC 3986 userinfo plus @ handles malformed credentials without crossing header structure.
-_URL_USERINFO = re.compile(r"(?i)((?:[a-z][a-z0-9+.\-]*:)?//)([A-Za-z0-9._~%!$&'()*+,;=:@\-]*)@")
+_URL_USERINFO = re.compile(
+    r"(?i)(?<![a-z0-9+.\-])((?:[a-z][a-z0-9+.\-]*+:)?//)([A-Za-z0-9._~%!$&'()*+,;=:@\-]*)@"
+)
 _FREEFORM_COOKIE_HEADER = re.compile(
     r"(?i)(?<![\w-])(set-cookie|cookie)(\s*[:=]\s*)([^\r\n]*)"
 )

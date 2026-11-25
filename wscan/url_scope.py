@@ -215,7 +215,7 @@ SENSITIVE_KEY_TOKENS = (
 KEYS_ALT = "|".join(re.escape(k) for k in SENSITIVE_KEY_TOKENS)
 # urlencoded: <key>=<value>（key が機微トークンを含むとき value をマスク）
 _RE_URLENCODED = re.compile(
-    rf"(?i)(?<![^&=?\s])([^&=?\s]*(?:{KEYS_ALT})[^&=]*)=[^&\r\n]*"
+    rf"(?i)(?<![^&=?\s])(?=[^&=?\s]*?(?:{KEYS_ALT}))([^&=?\s]++)=[^&\r\n]*"
 )
 # JSON: "<key>": "<value>"
 # 値は escape-aware（`\"` を含む JSON scalar 全体を伏せる。`"[^"]*"` だと `\"` で切れて末尾漏れ）
