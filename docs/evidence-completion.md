@@ -114,12 +114,12 @@ only complete common units qualify as successful safe-negative evidence.
 
 ### Standard sweep probe verification and fingerprinting (Playwright and HTTPX JSON slices)
 
-For the Playwright form/query standard sweeps (SQLi and XSS) and HTTPX JSON body injection (SQLi),
-each probe transmission durable records:
+For the Playwright form/query standard sweeps (SQLi, XSS, OS injection, SSTI, NoSQL injection, and Path Traversal)
+as well as HTTPX JSON body injection (SQLi and NoSQL), each probe transmission durable records:
 - Deterministic `attempt_id` and `scan_id`
-- Target `injection_key` and check name (`sqli`, `xss`) with `wave="standard"`
+- Target `injection_key` and check name (`sqli`, `xss`, `os`, `ssti`, `nosql`, `path_traversal`) with `wave="standard"`
 - `payload_fingerprint`: fixed-length cryptographic hash bound to `(payload, unit_key, check)`
-  computed via `attempt_ledger.payload_fingerprint`, shared across `payload`, `request`,
+  computed via `attempt_ledger.payload_fingerprint` (shared helper `_payload_fingerprint`), shared across `payload`, `request`,
   `observation`, and `decision` records.
 - Transmission outcome: `sent=True` on delivery; non-executed or blocked outcomes record
   `TRANSPORT_ERROR`, `BLOCKED`, or `UNEXECUTABLE`.

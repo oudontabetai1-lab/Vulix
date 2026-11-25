@@ -510,7 +510,7 @@ class DOMXSSScanner(BaseScanner):
 
         return False
 
-    async def _dispatch_send(self, ip: "InjectionPoint", payload) -> tuple[str, dict]:
+    async def _dispatch_send(self, ip: "InjectionPoint", payload, **kwargs) -> tuple[str, dict]:
         """dispatch facade の送信 override。
 
         DOMXSS の _apply_payload は独自シグネチャ (url, field_name, payload, form_index,
