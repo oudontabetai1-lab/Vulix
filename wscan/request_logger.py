@@ -124,6 +124,97 @@ _FREEFORM_COOKIE_HEADER = re.compile(
     r"(?i)(?<![\w-])(set-cookie|cookie)(\s*[:=]\s*)([^\r\n]*)"
 )
 
+_DETERMINERS_BEFORE_BEARER = frozenset({
+    "the", "a", "an", "this", "that", "every", "each", "any", "no", "which", "whose",
+    "sole", "legal", "rightful", "valid", "passport", "standard", "torch", "pall", "armor", "cup",
+})
+
+_PROSE_WORDS = frozenset({
+    "of", "to", "for", "in", "on", "at", "by", "from", "with", "and", "or",
+    "the", "a", "an", "that", "this", "which", "who", "whom", "whose",
+    "is", "was", "are", "were", "be", "been", "being", "has", "have", "had",
+    "do", "does", "did", "shall", "will", "can", "could", "may", "might", "must", "should", "would",
+    "bonds", "bond", "shares", "share", "cheque", "cheques", "check", "checks",
+    "notes", "note", "certificate", "certificates", "instrument", "instruments",
+    "paper", "papers", "security", "securities", "draft", "drafts",
+    "passport", "passports", "document", "documents", "card", "cards",
+    "letter", "letters", "message", "messages", "news", "name", "names",
+    "party", "parties", "holder", "holders", "person", "persons", "owner", "owners", "identity",
+    "token", "tokens", "auth", "authentication", "authorization", "scheme", "schemes",
+    "header", "headers", "type", "types", "format", "formats", "credential", "credentials",
+    "mode", "modes", "support", "specification", "spec", "standard", "standards",
+    "protocol", "protocols", "flow", "flows", "exchange", "usage", "endpoint", "endpoints",
+})
+
+_HEADER_LINE_AUTH_PATTERN = re.compile(
+    r"""(?<![\w-])(["']?[A-Za-z0-9_-]+["']?)"""
+    r"""(\s*+[:=]\s*+)"""
+    r"""(["']?)((?:bearer|basic|token|digest|oauth)\b)?(\s*)([^\r\n"'\],;}]+)(["']?)""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+_QUOTED_AUTH_SCHEME_PATTERN = re.compile(
+    r"""(["'])((?:bearer|basic|token|digest|oauth)\s+)([^\s"'\\]+)\1""",
+    re.IGNORECASE,
+)
+
+_RAW_BEARER_PATTERN = re.compile(
+    r"""(?<![\w-])(bearer)\s+([A-Za-z0-9._~+/=-]+)""",
+    re.IGNORECASE,
+)
+
+
+def _redact_auth_text(text: str) -> str:
+    """自由テキスト中の Authorization / Bearer / Basic / Token を伏せる。"""
+    if not isinstance(text, str) or not text:
+        return text
+
+    def _sub_header(m):
+        hdr, sep, q1, scheme, sp, token, q2 = m.groups()
+        norm = hdr.strip("\"'").lower()
+        if norm in ("cookie", "set-cookie") or not _is_sensitive_header(hdr):
+            return m.group(0)
+        token_clean = token.rstrip()
+        trailing_space = token[len(token_clean):]
+        if token_clean == _REDACTED or (scheme and token_clean == f"{scheme} {_REDACTED}"):
+            return m.group(0)
+        if scheme:
+            return f"{hdr}{sep}{q1}{scheme}{sp}{_REDACTED}{trailing_space}{q2}"
+        else:
+            return f"{hdr}{sep}{q1}{_REDACTED}{trailing_space}{q2}"
+
+    text = _HEADER_LINE_AUTH_PATTERN.sub(_sub_header, text)
+
+    def _sub_quoted(m):
+        q, scheme_sp, token = m.groups()
+        if token == _REDACTED:
+            return m.group(0)
+        return f"{q}{scheme_sp}{_REDACTED}{q}"
+
+    text = _QUOTED_AUTH_SCHEME_PATTERN.sub(_sub_quoted, text)
+
+    def _sub_raw(m):
+        start_pos = m.start()
+        prefix_text = text[max(0, start_pos - 64):start_pos]
+        prev_m = re.search(r"(\b\w+)\s*$", prefix_text)
+        prev_word = prev_m.group(1).lower() if prev_m else ""
+        if prev_word in _DETERMINERS_BEFORE_BEARER:
+            return m.group(0)
+
+        prefix, token = m.groups()
+        if token == _REDACTED:
+            return m.group(0)
+        punct = ""
+        while token and token[-1] in ".,;:!?)":
+            punct = token[-1] + punct
+            token = token[:-1]
+        if not token or token == _REDACTED or token.lower() in _PROSE_WORDS:
+            return m.group(0)
+        return f"{prefix} {_REDACTED}{punct}"
+
+    text = _RAW_BEARER_PATTERN.sub(_sub_raw, text)
+    return text
+
 
 def _redact_url_userinfo(text):
     """Mask embedded URL credentials without changing the original value."""
@@ -142,10 +233,12 @@ def _redact_headers(headers: dict) -> dict:
 
 
 def _redact_text(text):
-    """自由文内の Cookie header と機微値を既存の共有 redactor で伏せる。"""
-    safe = url_scope.redact_kv_values(_redact_url_userinfo(text))
-    if not isinstance(safe, str):
-        return safe
+    """自由文内の Authorization / Bearer、Cookie header、および機微値を伏せる。"""
+    if not isinstance(text, str):
+        return text
+    safe = _redact_url_userinfo(text)
+    safe = _redact_auth_text(safe)
+    safe = url_scope.redact_kv_values(safe)
 
     def redact_cookie_header(match):
         header = match.group(1)

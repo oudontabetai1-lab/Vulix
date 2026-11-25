@@ -214,10 +214,18 @@ SENSITIVE_KEY_TOKENS = (
 )
 KEYS_ALT = "|".join(re.escape(k) for k in SENSITIVE_KEY_TOKENS)
 # urlencoded: <key>=<value>（key が機微トークンを含むとき value をマスク）
-_RE_URLENCODED = re.compile(rf"(?i)([^&=?\s]*(?:{KEYS_ALT})[^&=]*)=[^&\r\n]*")
+_RE_URLENCODED = re.compile(
+    rf"(?i)(?<![^&=?\s])([^&=?\s]*(?:{KEYS_ALT})[^&=]*)=[^&\r\n]*"
+)
 # JSON: "<key>": "<value>"
 # 値は escape-aware（`\"` を含む JSON scalar 全体を伏せる。`"[^"]*"` だと `\"` で切れて末尾漏れ）
-_RE_JSON = re.compile(rf'(?i)("(?:[^"\\]*(?:{KEYS_ALT})[^"\\]*)"\s*:\s*)"(?:\\.|[^"\\])*"')
+_RE_AUTH_SCHEME_PREFIX = re.compile(
+    r"^(bearer|basic|token|digest|oauth)\s+", re.IGNORECASE
+)
+_RE_JSON = re.compile(
+    rf'("([^"\\]*(?:{KEYS_ALT})[^"\\]*)"\s*:\s*)"((?:\\.|[^"\\])*)"',
+    re.IGNORECASE,
+)
 
 _RE_URL_SCHEME = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
 
@@ -493,8 +501,15 @@ def redact_kv_values(text):
     if not isinstance(text, str) or not text:
         return text
     text = redact_secret_values(text)
+    def _redact_json(m):
+        val = m.group(3)
+        scheme_match = _RE_AUTH_SCHEME_PREFIX.match(val)
+        if scheme_match:
+            return f'{m.group(1)}"{scheme_match.group(1)} {REDACTED}"'
+        return f'{m.group(1)}"{REDACTED}"'
+
     text = _RE_URLENCODED.sub(lambda m: f"{m.group(1)}={REDACTED}", text)
-    text = _RE_JSON.sub(lambda m: f'{m.group(1)}"{REDACTED}"', text)
+    text = _RE_JSON.sub(_redact_json, text)
     return text
 
 
