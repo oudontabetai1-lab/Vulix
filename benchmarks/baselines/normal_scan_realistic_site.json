@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "mode": "normal",
+  "fixture_id": "realistic_site",
+  "target_checks": [
+    "header_injection",
+    "open_redirect",
+    "path_traversal",
+    "sqli",
+    "ssti",
+    "xss"
+  ],
+  "overall_status": "COMPLETE",
+  "ground_truth_recall": {
+    "expected_total": 11,
+    "matched_total": 11,
+    "recall": 1.0,
+    "missed": [],
+    "by_check": {
+      "header_injection": {
+        "expected": 1,
+        "matched": 1,
+        "recall": 1.0
+      },
+      "open_redirect": {
+        "expected": 1,
+        "matched": 1,
+        "recall": 1.0
+      },
+      "path_traversal": {
+        "expected": 1,
+        "matched": 1,
+        "recall": 1.0
+      },
+      "sqli": {
+        "expected": 2,
+        "matched": 2,
+        "recall": 1.0
+      },
+      "ssti": {
+        "expected": 1,
+        "matched": 1,
+        "recall": 1.0
+      },
+      "xss": {
+        "expected": 5,
+        "matched": 5,
+        "recall": 1.0
+      }
+    }
+  },
+  "safe_twin_precision": {
+    "safe_total": 15,
+    "fp_total": 0,
+    "tn_total": 15,
+    "fpr": 0.0,
+    "false_positives": []
+  },
+  "attempt_counts": {
+    "header_injection": 18,
+    "open_redirect": 22,
+    "path_traversal": 24,
+    "sqli": 54,
+    "ssti": 28,
+    "xss": 76
+  },
+  "total_attempts": 222,
+  "probe_accounting": {
+    "header_injection": {
+      "check": "header_injection",
+      "planned": 18,
+      "executed": 18,
+      "blocked": 0,
+      "skipped": 0,
+      "errors": 0,
+      "outcomes": {
+        "matched": 1,
+        "no_match": 17
+      }
+    },
+    "open_redirect": {
+      "check": "open_redirect",
+      "planned": 22,
+      "executed": 22,
+      "blocked": 0,
+      "skipped": 0,
+      "errors": 0,
+      "outcomes": {
+        "matched": 1,
+        "no_match": 21
+      }
+    },
+    "path_traversal": {
+      "check": "path_traversal",
+      "planned": 24,
+      "executed": 24,
+      "blocked": 0,
+      "skipped": 0,
+      "errors": 0,
+      "outcomes": {
+        "matched": 1,
+        "no_match": 23
+      }
+    },
+    "sqli": {
+      "check": "sqli",
+      "planned": 54,
+      "executed": 54,
+      "blocked": 0,
+      "skipped": 0,
+      "errors": 0,
+      "outcomes": {
+        "matched": 2,
+        "no_match": 52
+      }
+    },
+    "ssti": {
+      "check": "ssti",
+      "planned": 28,
+      "executed": 28,
+      "blocked": 0,
+      "skipped": 0,
+      "errors": 0,
+      "outcomes": {
+        "matched": 1,
+        "no_match": 27
+      }
+    },
+    "xss": {
+      "check": "xss",
+      "planned": 76,
+      "executed": 76,
+      "blocked": 0,
+      "skipped": 0,
+      "errors": 0,
+      "outcomes": {
+        "matched": 5,
+        "no_match": 71
+      }
+    }
+  },
+  "ledger_integrity": {
+    "had_write_error": false,
+    "quarantined": false,
+    "count_mismatches": [],
+    "gaps": [],
+    "unattributed_notes": [],
+    "valid": true
+  },
+  "unmeasured_checks": [],
+  "metadata": {
+    "description": "Baseline scorecard for normal deterministic scan on realistic_site fixture",
+    "git_commit": "c6b9bfce77da481818fba3b1dee1516ba243cd3e"
+  }
+}

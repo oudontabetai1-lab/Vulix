@@ -392,3 +392,17 @@ def test_verdicts_are_frozen_and_json_serializable():
     nightly_json = json.dumps(dataclasses.asdict(nightly_v))
     assert json.loads(nightly_json)["ready"] is True
 
+
+def test_evaluate_detection_gate_with_normal_scan_scorecard():
+    from wscan.normal_scan_scorecard import load_normal_scorecard_file
+    from pathlib import Path
+    baseline_path = Path(__file__).resolve().parents[1] / "benchmarks" / "baselines" / "normal_scan_realistic_site.json"
+    card = load_normal_scorecard_file(baseline_path)
+    verdict = evaluate_detection_gate(card, baseline=card)
+    assert verdict.passed is True
+    assert verdict.recall == 1.0
+    assert verdict.fpr == 0.0
+    assert verdict.expected_total == 11
+    assert verdict.attempted_cases == 222
+
+

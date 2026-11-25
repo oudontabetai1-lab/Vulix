@@ -45,6 +45,11 @@ from tests.fixtures.realistic_site import (
 )
 from tests.fixtures.spa_app import app as spa_app
 from wscan.engine import ScanEngine
+from wscan.normal_scan_scorecard import (
+    build_normal_scan_scorecard,
+    evaluate_normal_scan_gate,
+    load_normal_scorecard_file,
+)
 from wscan.recall_gate import compute_recall
 
 # Injection checks whose detection is deterministic over HTTP/Chromium.
@@ -224,6 +229,7 @@ class EndToEndRealisticScanTests(unittest.TestCase):
 
         cls._tmp = tempfile.TemporaryDirectory()
         engine = asyncio.run(_run_scan(cls._port, cls._tmp.name))
+        cls.engine = engine
         cls.findings = list(engine.all_findings)
         cls.pages_crawled = len(getattr(engine, "page_graph", {}) or {})
         # (check_type, path, field) tuples actually reported
@@ -318,6 +324,35 @@ class EndToEndRealisticScanTests(unittest.TestCase):
                     f"{spec['note']}. Findings: "
                     f"{[(f.check_type, f.field_name, f.evidence[:80]) for f in bogus]}",
                 )
+
+    def test_normal_scan_scorecard_and_nonregression_gate(self):
+        """通常スキャンの probe ledger と Finding から scorecard を生成し非回帰ゲートを照合する。"""
+        ledger_path = Path(self._tmp.name) / "probe_attempts.jsonl"
+        records = []
+        if ledger_path.is_file():
+            for line in ledger_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        pass
+
+        scorecard = build_normal_scan_scorecard(
+            findings=self.findings,
+            expected_findings=EXPECTED_FINDINGS,
+            safe_endpoints=SAFE_ENDPOINTS,
+            target_checks=CHECKS,
+            ledger_records=records,
+            wave_errors=getattr(self.engine, "wave_errors", []),
+        )
+        baseline_path = Path(__file__).resolve().parents[1] / "benchmarks" / "baselines" / "normal_scan_realistic_site.json"
+        baseline = load_normal_scorecard_file(baseline_path) if baseline_path.is_file() else None
+        verdict = evaluate_normal_scan_gate(scorecard, baseline=baseline)
+        print("\n" + verdict.describe(), flush=True)
+        self.assertTrue(
+            verdict.passed,
+            f"NORMAL SCAN NON-REGRESSION GATE FAILURE:\n{verdict.describe()}",
+        )
 
 
 @unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
