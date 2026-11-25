@@ -73,6 +73,14 @@ class _FakeBrowser:
         return True
 
 
+class _PageSession:
+    def __init__(self, url):
+        self.page = SimpleNamespace(url=url)
+
+    async def get_current_page(self):
+        return self.page
+
+
 class _FakeEngine:
     def __init__(self, check, handoff, finding=None, error=None, auth=True, scanner=None):
         self.handoff = handoff
@@ -1165,6 +1173,7 @@ def test_template_auth_headers_are_not_persisted_and_resume_uses_fresh_auth(tmp_
             return [{"storage": "local", "key": "access_token", "value": fresh_bearer}]
 
         scanner._capture_tokens = capture_tokens
+        scanner._active_session = _PageSession("https://target.test/app")
         resumed = AgentScannerTools(scanner, _harness(tmp_path, resume=True), engine_factory=factory)
         work_id = resumed.schedule_scanner(point_id, "sqli")["work_id"]
         outputs = [await resumed.run_scanner_work(work_id), await resumed.list_scanner_capabilities()]
@@ -1298,6 +1307,7 @@ def test_ordinary_json_keys_are_not_secret(key):
     "token", "access_token", "accessToken", "id_token", "auth_token", "csrf_token", "csrfmiddlewaretoken",
     "XSRF-TOKEN", "authenticity_token", "api_key", "apiKey", "x-api-key", "sessionid", "sessionId",
     "Authorization", "Cookie",
+    "tokens", "accessTokens", "refresh_tokens", "auth_tokens", "apiKeys", "api_keys", "session_ids", "sessionIds",
 ])
 def test_credential_keys_stay_secret(key):
     from wscan.agent_scanner_tools import _key_is_sensitive, sanitize_template
@@ -1320,3 +1330,32 @@ def test_credential_keys_stay_secret(key):
 def test_select_session_bearer(items, expected):
     from wscan.agent_scanner_tools import select_session_bearer
     assert select_session_bearer(items) == expected
+
+
+def test_session_bearer_from_another_origin_is_not_forwarded(tmp_path):
+    """storage の token は現在ページの origin のもの。送信先と origin が違えば付けずに BLOCKED にする。"""
+    async def scenario():
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-8", "domain": "target.test"}])
+
+        async def capture_tokens(_session):
+            return [{"storage": "local", "key": "access_token", "value": "other-origin-token-8888"}]
+
+        scanner._capture_tokens = capture_tokens
+        engines = []
+
+        def factory(check, handoff):
+            engines.append(_FakeEngine(check, handoff))
+            return engines[-1]
+
+        template = {"url": "https://target.test/api/items", "json_body": {"q": "x"},
+                    "headers": {"Authorization": _SECRET_AUTH}}
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/items", "/q", template_id="tmpl_o")
+        for page_url, expected in (("https://idp.example/login", "blocked"), ("https://target.test/app", "completed")):
+            scanner._active_session = _PageSession(page_url)
+            tools = AgentScannerTools(scanner, _harness(tmp_path / expected), engine_factory=factory)
+            point_id = tools.add_point(point, {"template": template})
+            result = await tools.run_scanner_work(tools.schedule_scanner(point_id, "sqli")["work_id"])
+            assert result["status"] == expected
+        assert len(engines) == 1  # 他 origin の token では engine を起動せず送らない
+        assert engines[0].injection_templates["tmpl_o"]["headers"]["Authorization"] == "Bearer other-origin-token-8888"
+    asyncio.run(scenario())

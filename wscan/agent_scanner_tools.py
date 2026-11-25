@@ -14,6 +14,7 @@ from wscan.agent_harness import AgentRole, WorkStatus
 from wscan.injection_point import InjectionPoint, parse_pointer
 from wscan.runtime_scope_guard import ScopePolicy, evaluate_scope
 from wscan.url_normalize import endpoint_identity
+from wscan.url_scope import same_origin as url_scope_same_origin
 
 
 _BODY_SECRET_REASON = "json body contains credentials that are not stored; it cannot be replayed safely"
@@ -59,8 +60,13 @@ def _leaf_is_secret(value, key: str) -> bool:
     )
 
 
-# 機微トークンを部分文字列として含むが資格情報ではない語（max_tokens・secretary 等）。
-_BENIGN_WORDS = frozenset({"tokens", "secretary", "secretaries", "secretariat"})
+# 機微トークンを部分文字列として含むが資格情報ではない語（secretary 等）。
+_BENIGN_WORDS = frozenset({"secretary", "secretaries", "secretariat"})
+# 複数形 tokens は直前に数量・資格情報でない語がある場合（max_tokens 等）だけ資格情報でない。
+# 直前が資格情報の修飾語（access_tokens 等）や語が無い（tokens 単独）場合は機微のまま。
+_CREDENTIAL_QUALIFIERS = frozenset({
+    "access", "refresh", "auth", "api", "id", "session", "bearer", "csrf", "xsrf", "client", "user",
+})
 # 直前にこの語がある "token" はページ送りカーソル（page_token・nextPageToken 等）。
 _CURSOR_QUALIFIERS = frozenset({"page", "next", "prev", "previous", "continuation", "pagination", "cursor", "sync"})
 
@@ -85,13 +91,19 @@ def _key_is_sensitive(key: str) -> bool:
     if is_sensitive_header(low) or low in ("cookie", "authorization"):
         return True
     words = _key_words(key)
+    # 複数語の別名（api_key・session_id 等）は複数形（api_keys・session_ids）も一致させる
+    stems = [w[:-1] if len(w) > 2 and w.endswith("s") else w for w in words]
     for alias in url_scope.SENSITIVE_KEY_TOKENS:
         parts = alias.split("_")
-        if len(parts) > 1 and any(words[i:i + len(parts)] == parts for i in range(len(words))):
+        if len(parts) > 1 and any(
+            seq[i:i + len(parts)] == parts for seq in (words, stems) for i in range(len(seq))
+        ):
             return True
     singles = [t for t in url_scope.SENSITIVE_KEY_TOKENS if "_" not in t]
     for i, word in enumerate(words):
         if word in _BENIGN_WORDS:
+            continue
+        if word == "tokens" and i and words[i - 1] not in _CREDENTIAL_QUALIFIERS:
             continue
         if word == "token" and i and words[i - 1] in _CURSOR_QUALIFIERS:
             continue
@@ -689,9 +701,15 @@ class AgentScannerTools:
             and not any(str(k).lower() == "authorization" for k in (getattr(self.scanner, "extra_headers", None) or {}))
         ):
             # 保存した template の Bearer は捨てている。Agent セッションから新しい値を得られる場合だけ送る。
+            # storage は origin ごとなので、現在のページが送信先と同じ origin のときだけ読む（他 origin の token を送らない）。
             capture = getattr(self.scanner, "_capture_tokens", None)
+            send_url = str(tmpl_meta.get("url") or point.url)
             try:
-                bearer = select_session_bearer(await capture(self.scanner._active_session)) if callable(capture) else ""
+                page_url = await self._current_page_url()
+                bearer = (
+                    select_session_bearer(await capture(self.scanner._active_session))
+                    if callable(capture) and page_url and url_scope_same_origin(page_url, send_url) else ""
+                )
             except Exception:
                 bearer = ""
             if not bearer:
@@ -1448,6 +1466,15 @@ class AgentScannerTools:
                     self.schedule_baselines(point_ids=(point_id,))
         except Exception:
             self.harness.note_coverage(coverage_gaps=["injection_point_discovery_failed"])
+
+    async def _current_page_url(self) -> str:
+        """Agent セッションの現在ページの URL（取れなければ空）。"""
+        session = self.scanner._active_session
+        get_page = getattr(session, "get_current_page", None)
+        if not callable(get_page):
+            return ""
+        page = await get_page()
+        return str(getattr(page, "url", "") or "")
 
     def _handoff(self, cookies):
         from wscan.agent_engine import AgentHandoffData

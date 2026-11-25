@@ -511,6 +511,7 @@ SCENARIOS: list[dict] = [
         "name": "bearer_api_with_session_token",
         "tokens": [{"storage": "local", "key": "access_token", "value": LAB_BEARER_TOKEN}],
         "events": [
+            {"visit": "/"},  # token は送信先と同じ origin のページの storage から読む
             *({"observe_json": {"path": path, "pointer": "/q", "body": {"q": "sample"},
                                 "headers": {"Authorization": f"Bearer {STALE_TEMPLATE_BEARER}",
                                             "Content-Type": "application/json"}}}
