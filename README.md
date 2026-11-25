@@ -595,6 +595,7 @@ python3 main.py setup "ECサイト。管理画面とREST APIあり"
 ```
 
 `description` は省略時に対話入力します。`--llm`、`--ollama-model`、`--ollama-url`、`--openai-model`、`--llm-base-url` を指定できます。説明からチェック、深さ、追加フラグを選んだ推奨 `scan` コマンドを表示します。
+説明に含まれる設定済み資格情報や password/token/Cookie/Authorization、URL の userinfo/query に見える値は、伏せ字にしてから LLM に送信します。伏せ字を検知すると CLI に通知します。ホスト名・パスや技術スタックなど、設定提案に必要な文脈は残します。
 
 ### `batch` — 複数ターゲット
 

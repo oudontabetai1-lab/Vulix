@@ -324,3 +324,71 @@ async def test_scan_report_ai_prompts_redact_target_and_finding_data(monkeypatch
     assert "xss" in prompts[0]
     assert "search_term" in prompts[1]
     assert "double_quoted_attr" in prompts[0] or "double_quoted_attr" in prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_auto_config_prompts_redact_secrets_in_all_entry_points(monkeypatch):
+    """auto_config wizard and API wrap user context and redact secret patterns."""
+    from wscan import auto_config, url_scope
+
+    captured = []
+
+    class FakePG:
+        provider = "ollama"
+
+        async def _check_llm_available(self):
+            return True
+
+    async def fake_provider_call(_pg, prompt, **_kwargs):
+        captured.append(prompt)
+        return '{"checks": ["xss"], "depth": 2, "notes": "ok"}'
+
+    monkeypatch.setitem(
+        url_scope._SECRET_VALUES,
+        "configured-auto-config-secret",
+        "configured_credential",
+    )
+    monkeypatch.setattr(auto_config, "_call_llm", fake_provider_call)
+
+    secret_input = (
+        "Scan https://alice:pass@target.test/app?token=secret-token with "
+        "Authorization: Bearer secret-bearer; Cookie: session=secret-cookie; "
+        "password=secret-password; configured-auto-config-secret; target is React and Node."
+    )
+
+    result = await auto_config.generate_from_description(FakePG(), secret_input)
+    assert result is not None
+    assert result["privacy_notice"] == auto_config._PRIVACY_NOTICE
+
+    assert len(captured) == 1
+    prompt = captured[0]
+    for secret in (
+        "pass@", "secret-token", "secret-bearer", "secret-cookie",
+        "secret-password", "configured-auto-config-secret", "alice:",
+    ):
+        assert secret not in prompt
+    for context in ("target.test/app", "React", "Node"):
+        assert context in prompt
+    assert "<untrusted_target_data" in prompt
+
+
+def test_llm_call_site_inventory_all_paths_covered():
+    """Verify that every LLM call-site listed in DELTA.md inventory is accounted for."""
+    inventory = {
+        "wscan/llm_client.py": ["complete_text"],
+        "wscan/payload_gen.py": ["PayloadGenerator"],
+        "wscan/adaptive_payload.py": ["AdaptivePayloadEngine"],
+        "wscan/attack_planner.py": ["AttackPlanner"],
+        "wscan/triage.py": ["TriageEngine"],
+        "wscan/remediation.py": ["generate_fix"],
+        "wscan/engine.py": ["ScanEngine"],
+        "wscan/auto_config.py": ["run_wizard", "generate_from_description"],
+        "wscan/llm_agent_browser.py": ["AgentBrowserScanner"],
+        "wscan/llm_web_tools.py": ["research_vulnerability", "fetch_url", "search_web"],
+    }
+    import importlib
+    for mod_path, entry_points in inventory.items():
+        module_name = mod_path.replace("/", ".").removesuffix(".py")
+        mod = importlib.import_module(module_name)
+        for ep in entry_points:
+            assert hasattr(mod, ep), f"Missing entry point {ep} in {mod_path}"

@@ -18,8 +18,22 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
 from rich import box as rbox
+from .content_provenance import ContentSource, ContentType, wrap_untrusted_observation
 
 console = Console()
+
+_PRIVACY_NOTICE = "検知した秘密情報は伏せ字にしたため、LLMには送信していません。"
+
+
+def _wrap_user_context(value: str) -> tuple[str, bool]:
+    """Wrap free-form operator input and report whether secret redaction occurred."""
+    original = str(value or "")
+    envelope = wrap_untrusted_observation(
+        original,
+        source=ContentSource.USER_CONFIG.value,
+        content_type=ContentType.INSTRUCTION.value,
+    )
+    return envelope.format_tagged_block(), envelope.content != original
 
 # ── 利用可能なチェック一覧 ──────────────────────────────────────────
 _ALL_CHECKS = [
@@ -372,19 +386,27 @@ async def run_wizard(payload_gen) -> Optional[WizardResult]:
     # ── LLM へ送信 ──────────────────────────────────────────────
     console.print("\n  [dim cyan]LLM に設定を生成させています...[/dim cyan]")
 
+    wrapped_target_desc, target_redacted = _wrap_user_context(target_desc)
+    wrapped_prohibited, prohibited_redacted = _wrap_user_context(prohibited)
+    wrapped_required, required_redacted = _wrap_user_context(required)
+    secrets_redacted = target_redacted or prohibited_redacted or required_redacted
+
     user_prompt = f"""以下の条件でWebセキュリティスキャン設定を生成してください。
 
 【スキャン対象の説明】
-{target_desc}
+{wrapped_target_desc}
 
 【禁止事項】
-{prohibited if prohibited else "特になし"}
+{wrapped_prohibited if prohibited else "特になし"}
 
 【必須検査項目・重点事項】
-{required if required else "LLM の判断に任せる"}
+{wrapped_required if required else "LLM の判断に任せる"}
 
 上記を踏まえて最適な設定JSONを返してください。
 禁止事項が含まれる場合は warnings と prohibited_reminder に必ず明記してください。"""
+
+    if secrets_redacted:
+        console.print(f"  [cyan]{_PRIVACY_NOTICE}[/cyan]")
 
     llm_text = await _call_llm(payload_gen, user_prompt)
 
@@ -451,9 +473,10 @@ async def generate_from_description(payload_gen, description: str) -> Optional[d
     if not await payload_gen._check_llm_available():
         return None
 
+    wrapped_description, secrets_redacted = _wrap_user_context(description)
     user_prompt = (
         "以下の要望に基づいてWebセキュリティスキャン設定を生成してください。\n\n"
-        f"【要望】\n{description}\n\n"
+        f"【要望】\n{wrapped_description}\n\n"
         "要望から検査項目・深さ・ヘッドレス・除外URLなどを判断して最適な設定JSONを返してください。\n"
         "ユーザーが特定の技術スタック（Django / Rails / PHP / React 等）や\n"
         "特定の検査項目を言及した場合は、それを優先してください。\n"
@@ -480,6 +503,7 @@ async def generate_from_description(payload_gen, description: str) -> Optional[d
         "timeout":           result.timeout,
         "notes":             result.notes,
         "warnings":          result.warnings,
+        "privacy_notice":    _PRIVACY_NOTICE if secrets_redacted else "",
     }
 
 

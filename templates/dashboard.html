@@ -7244,6 +7244,7 @@ async function runAutoConfig() {
     if (data.warnings && data.warnings.length) {
       msg += '  ⚠️ ' + data.warnings.slice(0, 2).join(' / ');
     }
+    if (data.privacy_notice) msg += '  🔒 ' + data.privacy_notice;
     statusEl.textContent = msg;
   } catch (e) {
     statusEl.textContent = '❌ ネットワークエラー: ' + e.message;
