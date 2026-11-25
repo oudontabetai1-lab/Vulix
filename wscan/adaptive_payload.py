@@ -481,22 +481,47 @@ class AdaptivePayloadEngine:
         # 観測へ合流。engine が最初の掃射後に整形済み文字列を渡す。空なら従来どおり。
         if extra_observations:
             observations = observations + "\n" + extra_observations
-        observations = wrap_untrusted_observation(
-            observations,
-            source=ContentSource.HTTP.value,
-            origin=url,
-            content_type=ContentType.EVIDENCE.value,
-        ).format_tagged_block()
         from .content_provenance import _redact_prompt_observation, _redact_prompt_origin
         from . import url_scope
 
-        payloads_list = "\n".join(
+        clean_url = _redact_prompt_origin(url, url_scope)
+        clean_field = _redact_prompt_observation(str(field_name or ""), url_scope)
+
+        wrapped_url = wrap_untrusted_observation(
+            clean_url,
+            source=ContentSource.HTTP.value,
+            origin=clean_url,
+            content_type=ContentType.OBSERVATION.value,
+        ).format_tagged_block()
+
+        wrapped_field = wrap_untrusted_observation(
+            clean_field,
+            source=ContentSource.DOM.value,
+            origin=clean_url,
+            content_type=ContentType.OBSERVATION.value,
+        ).format_tagged_block()
+
+        observations = wrap_untrusted_observation(
+            observations,
+            source=ContentSource.HTTP.value,
+            origin=clean_url,
+            content_type=ContentType.EVIDENCE.value,
+        ).format_tagged_block()
+
+        payloads_raw = "\n".join(
             f"  {_redact_prompt_observation(p, url_scope)}" for p in payloads_tried[:30]
         ) or "  (none recorded)"
+        payloads_list = wrap_untrusted_observation(
+            payloads_raw,
+            source=ContentSource.HTTP.value,
+            origin=clean_url,
+            content_type=ContentType.EVIDENCE.value,
+        ).format_tagged_block()
+
         # Sanitize attacker-controlled HTML before injecting into the LLM prompt
         # so that crafted pages cannot exfiltrate the system prompt or redirect
         # the model with instructions like "ignore previous directions".
-        page_excerpt = _sanitize_untrusted_html(page_html, max_len=5000, origin=url)
+        page_excerpt = _sanitize_untrusted_html(page_html, max_len=5000, origin=clean_url)
 
         if waf_name:
             from .waf_detector import _WAF_BYPASSES
@@ -511,8 +536,8 @@ class AdaptivePayloadEngine:
             waf_section = "No WAF detected — focus on application-level filtering bypasses."
 
         prompt = _ADAPTIVE_PROMPT.format(
-            url=_redact_prompt_origin(url, url_scope),
-            field_name=_redact_prompt_observation(str(field_name or ""), url_scope),
+            url=wrapped_url,
+            field_name=wrapped_field,
             check_type=check_type,
             cheatsheet=cheatsheet,
             waf_section=waf_section,
@@ -580,18 +605,25 @@ class AdaptivePayloadEngine:
         if not await self.pg._check_llm_available():
             return []
 
+        from .content_provenance import _redact_prompt_observation, _redact_prompt_origin
+        from . import url_scope
+
         cheatsheet = _get_cheatsheet(check_type)
-        seed_block = "\n".join(f"  {s}" for s in seeds[:20])
+        seed_block = "\n".join(
+            f"  {_redact_prompt_observation(s, url_scope)}" for s in seeds[:20]
+        )
+        clean_url_val = _redact_prompt_origin(url or "(unknown)", url_scope)
+        clean_field_val = _redact_prompt_observation(str(field_name or "(unknown)"), url_scope)
         clean_field = wrap_untrusted_observation(
-            field_name or "(unknown)",
+            clean_field_val,
             source=ContentSource.DOM.value,
-            origin=url or "",
+            origin=clean_url_val,
             content_type=ContentType.OBSERVATION.value,
         ).format_tagged_block()
         clean_url = wrap_untrusted_observation(
-            url or "(unknown)",
+            clean_url_val,
             source=ContentSource.HTTP.value,
-            origin=url or "",
+            origin=clean_url_val,
             content_type=ContentType.OBSERVATION.value,
         ).format_tagged_block()
         prompt = _MUTATION_PROMPT.format(
