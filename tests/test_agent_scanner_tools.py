@@ -94,6 +94,7 @@ class _FakeEngine:
         self.exclude_urls = ["https://target.test/private*"]
         self.exclude_fields = ["ignored"]
         self.login_url = "https://target.test/login"
+        self.header_scope_enforce = True
 
     def _is_attack_target_url(self, url):
         from wscan.url_scope import url_matches_any_scope
@@ -105,6 +106,22 @@ class _FakeEngine:
 
     async def _seed_and_verify_handoff_cookies(self, _browser):
         return self.auth
+
+    def auth_headers(self, extra=None, *, url="", include_cookie=True):
+        headers = dict(self.headers)
+        from wscan.engine import _effective_synced_token
+        from wscan import url_scope
+        synced_token = _effective_synced_token(self)
+        if url and synced_token:
+            captured_origin = synced_token.get("origin", "")
+            if captured_origin and url_scope.same_origin(url, captured_origin):
+                token_headers = synced_token.get("headers", {})
+                for k, v in token_headers.items():
+                    if not any(ek.lower() == k.lower() for ek in headers):
+                        headers[k] = v
+        if extra:
+            headers.update(extra)
+        return headers
 
 
 def _harness(path, *, resume=False):
@@ -1550,23 +1567,35 @@ def test_tampered_live_template_structure_blocks_before_send(tmp_path):
     asyncio.run(scenario())
 
 
-def test_real_scan_engine_receives_bearer_via_header_manager(tmp_path):
-    """実際の ScanEngine に対し、API GET carrier で同一 origin の Bearer が HeaderManager 経由で付与される。"""
+def test_real_scan_engine_bearer_origin_scoped_and_scope_enforced(tmp_path, monkeypatch):
+    """実際の ScanEngine に対し、Bearer は同一 origin のみに付与され、別 origin の access_urls や
+    スコープ外ホストには付与されず、header scope enforcement 無効時は送信が BLOCKED になる。"""
     async def scenario():
         from wscan.engine import ScanEngine
         harness = _harness(tmp_path)
-        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-val", "domain": "target.test"}])
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-val", "domain": "a.test"}])
+        scanner.target_url = "https://a.test/"
+        scanner.target_urls = ["https://a.test/"]
+        scanner.access_urls = ["https://sso.b.test/login"]
+        scanner.login_url = "https://a.test/login"
         fresh_bearer = "fresh-bearer-real-engine-1234"
 
         async def capture_tokens(_session):
             return [{"storage": "local", "key": "access_token", "value": fresh_bearer}]
 
         scanner._capture_tokens = capture_tokens
-        scanner._active_session = _PageSession("https://target.test/app")
+        scanner._active_session = _PageSession("https://a.test/app")
 
         real_engines = []
         def factory(check, handoff):
-            engine = ScanEngine("https://target.test/", checks=[check], headless=True, open_report=False)
+            engine = ScanEngine(
+                "https://a.test/",
+                target_urls=["https://a.test/"],
+                access_urls=["https://sso.b.test/login"],
+                checks=[check],
+                headless=True,
+                open_report=False,
+            )
             engine._browser = _FakeBrowser()
             async def fake_seed(*_):
                 return True
@@ -1576,9 +1605,9 @@ def test_real_scan_engine_receives_bearer_via_header_manager(tmp_path):
             return engine
 
         tools = AgentScannerTools(scanner, harness, engine_factory=factory)
-        point = InjectionPoint.for_url_param("https://target.test/api/search?q=1", "q")
+        point = InjectionPoint.for_url_param("https://a.test/api/search?q=1", "q")
         template = {
-            "url": "https://target.test/api/search?q=1",
+            "url": "https://a.test/api/search?q=1",
             "headers": {"Authorization": "Bearer old-expired-token", "Accept": "application/json"},
         }
         point_id = tools.add_point(point, {"template": template})
@@ -1587,8 +1616,42 @@ def test_real_scan_engine_receives_bearer_via_header_manager(tmp_path):
         assert result["status"] == "completed"
         assert len(real_engines) == 1
         eng = real_engines[0]
-        assert eng.header_manager.current().get("Authorization") == f"Bearer {fresh_bearer}"
-        assert eng.auth_headers(url="https://target.test/api/search?q=1").get("Authorization") == f"Bearer {fresh_bearer}"
+
+        # 1. Bearer は HeaderManager current には登録されない（全体流出防止）
+        assert "Authorization" not in eng.header_manager.current()
+
+        # 2. 同一 origin へのリクエストには Bearer が付与される
+        assert eng.auth_headers(url="https://a.test/api/search?q=1").get("Authorization") == f"Bearer {fresh_bearer}"
+
+        # 3. 異なる origin の access_urls (sso.b.test) には Bearer が付与されない
+        assert "Authorization" not in eng.auth_headers(url="https://sso.b.test/login")
+
+        # 4. スコープ外のホスト (evil.test) には Bearer が付与されない
+        assert "Authorization" not in eng.auth_headers(url="https://evil.test/attack")
+
+        # 5. header scope enforcement が無効な場合 (engine.header_scope_enforce=False または env var)
+        # は Bearer の送信が BLOCKED になり、理由が記録される
+        blocked_engines = []
+        def disabled_factory(check, handoff):
+            engine = factory(check, handoff)
+            engine.header_scope_enforce = False
+            blocked_engines.append(engine)
+            return engine
+
+        tools_disabled = AgentScannerTools(scanner, harness, engine_factory=disabled_factory)
+        work_id2 = tools_disabled.schedule_scanner(point_id, "sqli")["work_id"]
+        res2 = await tools_disabled.run_scanner_work(work_id2)
+        assert res2["status"] == "blocked"
+        assert res2["reason"] == "header scope enforcement is disabled; bearer token was withheld"
+
+        # env var WSCAN_HEADER_SCOPE_ENFORCE=0 でも同様に BLOCKED
+        monkeypatch.setenv("WSCAN_HEADER_SCOPE_ENFORCE", "0")
+        tools_env = AgentScannerTools(scanner, harness, engine_factory=factory)
+        work_id3 = tools_env.schedule_scanner(point_id, "os")["work_id"]
+        res3 = await tools_env.run_scanner_work(work_id3)
+        assert res3["status"] == "blocked"
+        assert res3["reason"] == "header scope enforcement is disabled; bearer token was withheld"
+
     asyncio.run(scenario())
 
 
@@ -1622,9 +1685,88 @@ def test_api_get_bearer_fresh_token_attached_when_origin_matches(tmp_path):
         result = await tools.run_scanner_work(work_id)
         assert result["status"] == "completed"
         assert len(engines) == 1
-        assert engines[0].headers.get("Authorization") == f"Bearer {fresh_bearer}"
+        assert "Authorization" not in engines[0].headers
         assert getattr(engines[0], "_synced_token", {}).get("headers", {}).get("Authorization") == f"Bearer {fresh_bearer}"
+        assert engines[0].auth_headers(url="https://target.test/api/search?q=1").get("Authorization") == f"Bearer {fresh_bearer}"
         assert fresh_bearer not in _all_persisted(tmp_path)
+    asyncio.run(scenario())
+
+
+def test_template_url_query_values_are_not_persisted_and_reobtained_on_send(tmp_path):
+    """Template URL のクエリ値（トークンや通常クエリ値）は永続化されず、キー名と構造ハッシュのみ保持され、
+    送信時に live agent session から再取得されて scanner へ渡される。再開時も成功し、構造改ざん時は BLOCKED になる。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-val", "domain": "target.test"}])
+        scanner._active_session = _PageSession("https://target.test/app")
+
+        fake_scanner = _FakeScanner(findings=[])
+        engines = []
+        def factory(check, handoff):
+            eng = _FakeEngine(check, handoff, scanner=fake_scanner)
+            engines.append(eng)
+            return eng
+
+        tools = AgentScannerTools(scanner, harness, engine_factory=factory)
+
+        raw_url = "https://target.test/api/search?q=test&access_token=secret_tok_123&page=2&sort=asc"
+        point = InjectionPoint.for_url_param("https://target.test/api/search?q=1", "q")
+        template = {
+            "url": raw_url,
+            "method": "GET",
+            "headers": {"Accept": "application/json"},
+        }
+
+        point_id = tools.add_point(point, {"template": template})
+
+        # 1. agent_scanner_points.json の検証: クエリ値（secret_tok_123, 2, asc, test）は一切含まれない
+        points_text = (tmp_path / "agent_scanner_points.json").read_text(encoding="utf-8")
+        assert "secret_tok_123" not in points_text
+        assert "sort=asc" not in points_text
+        assert "page=2" not in points_text
+        assert "q=test" not in points_text
+        # キー名は残る
+        assert "access_token=" in points_text
+        assert "sort=" in points_text
+        assert "page=" in points_text
+        assert "q=" in points_text
+
+        # 2. 送信時: live template からクエリ値が再取得され、scanner.scan_field に渡される
+        work_id = tools.schedule_scanner(point_id, "xss")["work_id"]
+        result = await tools.run_scanner_work(work_id)
+        assert result["status"] == "completed"
+        assert len(fake_scanner.calls) == 1
+        called_url = fake_scanner.calls[0][0]
+        # 通常クエリ値が scanner に渡されている
+        assert "sort=asc" in called_url
+        assert "page=2" in called_url
+        assert "q=test" in called_url
+
+        # 3. points, state, events, probe_attempts に secret_tok_123 が出現しない
+        all_text = " ".join(_all_persisted(tmp_path))
+        assert "secret_tok_123" not in all_text
+
+        # 4. 再開 (resume) の検証: メモリキャッシュを消して disk から再構築し、scanner.captured_templates から再取得して成功
+        tools._live_templates.clear()
+        tools_resumed = AgentScannerTools(scanner, harness, engine_factory=factory)
+        # scanner の captured_templates に live template を設定
+        scanner.captured_templates[point_id] = template
+        work_id2 = tools_resumed.schedule_scanner(point_id, "sqli")["work_id"]
+        res2 = await tools_resumed.run_scanner_work(work_id2)
+        assert res2["status"] == "completed"
+
+        # 5. live template が取得できない、またはクエリ構造が不一致（キーが異なる）場合は BLOCKED になる
+        tools_resumed._live_templates.clear()
+        scanner.captured_templates.clear()
+        scanner.captured_templates[point_id] = {
+            "url": "https://target.test/api/search?tampered_param=1",
+            "method": "GET",
+        }
+        work_id3 = tools_resumed.schedule_scanner(point_id, "os")["work_id"]
+        res3 = await tools_resumed.run_scanner_work(work_id3)
+        assert res3["status"] == "blocked"
+        assert "structure" in res3["reason"] or "match" in res3["reason"] or "live request template" in res3["reason"]
+
     asyncio.run(scenario())
 
 

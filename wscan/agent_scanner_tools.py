@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -85,10 +86,48 @@ def summarize_structure(value):
     return "any"
 
 
-def _structure_hash(body) -> str:
-    """JSON body の構造要約から決定論的ハッシュを生成する。"""
-    summary = summarize_structure(body)
-    canonical = json.dumps(summary, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+def _sanitize_url_query_for_persistence(url: str) -> tuple[str, list[str]]:
+    """URL の scheme, host, path, およびクエリのキー名のみを残し、クエリの値を一切除外する。
+
+    戻り値: (値を除去した安全な URL, クエリキー名のリスト)
+    例: "https://target.test/api/search?q=1&access_token=secret123&page=2"
+    -> ("https://target.test/api/search?access_token=&page=&q=", ["access_token", "page", "q"])
+    """
+    if not url:
+        return "", []
+    import urllib.parse
+    parsed = urllib.parse.urlsplit(str(url))
+    if not parsed.query:
+        return urllib.parse.urlunsplit(parsed._replace(fragment="")), []
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    query_keys = sorted(set(str(k) for k, _ in pairs))
+    safe_query = urllib.parse.urlencode([(k, "") for k in query_keys])
+    safe_url = urllib.parse.urlunsplit(parsed._replace(query=safe_query, fragment=""))
+    return safe_url, query_keys
+
+
+def _endpoint_base(url: str) -> str:
+    """URL の scheme, host, path 部分を返す（クエリやフラグメントは除外）。"""
+    if not url:
+        return ""
+    from urllib.parse import urlsplit, urlunsplit
+    parsed = urlsplit(str(url))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _structure_hash(body=None, query_keys: list[str] | None = None) -> str:
+    """JSON body および URL クエリキー名の構造要約から決定論的ハッシュを生成する。値は含めない。"""
+    summary: dict = {}
+    if body is not None:
+        summary["body"] = summarize_structure(body)
+    if query_keys:
+        summary["query_keys"] = sorted(set(str(k) for k in query_keys))
+    if not summary:
+        return ""
+    if "body" in summary and "query_keys" not in summary:
+        canonical = json.dumps(summary["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    else:
+        canonical = json.dumps(summary, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
 
@@ -245,17 +284,23 @@ def _redact_json_leaves(value, key: str = ""):
 
 
 def sanitize_template(template: dict) -> tuple[dict, bool]:
-    """永続化用に template からヘッダ値と body 値を一切除き、識別に必要な構造要約と非秘密メタ情報だけ残す。
+    """永続化用に template からヘッダ値、body 値、URL クエリ値を一切除き、
+    識別に必要な構造要約と非秘密メタ情報だけ残す。
 
-    戻り値は (安全な template, body/header に秘密があったかの多層防御フラグ)。
-    ヘッダ値と body 値は、秘密かどうかに関係なく、永続化用 template には一切残さない。"""
+    戻り値は (安全な template, body/header/query に秘密があったかの多層防御フラグ)。
+    値は秘密かどうかに関係なく、永続化用 template には一切残さない。"""
     if not isinstance(template, dict):
         return {}, False
+    raw_url = str(template.get("url") or "")
+    safe_url, query_keys = _sanitize_url_query_for_persistence(raw_url)
     safe = {
-        "url": str(template.get("url") or ""),
+        "url": safe_url,
         "method": str(template.get("method") or "POST").upper(),
         "content_type": str(template.get("content_type") or "application/json"),
     }
+    if query_keys:
+        safe["query_keys"] = query_keys
+
     auth_scheme = str(template.get("auth_scheme") or "")
     headers = template.get("headers")
     has_secret_header = False
@@ -269,21 +314,27 @@ def sanitize_template(template: dict) -> tuple[dict, bool]:
         safe["auth_scheme"] = auth_scheme
 
     body_secret = has_secret_header
-    if "json_body" in template:
-        body = template["json_body"]
+    body = template.get("json_body") if "json_body" in template else None
+    if body is not None:
         safe["body_structure"] = summarize_structure(body)
-        safe["structure_hash"] = _structure_hash(body)
         if isinstance(body, dict):
             safe["body_keys"] = sorted(str(k) for k in body.keys())
             for k, v in body.items():
                 if _key_is_sensitive(str(k)) or _leaf_is_secret(v, str(k)):
                     body_secret = True
+
+    if body is not None or query_keys:
+        safe["structure_hash"] = _structure_hash(body=body, query_keys=query_keys)
     elif "structure_hash" in template:
         safe["structure_hash"] = str(template["structure_hash"])
         if "body_structure" in template:
             safe["body_structure"] = template["body_structure"]
         if "body_keys" in template:
             safe["body_keys"] = template["body_keys"]
+        if "query_keys" in template:
+            safe["query_keys"] = template["query_keys"]
+
+    return safe, body_secret
 
     return safe, body_secret
 
@@ -439,8 +490,6 @@ class AgentScannerTools:
                     saved[key] = redacted
             tmpl = saved.get("template")
             if isinstance(tmpl, dict):
-                if tmpl.get("url") and redact_url(str(tmpl["url"])) != tmpl["url"]:
-                    saved["resume_unavailable"] = True
                 saved["template"], _ = sanitize_template(tmpl)
             f = saved.get("field")
             if isinstance(f, dict) and isinstance(f.get("template"), dict):
@@ -554,6 +603,7 @@ class AgentScannerTools:
         meta_tmpl = metadata.get("template") if isinstance(metadata.get("template"), dict) else {}
         expected_hash = meta_tmpl.get("structure_hash") or ""
         expected_url = str(meta_tmpl.get("url") or point.url)
+        expected_base = _endpoint_base(expected_url)
         expected_endpoint = endpoint_identity(expected_url)
         expected_method = str(meta_tmpl.get("method") or point.method or "POST").upper()
 
@@ -571,7 +621,7 @@ class AgentScannerTools:
                     for k, t in val.items():
                         if isinstance(t, dict) and t not in candidates:
                             t_url = str(t.get("url") or "")
-                            if t_url and (t_url == expected_url or endpoint_identity(t_url) == expected_endpoint):
+                            if t_url and (t_url == expected_url or _endpoint_base(t_url) == expected_base or endpoint_identity(t_url) == expected_endpoint):
                                 candidates.append(t)
 
             captured_reqs = (
@@ -585,7 +635,7 @@ class AgentScannerTools:
                         continue
                     r_url = str(req.get("url") or "")
                     r_method = str(req.get("method") or "POST").upper()
-                    if (r_url == expected_url or endpoint_identity(r_url) == expected_endpoint) and r_method == expected_method:
+                    if (r_url == expected_url or _endpoint_base(r_url) == expected_base or endpoint_identity(r_url) == expected_endpoint) and r_method == expected_method:
                         body = req.get("json_body")
                         if body is None and req.get("post_data"):
                             try:
@@ -626,14 +676,18 @@ class AgentScannerTools:
                     "content_type": "application/json",
                     "headers": {},
                 }, ""
-            return None, "live request template for json body is unavailable in the current agent session"
+            return None, "live request template is unavailable in the current agent session"
 
         matched = None
         for cand in candidates:
-            if not isinstance(cand, dict) or "json_body" not in cand:
+            if not isinstance(cand, dict):
                 continue
-            cand_body = cand["json_body"]
-            cand_hash = _structure_hash(cand_body)
+            cand_url = str(cand.get("url") or "")
+            if expected_base and _endpoint_base(cand_url) != expected_base:
+                continue
+            cand_body = cand.get("json_body")
+            _, cand_query_keys = _sanitize_url_query_for_persistence(cand_url)
+            cand_hash = _structure_hash(body=cand_body, query_keys=cand_query_keys)
             if not expected_hash or cand_hash == expected_hash:
                 matched = cand
                 break
@@ -982,8 +1036,14 @@ class AgentScannerTools:
                 )
                 self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason=_BEARER_UNAVAILABLE)
                 return {"status": "blocked", "reason": f"{_BEARER_UNAVAILABLE}; sign in through the agent session or set an Authorization header and retry"}
+        meta_tmpl = metadata.get("template") if isinstance(metadata.get("template"), dict) else {}
+        has_template_req = bool(
+            point.location in ("json_body", "json")
+            or meta_tmpl.get("structure_hash")
+            or meta_tmpl.get("query_keys")
+        )
         live_tmpl = None
-        if point.location in ("json_body", "json"):
+        if has_template_req:
             import inspect
             reobtain_res = self._reobtain_live_template(point, metadata)
             if inspect.isawaitable(reobtain_res):
@@ -1001,6 +1061,7 @@ class AgentScannerTools:
                 )
                 self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason=tmpl_reason)
                 return {"status": "blocked", "reason": tmpl_reason}
+        target_send_url = str((live_tmpl or {}).get("url") or meta_tmpl.get("url") or point.url)
         engine = None
         from wscan import url_scope
         secret_registry = getattr(url_scope, "_SECRET_VALUES", None)
@@ -1011,8 +1072,27 @@ class AgentScannerTools:
             engine = self.engine_factory(check, handoff)
             engine.target_only = True
             engine._runtime_scope_block_callback = self._record_scope_block
+
+            if is_bearer_carrier:
+                env_scope = os.environ.get("WSCAN_HEADER_SCOPE_ENFORCE", "")
+                if (
+                    getattr(engine, "header_scope_enforce", True) is False
+                    or (env_scope and env_scope.strip().lower() in ("0", "false", "no", "off"))
+                ):
+                    reason = "header scope enforcement is disabled; bearer token was withheld"
+                    self.harness.record_dispatch_event(
+                        event_type="authorization_decision",
+                        tool_name="run_scanner_work",
+                        work_id=work_id,
+                        correlation_id=corr_id,
+                        allowed=False,
+                        reason=reason,
+                    )
+                    self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason=reason)
+                    return {"status": "blocked", "reason": reason}
+
             if point.location in ("json_body", "json"):
-                tmpl_data = live_tmpl
+                tmpl_data = live_tmpl or {}
                 json_body = tmpl_data.get("json_body")
                 if json_body is None:
                     json_body = _default_json_body_for_pointer(point.parameter_id)
@@ -1028,8 +1108,8 @@ class AgentScannerTools:
                     clean_headers["Authorization"] = f"Bearer {bearer}"
                 template_dict = {
                     "method": str(tmpl_data.get("method") or point.method or "POST").upper(),
-                    "url": str(tmpl_data.get("url") or point.url),
-                    "endpoint": endpoint_identity(str(tmpl_data.get("url") or point.url)),
+                    "url": target_send_url,
+                    "endpoint": endpoint_identity(target_send_url),
                     "json_body": json_body,
                     "content_type": str(tmpl_data.get("content_type") or clean_headers.get("Content-Type") or "application/json"),
                     "headers": clean_headers,
@@ -1037,14 +1117,9 @@ class AgentScannerTools:
                 if not hasattr(engine, "injection_templates") or engine.injection_templates is None:
                     engine.injection_templates = {}
                 engine.injection_templates[point.template_id] = template_dict
-            elif bearer:
+            if bearer:
                 from wscan.engine import _store_synced_token
-                send_url = str(tmpl_meta.get("url") or point.url)
-                _store_synced_token(engine, send_url, {"Authorization": f"Bearer {bearer}"})
-                if hasattr(engine, "header_manager") and hasattr(engine.header_manager, "update"):
-                    await engine.header_manager.update({"Authorization": f"Bearer {bearer}"})
-                if hasattr(engine, "headers") and isinstance(engine.headers, dict):
-                    engine.headers["Authorization"] = f"Bearer {bearer}"
+                _store_synced_token(engine, target_send_url, {"Authorization": f"Bearer {bearer}"})
             from wscan.llm_agent_browser import security_probe_allowed
             tmpl_url = (metadata.get("template") or {}).get("url") if isinstance(metadata.get("template"), dict) else ""
             if (
@@ -1116,7 +1191,7 @@ class AgentScannerTools:
                 return {"status": "blocked", "reason": "authentication could not be verified; re-authenticate and retry"}
             scanner = engine.scanners[check]
             if point.location not in ("json_body", "json"):
-                await engine._browser.navigate(point.url)
+                await engine._browser.navigate(target_send_url)
             self.harness.record_dispatch_event(
                 event_type="authorization_decision",
                 tool_name="run_scanner_work",
@@ -1135,8 +1210,9 @@ class AgentScannerTools:
                 work.transition_to(WorkStatus.RUNNING)
                 work.attempts += 1
                 self.harness.checkpoint()
+            from wscan.request_logger import redact_url
             self.harness.record_probe_attempt(
-                target_url=point.url, check_type=check, work_id=work_id,
+                target_url=redact_url(str(target_send_url)), check_type=check, work_id=work_id,
                 correlation_id=corr_id,
                 status="dispatching", binding=binding, binding_digest=binding_digest,
             )
@@ -1144,9 +1220,9 @@ class AgentScannerTools:
                 if callable(getattr(scanner, "scan_injection_point", None)):
                     scan_coro = scanner.scan_injection_point(point, metadata["field"])
                 else:
-                    scan_coro = scanner.scan_field(point.url, point.form_index, metadata["field"], False)
+                    scan_coro = scanner.scan_field(target_send_url, point.form_index, metadata["field"], False)
             else:
-                scan_coro = scanner.scan_field(point.url, point.form_index, metadata["field"], point.legacy_is_url_param())
+                scan_coro = scanner.scan_field(target_send_url, point.form_index, metadata["field"], point.legacy_is_url_param())
             findings = await asyncio.wait_for(scan_coro, timeout=180)
             verified = []
             verification_inconclusive = False
@@ -1163,7 +1239,7 @@ class AgentScannerTools:
             )
             self.findings[work_id] = sanitized_findings
             self.harness.record_probe_attempt(
-                target_url=point.url, check_type=check, work_id=work_id,
+                target_url=redact_url(str(target_send_url)), check_type=check, work_id=work_id,
                 correlation_id=corr_id,
                 status="inconclusive" if status == WorkStatus.INCONCLUSIVE else "completed",
                 evidence_id=work_id, binding=binding, binding_digest=binding_digest,
