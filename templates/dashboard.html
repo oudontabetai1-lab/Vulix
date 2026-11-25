@@ -2101,6 +2101,28 @@ body { padding-left: 212px; }
           </div>
         </div>
 
+        <!-- Card 4: Proxy エクスポート取り込み -->
+        <div class="cfg-card">
+          <div class="cfg-card-header">
+            <div class="cfg-card-icon">📥</div>
+            <div>
+              <div class="cfg-card-title">Proxy エクスポート（ZAP / Burp）</div>
+            </div>
+          </div>
+          <div class="cfg-card-desc">
+            OWASP ZAP（JSON/HAR）または Burp Suite（XML）のエクスポートファイルを取り込み、クロールや JSON 操作のシードとして使用します。
+          </div>
+          <div class="cfg-grid">
+            <div class="cfg-field" style="grid-column:1/-1">
+              <label>Proxy エクスポートファイル</label>
+              <input type="text" id="cfgProxyExportFile" placeholder="アップロードするか、サーバ側パスを入力">
+              <input type="file" id="upProxyExportFile" accept=".json,.xml,.har" style="font-size:0.75rem">
+              <span id="upProxyExportFileStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
+              <div class="cfg-field-hint">空欄＝使用しない。スコープ内のリクエストのみ抽出してシードに追加します。</div>
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <!-- Tab: Flows -->
@@ -4395,6 +4417,7 @@ function submitScanConfig() {
     output_dir:   document.getElementById('cfgOutputDir').value.trim(),
     payloads_file: document.getElementById('cfgPayloadsFile').value.trim(),
     manual_crawl_file: document.getElementById('cfgManualCrawlFile').value.trim(),
+    proxy_export_file: (document.getElementById('cfgProxyExportFile')?.value || '').trim(),
     accounts:     collectAccounts(),
     auto_register: cfgToggles.auto_register,
     auto_register_count: parseInt(document.getElementById('cfgAutoRegisterCount').value) || 2,
@@ -4480,6 +4503,7 @@ function _collectFullConfigForExport() {
     access_urls: collect('cfgAccessUrls'),
     ctf_flag_pattern: collect('cfgCtfFlagPattern'),
     manual_crawl_file: collect('cfgManualCrawlFile'),
+    proxy_export_file: collect('cfgProxyExportFile'),
     manual_crawl_output: collect('manualCrawlOutput'),
     flows: collectFlows(),
     accounts: (typeof collectAccounts === 'function') ? collectAccounts() : [],
@@ -4588,6 +4612,7 @@ function applyImportedConfig(cfg) {
   else setVal('cfgAccessUrls', cfg.access_urls);
   setVal('cfgCtfFlagPattern', cfg.ctf_flag_pattern);
   setVal('cfgManualCrawlFile', cfg.manual_crawl_file);
+  setVal('cfgProxyExportFile', cfg.proxy_export_file);
   setVal('manualCrawlOutput', cfg.manual_crawl_output);
   if (cfg.toggles) {
     Object.entries(cfg.toggles).forEach(([k, v]) => {
@@ -4620,6 +4645,7 @@ function initConfigOverlay() {
   wireUpload('upTlsCaCert', 'cfgTlsCaCert', 'upTlsCaCertStatus');
   wireUpload('upPayloadsFile', 'cfgPayloadsFile', 'upPayloadsFileStatus');
   wireUpload('upManualCrawlFile', 'cfgManualCrawlFile', 'upManualCrawlFileStatus');
+  wireUpload('upProxyExportFile', 'cfgProxyExportFile', 'upProxyExportFileStatus');
   wireUpload('upCrawlReviewManualFile', 'crawlReviewManualFile', 'upCrawlReviewManualFileStatus');
   wireTotpQrPreview();
   // Read current port from URL
@@ -4710,7 +4736,7 @@ const CONFIG_SAVE_ALLOWLIST = [
   'mfa_selector', 'mfa_totp_digits', 'mfa_totp_period', 'mfa_totp_algorithm',
   'allowed_hours', 'forbidden_hours',
   'exclude_fields', 'exclude_urls', 'target_urls', 'access_urls',
-  'ctf_flag_pattern', 'manual_crawl_file', 'manual_crawl_output', 'auto_register_count', 'checks',
+  'ctf_flag_pattern', 'manual_crawl_file', 'proxy_export_file', 'manual_crawl_output', 'auto_register_count', 'checks',
 ];
 // 旧バージョンが localStorage に残した可能性のある秘匿キー。読込時に検出したら
 // 破棄して allowlist だけで上書き保存する（後方互換の後始末）。
@@ -4988,6 +5014,7 @@ function loadConfigFromStorage() {
     if (restoreTarget && cfg.access_urls) document.getElementById('cfgAccessUrls').value = safeUrlListForStorage(cfg.access_urls);
     if (cfg.ctf_flag_pattern) document.getElementById('cfgCtfFlagPattern').value = cfg.ctf_flag_pattern;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
+    if (cfg.proxy_export_file) document.getElementById('cfgProxyExportFile').value = cfg.proxy_export_file;
     if (cfg.state_profile) document.getElementById('cfgStateProfile').value = cfg.state_profile;
     if (cfg.manual_crawl_output) document.getElementById('manualCrawlOutput').value = cfg.manual_crawl_output;
     if (cfg.auto_register_count != null) document.getElementById('cfgAutoRegisterCount').value = cfg.auto_register_count;
@@ -5058,6 +5085,7 @@ async function loadDefaultConfigFromServer() {
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
+    if (cfg.proxy_export_file) document.getElementById('cfgProxyExportFile').value = cfg.proxy_export_file;
     if (Array.isArray(cfg.checks)) setSelectedChecks(cfg.checks);
     if (cfg.toggles) {
       Object.entries(cfg.toggles).forEach(([key, val]) => {
@@ -7376,6 +7404,7 @@ function submitHybridScan() {
       ? (document.getElementById('cfgLlmBaseUrl')?.value || '').trim() : ''),
     role_models:  collectRoleModels(),
     manual_crawl_file: (document.getElementById('cfgManualCrawlFile')?.value || '').trim(),
+    proxy_export_file: (document.getElementById('cfgProxyExportFile')?.value || '').trim(),
     target_urls:  (document.getElementById('cfgTargetUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
     access_urls:  (document.getElementById('cfgAccessUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
     fast_mode:    cfgToggles.fast_mode,

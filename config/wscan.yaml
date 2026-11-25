@@ -55,6 +55,9 @@ scan:
   # 手動巡回で保存した JSON を巡回シードとして使用する場合のパス
   manual_crawl_file: ""
 
+  # OWASP ZAP (JSON) / Burp Suite (XML) エクスポートを巡回シードとして使用する場合のパス
+  proxy_export_file: ""
+
   # N: リクエスト間の待機秒数 (0=制限なし, --fast 時は 0 に上書き)
   request_delay: 0.5
 

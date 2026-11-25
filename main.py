@@ -110,6 +110,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["target_urls"]             = list(s.get("target_urls",    []))
     cfg["access_urls"]             = list(s.get("access_urls",    []))
     cfg["manual_crawl_file"]       = str(s.get("manual_crawl_file", "") or "")
+    cfg["proxy_export_file"]       = str(s.get("proxy_export_file", s.get("proxy_export", "")) or "")
     cfg["allow_state_changing_probes"] = bool(s.get("allow_state_changing_probes", False))
     cfg["state_profile"]           = str(s.get("state_profile", "unrestricted") or "unrestricted")
     cfg["llm_concurrency"]         = int(l.get("concurrency", 0) or 0)
@@ -1728,6 +1729,14 @@ Examples:
             "共通ヘッダ・JSON 操作を取り込み、API を直接攻撃面にする。"
         ),
     )
+    # Proxy エクスポート取り込み
+    scan.add_argument(
+        "--proxy-export", metavar="PATH", default="",
+        help=(
+            "OWASP ZAP (JSON) または Burp Suite (XML) のエクスポートからエンドポイント・"
+            "共通ヘッダ・JSON 操作を取り込み、スキャンのシードに使用する。"
+        ),
+    )
     # 再開可能スキャン
     scan.add_argument(
         "--resume", metavar="DIR", default="",
@@ -3236,6 +3245,7 @@ async def run_scan(args):
             manual_crawl_path=getattr(args, "manual_crawl", "") or "",
             # API ファースト検査
             api_spec_path=getattr(args, "api_spec", "") or "",
+            proxy_export_path=getattr(args, "proxy_export", "") or "",
             # 再開可能スキャン
             resume_dir=getattr(args, "resume", "") or "",
             enable_checkpoint=not getattr(args, "no_checkpoint", False),
@@ -3372,6 +3382,91 @@ def _bind_is_intranet(host: str) -> bool:
         if ip.is_private or ip.is_loopback or ip.is_link_local:
             return True
     return False
+
+
+def _build_default_scan_cfg(cfg_dict=None) -> dict:
+    c = cfg_dict if cfg_dict is not None else _CFG
+    return {
+        "report_lang": c.get("report_lang", "ja"),
+        "agent_vision": c.get("agent_vision", "auto"),
+        "checks": c.get("checks", ["sqli", "xss", "os"]),
+        "depth": c.get("depth", 2),
+        "timeout": c.get("timeout", 30),
+        "max_forms": c.get("max_forms", 50),
+        "request_delay": c.get("request_delay", 0.5),
+        "navigation_retries": c.get("navigation_retries", 2),
+        "allowed_hours": c.get("allowed_hours", []) or [],
+        "forbidden_hours": c.get("forbidden_hours", []) or [],
+        "proxy": c.get("proxy", ""),
+        "tls_client_cert": c.get("tls_client_cert", ""),
+        "tls_client_key": c.get("tls_client_key", ""),
+        "tls_client_pfx": c.get("tls_client_pfx", ""),
+        "tls_client_cert_password": c.get("tls_client_cert_password", ""),
+        "tls_ca_cert": c.get("tls_ca_cert", ""),
+        "tls_verify": c.get("tls_verify", False),
+        "header_scope_enforce": c.get("header_scope_enforce", True),
+        "popup_header_intercept": _popup_header_intercept_default(),
+        "llm": c.get("llm_provider", "ollama"),
+        "ollama_model": c.get("ollama_model", "llama3"),
+        "openai_model": c.get("openai_model", "gpt-4o-mini"),
+        "gemini_model": c.get("gemini_model", "gemini-2.0-flash"),
+        "claude_model": c.get("claude_model", "claude-haiku-4-5-20251001"),
+        "openai_base_url": c.get("openai_base_url", ""),
+        "role_models": c.get("role_models", {}),
+        "llm_timeout_seconds": c.get("llm_timeout_seconds", 30),
+        "llm_stream_timeout_seconds": c.get("llm_stream_timeout_seconds", 90),
+        "llm_max_retries": c.get("llm_max_retries", 2),
+        "auth_user": c.get("auth_user", ""),
+        "auth_pass": c.get("auth_pass", ""),
+        "login_url": c.get("login_url", ""),
+        "login_user_field": c.get("login_user_field", "username"),
+        "login_pass_field": c.get("login_pass_field", "password"),
+        "login_success_indicator": c.get("login_success_indicator", ""),
+        "mfa_type": c.get("mfa_type", ""),
+        "mfa_field": c.get("mfa_field", ""),
+        "mfa_selector": c.get("mfa_selector", ""),
+        "mfa_email_account": c.get("mfa_email_account", ""),
+        "mfa_email_address": c.get("mfa_email_address", ""),
+        "mfa_email_imap_host": c.get("mfa_email_imap_host", ""),
+        "mfa_email_imap_port": c.get("mfa_email_imap_port", ""),
+        "mfa_email_imap_user": c.get("mfa_email_imap_user", ""),
+        "mfa_email_imap_ssl": c.get("mfa_email_imap_ssl", ""),
+        "mfa_totp_uri": c.get("mfa_totp_uri", ""),
+        "mfa_totp_secret": c.get("mfa_totp_secret", ""),
+        "mfa_totp_qr": c.get("mfa_totp_qr", ""),
+        "mfa_totp_digits": c.get("mfa_totp_digits", ""),
+        "mfa_totp_period": c.get("mfa_totp_period", ""),
+        "mfa_totp_algorithm": c.get("mfa_totp_algorithm", ""),
+        "bearer": c.get("bearer_token", ""),
+        "headers": c.get("headers_text", ""),
+        "exclude_fields": ", ".join(c.get("exclude_fields", []) or []),
+        "exclude_urls": "\n".join(c.get("exclude_urls", []) or []),
+        "target_urls": "\n".join(c.get("target_urls", []) or []),
+        "access_urls": "\n".join(c.get("access_urls", []) or []),
+        "manual_crawl_file": c.get("manual_crawl_file", ""),
+        "proxy_export_file": c.get("proxy_export_file", c.get("proxy_export", "")),
+        "state_profile": c.get("state_profile", "unrestricted"),
+        "toggles": {
+            "headless": c.get("headless", False),
+            "skip_registration": c.get("skip_registration", True),
+            "open_report": c.get("open_report", True),
+            "use_planner": c.get("use_planner", True),
+            "interactive_plan": c.get("interactive_plan", False),
+            "enable_ai_analysis": c.get("ai_analysis", True),
+            "enable_waf_detection": c.get("waf_detection", True),
+            "enable_payload_learning": c.get("payload_learning", True),
+            "community_payloads": c.get("community_payloads", True),
+            "component_intel": c.get("component_intel", False),
+            "tls_scan": c.get("tls_scan", False),
+            "enable_sitemap_crawl": c.get("sitemap_crawl", True),
+            "spa_crawl": c.get("spa_crawl", False),
+            "auto_spa_crawl": c.get("auto_spa_crawl", True),
+            "interactive_crawl_review": c.get("interactive_crawl_review", False),
+            "ctf_mode": c.get("ctf_mode", False),
+            "tls_verify": c.get("tls_verify", False),
+            "allow_state_changing_probes": c.get("allow_state_changing_probes", False),
+        },
+    }
 
 
 async def run_serve(args):
@@ -3551,6 +3646,7 @@ async def run_serve(args):
         "target_urls": "\n".join(_CFG.get("target_urls", []) or []),
         "access_urls": "\n".join(_CFG.get("access_urls", []) or []),
         "manual_crawl_file": _CFG.get("manual_crawl_file", ""),
+        "proxy_export_file": _CFG.get("proxy_export_file", ""),
         "state_profile": _CFG.get("state_profile", "unrestricted"),
         "toggles": {
             "headless": _CFG.get("headless", False),
@@ -4044,6 +4140,7 @@ async def run_serve(args):
                 handoff_cookies=(handoff.cookies if handoff is not None else None) or [],
                 additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
+                proxy_export_path=cfg.get("proxy_export_file", "") or cfg.get("proxy_export", "") or "",
                 headers=_hdrs,
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
                 header_refresh_interval=float(cfg.get("header_refresh_interval", 0.0) or 0.0),

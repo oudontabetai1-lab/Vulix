@@ -422,6 +422,7 @@
     'exclude_urls': 'crawl',
     'exclude_fields': 'crawl',
     'manual_crawl_file': 'crawl',
+    'proxy_export_file': 'crawl',
     'toggles.enable_sitemap_crawl': 'crawl',
     'toggles.spa_crawl': 'crawl',
     'toggles.auto_spa_crawl': 'crawl',
@@ -522,7 +523,7 @@
   const ADVANCED_FIELDS = new Set([
     // Crawl tab advanced
     'request_delay', 'navigation_retries', 'target_urls', 'access_urls',
-    'exclude_urls', 'exclude_fields', 'manual_crawl_file',
+    'exclude_urls', 'exclude_fields', 'manual_crawl_file', 'proxy_export_file',
     'toggles.enable_sitemap_crawl', 'toggles.spa_crawl',
     'toggles.auto_spa_crawl', 'toggles.interactive_crawl_review',
 
@@ -613,6 +614,7 @@
     'output_dir': 'cfgOutputDir',
     'payloads_file': 'cfgPayloadsFile',
     'manual_crawl_file': 'cfgManualCrawlFile',
+    'proxy_export_file': 'cfgProxyExportFile',
     'auto_register_count': 'cfgAutoRegisterCount',
     'exclude_fields': 'cfgExcludeFields',
     'exclude_urls': 'cfgExcludeUrls',
@@ -996,6 +998,7 @@
         openai_base_url: (getVal('cfgLlm') === 'openai_compatible' ? getVal('cfgLlmBaseUrl').trim() : ''),
         role_models: getRoleModels(),
         manual_crawl_file: getVal('cfgManualCrawlFile').trim(),
+        proxy_export_file: getVal('cfgProxyExportFile').trim(),
         target_urls: getVal('cfgTargetUrls').split('\n').map((s) => s.trim()).filter(Boolean),
         access_urls: getVal('cfgAccessUrls').split('\n').map((s) => s.trim()).filter(Boolean),
         fast_mode: Boolean(toggles.fast_mode),
@@ -1100,6 +1103,7 @@
       output_dir: getVal('cfgOutputDir').trim(),
       payloads_file: getVal('cfgPayloadsFile').trim(),
       manual_crawl_file: getVal('cfgManualCrawlFile').trim(),
+      proxy_export_file: getVal('cfgProxyExportFile').trim(),
       accounts: getAccountsLocal(),
       auto_register: Boolean(toggles.auto_register),
       auto_register_count: parseIntOrDefault(getVal('cfgAutoRegisterCount'), 2),

@@ -224,6 +224,7 @@ FIELDS = (
     _field('target_urls', 'target_urls', '', redacted=True),
     _field('access_urls', 'access_urls', '', redacted=True),
     _field('manual_crawl_file', 'manual_crawl_file', '', redacted=True),
+    _field('proxy_export_file', 'Proxy エクスポートファイル', '', redacted=True),
     _field('state_profile', '状態変更プロファイル', 'unrestricted', constraints={"enum": list(VALID_PROFILES)}),
     _field('toggles.headless', 'toggles.headless', False, modes=ALL_MODES),
     _field('toggles.skip_registration', 'toggles.skip_registration', True),
