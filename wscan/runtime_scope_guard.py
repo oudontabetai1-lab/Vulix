@@ -226,24 +226,31 @@ class RuntimeScopeGuardHook:
         policy: ScopePolicy,
         *,
         on_block: Optional[Callable[[httpx.Request, ScopeDecision], None]] = None,
+        target_only: bool = False,
     ) -> None:
         self.policy = policy
         self.on_block = on_block
+        self.target_only = target_only
 
     def __call__(self, request: httpx.Request) -> RuntimeScopeGuardHook:
         url_str = str(request.url)
         decision = evaluate_scope(url_str, self.policy)
-        if not decision.allowed:
+        access_only = _matches_scope_list(url_str, self.policy.access_urls) if self.target_only else False
+        is_target = decision.reason in {"target_url", "target_url_no_frag", "target_url_no_query"}
+        allowed = decision.allowed and (not self.target_only or (not access_only and is_target))
+        if not allowed:
+            reason = "access_url" if access_only else (decision.reason if not decision.allowed else "out_of_scope_destination")
+            blocked_decision = ScopeDecision(False, reason, url_str)
             if self.on_block is not None:
                 try:
-                    self.on_block(request, decision)
+                    self.on_block(request, blocked_decision)
                 except Exception:
                     pass
             raise OutOfScopeUrlError(
-                f"Out-of-scope egress blocked by Runtime Scope Guard: {url_str} (reason: {decision.reason})",
+                f"Out-of-scope egress blocked by Runtime Scope Guard: {url_str} (reason: {reason})",
                 request=request,
                 url=url_str,
-                reason=decision.reason,
+                reason=reason,
             )
         return self
 

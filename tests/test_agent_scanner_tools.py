@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from wscan.agent_harness import AgentHarness, AgentRunSpec, WorkStatus
+from wscan.agent_harness import AgentHarness, AgentRole, AgentRunSpec, WorkStatus
 from wscan.agent_scanner_tools import AgentScannerTools
 from wscan.injection_point import InjectionPoint
 from tests.fixtures.agent_lab_app import create_app
@@ -114,14 +114,17 @@ def test_capability_schema_ids_and_unsupported_carrier_coverage(tmp_path):
         tools = AgentScannerTools(_AgentScanner([]), harness)
         query_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
         json_id = tools.add_point(InjectionPoint.for_json_body("POST", "https://target.test/api", "/q"))
+        xml_id = tools.add_point(InjectionPoint.for_xml_body("POST", "https://target.test/api/xml", "/root/q"))
         response = await tools.list_scanner_capabilities()
         assert set(response) == {"capabilities"}
         by_id = {item["injection_point_id"]: item for item in response["capabilities"]}
         assert by_id[query_id]["status"] == "supported"
         assert by_id[query_id]["checks"] == ["os", "sqli", "xss"]
-        assert by_id[json_id]["status"] == "unsupported"
-        assert "authenticated context not shareable" in by_id[json_id]["reason"]
-        assert any("unsupported_carrier:json_body" in gap for gap in harness.state.coverage_gaps)
+        assert by_id[json_id]["status"] == "supported"
+        assert by_id[json_id]["checks"] == ["os", "sqli", "xss"]
+        assert by_id[xml_id]["status"] == "unsupported"
+        assert "xml_body carrier unsupported" in by_id[xml_id]["reason"]
+        assert any("unsupported_carrier:xml_body" in gap for gap in harness.state.coverage_gaps)
     asyncio.run(scenario())
 
 
@@ -274,7 +277,7 @@ def test_engine_scope_gate_blocks_before_browser_or_scanner_send(tmp_path):
     asyncio.run(scenario())
 
 
-def test_api_get_query_is_unsupported_before_payload_and_budget_fails_closed(tmp_path):
+def test_api_get_query_is_supported_and_budget_fails_closed(tmp_path):
     async def scenario():
         harness = _harness(tmp_path)
         scanner = _AgentScanner([{"name": "session", "value": "current-cookie-value", "domain": "target.test"}])
@@ -283,9 +286,9 @@ def test_api_get_query_is_unsupported_before_payload_and_budget_fails_closed(tmp
         point_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/api?q=1", "q"))
         work_id = tools.schedule_scanner(point_id, "xss")["work_id"]
         result = await tools.run_scanner_work(work_id)
-        assert result["status"] == "unsupported"
-        assert engine.scanner.calls == []
-        assert any("unsupported_carrier:query_api_get" in gap for gap in harness.state.coverage_gaps)
+        assert result["status"] == "completed"
+        assert engine.scanner.calls != []
+        assert harness.state.work_queue[0].status == WorkStatus.COMPLETE
 
         harness2 = _harness(tmp_path / "budget")
         harness2.state.consumed_steps = harness2.spec.max_steps
@@ -820,3 +823,297 @@ def test_controller_contract_and_agent_lab_fake_llm_integration(tmp_path):
     result = asyncio.run(_FakeLLM().use_tools(controller, point_id))
     assert result["status"] == "confirmed"
     assert harness.state.hypotheses[0]["deterministic_confirmed"] is True
+
+
+def test_httpx_carrier_json_body_and_api_get_confirmed_and_tri_state(tmp_path):
+    """JSON body と API GET の送信・確証・tri-state (confirmed / rejected / inconclusive) と
+    PR 2 イベント (tool_request, authorization_decision, dispatch_start, executed_scanner_work, dispatch_end) を検証。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        cookie = {"name": "session", "value": "fresh-session-token", "domain": "target.test"}
+        scanner = _AgentScanner([cookie])
+
+        # 1. JSON body finding -> confirmed
+        json_finding = SimpleNamespace(
+            check_type="sqli", severity="high", url="https://target.test/api/submit",
+            field_name="/user/name", payload="' OR 1=1--", evidence="SQL syntax error",
+        )
+        fake_scanner_json = _FakeScanner(findings=[json_finding], verify_result=True)
+        engine_json = _FakeEngine("sqli", SimpleNamespace(cookies=[]), scanner=fake_scanner_json)
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *_: engine_json)
+
+        point_json = InjectionPoint.for_json_body(
+            "POST", "https://target.test/api/submit", "/user/name",
+            template_id="tmpl_json_1",
+        )
+        point_id_json = tools.add_point(point_json, {"template": {"url": "https://target.test/api/submit", "json_body": {"user": {"name": "test"}}}})
+        hyp_json = {
+            "candidate_id": "hyp-json-1", "check_type": "sqli",
+            "url": "https://target.test/api/submit", "field_name": "/user/name",
+        }
+        hyp_json["injection_point_id"] = tools.register_hypothesis(hyp_json)
+        harness.note_hypotheses([hyp_json])
+
+        sched_json = tools.schedule_scanner(point_id_json, "sqli")
+        assert sched_json["status"] == "planned"
+        work_id_json = sched_json["work_id"]
+
+        result_json = await tools.run_scanner_work(work_id_json)
+        assert result_json["status"] == "completed"
+        assert result_json["verified_count"] == 1
+        assert engine_json.injection_templates["tmpl_json_1"]["json_body"] == {"user": {"name": "test"}}
+        assert engine_json.target_only is True
+
+        # Check hypothesis was confirmed deterministically
+        stored_hyp_json = next(h for h in harness.state.hypotheses if h["candidate_id"] == "hyp-json-1")
+        assert stored_hyp_json["deterministic_confirmed"] is True
+        assert stored_hyp_json["source_label"] == "agent_deterministic_confirmed"
+
+        # 2. API GET finding -> confirmed
+        api_finding = SimpleNamespace(
+            check_type="xss", severity="high", url="https://target.test/api/search?q=1",
+            field_name="q", payload="<script>alert(1)</script>", evidence="reflected script",
+        )
+        fake_scanner_api = _FakeScanner(findings=[api_finding], api_get=True, verify_result=True)
+        engine_api = _FakeEngine("xss", SimpleNamespace(cookies=[]), scanner=fake_scanner_api)
+        tools_api = AgentScannerTools(scanner, harness, engine_factory=lambda *_: engine_api)
+
+        point_api = InjectionPoint.for_url_param("https://target.test/api/search?q=1", "q")
+        point_id_api = tools_api.add_point(point_api)
+        hyp_api = {
+            "candidate_id": "hyp-api-1", "check_type": "xss",
+            "url": "https://target.test/api/search?q=1", "field_name": "q",
+        }
+        hyp_api["injection_point_id"] = tools_api.register_hypothesis(hyp_api)
+        harness.note_hypotheses([hyp_api])
+
+        sched_api = tools_api.schedule_scanner(point_id_api, "xss")
+        assert sched_api["status"] == "planned"
+        work_id_api = sched_api["work_id"]
+
+        result_api = await tools_api.run_scanner_work(work_id_api)
+        assert result_api["status"] == "completed"
+        assert result_api["verified_count"] == 1
+        stored_hyp_api = next(h for h in harness.state.hypotheses if h["candidate_id"] == "hyp-api-1")
+        assert stored_hyp_api["deterministic_confirmed"] is True
+        assert stored_hyp_api["source_label"] == "agent_deterministic_confirmed"
+
+        # 3. Verify lifecycle events emitted for both dispatches
+        events = harness.state.events
+        for wid in (work_id_json, work_id_api):
+            wid_events = [e for e in events if e.get("work_id") == wid or e.get("executed_work_id") == wid]
+            event_types = [e.get("event_type") for e in wid_events]
+            assert "tool_request" in event_types
+            assert "authorization_decision" in event_types
+            assert "dispatch_start" in event_types
+            assert "executed_scanner_work" in event_types
+            assert "dispatch_end" in event_types
+
+        # 4. Tri-state: unconfirmed finding preserves hypothesis with deterministic_confirmed=False
+        fake_scanner_unconf = _FakeScanner(findings=[json_finding], verify_result=False)
+        engine_unconf = _FakeEngine("sqli", SimpleNamespace(cookies=[]), scanner=fake_scanner_unconf)
+        tools_unconf = AgentScannerTools(scanner, harness, engine_factory=lambda *_: engine_unconf)
+        point_unconf = InjectionPoint.for_json_body("POST", "https://target.test/api/unconf", "/user/name")
+        point_id_unconf = tools_unconf.add_point(point_unconf)
+        hyp_unconf = {
+            "candidate_id": "hyp-unconf-1", "check_type": "sqli",
+            "url": "https://target.test/api/unconf", "field_name": "/user/name",
+        }
+        hyp_unconf["injection_point_id"] = tools_unconf.register_hypothesis(hyp_unconf)
+        harness.note_hypotheses([hyp_unconf])
+        work_unconf = tools_unconf.schedule_scanner(point_id_unconf, "sqli")["work_id"]
+        res_unconf = await tools_unconf.run_scanner_work(work_unconf)
+        assert res_unconf["status"] == "completed"
+        assert res_unconf["verified_count"] == 0
+        stored_hyp_unconf = next(h for h in harness.state.hypotheses if h["candidate_id"] == "hyp-unconf-1")
+        assert stored_hyp_unconf["deterministic_confirmed"] is False
+        assert stored_hyp_unconf["source_label"] == "agent_unverified"
+
+    asyncio.run(scenario())
+
+
+def test_httpx_carrier_scope_rejections_and_redirect_guard(tmp_path):
+    """scope 外、exclusion、access-only、および redirect 先 scope 外・access-only の拒否を検証。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        cookie = {"name": "session", "value": "test-cookie", "domain": "target.test"}
+        scanner = _AgentScanner([cookie])
+        tools = AgentScannerTools(scanner, harness)
+
+        # (a) URL scope checks on points
+        outside_id = tools.add_point(InjectionPoint.for_json_body("POST", "https://outside.test/api", "/item"))
+        excluded_id = tools.add_point(InjectionPoint.for_json_body("POST", "https://target.test/private/api", "/item"))
+        access_id = tools.add_point(InjectionPoint.for_json_body("POST", "https://target.test/login", "/item"))
+        tmpl_outside_id = tools.add_point(
+            InjectionPoint.for_json_body("POST", "https://target.test/api", "/item"),
+            {"template": {"url": "https://outside.test/api"}},
+        )
+
+        assert tools.schedule_scanner(outside_id, "sqli")["status"] == "blocked"
+        assert tools.schedule_scanner(excluded_id, "sqli")["status"] == "blocked"
+        assert tools.schedule_scanner(access_id, "sqli")["status"] == "blocked"
+        assert tools.schedule_scanner(tmpl_outside_id, "sqli")["status"] == "blocked"
+        assert any("scope_blocked" in gap for gap in harness.state.coverage_gaps)
+        assert any("excluded_url" in gap for gap in harness.state.coverage_gaps)
+        assert any("access_only_url" in gap for gap in harness.state.coverage_gaps)
+
+        # (b) Redirect guard via RuntimeScopeGuardHook with target_only=True
+        import httpx
+        from wscan.runtime_scope_guard import RuntimeScopeGuardHook, ScopePolicy, OutOfScopeUrlError
+        policy = ScopePolicy(
+            target_urls=("https://target.test/",),
+            access_urls=("https://target.test/login",),
+            exclude_urls=("https://target.test/private*",),
+        )
+
+        blocks = []
+        def _on_block(req, dec):
+            blocks.append((str(req.url), dec.reason))
+
+        hook = RuntimeScopeGuardHook(policy, on_block=_on_block, target_only=True)
+
+        # Target url is allowed
+        allowed_req = httpx.Request("POST", "https://target.test/api")
+        hook(allowed_req)
+        assert blocks == []
+
+        # Out-of-scope egress is blocked
+        out_req = httpx.Request("GET", "https://outside.test/leak")
+        with pytest.raises(OutOfScopeUrlError, match="Out-of-scope egress blocked"):
+            hook(out_req)
+        assert any(b[0] == "https://outside.test/leak" and b[1] in ("scope_blocked", "out_of_scope_destination") for b in blocks)
+
+        # Access-url egress in target_only mode is blocked
+        access_req = httpx.Request("GET", "https://target.test/login")
+        with pytest.raises(OutOfScopeUrlError, match="Out-of-scope egress blocked"):
+            hook(access_req)
+        assert any(b[0] == "https://target.test/login" and b[1] == "access_url" for b in blocks)
+
+        # Excluded egress is blocked
+        excl_req = httpx.Request("GET", "https://target.test/private/data")
+        with pytest.raises(OutOfScopeUrlError, match="Out-of-scope egress blocked"):
+            hook(excl_req)
+        assert any(b[0] == "https://target.test/private/data" and b[1] == "excluded_url" for b in blocks)
+
+    asyncio.run(scenario())
+
+
+def test_httpx_carrier_auth_unavailable_and_unverified_blocks(tmp_path):
+    """認証が受け取れないとき、または検証に失敗したときの BLOCKED を検証。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        # 1. Capture cookies failure
+        scanner_no_auth = _AgentScanner([])
+        tools_no_auth = AgentScannerTools(scanner_no_auth, harness, engine_factory=lambda *_: pytest.fail("must not create engine"))
+        point_id = tools_no_auth.add_point(InjectionPoint.for_json_body("POST", "https://target.test/api", "/data"))
+        work_id = tools_no_auth.schedule_scanner(point_id, "sqli")["work_id"]
+        res = await tools_no_auth.run_scanner_work(work_id)
+        assert res["status"] == "blocked"
+        assert "authentication state is unavailable" in res["reason"]
+        assert harness.state.work_queue[0].status == WorkStatus.BLOCKED
+
+        # 2. Handoff cookie verification failure
+        scanner_auth = _AgentScanner([{"name": "session", "value": "dummy", "domain": "target.test"}])
+        engine_unverified = _FakeEngine("sqli", SimpleNamespace(cookies=[]), auth=False)
+        tools_unverified = AgentScannerTools(scanner_auth, harness, engine_factory=lambda *_: engine_unverified)
+        point_id_2 = tools_unverified.add_point(InjectionPoint.for_json_body("POST", "https://target.test/api/auth2", "/data"))
+        work_id_2 = tools_unverified.schedule_scanner(point_id_2, "sqli")["work_id"]
+        res_2 = await tools_unverified.run_scanner_work(work_id_2)
+        assert res_2["status"] == "blocked"
+        assert "authentication could not be verified" in res_2["reason"]
+        assert harness.state.work_queue[-1].status == WorkStatus.BLOCKED
+    asyncio.run(scenario())
+
+
+def test_httpx_carrier_duplication_prevention(tmp_path):
+    """二重送信の防止（replay suppression）を検証。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "dummy", "domain": "target.test"}])
+        engine = _FakeEngine("sqli", SimpleNamespace(cookies=[]))
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *_: engine)
+
+        point_id = tools.add_point(InjectionPoint.for_json_body("POST", "https://target.test/api", "/item"))
+        work_id = tools.schedule_scanner(point_id, "sqli")["work_id"]
+
+        # First run succeeds
+        res1 = await tools.run_scanner_work(work_id)
+        assert res1["status"] == "completed"
+
+        # Simulate work being re-attempted while probe attempt is recorded
+        work = next(w for w in harness.state.work_queue if w.work_id == work_id)
+        work.status = WorkStatus.PLANNED
+
+        res2 = await tools.run_scanner_work(work_id)
+        assert res2["status"] == "inconclusive"
+        assert "automatic replay was suppressed" in res2["reason"]
+    asyncio.run(scenario())
+
+
+def test_httpx_carrier_secret_redaction(tmp_path):
+    """ツールの入出力とログに秘密が残らないことを検証。"""
+    async def scenario():
+        secret_token = "super-secret-token-12345"
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "token", "value": secret_token, "domain": "target.test"}])
+
+        finding = SimpleNamespace(
+            check_type="sqli", severity="high", url="https://target.test/api?token=query-secret",
+            field_name="/user", payload=f"payload-with-{secret_token}", evidence=f"evidence-with-{secret_token}",
+        )
+        engine = _FakeEngine("sqli", SimpleNamespace(cookies=[]), finding=finding)
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *_: engine)
+
+        point = InjectionPoint.for_json_body("POST", f"https://target.test/api?token={secret_token}", "/user")
+        point_id = tools.add_point(point)
+
+        # Checkpoint does not persist query secret
+        saved_points = (tmp_path / "agent_scanner_points.json").read_text(encoding="utf-8")
+        assert secret_token not in saved_points
+
+        work_id = tools.schedule_scanner(point_id, "sqli")
+        # Since url had query secret, it was marked resume_unavailable
+        assert work_id["status"] == "unsupported"
+
+        # Now test with clean URL but secret payload/evidence
+        clean_point = InjectionPoint.for_json_body("POST", "https://target.test/api", "/user")
+        clean_id = tools.add_point(clean_point)
+        work_id_2 = tools.schedule_scanner(clean_id, "sqli")["work_id"]
+        res = await tools.run_scanner_work(work_id_2)
+        assert res["status"] == "completed"
+
+        # Check sanitized findings have secret redacted
+        persisted = "\n".join(p.read_text(encoding="utf-8") for p in tmp_path.rglob("*") if p.is_file())
+        assert secret_token not in persisted
+    asyncio.run(scenario())
+
+
+def test_httpx_carrier_unsupported_xml_coverage_gap(tmp_path):
+    """UNSUPPORTED のまま残した XML carrier の coverage gap と拒否を検証。"""
+    async def scenario():
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "val", "domain": "target.test"}])
+        tools = AgentScannerTools(scanner, harness)
+
+        xml_point = InjectionPoint.for_xml_body("POST", "https://target.test/api/xml", "/root/user/@id")
+        xml_id = tools.add_point(xml_point)
+
+        # Capabilities reports unsupported with reason
+        caps = await tools.list_scanner_capabilities()
+        cap_entry = next(c for c in caps["capabilities"] if c["injection_point_id"] == xml_id)
+        assert cap_entry["status"] == "unsupported"
+        assert cap_entry["carrier"] == "xml_body"
+        assert "xml_body carrier unsupported" in cap_entry["reason"]
+
+        # Baseline scheduling records gap
+        tools.schedule_baselines(point_ids=(xml_id,))
+        assert any("unsupported_carrier:xml_body" in gap for gap in harness.state.coverage_gaps)
+
+        # Attempting run_scanner_work with unresolved point returns unsupported
+        tools.work_specs["work-xml-1"] = (xml_id, "sqli")
+        harness.enqueue(AgentRole.PROBE_SPECIALIST, xml_id, check_type="sqli")
+        work = harness.state.work_queue[-1]
+        res = await tools.run_scanner_work(work.work_id)
+        assert res["status"] == "unsupported"
+        assert harness.state.work_queue[-1].status == WorkStatus.BLOCKED
+    asyncio.run(scenario())

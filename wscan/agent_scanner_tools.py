@@ -10,13 +10,27 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 from wscan.agent_harness import AgentRole, WorkStatus
-from wscan.injection_point import InjectionPoint
+from wscan.injection_point import InjectionPoint, parse_pointer
 from wscan.runtime_scope_guard import ScopePolicy, evaluate_scope
 from wscan.url_normalize import endpoint_identity
 
 
 SUPPORTED_CHECKS = frozenset({"xss", "sqli", "os"})
-_SUPPORTED_CARRIERS = frozenset({"form", "query"})
+_SUPPORTED_CARRIERS = frozenset({"form", "query", "json_body", "json"})
+
+
+def _default_json_body_for_pointer(pointer: str) -> dict | list:
+    """Build a minimal empty JSON object/array structure that contains the pointer."""
+    try:
+        tokens = parse_pointer(pointer)
+    except Exception:
+        tokens = []
+    if not tokens:
+        return {}
+    current: Any = ""
+    for token in reversed(tokens):
+        current = {token: current}
+    return current
 
 
 def _verification_consistency_reason(
@@ -119,6 +133,15 @@ class AgentScannerTools:
                     if redacted != saved[key]:
                         saved["resume_unavailable"] = True
                     saved[key] = redacted
+            if isinstance(saved.get("template"), dict):
+                tmpl = dict(saved["template"])
+                if tmpl.get("url"):
+                    redacted = redact_url(str(tmpl["url"]))
+                    if redacted != tmpl["url"]:
+                        saved["resume_unavailable"] = True
+                    tmpl["url"] = redacted
+                saved["template"] = tmpl
+            self.points[point_id] = saved
             safe[point_id] = saved
         tmp.write_text(json.dumps(safe, ensure_ascii=False, sort_keys=True), encoding="utf-8")
         tmp.replace(self.points_path)
@@ -137,10 +160,18 @@ class AgentScannerTools:
             if existing is not None and existing.stable_key_parts() != point.stable_key_parts():
                 raise ValueError("injection point ID collision; rediscover the input point before scheduling")
         if current is None or current.get("resume_unavailable"):
+            template = None
+            if isinstance(field, dict) and isinstance(field.get("template"), dict):
+                template = dict(field["template"])
+            elif getattr(point, "template", None) and isinstance(point.template, dict):
+                template = dict(point.template)
             self.points[point_id] = {
                 "location": point.location, "url": point.url, "parameter_id": point.parameter_id,
+                "display_name": point.display_name,
                 "form_index": point.form_index, "field": dict(field or {"name": point.parameter_id}),
                 "method": point.method, "action": point.action,
+                "template_id": point.template_id,
+                "template": template or {},
             }
         self._save_points()
         return point_id
@@ -157,6 +188,16 @@ class AgentScannerTools:
                 return None, item
             if carrier == "query":
                 point = InjectionPoint.for_url_param(item["url"], item["parameter_id"])
+            elif carrier in ("json_body", "json"):
+                template_id = str(item.get("template_id") or f"tmpl_{str(point_id)[:12]}")
+                display_name = str(item.get("display_name") or (item.get("field", {}) or {}).get("name") or "")
+                point = InjectionPoint.for_json_body(
+                    item.get("method", "POST"),
+                    item["url"],
+                    item["parameter_id"],
+                    display_name=display_name,
+                    template_id=template_id,
+                )
             else:
                 point = InjectionPoint.for_form(
                     item["url"], item["parameter_id"], int(item.get("form_index", 0)),
@@ -168,26 +209,31 @@ class AgentScannerTools:
             return None, item
         return point, item
 
-    def _scope_reason(self, point: InjectionPoint, field_name: str = "") -> str:
+    def _scope_reason(self, point: InjectionPoint, field_name: str = "", template: dict | None = None) -> str:
         engine_args = self.scanner
         from wscan.llm_agent_browser import _url_is_excluded, security_probe_allowed
+        policy = ScopePolicy(
+            target_urls=tuple(engine_args.target_urls), access_urls=tuple(engine_args.access_urls),
+            exclude_urls=tuple(engine_args.exclude_urls), login_url=engine_args.login_url,
+        )
+        from wscan.runtime_scope_guard import _matches_scope_list
         if _url_is_excluded(point.url, engine_args.exclude_urls):
             return "excluded_url"
-        if field_name and field_name.lower() in {f.lower() for f in engine_args.exclude_fields}:
-            return "excluded_field"
+        if _matches_scope_list(point.url, policy.access_urls):
+            return "access_only_url"
         if not security_probe_allowed(
             point.url, engine_args.target_urls, engine_args.exclude_urls,
             access_urls=engine_args.access_urls, field_name=field_name,
             exclude_fields=engine_args.exclude_fields,
         ):
             return "scope_blocked"
-        policy = ScopePolicy(
-            target_urls=tuple(engine_args.target_urls), access_urls=tuple(engine_args.access_urls),
-            exclude_urls=tuple(engine_args.exclude_urls), login_url=engine_args.login_url,
-        )
         decision = evaluate_scope(point.url, policy)
         if not decision.allowed or decision.reason not in {"target_url", "target_url_no_frag", "target_url_no_query"}:
-            return "scope_blocked" if decision.reason != "excluded_url" else "excluded_url"
+            if decision.reason == "excluded_url":
+                return "excluded_url"
+            if decision.reason == "access_url":
+                return "access_only_url"
+            return "scope_blocked"
         if point.action:
             from wscan.runtime_scope_guard import _matches_scope_list
             if _url_is_excluded(point.action, engine_args.exclude_urls):
@@ -202,6 +248,21 @@ class AgentScannerTools:
             action_decision = evaluate_scope(point.action, policy)
             if not action_decision.allowed or action_decision.reason not in {"target_url", "target_url_no_frag", "target_url_no_query"}:
                 return "scope_blocked" if action_decision.reason != "excluded_url" else "excluded_url"
+        if isinstance(template, dict) and template.get("url"):
+            tmpl_url = str(template["url"])
+            if _url_is_excluded(tmpl_url, engine_args.exclude_urls):
+                return "excluded_url"
+            from wscan.runtime_scope_guard import _matches_scope_list
+            if _matches_scope_list(tmpl_url, policy.access_urls):
+                return "access_only_url"
+            if not security_probe_allowed(
+                tmpl_url, engine_args.target_urls, engine_args.exclude_urls,
+                access_urls=engine_args.access_urls,
+            ):
+                return "scope_blocked"
+            tmpl_decision = evaluate_scope(tmpl_url, policy)
+            if not tmpl_decision.allowed or tmpl_decision.reason not in {"target_url", "target_url_no_frag", "target_url_no_query"}:
+                return "scope_blocked" if tmpl_decision.reason != "excluded_url" else "excluded_url"
         return ""
 
     async def list_scanner_capabilities(self, *, correlation_id: str = "") -> dict:
@@ -231,17 +292,27 @@ class AgentScannerTools:
             point, metadata = self._resolve(point_id)
             carrier = "query" if raw.get("location") == "url_param" else raw.get("location", "unknown")
             if point is None:
-                reason = (
-                    "endpoint was redacted in the checkpoint; rediscover this input point"
-                    if metadata and metadata.get("resume_unavailable")
-                    else "authenticated context not shareable for this carrier"
-                )
+                if metadata and metadata.get("resume_unavailable"):
+                    reason = "endpoint was redacted in the checkpoint; rediscover this input point"
+                elif carrier == "xml_body":
+                    reason = "xml_body carrier unsupported: XML lacks schema parsing, browser harvesting, and dynamic token binding in agent mode"
+                else:
+                    reason = "authenticated context not shareable for this carrier"
                 items.append({"injection_point_id": point_id, "carrier": carrier, "checks": [], "status": "unsupported", "reason": reason})
                 gaps.append(f"unsupported_carrier:{carrier}")
                 continue
-            reason = self._scope_reason(point, str(metadata.get("parameter_id", "")))
+            reason = self._scope_reason(point, str(metadata.get("parameter_id", "")), metadata.get("template") if isinstance(metadata, dict) else None)
             status = "blocked" if reason else "supported"
             items.append({"injection_point_id": point_id, "carrier": carrier, "checks": sorted(SUPPORTED_CHECKS), "status": status, "reason": reason})
+        if gaps:
+            self.harness.note_coverage(coverage_gaps=[*self.harness.state.coverage_gaps, *gaps])
+        self.harness.record_dispatch_event(
+            event_type="dispatch_end",
+            tool_name="list_scanner_capabilities",
+            correlation_id=corr_id,
+            status="completed",
+        )
+        return {"capabilities": items}
         if gaps:
             self.harness.note_coverage(coverage_gaps=[*self.harness.state.coverage_gaps, *gaps])
         self.harness.record_dispatch_event(
@@ -281,7 +352,7 @@ class AgentScannerTools:
                 reason="unknown injection point ID",
             )
             return {"status": "unsupported", "reason": "unknown injection point ID"}
-        reason = self._scope_reason(point, str(metadata.get("parameter_id", "")))
+        reason = self._scope_reason(point, str(metadata.get("parameter_id", "")), metadata.get("template") if isinstance(metadata, dict) else None)
         if reason:
             self.harness.record_dispatch_event(
                 event_type="authorization_decision",
@@ -394,7 +465,7 @@ class AgentScannerTools:
             )
             self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="unsupported carrier or check")
             return {"status": "unsupported", "reason": "this carrier or check is not supported"}
-        reason = self._scope_reason(point, str(metadata.get("parameter_id", "")))
+        reason = self._scope_reason(point, str(metadata.get("parameter_id", "")), metadata.get("template") if isinstance(metadata, dict) else None)
         if reason:
             self.harness.record_dispatch_event(
                 event_type="authorization_decision",
@@ -454,7 +525,26 @@ class AgentScannerTools:
         try:
             handoff = self._handoff(cookies)
             engine = self.engine_factory(check, handoff)
+            engine.target_only = True
+            engine._runtime_scope_block_callback = self._record_scope_block
+            if point.location in ("json_body", "json"):
+                tmpl_data = metadata.get("template") if isinstance(metadata.get("template"), dict) else {}
+                json_body = tmpl_data.get("json_body")
+                if json_body is None:
+                    json_body = _default_json_body_for_pointer(point.parameter_id)
+                template_dict = {
+                    "method": str(tmpl_data.get("method") or point.method or "POST").upper(),
+                    "url": str(tmpl_data.get("url") or point.url),
+                    "endpoint": endpoint_identity(str(tmpl_data.get("url") or point.url)),
+                    "json_body": json_body,
+                    "content_type": str(tmpl_data.get("content_type") or "application/json"),
+                    "headers": dict(tmpl_data.get("headers") or {}),
+                }
+                if not hasattr(engine, "injection_templates") or engine.injection_templates is None:
+                    engine.injection_templates = {}
+                engine.injection_templates[point.template_id] = template_dict
             from wscan.llm_agent_browser import security_probe_allowed
+            tmpl_url = (metadata.get("template") or {}).get("url") if isinstance(metadata.get("template"), dict) else ""
             if (
                 not security_probe_allowed(
                     point.url, engine.target_urls, engine.exclude_urls,
@@ -471,6 +561,15 @@ class AgentScannerTools:
                     )
                     or not engine._is_attack_target_url(point.action)
                     or engine._is_url_excluded(point.action)
+                ))
+                or (tmpl_url and (
+                    not security_probe_allowed(
+                        tmpl_url, engine.target_urls, engine.exclude_urls,
+                        access_urls=engine.access_urls, field_name=metadata["parameter_id"],
+                        exclude_fields=engine.exclude_fields,
+                    )
+                    or not engine._is_attack_target_url(tmpl_url)
+                    or engine._is_url_excluded(tmpl_url)
                 ))
             ):
                 self.harness.record_dispatch_event(
@@ -512,21 +611,8 @@ class AgentScannerTools:
                 self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="authentication unverified")
                 return {"status": "blocked", "reason": "authentication could not be verified; re-authenticate and retry"}
             scanner = engine.scanners[check]
-            # BaseScanner reroutes selected SPA/API GET query points through HTTPX.
-            # Preflight on the guarded WScan browser and fail closed before payload dispatch.
-            await engine._browser.navigate(point.url)
-            if scanner._should_route_to_api_get(point):
-                self.harness.record_dispatch_event(
-                    event_type="authorization_decision",
-                    tool_name="run_scanner_work",
-                    work_id=work_id,
-                    correlation_id=corr_id,
-                    allowed=False,
-                    reason="HTTPX API GET carrier unsupported",
-                )
-                self.harness.note_coverage(coverage_gaps=[f"unsupported_carrier:query_api_get:{point_id}"])
-                self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason="HTTPX API GET carrier unsupported")
-                return {"status": "unsupported", "reason": "this query input uses HTTPX transport; only Playwright form and query inputs are supported"}
+            if point.location not in ("json_body", "json"):
+                await engine._browser.navigate(point.url)
             self.harness.record_dispatch_event(
                 event_type="authorization_decision",
                 tool_name="run_scanner_work",
@@ -550,10 +636,14 @@ class AgentScannerTools:
                 correlation_id=corr_id,
                 status="dispatching", binding=binding, binding_digest=binding_digest,
             )
-            findings = await asyncio.wait_for(
-                scanner.scan_field(point.url, point.form_index, metadata["field"], point.legacy_is_url_param()),
-                timeout=180,
-            )
+            if point.location in ("json_body", "json"):
+                if callable(getattr(scanner, "scan_injection_point", None)):
+                    scan_coro = scanner.scan_injection_point(point, metadata["field"])
+                else:
+                    scan_coro = scanner.scan_field(point.url, point.form_index, metadata["field"], False)
+            else:
+                scan_coro = scanner.scan_field(point.url, point.form_index, metadata["field"], point.legacy_is_url_param())
+            findings = await asyncio.wait_for(scan_coro, timeout=180)
             verified = []
             verification_inconclusive = False
             for finding in findings:
@@ -963,7 +1053,7 @@ class AgentScannerTools:
         parameter_identity = {
             "parameter_id": str(metadata.get("parameter_id", point.parameter_id)),
             "form_index": int(point.form_index) if carrier == "form" else None,
-            "method": str(point.method or "").upper() if carrier == "form" else "",
+            "method": str(point.method or "").upper() if carrier in ("form", "json") else "",
             "action_identity": endpoint_identity(redact_url(point.action)) if carrier == "form" and point.action else "",
         }
         return {
