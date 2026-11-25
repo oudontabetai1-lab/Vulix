@@ -112,6 +112,26 @@ controls, failures, duplicate hooks, concurrent equal names, missing/wrong/late 
 and separate-process restart/resume. Candidate and confirmed counts are recorded separately;
 only complete common units qualify as successful safe-negative evidence.
 
+### Standard sweep probe verification and fingerprinting (SQLi transport slice)
+
+For the Playwright form/query standard sweep, each probe transmission durable records:
+- Deterministic `attempt_id` and `scan_id`
+- Target `injection_key` and check name (`sqli`) with `wave="standard"`
+- `payload_fingerprint`: fixed-length cryptographic hash bound to `(payload, unit_key, check)`
+  computed via `attempt_ledger.payload_fingerprint`, shared across `payload`, `request`,
+  `observation`, and `decision` records.
+- Transmission outcome: `sent=True` on delivery; non-executed or blocked outcomes record
+  `TRANSPORT_ERROR`, `BLOCKED`, or `UNEXECUTABLE`.
+- Causal references: `decision` records reference the outgoing request via `request_attempt_id`
+  and the observed response via `parent_id`.
+
+Reconciliation of planned payload count, executed transmissions, and manifest records is evaluated
+at the conclusion of the wave. Discrepancies (or ledger write failures) do not affect scanner
+detection or checkpoint resumption, but are captured in observability as
+`probe_ledger_incomplete:<check>:<wave>:<reason>` (reasons: `write_failed`, `count_mismatch`) in
+`engine.wave_errors` and the observability summary. All recorded traffic passes central value-based
+and header redaction, strictly omitting credentials, cookies, and tokens.
+
 ### Browser page and flow operations
 
 The ordinary page scheduler now persists a bounded browser chain for `dom_xss`

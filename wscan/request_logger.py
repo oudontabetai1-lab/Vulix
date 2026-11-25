@@ -219,7 +219,8 @@ class RequestLogger:
                   parent_id="", outcome=None, decision_rule="", decision_version="",
                   record_kind="legacy", request_attempt_id="", completion_unit=None,
                   wave="", baseline_attempt_ids=(), control_attempt_ids=(), browser=None,
-                  related_attempt_ids=(), decision_subject="") -> Optional[str]:
+                  related_attempt_ids=(), decision_subject="",
+                  payload_fingerprint: str = "") -> Optional[str]:
         """Append observation only; return its ID only after a successful write."""
         if not self.enabled:
             return
@@ -277,6 +278,7 @@ class RequestLogger:
                 rationale=redact_excerpt(rationale), browser=browser,
                 related_attempt_ids=tuple(related_attempt_ids),
                 decision_subject=decision_subject,
+                payload_fingerprint=payload_fingerprint,
             )
             if record_kind == "graphql_decision":
                 from .graphql_evidence import valid_shape
@@ -314,7 +316,8 @@ class RequestLogger:
 
     @contextmanager
     def probe_scope(self, ip, check, *, role="attack", wave="standard",
-                    baseline_attempt_ids=(), control_attempt_ids=(), parent_id="", transport=None):
+                    baseline_attempt_ids=(), control_attempt_ids=(), parent_id="", transport=None,
+                    payload_fingerprint: str = ""):
         from wscan.probe_ledger import sha256_hex
         context = dict(logger=self, requests=[], role=role, check=check, wave=wave, parent_id=parent_id,
                        transport=transport,
@@ -322,7 +325,8 @@ class RequestLogger:
                                                    ip.operation_id, ip.template_digest])) if ip is not None else "",
                        completion_unit=self.probe_ledger.current_unit(),
                        baseline_attempt_ids=tuple(baseline_attempt_ids),
-                       control_attempt_ids=tuple(control_attempt_ids))
+                       control_attempt_ids=tuple(control_attempt_ids),
+                       payload_fingerprint=payload_fingerprint)
         token = _CURRENT_PROBE.set(context)
         try:
             yield context
@@ -333,6 +337,8 @@ class RequestLogger:
         metadata = {key: context[key] for key in (
             "role", "check", "field", "wave", "completion_unit",
             "baseline_attempt_ids", "control_attempt_ids")}
+        if "payload_fingerprint" in context:
+            metadata["payload_fingerprint"] = context["payload_fingerprint"]
         try:
             kwargs.setdefault("actor", "scanner_transport")
             return self.log_probe(**metadata, **kwargs)
@@ -497,7 +503,8 @@ class RequestLogger:
                        and req.get("_req_id") == resp.get("_req_id") else "",
                        rationale="HTTP response observed; detector role and outcome unknown")
 
-    def log_payload(self, field: str, payload: str, check_type: str, url: str = "") -> None:
+    def log_payload(self, field: str, payload: str, check_type: str, url: str = "",
+                    payload_fingerprint: str = "") -> None:
         """フィールドへ投入したペイロードを記録する。"""
         if not self.enabled:
             return
@@ -512,6 +519,7 @@ class RequestLogger:
             url=url, actor="payload_submission",
             rationale=f"url={redact_url(url)}; payload prepared; transport, delivery and outcome unknown",
             record_kind="payload",
+            payload_fingerprint=payload_fingerprint,
         )
         record = {
             "ts": time.time(),

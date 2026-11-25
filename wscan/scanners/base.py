@@ -1142,10 +1142,14 @@ class BaseScanner(ABC):
                 raise BaselineRecoveryBlocked(
                     "probe blocked because its sent-payload fingerprint was not durable"
                 ) from exc
+        from wscan.attempt_ledger import payload_fingerprint
+        from wscan.checkpoint import CheckpointState
+        unit_key = CheckpointState._candidate_unit_key(ip, self.CHECK_TYPE) if ip is not None else ""
+        fp = payload_fingerprint(payload, unit_key, self.CHECK_TYPE) if unit_key else ""
         source, pair = await self._send_probe(
             ip, lambda: self._apply_ip_unrecorded(ip, payload), role=probe_role, wave=probe_wave,
             baseline_attempt_ids=baseline_attempt_ids, control_attempt_ids=control_attempt_ids,
-            parent_id=parent_attempt_id)
+            parent_id=parent_attempt_id, payload_fingerprint=fp)
         from wscan.auth_detect import url_looks_like_login
         login_target = (getattr(getattr(self, "engine", None), "_is_login_target_url", lambda url: False)(ip.url)
                         or url_looks_like_login(ip.url))
@@ -1167,7 +1171,8 @@ class BaseScanner(ABC):
         return pair["_session_valid"]
 
     async def _send_probe(self, ip, send, *, role="attack", wave="standard",
-                          baseline_attempt_ids=(), control_attempt_ids=(), parent_id=""):
+                          baseline_attempt_ids=(), control_attempt_ids=(), parent_id="",
+                          payload_fingerprint: str = ""):
         from wscan.probe_ledger import Transport
         # JS 制御フォーム（検出済み）への残り probe は送信せず短絡する。budget gate と同じく
         # 判定ではなく送信を止めるだけ（「送れなかった probe」を判定に使わない既存規約）。
@@ -1178,7 +1183,8 @@ class BaseScanner(ABC):
             return await send()
         with logger.probe_scope(ip, self.CHECK_TYPE, role=role, wave=wave,
                                 baseline_attempt_ids=baseline_attempt_ids,
-                                control_attempt_ids=control_attempt_ids, parent_id=parent_id) as context:
+                                control_attempt_ids=control_attempt_ids, parent_id=parent_id,
+                                payload_fingerprint=payload_fingerprint) as context:
             try:
                 source, pair = await send()
             except BaseException as exc:
@@ -2520,7 +2526,8 @@ class BaseScanner(ABC):
         return auth_headers(extra, include_cookie=include_cookie)
 
     async def log_payload_test(
-        self, field_name: str, payload: str, check_type: str, url: str = ""
+        self, field_name: str, payload: str, check_type: str, url: str = "",
+        payload_fingerprint: str = "",
     ) -> None:
         """Record a tested payload to the audit log and (if present) the dashboard.
 
@@ -2543,7 +2550,7 @@ class BaseScanner(ABC):
         # この helper を広く呼ぶため、stub 構築されたスキャナでも安全に no-op になる）。
         logger = getattr(getattr(self, "engine", None), "request_logger", None)
         if logger is not None:
-            logger.log_payload(field_name, payload, check_type, url)
+            logger.log_payload(field_name, payload, check_type, url, payload_fingerprint=payload_fingerprint)
         monitor = getattr(self, "monitor", None)
         if monitor:
             await monitor.emit_payload_test(field_name, payload, check_type, url)

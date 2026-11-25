@@ -278,6 +278,17 @@ class ProbeLedger:
             result[unit] = decisions
         return result
 
+    def wave_records(self, check: str, wave: str, *, role: str = "", unit: str = "") -> list[dict]:
+        """wave 内の記録済みイベントを返す（純粋クエリ）。"""
+        with self._lock:
+            return [
+                r for r in self.events.values()
+                if r.get("check") == check
+                and r.get("wave") == wave
+                and (not role or r.get("role") == role)
+                and (not unit or r.get("completion_unit") == unit)
+            ]
+
     def reconcile_persisted(self) -> None:
         """Re-read the source at completion so missing files/rows cannot pass on memory alone."""
         if self._path is None or not self.enabled:
@@ -408,7 +419,7 @@ class ProbeLedger:
                 return False
         if rec.get("record_kind", "legacy") != "legacy":
             if any(not isinstance(rec.get(k, ""), str) for k in
-                   ("parent_id", "request_attempt_id", "check", "wave", "injection_key")):
+                   ("parent_id", "request_attempt_id", "check", "wave", "injection_key", "payload_fingerprint")):
                 return False
             if any(not isinstance(rec.get(k, []), list) or
                    any(not isinstance(ref, str) for ref in rec.get(k, []))

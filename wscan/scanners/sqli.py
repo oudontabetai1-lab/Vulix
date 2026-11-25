@@ -3,6 +3,7 @@ SQL Injection Scanner
 Detects error-based, boolean-based, time-based, and authentication-bypass SQL injection.
 """
 import asyncio
+import json
 import re
 import time
 from difflib import SequenceMatcher
@@ -546,6 +547,12 @@ class SQLiScanner(BaseScanner):
         payloads = await self.get_payloads(field_name, ip.url, ip=ip)
         payloads = self._prioritize_login_payloads(field_name, payloads)
 
+        from wscan.attempt_ledger import payload_fingerprint
+        from wscan.checkpoint import CheckpointState
+        unit_key = CheckpointState._candidate_unit_key(ip, self.CHECK_TYPE) if ip is not None else ""
+        planned_standard_count = len(payloads)
+        executed_standard_count = 0
+
         if self.monitor:
             await self.monitor.emit_status(
                 f"SQLi testing: {field_name} on {ip.url}"
@@ -634,7 +641,8 @@ class SQLiScanner(BaseScanner):
         auth_lost = [False]
 
         async def _test_payload(payload: str, check_label: str = "sqli") -> bool:
-            await self.log_payload_test(field_name, payload, check_label, ip.url)
+            fp = payload_fingerprint(payload, unit_key, self.CHECK_TYPE) if unit_key else ""
+            await self.log_payload_test(field_name, payload, check_label, ip.url, payload_fingerprint=fp)
 
             # Apply payload
             wave = {"sqli": "standard", "sqli_evolved": "evolution", "sqli_mutation": "mutation"}.get(check_label, "auxiliary")
@@ -668,7 +676,7 @@ class SQLiScanner(BaseScanner):
                     self._probe_decision(
                         pair, False, "sqli_payload_oracle",
                         baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
-                        outcome="indeterminate",
+                        outcome="blocked",
                         rationale=f"session lost ({reason})",
                     )
                     auth_lost[0] = True
@@ -678,7 +686,7 @@ class SQLiScanner(BaseScanner):
                     self._probe_decision(
                         pair, False, "sqli_payload_oracle",
                         baseline_attempt_ids=baseline_ids, control_attempt_ids=control_ids,
-                        outcome="indeterminate",
+                        outcome="blocked",
                         rationale=f"response blocked ({reason})",
                     )
                     blocked_probes[0] += 1
@@ -725,8 +733,9 @@ class SQLiScanner(BaseScanner):
                 if payload not in (true_payload, false_payload):
                     continue
                 partner = false_payload if payload == true_payload else true_payload
+                partner_fp = payload_fingerprint(partner, unit_key, self.CHECK_TYPE) if unit_key else ""
                 await self.log_payload_test(
-                    field_name, partner, "sqli_boolean_partner", ip.url
+                    field_name, partner, "sqli_boolean_partner", ip.url, payload_fingerprint=partner_fp
                 )
                 partner_source, partner_pair = await self._apply_ip(
                     ip, partner, probe_role="control", baseline_attempt_ids=baseline_ids,
@@ -911,8 +920,32 @@ class SQLiScanner(BaseScanner):
         for payload in payloads:
             if auth_lost[0]:
                 break
+            executed_standard_count += 1
             if await _test_payload(payload):
                 break  # Found vulnerability, move to next field
+
+        # ── probe ledger 整合性検証（第 1 スライス: sqli standard sweep） ──
+        logger = getattr(getattr(self, "engine", None), "request_logger", None)
+        ledger = getattr(logger, "probe_ledger", None) if logger else None
+        if ledger is not None and getattr(ledger, "enabled", False):
+            if ledger.quarantined or ledger.manifest.had_write_error:
+                self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:standard:write_failed")
+            from wscan.probe_ledger import sha256_hex
+            unit = ledger.current_unit()
+            field_key = sha256_hex(json.dumps([ip.stable_key_parts(), ip.parameter_id, ip.operation_id, ip.template_digest])) if ip is not None else ""
+            manifest_requests = [
+                rec for rec in ledger.events.values()
+                if rec.get("record_kind") == "request"
+                and rec.get("check") == self.CHECK_TYPE
+                and rec.get("wave") == "standard"
+                and rec.get("role") == "attack"
+                and ((rec.get("completion_unit") == unit) if unit else (rec.get("injection_key") == field_key if field_key else True))
+            ]
+            manifest_count = len(manifest_requests)
+            if manifest_count != executed_standard_count:
+                self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:standard:count_mismatch")
+            elif not findings and not auth_lost[0] and executed_standard_count != planned_standard_count:
+                self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:standard:count_mismatch")
 
         # evolution wave は legacy browser transport 専用なので JSON/XML では実行しない。
         if not findings and not auth_lost[0] and ip.location not in ("json_body", "xml_body"):
@@ -1025,11 +1058,16 @@ class SQLiScanner(BaseScanner):
     async def _get_baseline(self, ip: InjectionPoint) -> tuple[str, dict]:
         """Get a baseline response with a safe value."""
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        from wscan.attempt_ledger import payload_fingerprint
+        from wscan.checkpoint import CheckpointState
+        unit_key = CheckpointState._candidate_unit_key(ip, self.CHECK_TYPE) if ip is not None else ""
+        fp = payload_fingerprint("baseline_test", unit_key, self.CHECK_TYPE) if unit_key else ""
         await self.log_payload_test(
             ip.display_name or ip.parameter_id,
             "baseline_test",
             "sqli_baseline",
             ip.url,
+            payload_fingerprint=fp,
         )
         try:
             return await self._apply_ip(ip, "baseline_test", baseline=True)
@@ -1066,7 +1104,11 @@ class SQLiScanner(BaseScanner):
                 send = lambda: self.browser.test_url_param(ip.url, ip.parameter_id, payload)
             else:
                 send = lambda: self.browser.fill_and_submit_form(ip.submit_index, ip.parameter_id, payload)
-            return await self._send_probe(ip, send, role="baseline")
+            from wscan.attempt_ledger import payload_fingerprint
+            from wscan.checkpoint import CheckpointState
+            unit_key = CheckpointState._candidate_unit_key(ip, self.CHECK_TYPE) if ip is not None else ""
+            fp = payload_fingerprint(payload, unit_key, self.CHECK_TYPE) if unit_key else ""
+            return await self._send_probe(ip, send, role="baseline", payload_fingerprint=fp)
         if baseline:
             probe_context["probe_role"] = "baseline"
         return await super()._apply_ip(ip, payload, **probe_context)
