@@ -207,6 +207,7 @@ class ProbeAttemptRecord:
     browser: Optional[BrowserEvidence] = None
     related_attempt_ids: tuple[str, ...] = ()
     decision_subject: str = ""
+    payload_fingerprint: str = ""
 
     @property
     def correlated(self) -> bool:
