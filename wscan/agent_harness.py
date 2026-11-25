@@ -42,6 +42,9 @@ _INTERNAL_ID_KEYS = frozenset({
     "step_id",
     "episode_id",
     "run_id",
+    "scan_id",
+    "head_id",
+    "injection_point_id",
     "parent_step_id",
     "parent_hypothesis_id",
 })
@@ -236,6 +239,7 @@ VALID_WORK_STATUS_TRANSITIONS: dict[WorkStatus, frozenset[WorkStatus]] = {
     WorkStatus.TRANSIENT_FAILURE: frozenset({
         WorkStatus.PLANNED,
         WorkStatus.RUNNING,
+        WorkStatus.INCONCLUSIVE,
         WorkStatus.FAILED,
         WorkStatus.CANCELLED,
     }),
@@ -395,6 +399,7 @@ class AgentRunState:
     checkpoint_generation: int = 0
     work_queue: list[AgentWorkItem] = field(default_factory=list)
     hypotheses: list[dict] = field(default_factory=list)
+    scanner_evidence: list[dict] = field(default_factory=list)
     guard_records: list[dict] = field(default_factory=list)
     # 認証秘密の resume 同一性。per-run salt 付き scrypt（_auth_fingerprint）で、spec_hash には
     # 秘密を入れない（無塩 SHA-256 だと artifact から低エントロピー password を辞書攻撃できる）。
@@ -421,6 +426,8 @@ class AgentRunState:
         values["work_queue"] = [
             AgentWorkItem.from_dict(item) for item in values.get("work_queue", [])
         ]
+        scanner_evidence = values.get("scanner_evidence", [])
+        values["scanner_evidence"] = scanner_evidence if isinstance(scanner_evidence, list) else []
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in values.items() if k in known})
 
@@ -520,6 +527,8 @@ class AgentProbeAttemptRecord:
     status: str = "sent"
     response_status: int = 0
     evidence_id: str = ""
+    binding: dict = field(default_factory=dict)
+    binding_digest: str = ""
     timestamp: float = 0.0
 
     def to_dict(self) -> dict:
@@ -536,6 +545,9 @@ class AgentVerificationRecord:
     verification_id: str
     run_id: str
     candidate_id: str
+    scan_id: str = ""
+    head_id: str = ""
+    injection_point_id: str = ""
     episode_id: str = ""
     step_id: str = ""
     work_id: str = ""
@@ -546,6 +558,8 @@ class AgentVerificationRecord:
     evidence_ids: tuple[str, ...] = ()
     rejection_reason: str = ""
     deterministic_confirmed: bool = False
+    binding: dict = field(default_factory=dict)
+    binding_digest: str = ""
     timestamp: float = 0.0
 
     def to_dict(self) -> dict:
@@ -754,6 +768,7 @@ class AgentHarness:
         candidates = [
             item for item in self.state.work_queue
             if item.status == WorkStatus.PLANNED
+            or (item.status == WorkStatus.TRANSIENT_FAILURE and item.attempts < 2)
             or (item.status == WorkStatus.INCONCLUSIVE and item.attempts < 2)
         ]
         if not candidates:
@@ -984,11 +999,26 @@ class AgentHarness:
         self.state.hypotheses_count = len(self.state.hypotheses)
         self.checkpoint()
 
+    def record_scanner_evidence(self, evidence: dict) -> None:
+        """決定論スキャナが再現確認した finding を checkpoint に保存する。"""
+        safe = self._sanitize_value(dict(evidence))
+        evidence_id = str(safe.get("evidence_id", ""))
+        if not evidence_id:
+            raise ValueError("scanner evidence requires an evidence ID")
+        for existing in self.state.scanner_evidence:
+            if existing.get("evidence_id") == evidence_id:
+                if existing != safe:
+                    raise ValueError("scanner evidence ID collision")
+                return
+        self.state.scanner_evidence.append(safe)
+        self.checkpoint()
+
     def update_hypothesis(
         self,
         candidate_id: str,
         *,
         status: str | None = None,
+        verification_outcome: str | None = None,
         rejection_reason: str = "",
         evidence_ids: Iterable[str] = (),
         dynamic_verified: bool | None = None,
@@ -999,6 +1029,8 @@ class AgentHarness:
             if item.get("candidate_id") == candidate_id:
                 if status is not None:
                     item["status"] = str(status)
+                if verification_outcome is not None:
+                    item["verification_outcome"] = str(verification_outcome)
                 if rejection_reason:
                     safe_reason = _redact_bounded(self._redact_runtime(str(rejection_reason)))
                     item["rejection_reason"] = safe_reason
@@ -1102,6 +1134,8 @@ class AgentHarness:
         status: str = "sent",
         response_status: int = 0,
         evidence_id: str = "",
+        binding: dict | None = None,
+        binding_digest: str = "",
     ) -> AgentProbeAttemptRecord:
         probe_id = f"probe-{secrets.token_hex(8)}"
         corr_id = str(correlation_id or step_id or probe_id)
@@ -1120,6 +1154,8 @@ class AgentHarness:
             status=str(status or "sent"),
             response_status=int(response_status),
             evidence_id=str(evidence_id or ""),
+            binding=dict(binding or {}),
+            binding_digest=str(binding_digest or ""),
             timestamp=time.time(),
         )
         self._append_jsonl(self.probe_attempts_path, record.to_dict())
@@ -1135,10 +1171,15 @@ class AgentHarness:
         episode_id: str = "",
         step_id: str = "",
         work_id: str = "",
+        scan_id: str = "",
+        head_id: str = "",
+        injection_point_id: str = "",
         correlation_id: str = "",
         evidence_ids: Iterable[str] = (),
         rejection_reason: str = "",
         deterministic_confirmed: bool = False,
+        binding: dict | None = None,
+        binding_digest: str = "",
     ) -> AgentVerificationRecord:
         verification_id = f"verify-{secrets.token_hex(8)}"
         corr_id = str(correlation_id or step_id or verification_id)
@@ -1151,6 +1192,9 @@ class AgentHarness:
             verification_id=verification_id,
             run_id=self.state.run_id,
             candidate_id=str(candidate_id),
+            scan_id=str(scan_id or self.state.run_id),
+            head_id=str(head_id or ""),
+            injection_point_id=str(injection_point_id or ""),
             episode_id=str(episode_id or ""),
             step_id=str(step_id or ""),
             work_id=str(work_id or ""),
@@ -1161,6 +1205,8 @@ class AgentHarness:
             evidence_ids=safe_evidence,
             rejection_reason=safe_reason,
             deterministic_confirmed=bool(deterministic_confirmed),
+            binding=dict(binding or {}),
+            binding_digest=str(binding_digest or ""),
             timestamp=time.time(),
         )
         self._append_jsonl(self.verification_results_path, record.to_dict())
