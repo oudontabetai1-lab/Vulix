@@ -679,6 +679,10 @@ def evaluate_replay_gate(scenarios: Sequence[Mapping[str, Any]]) -> AgentEvalVer
         for key in totals:
             if sc.get(key) is not None:
                 totals[key] += int(sc[key])
+        # 合計だけでは他シナリオの過大値で見逃しが隠れるため、シナリオごとにも上限を検査する
+        for part, whole in (("recalled", "ground_truth_total"), ("safe_twin_fp", "safe_twin_total")):
+            if sc.get(part) is not None and sc.get(whole) is not None and sc[part] > sc[whole]:
+                failures.append(f"{name}: {part}={sc[part]} が {whole}={sc[whole]} を超えています")
         status, expected = sc.get("harness_status"), sc.get("expected_status")
         if sc.get("outcome_success") and status is not None and str(status) != AgentEvalStatus.COMPLETE.value:
             failures.append(f"{name}: harness_status={status} を成功として表示しています")

@@ -120,6 +120,8 @@ def _ok(**overrides) -> dict:
     {"harness_status": "partial", "expected_status": "partial", "outcome_success": True, "recalled": 0,
      "ground_truth_total": 0},
     {"harness_status": "failed", "expected_status": "partial", "outcome_success": False},
+    # 過大な recall で他シナリオの見逃しを相殺しない
+    {"recalled": 2},
 ])
 def test_gate_fails_each_rollout_criterion(overrides):
     verdict = evaluate_replay_gate([_ok(), _ok(**overrides)])

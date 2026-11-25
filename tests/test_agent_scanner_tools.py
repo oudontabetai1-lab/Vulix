@@ -1293,7 +1293,8 @@ def test_bearer_template_without_session_token_is_blocked_with_reason(tmp_path):
 
 
 @pytest.mark.parametrize("key", [
-    "max_tokens", "max_output_tokens", "page_token", "nextPageToken", "next_token", "secretary", "q", "author",
+    "max_tokens", "maxTokens", "max-tokens", "max_output_tokens", "num_tokens", "total_tokens", "token_count",
+    "page_token", "pageToken", "next_page_token", "nextPageToken", "next_token", "secretary", "q", "author",
 ])
 def test_ordinary_json_keys_are_not_secret(key):
     from wscan.agent_scanner_tools import _key_is_sensitive, sanitize_template
@@ -1325,6 +1326,8 @@ def test_credential_keys_stay_secret(key):
     ([{"key": "token_a", "value": "aaaaaaaa1111"}, {"key": "token_b", "value": "bbbbbbbb2222"}], ""),  # 曖昧
     ([{"key": "refresh_token", "value": "zzzzzzzz9999"}, {"key": "csrf_token", "value": "cccccccc3333"}], ""),
     ([{"key": "page_token", "value": "pppppppp4444"}, {"key": "theme", "value": "dark"}], ""),
+    # 資格情報を示さないキーの JWT 形の値（同 origin のウィジェット等）は送らない
+    ([{"key": "widget_state", "value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sigsigsig"}], ""),
     ([], ""),
 ])
 def test_select_session_bearer(items, expected):
@@ -1358,4 +1361,36 @@ def test_session_bearer_from_another_origin_is_not_forwarded(tmp_path):
             assert result["status"] == expected
         assert len(engines) == 1  # 他 origin の token では engine を起動せず送らない
         assert engines[0].injection_templates["tmpl_o"]["headers"]["Authorization"] == "Bearer other-origin-token-8888"
+    asyncio.run(scenario())
+
+
+_REVIEW_TOKEN_KEYS = [
+    "oauth_tokens", "oauthTokens", "oauth-tokens", "github_tokens", "githubTokens", "bot_tokens", "app_tokens",
+    "jwt_tokens", "jwtTokens", "service_tokens", "serviceTokens", "service-tokens", "private_tokens",
+    "device_tokens", "push_tokens", "my_tokens",
+]
+
+
+@pytest.mark.parametrize("key", _REVIEW_TOKEN_KEYS)
+def test_plural_token_keys_are_not_persisted_or_output_in_plain_text(tmp_path, key):
+    """任意の語 + tokens のキーは秘密。値は points.json・ツール出力・イベントに残らず、body_secret が付く。"""
+    async def scenario():
+        secret_value = "opaqueVal12345-plural"
+        harness = _harness(tmp_path)
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-value-9", "domain": "target.test"}])
+        engines = []
+        tools = AgentScannerTools(scanner, harness, engine_factory=lambda *a: engines.append(a) or _FakeEngine(*a))
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/x", "/q", template_id="tmpl_p")
+        header = "X-" + key.replace("_", "-")
+        point_id = tools.add_point(point, {"template": {
+            "url": "https://target.test/api/x", "json_body": {"q": "x", key: secret_value},
+            "headers": {header: secret_value},
+        }})
+        saved = json.loads((tmp_path / "agent_scanner_points.json").read_text(encoding="utf-8"))
+        assert saved[point_id]["body_secret"] is True
+        outputs = [tools.schedule_scanner(point_id, "sqli"), await tools.list_scanner_capabilities()]
+        assert outputs[0]["status"] == "unsupported"
+        assert engines == []
+        blob = json.dumps(outputs, default=str) + json.dumps(harness.state.events, default=str) + _all_persisted(tmp_path)
+        assert secret_value not in blob
     asyncio.run(scenario())

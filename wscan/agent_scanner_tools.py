@@ -60,15 +60,19 @@ def _leaf_is_secret(value, key: str) -> bool:
     )
 
 
-# 機微トークンを部分文字列として含むが資格情報ではない語（secretary 等）。
-_BENIGN_WORDS = frozenset({"secretary", "secretaries", "secretariat"})
-# 複数形 tokens は直前に数量・資格情報でない語がある場合（max_tokens 等）だけ資格情報でない。
-# 直前が資格情報の修飾語（access_tokens 等）や語が無い（tokens 単独）場合は機微のまま。
-_CREDENTIAL_QUALIFIERS = frozenset({
-    "access", "refresh", "auth", "api", "id", "session", "bearer", "csrf", "xsrf", "client", "user",
+# 既定は秘密。資格情報ではないと明らかな「キー名全体」だけを例外にする（迷う語は秘密の側）。
+# 照合は語に分けて "_" でつないだ形（maxTokens・max-tokens も max_tokens になる）。
+_NON_SECRET_KEYS = frozenset({
+    "max_tokens", "max_output_tokens", "max_completion_tokens", "max_new_tokens",
+    "num_tokens", "total_tokens", "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens",
+    "token_count", "page_token", "next_page_token", "prev_page_token", "next_token", "continuation_token",
+    "secretary",
 })
-# 直前にこの語がある "token" はページ送りカーソル（page_token・nextPageToken 等）。
-_CURSOR_QUALIFIERS = frozenset({"page", "next", "prev", "previous", "continuation", "pagination", "cursor", "sync"})
+# SENSITIVE_KEY_TOKENS（部分一致）に加えて、語として現れたら秘密とみなす語。
+_SECRET_WORDS = frozenset({
+    "key", "keys", "session", "sessions", "cookie", "cookies", "auth", "oauth", "authorization",
+    "bearer", "jwt", "credential", "credentials",
+})
 
 
 def _key_words(key: str) -> list[str]:
@@ -79,10 +83,7 @@ def _key_words(key: str) -> list[str]:
 
 
 def _key_is_sensitive(key: str) -> bool:
-    """既存 redaction と同じ機微トークン集合を、語の境界で判定する。
-
-    語の中の部分一致（csrfmiddlewaretoken・mypassword）は従来どおり機微とし、
-    資格情報でない既知の語（tokens・secretary）とページ送りの token だけを除く。"""
+    """キー名が資格情報を示すか。既存 redaction の部分一致を既定とし、明示した例外だけ外す。"""
     from wscan import url_scope
     from wscan.request_logger import is_sensitive_header
     low = str(key).lower()
@@ -91,25 +92,13 @@ def _key_is_sensitive(key: str) -> bool:
     if is_sensitive_header(low) or low in ("cookie", "authorization"):
         return True
     words = _key_words(key)
-    # 複数語の別名（api_key・session_id 等）は複数形（api_keys・session_ids）も一致させる
-    stems = [w[:-1] if len(w) > 2 and w.endswith("s") else w for w in words]
-    for alias in url_scope.SENSITIVE_KEY_TOKENS:
-        parts = alias.split("_")
-        if len(parts) > 1 and any(
-            seq[i:i + len(parts)] == parts for seq in (words, stems) for i in range(len(seq))
-        ):
-            return True
-    singles = [t for t in url_scope.SENSITIVE_KEY_TOKENS if "_" not in t]
-    for i, word in enumerate(words):
-        if word in _BENIGN_WORDS:
-            continue
-        if word == "tokens" and i and words[i - 1] not in _CREDENTIAL_QUALIFIERS:
-            continue
-        if word == "token" and i and words[i - 1] in _CURSOR_QUALIFIERS:
-            continue
-        if any(t in word for t in singles):
-            return True
-    return False
+    if "_".join(words) in _NON_SECRET_KEYS:
+        return False
+    joined = "".join(words)
+    return (
+        any(token in low or token.replace("_", "") in joined for token in url_scope.SENSITIVE_KEY_TOKENS)
+        or any(word in _SECRET_WORDS for word in words)
+    )
 
 
 def _redact_json_leaves(value, key: str = ""):
@@ -162,7 +151,7 @@ _BEARER_UNAVAILABLE = "bearer authentication unavailable in the agent session"
 def select_session_bearer(items) -> str:
     """Agent セッションの storage 項目から Bearer に使う値を 1 つ選ぶ（純粋）。
 
-    token/JWT らしい値だけを候補にし、refresh/CSRF 用は除く。候補が 1 つでなければ、
+    token らしいキーの値（JWT 形でもキーが資格情報を示すもの）だけを候補にし、refresh/CSRF 用は除く。候補が 1 つでなければ、
     access を含むキーが 1 つのときだけそれを選ぶ。曖昧なら空文字（推測で送らない）。"""
     from wscan.content_provenance import _JWT_VALUE_PATTERN
     found: dict[str, list[str]] = {}
@@ -190,7 +179,7 @@ def select_session_bearer(items) -> str:
         token_key = bool({"jwt", "bearer"} & set(words)) or (
             _key_is_sensitive(key) and any("token" in w for w in words)
         )
-        if token_key or _JWT_VALUE_PATTERN.fullmatch(val):
+        if token_key or (_JWT_VALUE_PATTERN.fullmatch(val) and _key_is_sensitive(key)):
             found.setdefault(val, words)
 
     for item in items or ():
