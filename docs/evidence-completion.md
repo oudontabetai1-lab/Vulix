@@ -112,11 +112,12 @@ controls, failures, duplicate hooks, concurrent equal names, missing/wrong/late 
 and separate-process restart/resume. Candidate and confirmed counts are recorded separately;
 only complete common units qualify as successful safe-negative evidence.
 
-### Standard sweep probe verification and fingerprinting (SQLi transport slice)
+### Standard sweep probe verification and fingerprinting (Playwright and HTTPX JSON slices)
 
-For the Playwright form/query standard sweep, each probe transmission durable records:
+For the Playwright form/query standard sweeps (SQLi and XSS) and HTTPX JSON body injection (SQLi),
+each probe transmission durable records:
 - Deterministic `attempt_id` and `scan_id`
-- Target `injection_key` and check name (`sqli`) with `wave="standard"`
+- Target `injection_key` and check name (`sqli`, `xss`) with `wave="standard"`
 - `payload_fingerprint`: fixed-length cryptographic hash bound to `(payload, unit_key, check)`
   computed via `attempt_ledger.payload_fingerprint`, shared across `payload`, `request`,
   `observation`, and `decision` records.
@@ -126,7 +127,8 @@ For the Playwright form/query standard sweep, each probe transmission durable re
   and the observed response via `parent_id`.
 
 Reconciliation of planned payload count, executed transmissions, and manifest records is evaluated
-at the conclusion of the wave. Discrepancies (or ledger write failures) do not affect scanner
+at the conclusion of the wave via the shared helper `_reconcile_probe_ledger_wave` and thread-safe
+ledger queries (`ProbeLedger.wave_records`). Discrepancies (or ledger write failures) do not affect scanner
 detection or checkpoint resumption, but are captured in observability as
 `probe_ledger_incomplete:<check>:<wave>:<reason>` (reasons: `write_failed`, `count_mismatch`) in
 `engine.wave_errors` and the observability summary. All recorded traffic passes central value-based

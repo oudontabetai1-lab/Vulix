@@ -779,6 +779,51 @@ class BaseScanner(ABC):
                 return
         errors.append(note)
 
+    def _reconcile_probe_ledger_wave(
+        self,
+        ip: Optional["InjectionPoint"],
+        wave: str = "standard",
+        *,
+        planned_count: int,
+        executed_count: int,
+        findings_count: int,
+        stopped_early: bool = False,
+        role: str = "attack",
+    ) -> None:
+        """wave 終了時の probe ledger 整合性検証ヘルパ（通常層スキャナ共通）。
+
+        台帳の書込み失敗（write_failed）や、planned/executed/manifest の件数不一致（count_mismatch）
+        を検知して engine.wave_errors に記録する（observability に反映）。
+        攻撃挙動や checkpoint 判定には一切干渉しない（不変条件）。
+        """
+        logger = getattr(getattr(self, "engine", None), "request_logger", None)
+        ledger = getattr(logger, "probe_ledger", None) if logger else None
+        if ledger is None or not getattr(ledger, "enabled", False):
+            return
+
+        if ledger.quarantined or ledger.manifest.had_write_error:
+            self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:{wave}:write_failed")
+
+        from wscan.probe_ledger import sha256_hex
+        unit = ledger.current_unit()
+        field_key = (
+            sha256_hex(json.dumps([ip.stable_key_parts(), ip.parameter_id, ip.operation_id, ip.template_digest]))
+            if ip is not None else ""
+        )
+        manifest_requests = ledger.wave_records(
+            check=self.CHECK_TYPE,
+            wave=wave,
+            role=role,
+            unit=unit,
+            record_kind="request",
+            injection_key=field_key,
+        )
+        manifest_count = len(manifest_requests)
+        if manifest_count != executed_count:
+            self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:{wave}:count_mismatch")
+        elif not findings_count and not stopped_early and executed_count != planned_count:
+            self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:{wave}:count_mismatch")
+
     def _observe_token_lifecycle(
         self,
         ip: InjectionPoint,
