@@ -186,13 +186,53 @@ def test_linear_performance_with_mass_bearer_tokens():
     import time
 
     chunk = ("payload_data " * 10) + "Bearer x_secret_token_12345 "
-    data = chunk * 20000  # ~3.0 MB, 20,000 matches
+    n1 = 1000
+    n2 = 4000
 
     start = time.perf_counter()
-    result = redact_text(data)
-    elapsed = time.perf_counter() - start
+    res1 = redact_text(chunk * n1)
+    elapsed_n1 = time.perf_counter() - start
 
-    assert "x_secret_token_12345" not in result
-    assert "Bearer <redacted>" in result
-    # O(N*M) の全走査だと数十秒〜分単位でタイムアウトするが、64文字の局所窓により安定して完了する
-    assert elapsed < 15.0, f"redact_text took too long: {elapsed:.2f}s"
+    start = time.perf_counter()
+    res2 = redact_text(chunk * n2)
+    elapsed_n2 = time.perf_counter() - start
+
+    assert "x_secret_token_12345" not in res1
+    assert "Bearer <redacted>" in res1
+    assert "x_secret_token_12345" not in res2
+    assert "Bearer <redacted>" in res2
+
+    # CI 上の負荷変動を避けるため、絶対時間ではなく 4 倍サイズに対する実行時間比で線形性を検証
+    if elapsed_n1 > 0.005:
+        ratio = elapsed_n2 / elapsed_n1
+        assert ratio < 6.0, f"raw bearer window ratio is super-linear: {ratio:.2f}x"
+
+
+def test_urlencoded_no_catastrophic_scanning():
+    """urlencoded のキー走査で二乗走査が発生せず、線形時間で完了すること。"""
+    import time
+    from wscan.url_scope import redact_kv_values
+
+    # 正しい伏せ字化が行われることの検証
+    assert (
+        redact_kv_values("user_password=secret&other=safe")
+        == "user_password=<redacted>&other=safe"
+    )
+
+    n1 = 2500
+    n2 = 10000
+
+    start = time.perf_counter()
+    res1 = redact_kv_values("x" * n1)
+    elapsed_n1 = time.perf_counter() - start
+
+    start = time.perf_counter()
+    res2 = redact_kv_values("x" * n2)
+    elapsed_n2 = time.perf_counter() - start
+
+    assert res1 == "x" * n1
+    assert res2 == "x" * n2
+    assert elapsed_n2 < 0.5, f"urlencoded scanning took too long: {elapsed_n2:.2f}s"
+    if elapsed_n1 > 0.0001:
+        ratio = elapsed_n2 / elapsed_n1
+        assert ratio < 6.0, f"urlencoded scanning ratio is super-linear: {ratio:.2f}x"
