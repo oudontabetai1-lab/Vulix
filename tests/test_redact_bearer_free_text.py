@@ -158,6 +158,29 @@ def test_attack_payload_and_ordinary_query_not_broken():
 
 # --- 7. 性能回帰テスト（線形時間検証） ---
 
+def test_header_line_auth_no_catastrophic_backtracking():
+    """ヘッダ区切り文字に続く空白でバックトラック爆発が起きず、線形時間で完了すること。"""
+    import time
+
+    n1 = 5000
+    n2 = 20000
+
+    start = time.perf_counter()
+    res1 = redact_text("a:" + "\n" * n1 + "}")
+    elapsed_n1 = time.perf_counter() - start
+
+    start = time.perf_counter()
+    res2 = redact_text("a:" + "\n" * n2 + "}")
+    elapsed_n2 = time.perf_counter() - start
+
+    assert res1 == "a:" + "\n" * n1 + "}"
+    assert res2 == "a:" + "\n" * n2 + "}"
+    assert elapsed_n2 < 0.5, f"header line backtracking took too long: {elapsed_n2:.2f}s"
+    if elapsed_n1 > 0.0005:
+        ratio = elapsed_n2 / elapsed_n1
+        assert ratio < 6.0, f"header line backtracking ratio is super-linear: {ratio:.2f}x"
+
+
 def test_linear_performance_with_mass_bearer_tokens():
     """敵性サイトが数 MB で数万回の Bearer を含む応答を返しても、局所窓により線形時間で完了すること。"""
     import time

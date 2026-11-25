@@ -148,7 +148,7 @@ _PROSE_WORDS = frozenset({
 
 _HEADER_LINE_AUTH_PATTERN = re.compile(
     r"""(?<![\w-])(["']?[A-Za-z0-9_-]+["']?)"""
-    r"""(\s*[:=]\s*)"""
+    r"""(\s*+[:=]\s*+)"""
     r"""(["']?)((?:bearer|basic|token|digest|oauth)\b)?(\s*)([^\r\n"'\],;}]+)(["']?)""",
     re.VERBOSE | re.IGNORECASE,
 )
