@@ -278,15 +278,25 @@ class ProbeLedger:
             result[unit] = decisions
         return result
 
-    def wave_records(self, check: str, wave: str, *, role: str = "", unit: str = "") -> list[dict]:
-        """wave 内の記録済みイベントを返す（純粋クエリ）。"""
+    def wave_records(
+        self,
+        check: str,
+        wave: str,
+        *,
+        role: str = "",
+        unit: str = "",
+        record_kind: str = "",
+        injection_key: str = "",
+    ) -> list[dict]:
+        """wave 内の記録済みイベントを返す（純粋クエリ、スレッドセーフ）。"""
         with self._lock:
             return [
                 r for r in self.events.values()
                 if r.get("check") == check
                 and r.get("wave") == wave
                 and (not role or r.get("role") == role)
-                and (not unit or r.get("completion_unit") == unit)
+                and (not record_kind or r.get("record_kind") == record_kind)
+                and ((r.get("completion_unit") == unit) if unit else (r.get("injection_key") == injection_key if injection_key else True))
             ]
 
     def reconcile_persisted(self) -> None:

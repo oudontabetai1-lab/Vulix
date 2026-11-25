@@ -924,28 +924,15 @@ class SQLiScanner(BaseScanner):
             if await _test_payload(payload):
                 break  # Found vulnerability, move to next field
 
-        # ── probe ledger 整合性検証（第 1 スライス: sqli standard sweep） ──
-        logger = getattr(getattr(self, "engine", None), "request_logger", None)
-        ledger = getattr(logger, "probe_ledger", None) if logger else None
-        if ledger is not None and getattr(ledger, "enabled", False):
-            if ledger.quarantined or ledger.manifest.had_write_error:
-                self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:standard:write_failed")
-            from wscan.probe_ledger import sha256_hex
-            unit = ledger.current_unit()
-            field_key = sha256_hex(json.dumps([ip.stable_key_parts(), ip.parameter_id, ip.operation_id, ip.template_digest])) if ip is not None else ""
-            manifest_requests = [
-                rec for rec in ledger.events.values()
-                if rec.get("record_kind") == "request"
-                and rec.get("check") == self.CHECK_TYPE
-                and rec.get("wave") == "standard"
-                and rec.get("role") == "attack"
-                and ((rec.get("completion_unit") == unit) if unit else (rec.get("injection_key") == field_key if field_key else True))
-            ]
-            manifest_count = len(manifest_requests)
-            if manifest_count != executed_standard_count:
-                self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:standard:count_mismatch")
-            elif not findings and not auth_lost[0] and executed_standard_count != planned_standard_count:
-                self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:standard:count_mismatch")
+        # ── probe ledger 整合性検証（sqli standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
 
         # evolution wave は legacy browser transport 専用なので JSON/XML では実行しない。
         if not findings and not auth_lost[0] and ip.location not in ("json_body", "xml_body"):

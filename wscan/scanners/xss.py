@@ -188,6 +188,13 @@ class XSSScanner(BaseScanner):
         field_name = ip.parameter_id
         payloads = await self.get_payloads(field_name, ip.url, ip=ip)
 
+        from wscan.attempt_ledger import payload_fingerprint
+        from wscan.checkpoint import CheckpointState
+        unit_key = CheckpointState._candidate_unit_key(ip, self.CHECK_TYPE) if ip is not None else ""
+        planned_standard_count = len(payloads)
+        executed_standard_count = 0
+        auth_lost = [False]
+
         if self.monitor:
             await self.monitor.emit_status(f"XSS testing: {field_name} on {ip.url}")
 
@@ -233,7 +240,8 @@ class XSSScanner(BaseScanner):
             fire: bool = False,
             expect_token: str = "",
         ) -> bool:
-            await self.log_payload_test(field_name, payload, check_label, ip.url)
+            fp = payload_fingerprint(payload, unit_key, self.CHECK_TYPE) if unit_key else ""
+            await self.log_payload_test(field_name, payload, check_label, ip.url, payload_fingerprint=fp)
 
             # Reset dialog detector
             self.browser.reset_dialog()
@@ -242,6 +250,8 @@ class XSSScanner(BaseScanner):
             source, pair = await self._apply_ip(
                 ip, payload, baseline_attempt_ids=baseline_ids,
                 probe_wave={"xss": "standard", "xss_evolved": "evolution"}.get(check_label, "auxiliary"))
+            if pair.get("_authentication_lost"):
+                auth_lost[0] = True
 
             await asyncio.sleep(0.5 * self.sleep_factor)  # Wait for any JS execution
 
@@ -353,8 +363,21 @@ class XSSScanner(BaseScanner):
             return False
 
         for payload in payloads:
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
             if await _test_payload(payload):
                 break  # Found vulnerability, move to next field
+
+        # ── probe ledger 整合性検証（第 2 スライス: xss standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
 
         # --- Check 3: deterministic context-aware evolution wave ---
         # 走らせる条件は次のいずれか（かつ dialog 未確証のとき）:
@@ -676,10 +699,14 @@ class XSSScanner(BaseScanner):
         立ったダイアログは後続 payload に持ち越さないよう reset する。
         """
         from urllib.parse import urlparse
+        from wscan.attempt_ledger import payload_fingerprint
+        from wscan.checkpoint import CheckpointState
 
+        unit_key = CheckpointState._candidate_unit_key(ip, self.CHECK_TYPE) if ip is not None else ""
+        fp = payload_fingerprint(neutral_value, unit_key, self.CHECK_TYPE) if unit_key else ""
         try:
             await self.log_payload_test(
-                ip.parameter_id, neutral_value, "xss_handler_baseline", ip.url
+                ip.parameter_id, neutral_value, "xss_handler_baseline", ip.url, payload_fingerprint=fp,
             )
             self.browser.reset_dialog()
             src, pair = await self._apply_ip(ip, neutral_value, probe_role="baseline")
