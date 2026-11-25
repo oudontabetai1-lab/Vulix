@@ -1085,6 +1085,8 @@ class ScanEngine:
         tls_verify: bool = False,
         # API ファースト検査: OpenAPI/Swagger/Postman スペックのパス
         api_spec_path: str = "",
+        # Proxy エクスポート: OWASP ZAP(JSON)/Burp Suite(XML) のパス
+        proxy_export_path: str = "",
         # 再開可能スキャン: 直前スキャンの出力ディレクトリ（checkpoint.json を読む）
         resume_dir: str = "",
         enable_checkpoint: bool = True,
@@ -1217,6 +1219,7 @@ class ScanEngine:
         # API ファースト検査: スペック取り込みパスと、取り込んだ JSON 操作群
         # （mass_assignment 等が利用する RequestTemplate のリスト）
         self.api_spec_path: str = api_spec_path
+        self.proxy_export_path: str = proxy_export_path
         self.api_seed_requests: list = []
         # JSON body の実値を含み得るため、永続化しないメモリ内レジストリ。
         self.injection_templates: dict[str, dict] = {}
@@ -1700,6 +1703,12 @@ class ScanEngine:
         # Auto-login landing page. Seeded into the normal crawl so authenticated
         # pages are not missed when the scan target itself is the login URL.
         self.auth_landing_url: str = ""
+
+    def _record_scan_note(self, note: str) -> None:
+        """検出力に関わる出来事を ``wave_errors`` に記録する。"""
+        if not hasattr(self, "wave_errors") or self.wave_errors is None:
+            self.wave_errors = []
+        self.wave_errors.append(note)
 
     def observability_summary(self) -> dict:
         """``wave_errors`` をカテゴリ別に集計して返す（純粋・レポート/サマリ用）。"""
@@ -4643,15 +4652,16 @@ class ScanEngine:
                         self.visited_urls.add(_aurl)
                         queue.append((_aurl, 0, self.target_url))
                 # JSON ボディ操作はスコープ内のものだけ mass_assignment へ渡す
-                self.api_seed_requests = [
+                api_requests = [
                     r for r in api_seed.requests
                     if self._is_attack_target_url(r.url) and not self._is_url_excluded(r.url)
                 ]
+                self.api_seed_requests.extend(api_requests)
                 # スペック由来 URL（GET 含む全操作）を記録（graphql の具体 URL probe ゲート用）
-                self.api_seed_urls = {
-                    u for u in (api_seed.urls or [])
-                    if not self._is_url_excluded(u)
-                } | {r.url for r in self.api_seed_requests}
+                self.api_seed_urls.update(
+                    {u for u in (api_seed.urls or []) if not self._is_url_excluded(u)}
+                    | {r.url for r in api_requests}
+                )
                 if getattr(api_seed, "headers", None):
                     # 利用者が --header で明示した値は seed（スペックの default/example、
                     # 例えば API キーのプレースホルダ）で上書きしない。has() で既存を尊重。
@@ -4664,6 +4674,60 @@ class ScanEngine:
                         await self.header_manager.update(api_hdrs)
             except Exception as _api_err:
                 console.print(f"  [yellow][API] スペック読み込み失敗: {_api_err}[/yellow]")
+
+        # Proxy エクスポート（OWASP ZAP / Burp Suite）取り込み — エンドポイント・共通ヘッダ・
+        # JSON 操作（mass_assignment 等が使う）をシードする。
+        if self.proxy_export_path:
+            try:
+                from wscan.proxy_importer import load_proxy_export
+                proxy_seed = load_proxy_export(
+                    self.proxy_export_path,
+                    target_urls=self.target_urls,
+                    access_urls=self.access_urls,
+                    exclude_urls=list(self.exclude_urls),
+                )
+                console.print(
+                    f"  [dim cyan][Proxy Export][/dim cyan] {len(proxy_seed.urls)} URL, "
+                    f"{len(proxy_seed.requests)} JSON 操作を読み込みました: {self.proxy_export_path}"
+                )
+                if proxy_seed.rejected_scope_reasons:
+                    for reason, count in sorted(proxy_seed.rejected_scope_reasons.items()):
+                        self._record_scan_note(f"proxy_export_rejected:{reason}:{count}")
+                if len(proxy_seed.urls) == 0 and proxy_seed.rejected_scope_count == 0:
+                    self._record_scan_note("proxy_export_empty:no_requests_found")
+                for _purl in proxy_seed.urls:
+                    if (
+                        _purl not in self.visited_urls
+                        and self._is_access_allowed_url(_purl)
+                        and not self._is_url_excluded(_purl)
+                    ):
+                        self.visited_urls.add(_purl)
+                        queue.append((_purl, 0, self.target_url))
+                # JSON ボディ操作はスコープ内のものだけ mass_assignment へ渡す
+                proxy_requests = [
+                    r for r in proxy_seed.requests
+                    if self._is_attack_target_url(r.url) and not self._is_url_excluded(r.url)
+                ]
+                self.api_seed_requests.extend(proxy_requests)
+                self.api_seed_urls.update(
+                    {u for u in (proxy_seed.urls or []) if not self._is_url_excluded(u)}
+                    | {r.url for r in proxy_requests}
+                )
+                if getattr(proxy_seed, "headers", None):
+                    proxy_hdrs = {
+                        k: v for k, v in proxy_seed.headers.items()
+                        if k.lower() not in ("cookie", "content-length", "host")
+                        and not self.header_manager.has(k)
+                        and v != "<redacted>"
+                    }
+                    if proxy_hdrs:
+                        await self.header_manager.update(proxy_hdrs)
+            except Exception as _proxy_err:
+                msg = f"Proxy エクスポート読み込み失敗: {_proxy_err}"
+                console.print(f"  [yellow][Proxy Export] {msg}[/yellow]")
+                self._record_scan_note(f"proxy_export_error:{type(_proxy_err).__name__}:{_proxy_err}")
+                if self.monitor:
+                    await self.monitor.emit_status(f"⚠️ {msg}", "warning")
 
         # C-3: Seed crawl queue from sitemap.xml / robots.txt (if enabled)
         sitemap_urls = await self._fetch_sitemap_urls() if self.enable_sitemap_crawl else []

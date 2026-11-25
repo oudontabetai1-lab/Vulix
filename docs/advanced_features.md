@@ -23,6 +23,7 @@
 | M | マルチターゲット一括スキャン | `wscan/batch_runner.py`, `main.py` | 実装済み |
 | N | リクエストレート制御 | `wscan/engine.py`, `main.py` | 実装済み |
 | O | HAR ファイルインポート | `wscan/har_importer.py`, `wscan/engine.py` | 実装済み |
+| O-2 | Proxy エクスポート取り込み（ZAP / Burp） | `wscan/proxy_importer.py`, `wscan/engine.py` | 実装済み |
 | P | WebSocket インジェクション | `wscan/scanners/websocket.py` | 実装済み |
 | Q | TLS 設定検査（sslyze・opt-in） | `wscan/scanners/tls_config_scan.py`, `wscan/tls_scan.py` | 実装済み |
 
@@ -547,6 +548,40 @@ python main.py scan --delay 0 https://target.example.com
 ```bash
 # DevTools でキャプチャした HAR をシードに使用
 python main.py scan --har captured.har https://target.example.com
+```
+
+---
+
+## O-2. Proxy エクスポート取り込み（ZAP / Burp）
+
+**ファイル**: `wscan/proxy_importer.py`, `wscan/engine.py:_phase_crawl()`
+
+### 目的
+OWASP ZAP（JSON/HAR）または Burp Suite（XML: Save items）のエクスポートファイルからスコープ内のエンドポイント・共通ヘッダ・JSON 操作を読み込み、スキャンのシードとして活用する。本機能は**通常モード**の決定論的検査（確実性重視）向けに設計されている。
+
+### 抽出内容とセキュリティ
+- **URL**: スコープ（`target_urls` / `access_urls` / `exclude_urls`）判定を通過した URL を BFS クロールキューおよびシード URL 集合に追加。URL 内の userinfo や認証 query 値は自動的に伏字化。
+- **JSON 操作**: POST/PUT/PATCH/DELETE リクエストで JSON ボディを持つものを `RequestTemplate` として抽出し、`mass_assignment` などの JSON ボディ系スキャナの検査対象に登録。
+- **秘密情報の保護**: Cookie や Authorization、セッショントークンなどの認証情報は安全に伏字化（`<redacted>`）され、ログ・レポート・ダッシュボードへ平文出力されない。
+- **Observability**: スコープ外や不正形式で除外された項目は、件数と理由（`proxy_export_rejected:*`）を `wave_errors` / Observability に記録。
+
+### 使い方
+
+本機能は**ダッシュボード操作が基本**です。CLI は自動化や CI 用の補助入口として利用できます。
+
+#### 1. ダッシュボードから使用（基本）
+1. `python main.py serve` を起動し、ブラウザでダッシュボードを開く。
+2. スキャン設定の「🎯 スコープ・除外」タブを開く。
+3. 「Proxy エクスポート（ZAP / Burp）」カードのファイル選択ボタンからエクスポートファイル（`.json` / `.xml` / `.har`）をアップロードするか、サーバー側パスを入力する。
+4. スキャンを開始すると、自動的にスコープ内リクエストがシードとして取り込まれる。
+
+#### 2. CLI から使用（補助）
+```bash
+# OWASP ZAP JSON エクスポートをシードに使用
+python main.py scan https://target.example.com --proxy-export zap_report.json
+
+# Burp Suite XML エクスポートをシードに使用
+python main.py scan https://target.example.com --proxy-export burp_items.xml
 ```
 
 ---

@@ -510,6 +510,7 @@ python3 main.py scan URL [URL ...] [options]
 | `--notify-webhook URL` | 空 | Finding 通知の Slack/汎用 Webhook |
 | `--notify-severity LEVEL` | `high` | `critical/high/medium/low` の通知閾値 |
 | `--har FILE` | 空 | HAR の URL/Cookie をシード化 |
+| `--proxy-export PATH` | 空 | OWASP ZAP (JSON) または Burp Suite (XML) のエクスポートから URL/ヘッダ/JSON 操作をシード化 |
 | `--manual-crawl FILE` | config / 空 | 手動巡回 JSON をシード化 |
 | `--api-spec FILE` | 空 | OpenAPI/Swagger/Postman を直接検査 |
 | `--resume DIR` | 空 | 前回の `checkpoint.json` から再開 |
@@ -1114,12 +1115,13 @@ OpenAPI 2.0/3.x、Swagger JSON/YAML、Postman Collection から URL、共通ヘ�
 - 読み込んだ JS/JSON 資産からリンク候補を抽出する際、minified JS の正規表現リテラルや式片（`/(?:` `/16*(…` 等）を誤ってルートとして拾わないようフィルタします。無駄なクロールとプランナー LLM の浪費を抑え、実ルートへの到達性を保ちます。
 - `js_static`: インライン/外部 JavaScript の危険な source-to-sink フローを静的確認します。
 
-### flow / 手動巡回 / HAR
+### flow / 手動巡回 / HAR / プロキシエクスポート
 
 - `record`: navigate、fill、click、wait 等を JSON フローへ記録します。
 - `manual-crawl`: 可視ブラウザで訪問 URL、フォーム、Cookie を JSON に保存します。
 - ダッシュボード手動巡回: 可視ブラウザ、CDP スクリーンキャストによる遠隔操作、URL リスト取り込みの3方式です。
 - `--har`: HAR のエンドポイントと Cookie をスキャンシードへ加えます。
+- Proxy エクスポート取り込み: OWASP ZAP (JSON/HAR) または Burp Suite (XML) のエクスポートから、スコープ内のリクエストを抽出して通常スキャンのシードと JSON 操作（`mass_assignment` 等）に加えます。ダッシュボードの「スコープ・除外」設定からのファイル指定が基本で、CLI（`--proxy-export PATH`）は自動化向けの補助入口です。通常モードの機能として動作し、Cookie や Authorization などの秘匿情報は安全に伏字化・除外されます。
 
 ### ペイロード・WAF・レート制御
 
