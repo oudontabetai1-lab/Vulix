@@ -677,12 +677,15 @@ class AgentHarness:
         secret_values: Iterable[str] = (),
         auth_secret_material: str = "",
         agent_jit_context: bool = False,
+        information_gain_shadow: bool = False,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.spec = spec
         self.repeat_threshold = max(2, int(repeat_threshold))
         self.agent_jit_context = bool(agent_jit_context)
+        # 情報利得ランキングの観測のみ（実際の work 順序は変えない）。内部設定・既定 off
+        self.information_gain_shadow = bool(information_gain_shadow)
         self.state_path = self.output_dir / STATE_FILENAME
         self.trace_path = self.output_dir / TRACE_FILENAME
         self.manifest_path = self.output_dir / MANIFEST_FILENAME
@@ -828,10 +831,67 @@ class AgentHarness:
         if not candidates:
             return None
         item = min(candidates, key=lambda value: (priority[value.role], value.work_id))
+        if self.information_gain_shadow:
+            self._record_information_gain_shadow(candidates, item)
         item.transition_to(WorkStatus.RUNNING)
         item.attempts += 1
         self.checkpoint()
         return item
+
+    def information_gain_candidates(self, items: Iterable[AgentWorkItem]) -> list:
+        """work item を IG ランキング用の候補へ写像する（状態は変えない）。
+
+        必須 baseline＝検証役以外（決定論スケジューラが投入する work）。cost/risk は
+        harness に根拠データがないため 0（精密そうな値を作らない）。
+        """
+        from wscan.information_gain import ProbeCandidate, hypothesis_state
+
+        out = []
+        for work in items:
+            hypothesis = None
+            for hyp in self.state.hypotheses:
+                if work.role == AgentRole.VERIFIER and hyp.get("candidate_id") == work.target:
+                    hypothesis = hyp
+                    break
+                if (
+                    work.role == AgentRole.PROBE_SPECIALIST
+                    and hyp.get("injection_point_id") == work.target
+                    and (not work.check_type or hyp.get("check_type") == work.check_type)
+                ):
+                    hypothesis = hyp
+                    break
+            direct = work.role in {AgentRole.PROBE_SPECIALIST, AgentRole.VERIFIER}
+            out.append(ProbeCandidate(
+                candidate_id=work.work_id,
+                state=hypothesis_state(hypothesis),
+                probe_class="deterministic" if direct else "weak",
+                repeats=max(0, work.attempts),
+                mandatory=work.role != AgentRole.VERIFIER,
+            ))
+        return out
+
+    def _record_information_gain_shadow(self, candidates: list, chosen: AgentWorkItem) -> None:
+        """IG 順位を観測イベントにだけ出す。失敗しても実行順序・状態には影響させない。"""
+        try:
+            from wscan.information_gain import rank_candidates
+
+            ranked = rank_candidates(self.information_gain_candidates(candidates))
+            top = ranked[0].candidate_id if ranked else ""
+            self.record_dispatch_event(
+                event_type="information_gain_shadow",
+                tool_name="scheduler",
+                work_id=chosen.work_id,
+                details={
+                    "baseline_work_id": chosen.work_id,
+                    "ig_top_work_id": top,
+                    "agrees": top == chosen.work_id,
+                    "candidate_count": len(ranked),
+                    "ranking_truncated": len(ranked) > 8,
+                    "ranking": [r.to_dict() for r in ranked[:8]],
+                },
+            )
+        except Exception:  # noqa: BLE001 - shadow は本処理を絶対に妨げない
+            pass
 
     def requeue_role(self, role: AgentRole) -> int:
         """新しい process/session でやり直す必要がある役割を planned に戻す。"""

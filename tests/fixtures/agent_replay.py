@@ -319,8 +319,19 @@ async def _replay_events(events, *, net, agent, harness, tools, outputs, hypothe
 async def _dispatch(event, tools, harness) -> list:
     name = event["tool"]
     if name == "run_scanner_work" and event.get("work") == "*":
-        planned = [w.work_id for w in harness.state.work_queue if w.status == WorkStatus.PLANNED]
-        return [await tools.dispatch_tool(name, work_id=work_id) for work_id in planned]
+        planned_items = [w for w in harness.state.work_queue if w.status == WorkStatus.PLANNED]
+        planned = [w.work_id for w in planned_items]
+        # 情報利得 shadow の比較用: 実行前の候補（baseline=queue 順）と実行後の結果を記録するだけ
+        trace = getattr(harness, "replay_work_trace", None)
+        if trace is not None:
+            trace.append({"candidates": harness.information_gain_candidates(planned_items), "results": {}})
+        results = []
+        for work_id in planned:
+            res = await tools.dispatch_tool(name, work_id=work_id)
+            if trace is not None:
+                trace[-1]["results"][work_id] = int(res.get("verified_count", 0) or 0)
+            results.append(res)
+        return results
     args = {}
     if "point" in event:
         args["injection_point_id"] = tools._point_id(_point(event["point"]))
@@ -351,14 +362,18 @@ def _classify(findings, scenario) -> dict:
             "safe_twin_fp": fp, "unexpected_findings": unexpected}
 
 
-async def run_scenario(scenario: dict, out_dir: Path, *, jit_context: bool = False) -> dict:
+async def run_scenario(
+    scenario: dict, out_dir: Path, *, jit_context: bool = False, information_gain_shadow: bool = False,
+) -> dict:
     """1 シナリオを再生し、replay gate の入力（oracle の測定値）を返す。"""
     net = LabNet()
     agent = LabAgent(tokens=scenario.get("tokens", ()), extra_headers=scenario.get("extra_headers"))
     outputs, hypotheses, findings = [], [], []
     events = scenario["events"]
     interrupt = scenario.get("interrupt_after")
-    harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), agent_jit_context=jit_context)
+    harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), agent_jit_context=jit_context,
+                           information_gain_shadow=information_gain_shadow)
+    harness.replay_work_trace = []
     tools = AgentScannerTools(agent, harness, engine_factory=lambda check, h: LabEngine(net, check, h, agent))
     done = await _replay_events(
         events[:interrupt] if interrupt else events,
@@ -379,7 +394,10 @@ async def run_scenario(scenario: dict, out_dir: Path, *, jit_context: bool = Fal
     if interrupt:
         # 中断（プロセス終了）→ 同じ出力先から resume。完了済み work は再送しない。
         findings.extend(tools.agent_findings())
-        harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), resume=True, agent_jit_context=jit_context)
+        prior_trace = harness.replay_work_trace
+        harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), resume=True, agent_jit_context=jit_context,
+                               information_gain_shadow=information_gain_shadow)
+        harness.replay_work_trace = prior_trace
         tools = AgentScannerTools(agent, harness, engine_factory=lambda check, h: LabEngine(net, check, h, agent))
         await _replay_events(
             events, net=net, agent=agent, harness=harness, tools=tools, outputs=outputs,
@@ -447,6 +465,8 @@ async def run_scenario(scenario: dict, out_dir: Path, *, jit_context: bool = Fal
         ) if interrupt else None,
         "hypothesis_labels": {h.get("candidate_id"): h.get("source_label") for h in harness.state.hypotheses},
         "outputs": outputs,
+        "work_trace": harness.replay_work_trace,
+        "work_statuses": {w.work_id: w.status.value for w in harness.state.work_queue},
         "prompt_chars_baseline": prompt_chars_base,
         "prompt_chars_jit": prompt_chars_jit,
         "prompt_tokens_baseline": prompt_toks_base,
