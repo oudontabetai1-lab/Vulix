@@ -37,6 +37,12 @@ def _clean_headers():
         ("Authorization: Bearer secret-token-123\r\nNext: val", "Authorization: Bearer <redacted>\r\nNext: val"),
         ("Authorization: Bearer secret-token-123\nNext: val", "Authorization: Bearer <redacted>\nNext: val"),
         ("Authorization: secret-no-scheme-value", "Authorization: <redacted>"),
+        ("\"Authorization\": \"secret-no-scheme-value\"", "\"Authorization\": \"<redacted>\""),
+        ("\"authorization\": \"secret-no-scheme-value\"", "\"authorization\": \"<redacted>\""),
+        ("\"Proxy-Authorization\": \"secret-proxy-value\"", "\"Proxy-Authorization\": \"<redacted>\""),
+        ("\"X-Api-Key\": \"my-secret-key-123\"", "\"X-Api-Key\": \"<redacted>\""),
+        ("'Authorization': 'secret-no-scheme-value'", "'Authorization': '<redacted>'"),
+        ("'X-Api-Key': 'secret-key-456'", "'X-Api-Key': '<redacted>'"),
         ("curl -H \"Authorization: Bearer secret-token-123\" https://api.example.com",
          "curl -H \"Authorization: Bearer <redacted>\" https://api.example.com"),
         ("curl -H 'Authorization: Bearer secret-token-123' https://api.example.com",
@@ -66,6 +72,10 @@ def test_header_line_redaction(text, expected):
         ('{"token": "Basic dXNlcjpwYXNz"}', '{"token": "Basic <redacted>"}'),
         ('{"token": "Bearer secret-token-123", "limit": 10}',
          '{"token": "Bearer <redacted>", "limit": 10}'),
+        ('{"Authorization": "secret-no-scheme-value"}', '{"Authorization": "<redacted>"}'),
+        ('{"X-Api-Key": "my-secret-key-123"}', '{"X-Api-Key": "<redacted>"}'),
+        ('{"Authorization": "secret-no-scheme-value", "page": 1}',
+         '{"Authorization": "<redacted>", "page": 1}'),
         ("{'Authorization': 'Bearer secret-token-123'}", "{'Authorization': 'Bearer <redacted>'}"),
         ("{'token': 'Bearer secret-token-123'}", "{'token': 'Bearer <redacted>'}"),
     ],
@@ -86,6 +96,13 @@ def test_json_value_redaction(text, expected):
          "The server returned Bearer <redacted>... in the body."),
         ("Token was Bearer secret123;", "Token was Bearer <redacted>;"),
         ("Bearer x", "Bearer <redacted>"),
+        ("Use the Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 token.",
+         "Use the Bearer <redacted> token."),
+        ("Send a valid Bearer secret-token-12345", "Send a valid Bearer <redacted>"),
+        ("the Bearer secret123", "the Bearer <redacted>"),
+        ("valid Bearer dXNlcjpwYXNz", "valid Bearer <redacted>"),
+        ("The server returned valid Bearer tok_9944b09199c62bcf in header.",
+         "The server returned valid Bearer <redacted> in header."),
     ],
 )
 def test_raw_bearer_redaction(text, expected):
@@ -110,6 +127,12 @@ def test_raw_bearer_redaction(text, expected):
         "A token of appreciation was given.",
         "The token represents the user entity in the conceptual model.",
         "passport bearer confirmed identity.",
+        "A valid bearer token is required.",
+        "The bearer of bad news arrived.",
+        "He is a rightful bearer of this heritage.",
+        '"Content-Type": "application/json"',
+        '"Accept": "text/html"',
+        '"User-Agent": "Mozilla/5.0"',
     ],
 )
 def test_non_secret_prose_is_preserved(prose):
@@ -156,30 +179,59 @@ def test_attack_payload_and_ordinary_query_not_broken():
     assert redact_text(ordinary_json) == ordinary_json
 
 
-# --- 7. 性能回帰テスト（計算量・二乗走査防止の検証） ---
+# --- 7. 代入形式・環境変数等のキーの伏せ字化テスト ---
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("token = secret-val", "token =<redacted>"),
+        ("password = secret-val", "password =<redacted>"),
+        ("password =secret-val", "password =<redacted>"),
+        ("password= secret-val", "password=<redacted>"),
+        ("api_key = secret-key-xyz", "api_key =<redacted>"),
+        ("access_token =secret-tok", "access_token =<redacted>"),
+        ("client_secret\t=\tsecret-client-xyz", "client_secret\t=<redacted>"),
+        ("export API_TOKEN = secret-tok-123", "export API_TOKEN =<redacted>"),
+        ("const USER_PASSWORD = 'secret-val'", "const USER_PASSWORD =<redacted>"),
+        ("let session_id\t=\t12345678", "let session_id\t=<redacted>"),
+        ("secret key=X", "secret key=<redacted>"),
+        ("Client Secret ID=X", "Client Secret ID=<redacted>"),
+        ("token value=X", "token value=<redacted>"),
+        ("password\n= X", "password\n=<redacted>"),
+        ("token?x=X", "token?x=<redacted>"),
+        ("password hash = X", "password hash =<redacted>"),
+        ("my token here=X", "my token here=<redacted>"),
+    ],
+)
+def test_assignment_style_key_redaction(text, expected):
+    assert redact_text(text) == expected
+
+
+# --- 8. 性能回帰テスト（計算量・二乗走査防止の検証） ---
 
 def test_header_line_auth_no_catastrophic_backtracking():
     """ヘッダ区切り文字に続く空白でバックトラック爆発が起きず、高速に完了すること。
 
-    所有格数量子がない場合（修正前）は n=40000 で約 16 秒以上を要するが、
-    修正後は数ミリ秒（0.5 秒以下）で完了する。
+    所有格数量子がない場合（修正前）は n=50000 で約 23 秒以上を要するが、
+    修正後は数ミリ秒（0.5 秒以下、上限 2.0 秒）で完了する。
     """
     import time
 
-    n = 40000
+    n = 50000
     start = time.perf_counter()
     res = redact_text("a:" + "\n" * n + "}")
     elapsed = time.perf_counter() - start
 
     assert res == "a:" + "\n" * n + "}"
-    assert elapsed < 10.0, f"header line backtracking took too long: {elapsed:.2f}s"
+    assert elapsed < 2.0, f"header line backtracking took too long: {elapsed:.2f}s"
 
 
 def test_linear_performance_with_mass_bearer_tokens():
     """敵性サイトが数 MB で数千回の Bearer を含む応答を返しても、局所窓により高速に完了すること。
 
-    全文走査のままの場合（修正前）は n=5000 で約 23 秒以上を要するが、
-    64 文字の局所窓により 0.5 秒以下で完了する。
+    全文走査のままの場合（修正前）は n=5000 で約 110 秒以上を要するが、
+    64 文字の局所窓により通常 0.5 秒以下、高負荷時でも 2 秒以下（上限 10.0 秒、
+    修正前の 1/11 以下）で完了する。
     """
     import time
 
@@ -198,8 +250,8 @@ def test_linear_performance_with_mass_bearer_tokens():
 def test_urlencoded_no_catastrophic_scanning():
     """urlencoded のキー走査で二乗走査が発生せず、高速に完了すること。
 
-    先頭境界条件がない場合（修正前）は n=15000 で約 22 秒以上を要するが、
-    修正後は数ミリ秒（0.5 秒以下）で完了する。
+    先頭境界条件や所有格数量子がない場合（修正前）は n=20000 で約 12〜16 秒以上を要するが、
+    修正後は数ミリ秒（0.5 秒以下、上限 2.0 秒）で完了する。
     """
     import time
     from wscan.url_scope import redact_kv_values
@@ -210,10 +262,116 @@ def test_urlencoded_no_catastrophic_scanning():
         == "user_password=<redacted>&other=safe"
     )
 
-    n = 15000
+    n = 20000
+    # ケース1: キー境界のない単一文字の繰り返し
     start = time.perf_counter()
     res = redact_kv_values("x" * n)
     elapsed = time.perf_counter() - start
+    assert res == "x" * n
+    assert elapsed < 2.0, f"urlencoded scanning (x) took too long: {elapsed:.2f}s"
+
+    # ケース2: 機微キー語の連続（区切りなし）
+    start = time.perf_counter()
+    res_token = redact_kv_values("token" * n)
+    elapsed_token = time.perf_counter() - start
+    assert res_token == "token" * n
+    assert elapsed_token < 2.0, f"urlencoded scanning (token) took too long: {elapsed_token:.2f}s"
+
+    # ケース3: 機微キー語＋空白の連続（未境界・空白スキップ時の二乗走査防止）
+    start = time.perf_counter()
+    res_sp = redact_kv_values("token " * n)
+    elapsed_sp = time.perf_counter() - start
+    assert res_sp == "token " * n
+    assert elapsed_sp < 2.0, f"urlencoded scanning (token space) took too long: {elapsed_sp:.2f}s"
+
+    # ケース4: 代入形式の連続（所有格数量子の境界と上限256の検証）
+    start = time.perf_counter()
+    res_assign = redact_kv_values("token = " * n)
+    elapsed_assign = time.perf_counter() - start
+    assert elapsed_assign < 2.0, f"urlencoded scanning (token assign) took too long: {elapsed_assign:.2f}s"
+
+
+def test_url_userinfo_no_catastrophic_scanning():
+    """URL の userinfo 走査で二乗走査が発生せず、高速に完了すること。
+
+    先頭境界条件や所有格数量子がない場合（修正前）は n=50000 で約 18 秒以上を要するが、
+    修正後は数ミリ秒（0.5 秒以下、上限 2.0 秒）で完了する。
+    """
+    import time
+
+    # 正しい伏せ字化が行われることの検証
+    assert (
+        redact_text("http://user:pass@example.com/api")
+        == "http://<redacted>@example.com/api"
+    )
+
+    n = 50000
+    start = time.perf_counter()
+    res = redact_text("x" * n)
+    elapsed = time.perf_counter() - start
 
     assert res == "x" * n
-    assert elapsed < 10.0, f"urlencoded scanning took too long: {elapsed:.2f}s"
+    assert elapsed < 2.0, f"url userinfo scanning took too long: {elapsed:.2f}s"
+
+
+def test_urlencoded_property_no_regression_against_main():
+    """多数のランダムなパラメータ・代入形式で、main 以上の伏せ字量を維持すること。
+
+    キーに複数語、空白、タブ、改行、?、大文字小文字の混在を含め、
+    main の実装と比較して伏せる量が少ないケースが 0 件であることを検証する。
+    """
+    import random
+    import string
+    import re
+    from wscan import url_scope
+    from wscan.url_scope import SENSITIVE_KEY_TOKENS, KEYS_ALT, REDACTED
+
+    # main (38753de) の正規表現パターン
+    p_main = re.compile(
+        rf"(?i)(?<![^&=?\s])([^&=?\s]*(?:{KEYS_ALT})[^&=]*)=[^&\r\n]*"
+    )
+
+    tokens = list(SENSITIVE_KEY_TOKENS)
+    key_chars = string.ascii_letters + string.digits + "_-."
+    val_chars = string.ascii_letters + string.digits + "._~+/=-@:;,!$"
+    separators = [" ", "  ", "\t", "\n", "?x", " - ", " ID ", " hash = ", "?/="]
+    prefixes = [
+        "", "export ", "const ", "let ", "var ", "set ", "?", "&", " ",
+        "Client ", "The ", "admin ", "app.", "my ",
+    ]
+
+    rng = random.Random(42)  # 固定シードで再現性を確保
+
+    less_redacted_cases = []
+
+    for _ in range(5000):
+        pfx = rng.choice(prefixes)
+        k = rng.choice(tokens)
+        if rng.random() < 0.5:
+            # 大文字・小文字の混在
+            k = "".join(c.upper() if rng.random() < 0.5 else c.lower() for c in k)
+        if rng.random() < 0.5:
+            # 複数語・空白・タブ・改行・? を含むキーサフィックス
+            k = k + rng.choice(separators) + rng.choice(["key", "value", "token", "id", "123", ""])
+        if rng.random() < 0.3:
+            k = rng.choice(["my ", "app.", "auth_"]) + k
+
+        sp_before = rng.choice(["", " ", "  ", "\t", "\n", " \t "])
+        sp_after = rng.choice(["", " ", "  ", "\t"])
+        val = "".join(rng.choices(val_chars, k=rng.randint(1, 16)))
+
+        s = f"{pfx}{k}{sp_before}={sp_after}{val}"
+        if rng.random() < 0.5:
+            rand_k = "".join(rng.choices(key_chars, k=5))
+            s += f"&other={rand_k}"
+
+        rm = p_main.sub(lambda m: f"{m.group(1)}={REDACTED}", s)
+        rc = url_scope._RE_URLENCODED.sub(lambda m: f"{m.group(1)}={REDACTED}", s)
+
+        if rc.count(REDACTED) < rm.count(REDACTED):
+            less_redacted_cases.append((s, rm, rc))
+
+    assert not less_redacted_cases, (
+        f"Found {len(less_redacted_cases)} cases where new pattern redacted less than main:\n"
+        f"  Sample: {less_redacted_cases[:5]}"
+    )
