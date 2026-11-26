@@ -108,10 +108,13 @@ def bound_sections(title: str, sections: Sequence[tuple[str, Sequence[str]]], ma
     return out[:max_chars]
 
 
-# reviewer が判断に使う高優先度の行（finding ブロック・gap 宣言・完了主張）
+# reviewer が判断に使う高優先度の行（finding ブロック・gap 宣言・完了主張）。
+# 行は対象由来なので線形時間で終わる形にする。旧形 `^\s*(?:…|[A-Z ]+ COMPLETE)` は
+# \s* と [A-Z ]+ が空白で重なり、空白の長い行で二乗時間になった。完了主張は
+# 「(最後の非空白 whitespace まで)? + [A-Z ]+」に分けて重なりを無くす（受理集合は同じ）。
 _PRIORITY_EVIDENCE_RE = re.compile(
-    r"^\s*(?:WSCAN-NONCE|WSCAN-CANDIDATE|VULNERABILITY FOUND|Type|Severity|URL|Field|Payload|"
-    r"Evidence|COVERAGE GAP|GAP RESOLVED|[A-Z ]+ COMPLETE)\b",
+    r"^(?:\s*(?:WSCAN-NONCE|WSCAN-CANDIDATE|VULNERABILITY FOUND|Type|Severity|URL|Field|Payload|"
+    r"Evidence|COVERAGE GAP|GAP RESOLVED)|(?:\s*[^\S ])?[A-Z ]+ COMPLETE)\b",
     re.IGNORECASE,
 )
 _MAX_REVIEWER_EVIDENCE_CHARS = 4000

@@ -611,3 +611,68 @@ def test_discarded_notes_reach_agent_observability(tmp_path):
     from wscan.report import ReportGenerator
     html = ReportGenerator(tmp_path)._build_observability_html(obs, 0)
     assert "agent_notes_discarded" in html
+
+
+def test_priority_evidence_regex_is_linear_on_hostile_whitespace():
+    """対象由来の空白だけの長大行で優先証跡の判定が止まらないこと（ReDoS 回帰）。
+
+    旧形は 16k 空白 3 行で約 10 秒（上限の 5 倍以上）、現行は数 ms（上限の 1/20 以下）。
+    """
+    import time
+    from wscan.agent_jit_context import select_priority_evidence
+
+    hostile = [" " * 16000, "\t" + " " * 16000, " " * 16000 + "x"]
+    start = time.perf_counter()
+    assert select_priority_evidence(hostile) == ""
+    assert time.perf_counter() - start < 0.5
+
+
+def test_priority_evidence_regex_matches_previous_acceptance():
+    """線形化した正規表現の受理集合が旧形と同じであること（短い入力で網羅比較）。"""
+    import random
+    import re
+    from wscan.agent_jit_context import _PRIORITY_EVIDENCE_RE
+
+    previous = re.compile(
+        r"^\s*(?:WSCAN-NONCE|WSCAN-CANDIDATE|VULNERABILITY FOUND|Type|Severity|URL|Field|Payload|"
+        r"Evidence|COVERAGE GAP|GAP RESOLVED|[A-Z ]+ COMPLETE)\b",
+        re.IGNORECASE,
+    )
+    atoms = [" ", "\t", "　", "a", "Z", "1", "-", ":", " COMPLETE", "COMPLETE",
+             "complete", "x COMPLETE", "Type", "URL", "GAP RESOLVED", "é", "_"]
+    rng = random.Random(0)
+    samples = ["SCAN COMPLETE", "FOO  BAR COMPLETE", "  COMPLETE", "\t COMPLETE", "\tA COMPLETE",
+               "x COMPLETED", "  Evidence: e", "Typewriter"]
+    samples += ["".join(rng.choice(atoms) for _ in range(rng.randint(0, 7))) for _ in range(20000)]
+    for line in samples:
+        assert bool(_PRIORITY_EVIDENCE_RE.match(line)) == bool(previous.match(line)), repr(line)
+
+
+def test_agent_report_observability_redacts_secrets(tmp_path):
+    """Agent レポートの observability（件数キー・サンプル）に設定済み秘密値を出さないこと。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from wscan.agent_engine import AgentEngine
+
+    secret = "Bearer obs-secret-7f3a"
+    result = SimpleNamespace(
+        findings=[], steps_taken=1, success=True, error="", final_summary="",
+    )
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner") as scanner_cls, patch(
+        "wscan.report.ReportGenerator.generate", return_value=tmp_path / "report.html"
+    ) as generate:
+        scanner_cls.return_value.run = AsyncMock(return_value=result)
+        scanner_cls.return_value._network_guard_errors = ()
+        # 区切り無しの記録は全文がカテゴリ名（dict キー）になる
+        scanner_cls.return_value._observability_notes = [
+            f"agent note {secret}", f"agent_notes_discarded:{secret}",
+        ]
+        engine = AgentEngine(
+            url="http://fixture.test", checks=["xss"], output_dir=str(tmp_path),
+            open_report=False, extra_headers={"Authorization": secret},
+        )
+        asyncio.run(engine.run())
+    obs = generate.call_args.kwargs["observability"]
+    assert obs["total"] == 2
+    assert secret not in json.dumps(obs)
+    assert obs["by_category"]["agent_notes_discarded"] == 1

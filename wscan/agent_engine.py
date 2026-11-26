@@ -37,8 +37,12 @@ def _scope_list(values) -> list[str]:
     return [str(value).strip() for value in (values or []) if str(value).strip()]
 
 
-def _agent_observability(wave_errors, sample_limit: int = 5) -> dict:
-    """Agent の wave_errors をレポートの observability 形式へ集計する（純粋関数）。"""
+def _agent_observability(wave_errors, sample_limit: int = 5, secrets=()) -> dict:
+    """Agent の wave_errors をレポートの observability 形式へ集計する（純粋関数）。
+
+    集計前に秘密値を伏せる（区切りの無い記録は全文がカテゴリ名＝dict キーになるため）。
+    """
+    wave_errors = [_redact_exact_secrets(note, secrets) for note in wave_errors]
     by_category: dict[str, int] = {}
     for note in wave_errors:
         category = str(note).split(":", 1)[0].strip() or "other"
@@ -439,7 +443,7 @@ class AgentEngine:
             visited_urls=[self.url],
             checks=self.checks,
             coverage=report_coverage,
-            observability=_agent_observability(self.wave_errors),
+            observability=_agent_observability(self.wave_errors, secrets=artifact_secrets),
         )
 
         console.print(
