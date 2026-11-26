@@ -437,14 +437,19 @@ class AgentRunState:
         events = values.get("events", [])
         values["events"] = events if isinstance(events, list) else []
         raw_notes = values.get("notes")
+        notes_discarded = 0
         if isinstance(raw_notes, dict) and raw_notes:
             from wscan.agent_jit_context import AgentStructuredNotes
             parsed_notes = AgentStructuredNotes.from_dict(raw_notes)
             values["notes"] = parsed_notes.to_dict()
+            notes_discarded = parsed_notes.discarded
         else:
             values["notes"] = {}
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in values.items() if k in known})
+        state = cls(**{k: v for k, v in values.items() if k in known})
+        # 破棄したノート数は field にしない（checkpoint を変えない）。harness が observability へ渡す
+        state.notes_discarded = notes_discarded
+        return state
 
 
 @dataclass(frozen=True)
@@ -694,8 +699,10 @@ class AgentHarness:
             {str(value) for value in secret_values if str(value)}, key=len, reverse=True
         ))
 
+        self.notes_discarded = 0
         if resume:
             self.state = self._load_state()
+            self.notes_discarded = getattr(self.state, "notes_discarded", 0)
             if self.state.spec_hash != spec.spec_hash:
                 raise ValueError(
                     "Agent resume spec mismatch: target/provider/model/checks/max_steps "

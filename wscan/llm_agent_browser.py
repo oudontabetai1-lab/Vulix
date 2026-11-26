@@ -1013,6 +1013,8 @@ class AgentBrowserScanner:
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
         self._network_guard_errors: list[str] = []
+        # 成否を変えない observability 記録（engine.wave_errors へ渡す）
+        self._observability_notes: list[str] = []
         self._scanner_tools = None
         self._network_guard_policy = ScopePolicy(
             target_urls=tuple(self.target_urls), access_urls=tuple(self.access_urls),
@@ -1962,6 +1964,10 @@ class AgentBrowserScanner:
                     and (self.harness_output_dir / "agent_state.json").exists()
                 )
                 return result
+            if self._harness.notes_discarded:
+                self._observability_notes.append(
+                    f"agent_notes_discarded:{self._harness.notes_discarded}"
+                )
             if self.resume and not self.storage_state:
                 # BrowserSession は process を跨いで cookie を保持しない。storage state が
                 # 無い resume では、完了済みでも認証 episode を必ずやり直す。
@@ -2948,6 +2954,18 @@ class AgentBrowserScanner:
                 target_url=self.target_url,
             )
             jit_block = builder.build_prompt_block()
+            # JIT でも reviewer の証跡を失わない: 優先行（finding/gap）を上限内で残す
+            from wscan.agent_jit_context import select_priority_evidence
+            priority_evidence = select_priority_evidence(prior_texts)
+            excerpt_block = ""
+            if priority_evidence:
+                excerpt_block = "\n\nEvidence excerpt (prioritized):\n" + wrap_untrusted_observation(
+                    re.sub(r"WSCAN-NONCE:[^\s]+", "WSCAN-CANDIDATE", priority_evidence),
+                    source=ContentSource.HTTP.value,
+                    origin=self.target_url,
+                    content_type=ContentType.OBSERVATION.value,
+                    correlation_id=str(work.work_id),
+                ).format_tagged_block()
             return (
                 "Act as an adversarial reviewer. Do not submit payloads. Challenge false positives, "
                 "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
@@ -2955,6 +2973,7 @@ class AgentBrowserScanner:
                 "shows every discovered page and input was tested for every requested check.\n"
                 "A resolved gap must be stated as `GAP RESOLVED: <description>`.\n\n"
                 + jit_block
+                + excerpt_block
             )
         evidence = re.sub(
             r"WSCAN-NONCE:[^\s]+", "WSCAN-CANDIDATE", "\n".join(prior_texts)[-12000:]

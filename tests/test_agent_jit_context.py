@@ -514,3 +514,165 @@ def test_replay_scenarios_comparison_baseline_vs_jit(tmp_path):
     assert total_tokens_jit <= total_tokens_base
     for r in jit_results:
         assert r["prompt_chars_jit"] <= 3500 + 500
+
+
+def _real_envelopes_balanced(text: str) -> bool:
+    """ビルダーが付けた envelope（source 属性付き）の開閉が順に対応していること。"""
+    import re as _re
+    depth = 0
+    for m in _re.finditer(r'<untrusted_target_data source="|</untrusted_target_data>', text):
+        depth += 1 if m.group(0).startswith("<untrusted_target_data source") else -1
+        if depth not in (0, 1):
+            return False
+    return depth == 0
+
+
+def test_char_cap_holds_with_tag_like_untrusted_text(tmp_path):
+    """target/gap に開きタグ風の文字列を大量に入れても、上限内に収まり envelope は壊れないこと。"""
+    harness = AgentHarness(tmp_path, _sample_spec(tmp_path), agent_jit_context=True)
+    opener = "<untrusted_target_data x>"
+    for i in range(8):
+        harness.enqueue(
+            role=AgentRole.PROBE_SPECIALIST,
+            target=f"http://target.test/p{i}?q=" + opener * 40,
+            check_type="xss",
+        )
+    harness.note_coverage(coverage_gaps=[f"gap{i} " + opener * 8 for i in range(8)])
+    builder = AgentJitContextBuilder(harness)
+    text = builder.build_context().formatted_context
+    assert len(text) <= builder.config.max_total_chars
+    assert "[...JIT context truncated]" in text
+    assert _real_envelopes_balanced(text)
+    # 小さい上限でも同様（巻き戻しで文脈を失いすぎない＝見出しは残る）
+    for cap in (300, 1000):
+        small = AgentJitContextBuilder(harness, config=JitContextConfig(max_total_chars=cap))
+        t = small.build_context().formatted_context
+        assert len(t) <= cap
+        assert _real_envelopes_balanced(t)
+
+
+def test_reviewer_jit_prompt_keeps_prioritized_evidence(tmp_path):
+    """JIT on の reviewer でも、古い episode の finding 行や gap 宣言を上限内で失わないこと。"""
+    from wscan.agent_jit_context import select_priority_evidence
+
+    harness = AgentHarness(tmp_path, _sample_spec(tmp_path), agent_jit_context=True)
+    harness.enqueue(AgentRole.ADVERSARIAL_REVIEWER, "http://target.test/")
+    reviewer_work = harness.state.work_queue[0]
+    finding = (
+        "WSCAN-NONCE:abc123\nVULNERABILITY FOUND:\nType: sqli\nSeverity: high\n"
+        "URL: http://target.test/old-search\nField: q\nPayload: ' OR 1=1--\n"
+        "Evidence: SQL error disclosed"
+    )
+    # 最初に finding、その後に 12k 超の通常ログ（末尾切り詰めなら finding が消える量）
+    prior = [finding, "COVERAGE GAP: /admin form untested"] + ["navigated " + "N" * 3000 for _ in range(6)]
+    scanner = AgentBrowserScanner(target_url="http://target.test/", agent_jit_context=True)
+    scanner._harness = harness
+    prompt = scanner._build_work_task(reviewer_work, prior)
+    assert "Type: sqli" in prompt
+    assert "URL: http://target.test/old-search" in prompt
+    assert "/admin form untested" in prompt
+    # 通常ログは含めない・nonce は中和する・untrusted envelope で包む
+    assert "N" * 100 not in prompt
+    assert "abc123" not in prompt
+    excerpt = prompt.split("Evidence excerpt (prioritized):\n", 1)[1]
+    assert excerpt.startswith("<untrusted_target_data ")
+    # 純粋関数: 上限内で新しい優先行を残す
+    lines = [f"Payload: p{i} " + "z" * 50 for i in range(200)]
+    picked = select_priority_evidence(lines, max_chars=1000)
+    assert len(picked) <= 1000
+    assert "Payload: p199 " in picked and "Payload: p0 " not in picked
+    # 優先行が無ければ section ごと出さない（JIT の削減を保つ）
+    assert "Evidence excerpt" not in scanner._build_work_task(reviewer_work, ["plain log"])
+
+
+def test_discarded_notes_reach_agent_observability(tmp_path):
+    """壊れたノートの破棄件数が wave_errors 用の記録と Agent レポートの observability に出ること。"""
+    from wscan.agent_engine import _agent_observability
+
+    spec = _sample_spec(tmp_path)
+    AgentHarness(tmp_path, spec, agent_jit_context=True)
+    state_file = tmp_path / "agent_state.json"
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    data["notes"] = {
+        "episode_notes": [{"episode_id": "ok", "timestamp": 1.0}, {"timestamp": None}, "bad"],
+        "resume_notes": 5,
+    }
+    state_file.write_text(json.dumps(data), encoding="utf-8")
+    resumed = AgentHarness(tmp_path, spec, resume=True, agent_jit_context=True)
+    assert resumed.notes_discarded == 3
+    # 永続 state には件数を書かない（checkpoint の形は変えない）
+    resumed.checkpoint()
+    assert "notes_discarded" not in state_file.read_text(encoding="utf-8")
+
+    obs = _agent_observability(["network_scope_blocked:x:http://t/", f"agent_notes_discarded:{resumed.notes_discarded}"])
+    assert obs["total"] == 2
+    assert obs["by_category"]["agent_notes_discarded"] == 1
+    assert "agent_notes_discarded:3" in obs["samples"]
+    from wscan.report import ReportGenerator
+    html = ReportGenerator(tmp_path)._build_observability_html(obs, 0)
+    assert "agent_notes_discarded" in html
+
+
+def test_priority_evidence_regex_is_linear_on_hostile_whitespace():
+    """対象由来の空白だけの長大行で優先証跡の判定が止まらないこと（ReDoS 回帰）。
+
+    旧形は 16k 空白 3 行で約 10 秒（上限の 5 倍以上）、現行は数 ms（上限の 1/20 以下）。
+    """
+    import time
+    from wscan.agent_jit_context import select_priority_evidence
+
+    hostile = [" " * 16000, "\t" + " " * 16000, " " * 16000 + "x"]
+    start = time.perf_counter()
+    assert select_priority_evidence(hostile) == ""
+    assert time.perf_counter() - start < 0.5
+
+
+def test_priority_evidence_regex_matches_previous_acceptance():
+    """線形化した正規表現の受理集合が旧形と同じであること（短い入力で網羅比較）。"""
+    import random
+    import re
+    from wscan.agent_jit_context import _PRIORITY_EVIDENCE_RE
+
+    previous = re.compile(
+        r"^\s*(?:WSCAN-NONCE|WSCAN-CANDIDATE|VULNERABILITY FOUND|Type|Severity|URL|Field|Payload|"
+        r"Evidence|COVERAGE GAP|GAP RESOLVED|[A-Z ]+ COMPLETE)\b",
+        re.IGNORECASE,
+    )
+    atoms = [" ", "\t", "　", "a", "Z", "1", "-", ":", " COMPLETE", "COMPLETE",
+             "complete", "x COMPLETE", "Type", "URL", "GAP RESOLVED", "é", "_"]
+    rng = random.Random(0)
+    samples = ["SCAN COMPLETE", "FOO  BAR COMPLETE", "  COMPLETE", "\t COMPLETE", "\tA COMPLETE",
+               "x COMPLETED", "  Evidence: e", "Typewriter"]
+    samples += ["".join(rng.choice(atoms) for _ in range(rng.randint(0, 7))) for _ in range(20000)]
+    for line in samples:
+        assert bool(_PRIORITY_EVIDENCE_RE.match(line)) == bool(previous.match(line)), repr(line)
+
+
+def test_agent_report_observability_redacts_secrets(tmp_path):
+    """Agent レポートの observability（件数キー・サンプル）に設定済み秘密値を出さないこと。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from wscan.agent_engine import AgentEngine
+
+    secret = "Bearer obs-secret-7f3a"
+    result = SimpleNamespace(
+        findings=[], steps_taken=1, success=True, error="", final_summary="",
+    )
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner") as scanner_cls, patch(
+        "wscan.report.ReportGenerator.generate", return_value=tmp_path / "report.html"
+    ) as generate:
+        scanner_cls.return_value.run = AsyncMock(return_value=result)
+        scanner_cls.return_value._network_guard_errors = ()
+        # 区切り無しの記録は全文がカテゴリ名（dict キー）になる
+        scanner_cls.return_value._observability_notes = [
+            f"agent note {secret}", f"agent_notes_discarded:{secret}",
+        ]
+        engine = AgentEngine(
+            url="http://fixture.test", checks=["xss"], output_dir=str(tmp_path),
+            open_report=False, extra_headers={"Authorization": secret},
+        )
+        asyncio.run(engine.run())
+    obs = generate.call_args.kwargs["observability"]
+    assert obs["total"] == 2
+    assert secret not in json.dumps(obs)
+    assert obs["by_category"]["agent_notes_discarded"] == 1

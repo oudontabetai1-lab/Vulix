@@ -37,6 +37,23 @@ def _scope_list(values) -> list[str]:
     return [str(value).strip() for value in (values or []) if str(value).strip()]
 
 
+def _agent_observability(wave_errors, sample_limit: int = 5, secrets=()) -> dict:
+    """Agent の wave_errors をレポートの observability 形式へ集計する（純粋関数）。
+
+    集計前に秘密値を伏せる（区切りの無い記録は全文がカテゴリ名＝dict キーになるため）。
+    """
+    wave_errors = [_redact_exact_secrets(note, secrets) for note in wave_errors]
+    by_category: dict[str, int] = {}
+    for note in wave_errors:
+        category = str(note).split(":", 1)[0].strip() or "other"
+        by_category[category] = by_category.get(category, 0) + 1
+    return {
+        "total": len(wave_errors),
+        "by_category": by_category,
+        "samples": [str(note) for note in wave_errors[:sample_limit]],
+    }
+
+
 def _redact_exact_secrets(value: str, secrets) -> str:
     """Agent/target が秘密値を反射しても成果物へ残さない。"""
     text = str(value or "")
@@ -302,6 +319,7 @@ class AgentEngine:
         result: AgentScanResult = await scanner.run()
         result.network_guard_errors = list(getattr(scanner, "_network_guard_errors", ()))
         self.wave_errors.extend(result.network_guard_errors)
+        self.wave_errors.extend(getattr(scanner, "_observability_notes", ()))
         if result.network_guard_errors:
             result.success = False
             result.coverage_gaps = list(dict.fromkeys([
@@ -425,6 +443,7 @@ class AgentEngine:
             visited_urls=[self.url],
             checks=self.checks,
             coverage=report_coverage,
+            observability=_agent_observability(self.wave_errors, secrets=artifact_secrets),
         )
 
         console.print(
@@ -525,6 +544,7 @@ class AgentEngine:
         result = await scanner.run()
         result.network_guard_errors = list(getattr(scanner, "_network_guard_errors", ()))
         self.wave_errors.extend(result.network_guard_errors)
+        self.wave_errors.extend(getattr(scanner, "_observability_notes", ()))
         if result.network_guard_errors:
             result.success = False
             result.coverage_gaps = list(dict.fromkeys([

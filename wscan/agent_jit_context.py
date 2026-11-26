@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
@@ -68,6 +69,75 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (ValueError, TypeError) as exc:
         raise ValueError(f"invalid float value {value!r}: {exc}") from exc
+
+
+def bound_sections(title: str, sections: Sequence[tuple[str, Sequence[str]]], max_chars: int) -> str:
+    """見出し＋項目を上限 ``max_chars`` 以内で連結する（純粋関数）。
+
+    項目単位で採否を決めるため、項目内の untrusted envelope は常に完結したまま残る。
+    収まらない項目は飛ばして後続の小さい項目を試し、落とした件数を末尾マーカーで示す。
+    """
+    full = title + "".join(
+        "\n\n" + heading + "".join("\n" + item for item in items) for heading, items in sections
+    )
+    if len(full) <= max_chars:
+        return full
+    marker_tpl = "\n[...JIT context truncated] ({n} item(s) omitted)"
+    budget = max(0, max_chars - len(marker_tpl.format(n=10**6)))
+    out = title[:budget]
+    omitted = 0
+    for heading, items in sections:
+        head_sep = "\n\n" + heading
+        if len(out) + len(head_sep) > budget:
+            omitted += len(items)
+            continue
+        kept: list[str] = []
+        size = len(out) + len(head_sep)
+        for item in items:
+            piece = "\n" + item
+            if size + len(piece) > budget:
+                omitted += 1
+                continue
+            kept.append(piece)
+            size += len(piece)
+        if kept:
+            out += head_sep + "".join(kept)
+    if omitted:
+        out += marker_tpl.format(n=omitted)
+    # 上限が marker 長未満の極端な設定でも超えない（ここで切れるのは marker のみ）
+    return out[:max_chars]
+
+
+# reviewer が判断に使う高優先度の行（finding ブロック・gap 宣言・完了主張）。
+# 行は対象由来なので線形時間で終わる形にする。旧形 `^\s*(?:…|[A-Z ]+ COMPLETE)` は
+# \s* と [A-Z ]+ が空白で重なり、空白の長い行で二乗時間になった。完了主張は
+# 「(最後の非空白 whitespace まで)? + [A-Z ]+」に分けて重なりを無くす（受理集合は同じ）。
+_PRIORITY_EVIDENCE_RE = re.compile(
+    r"^(?:\s*(?:WSCAN-NONCE|WSCAN-CANDIDATE|VULNERABILITY FOUND|Type|Severity|URL|Field|Payload|"
+    r"Evidence|COVERAGE GAP|GAP RESOLVED)|(?:\s*[^\S ])?[A-Z ]+ COMPLETE)\b",
+    re.IGNORECASE,
+)
+_MAX_REVIEWER_EVIDENCE_CHARS = 4000
+
+
+def select_priority_evidence(texts: Sequence[str], max_chars: int = _MAX_REVIEWER_EVIDENCE_CHARS) -> str:
+    """prior episode の出力から reviewer 用の優先証跡だけを上限内で選ぶ（純粋関数）。
+
+    finding ブロック・gap 宣言・完了主張の行を新しい順に確保し、元の出現順で返す。
+    通常ログ行は JIT の ledger で代替するため含めない（12k 末尾切り詰めで発見行を失わない）。
+    """
+    lines = "\n".join(str(t or "") for t in texts).splitlines()
+    chosen: list[int] = []
+    used = 0
+    for idx in reversed(range(len(lines))):
+        if not _PRIORITY_EVIDENCE_RE.match(lines[idx]):
+            continue
+        cost = len(lines[idx]) + 1
+        if used + cost > max_chars:
+            continue
+        chosen.append(idx)
+        used += cost
+    return "\n".join(lines[i] for i in sorted(chosen))
 
 
 @dataclass(frozen=True)
@@ -174,6 +244,8 @@ class AgentStructuredNotes:
     """構造化ノートの集合（checkpoint に含めて原子的に保存・再開）。"""
     episode_notes: list[EpisodeNote] = field(default_factory=list)
     resume_notes: list[ResumeNote] = field(default_factory=list)
+    # from_dict で破棄した壊れたノート数（永続化しない。observability 用）
+    discarded: int = field(default=0, compare=False)
 
     def add_episode_note(self, note: EpisodeNote) -> None:
         self.episode_notes.append(note)
@@ -195,23 +267,30 @@ class AgentStructuredNotes:
     def from_dict(cls, data: Mapping[str, Any] | None) -> "AgentStructuredNotes":
         if not data or not isinstance(data, Mapping):
             return cls()
-        episodes: list[EpisodeNote] = []
-        for x in data.get("episode_notes", []):
-            if isinstance(x, Mapping):
-                note = EpisodeNote.from_dict(x)
-                if note is not None:
-                    episodes.append(note)
-            else:
-                logger.warning("Discarding non-mapping episode note: %s", type(x).__name__)
-        resumes: list[ResumeNote] = []
-        for x in data.get("resume_notes", []):
-            if isinstance(x, Mapping):
-                note = ResumeNote.from_dict(x)
-                if note is not None:
-                    resumes.append(note)
-            else:
-                logger.warning("Discarding non-mapping resume note: %s", type(x).__name__)
-        return cls(episode_notes=episodes, resume_notes=resumes)
+        discarded = 0
+
+        def _parse(key: str, note_cls: Any) -> list[Any]:
+            nonlocal discarded
+            raw = data.get(key, [])
+            if not isinstance(raw, (list, tuple)):
+                logger.warning("Discarding non-list %s: %s", key, type(raw).__name__)
+                discarded += 1
+                return []
+            parsed = []
+            for x in raw:
+                note = note_cls.from_dict(x)
+                if note is None:
+                    discarded += 1
+                else:
+                    parsed.append(note)
+            return parsed
+
+        notes = cls(
+            episode_notes=_parse("episode_notes", EpisodeNote),
+            resume_notes=_parse("resume_notes", ResumeNote),
+        )
+        notes.discarded = discarded
+        return notes
 
 
 @dataclass(frozen=True)
@@ -234,6 +313,7 @@ class JitContextBundle:
     recent_results: list[dict[str, Any]] = field(default_factory=list)
     coverage_gaps: list[str] = field(default_factory=list)
     notes_summary: str = ""
+    notes_items: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     formatted_context: str = ""
     estimated_tokens: int = 0
@@ -332,6 +412,7 @@ class AgentJitContextBuilder:
                 f"- Episode {ep.episode_id} ({ep.role}): status={ep.status}{ev_str}\n  summary: {wrapped_summary}"
             )
             evidence_ids.extend(ep.evidence_ids)
+        bundle.notes_items = notes_lines
         bundle.notes_summary = "\n".join(notes_lines)
 
         # 2. 未完了 work の選定（上限あり、優先順位付け）
@@ -512,12 +593,12 @@ class AgentJitContextBuilder:
         return bundle
 
     def _format_and_bound(self, bundle: JitContextBundle) -> str:
-        sections: list[str] = [
-            "## Just-In-Time Context & Structured Notes",
-        ]
+        # 各 section は (見出し, 項目リスト)。項目は完結した envelope を含む単位で、
+        # 上限超過時は項目単位で落とす（文字列途中で切らない＝タグを壊さない）。
+        sections: list[tuple[str, list[str]]] = []
 
         if bundle.notes_summary:
-            sections.append("### Structured Notes\n" + bundle.notes_summary)
+            sections.append(("### Structured Notes", bundle.notes_items))
 
         if bundle.pending_work:
             work_lines = [
@@ -527,9 +608,9 @@ class AgentJitContextBuilder:
                 + f"\n  target: {w['wrapped_target']}"
                 for w in bundle.pending_work
             ]
-            sections.append(f"### Pending Work Ledger ({len(bundle.pending_work)})\n" + "\n".join(work_lines))
+            sections.append((f"### Pending Work Ledger ({len(bundle.pending_work)})", work_lines))
         else:
-            sections.append("### Pending Work Ledger\n- (no pending work items)")
+            sections.append(("### Pending Work Ledger", ["- (no pending work items)"]))
 
         if bundle.hypotheses:
             hyp_lines = []
@@ -543,7 +624,7 @@ class AgentJitContextBuilder:
                 if h.get("wrapped_evidence"):
                     line += "\n  evidence: " + h["wrapped_evidence"]
                 hyp_lines.append(line)
-            sections.append(f"### Hypotheses & Evidence ({len(bundle.hypotheses)})\n" + "\n".join(hyp_lines))
+            sections.append((f"### Hypotheses & Evidence ({len(bundle.hypotheses)})", hyp_lines))
 
         if bundle.recent_results:
             res_lines = []
@@ -556,7 +637,7 @@ class AgentJitContextBuilder:
                 if r.get("wrapped_detail"):
                     line += "\n  detail: " + r["wrapped_detail"]
                 res_lines.append(line)
-            sections.append(f"### Recent Confirmed Results ({len(bundle.recent_results)})\n" + "\n".join(res_lines))
+            sections.append((f"### Recent Confirmed Results ({len(bundle.recent_results)})", res_lines))
 
         if bundle.coverage_gaps:
             gap_lines = []
@@ -569,29 +650,11 @@ class AgentJitContextBuilder:
                     correlation_id=f"gap-{idx}",
                 )
                 gap_lines.append(f"- gap:\n  {wg}")
-            sections.append(f"### Active Coverage Gaps ({len(bundle.coverage_gaps)})\n" + "\n".join(gap_lines))
+            sections.append((f"### Active Coverage Gaps ({len(bundle.coverage_gaps)})", gap_lines))
 
-        full_text = "\n\n".join(sections)
-        # 上限文字数を厳格に遵守（閉じタグやマーカーの欠落を防止）
-        if len(full_text) > self.config.max_total_chars:
-            marker = "\n[...JIT context truncated]"
-            closing_tag = "\n</untrusted_target_data>"
-            reserve = len(marker) + len(closing_tag) * 2 + 10
-            cutoff = max(50, self.config.max_total_chars - reserve)
-            truncated = full_text[:cutoff].rstrip()
-            # 開きタグの途中で切れた場合はタグの開始位置前まで戻す
-            last_lt = truncated.rfind("<")
-            last_gt = truncated.rfind(">")
-            if last_lt > last_gt:
-                truncated = truncated[:last_lt].rstrip()
-            # 途中で切れた untrusted_target_data タグを閉じる
-            open_tags = truncated.count("<untrusted_target_data")
-            close_tags = truncated.count("</untrusted_target_data>")
-            if open_tags > close_tags:
-                truncated += closing_tag * (open_tags - close_tags)
-            truncated += marker
-            return truncated
-        return full_text
+        return bound_sections(
+            "## Just-In-Time Context & Structured Notes", sections, self.config.max_total_chars
+        )
 
     def build_prompt_block(self) -> str:
         """Agent のタスクプロンプトに挿入可能な整形済みテキストを直接返す。"""
