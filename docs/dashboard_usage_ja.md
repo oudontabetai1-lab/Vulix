@@ -261,7 +261,7 @@ Bearer/カスタムヘッダは「認証・Cookie」の設定を引き継ぎま�
 
 #### Agent JIT コンテキスト（任意・既定 off）
 
-「機能フラグ」タブの **Agent JIT コンテキスト**（`/app` の Scan Setup では「AI・自律探索」タブ）は、Agent が各ステップで LLM に渡す情報を、直近の高 signal な証拠と構造化ノートだけに絞り、上限付きで供給する機能です。履歴全体を毎回送らないため、Agent の入力トークンを減らす狙いがあります。
+「機能フラグ」タブの **Agent JIT コンテキスト**（`/app` の Scan Setup では「AI・自律探索」タブ）は、各 work（episode）の開始時に、上限付きの JIT ブロック（構造化ノート・未完了の work・仮説・gap）を LLM に渡す機能です。Reviewer では履歴の抜粋をこのブロックに置き換えるため入力が減ります（fixture 例: 10426→2386 字）。一方、Explorer と Probe ではプロンプトにブロックを追記するため、入力は**増えます**（同 2335→3930 字、655→2630 字）。トークン削減が見込めるのは Reviewer に限ります。
 
 - **Agent モードの機能**です。通常モードの決定論スキャナの判定には影響しません。
 - **既定は off**（`features.agent_jit_context: false`）です。CLI の補助入口では `agent --jit-context` で有効にできます。設定の詳細は [README](../README.md) の Agent オプション表を参照してください。
