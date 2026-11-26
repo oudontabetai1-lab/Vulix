@@ -358,7 +358,7 @@ async def run_scenario(scenario: dict, out_dir: Path, *, jit_context: bool = Fal
     outputs, hypotheses, findings = [], [], []
     events = scenario["events"]
     interrupt = scenario.get("interrupt_after")
-    harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)))
+    harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), agent_jit_context=jit_context)
     tools = AgentScannerTools(agent, harness, engine_factory=lambda check, h: LabEngine(net, check, h, agent))
     done = await _replay_events(
         events[:interrupt] if interrupt else events,
@@ -379,7 +379,7 @@ async def run_scenario(scenario: dict, out_dir: Path, *, jit_context: bool = Fal
     if interrupt:
         # 中断（プロセス終了）→ 同じ出力先から resume。完了済み work は再送しない。
         findings.extend(tools.agent_findings())
-        harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), resume=True)
+        harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), resume=True, agent_jit_context=jit_context)
         tools = AgentScannerTools(agent, harness, engine_factory=lambda check, h: LabEngine(net, check, h, agent))
         await _replay_events(
             events, net=net, agent=agent, harness=harness, tools=tools, outputs=outputs,
@@ -405,48 +405,28 @@ async def run_scenario(scenario: dict, out_dir: Path, *, jit_context: bool = Fal
     ))
     kept = {h.get("candidate_id") for h in harness.state.hypotheses}
 
-    # プロンプト文字数・トークン数の計測（baseline vs JIT context）
-    from wscan.agent_jit_context import AgentJitContextBuilder, estimate_tokens
-    import re
-    from wscan.content_provenance import wrap_untrusted_observation, ContentType
+    # 本番の _build_work_task 経路を用いたプロンプト文字数・トークン数の計測
+    from wscan.llm_agent_browser import AgentBrowserScanner
+    from wscan.agent_harness import AgentRole, AgentWorkItem
+    from wscan.agent_jit_context import estimate_tokens
     raw_texts = [json.dumps(ev, default=str) for ev in events]
-    raw_evidence = re.sub(r"WSCAN-NONCE:[^\s]+", "WSCAN-CANDIDATE", "\n".join(raw_texts)[-12000:])
-    wrapped_evidence = wrap_untrusted_observation(
-        raw_evidence, source="http", origin=LAB + "/", content_type=ContentType.OBSERVATION.value,
-    ).format_tagged_block()
-    raw_ledger = "\n".join(
-        f"- {item.role.value if hasattr(item.role, 'value') else item.role} | {item.target} | {item.check_type or '-'} | {item.status.value if hasattr(item.status, 'value') else item.status}"
-        for item in harness.state.work_queue
+    rev_work = AgentWorkItem(
+        work_id="work-rev-replay",
+        role=AgentRole.ADVERSARIAL_REVIEWER,
+        target=LAB + "/",
     )
-    wrapped_gaps = wrap_untrusted_observation(
-        "\n".join(harness.state.reviewer_gaps), source="http", origin=LAB + "/", content_type=ContentType.OBSERVATION.value,
-    ).format_tagged_block()
-    baseline_prompt = (
-        "Act as an adversarial reviewer. Do not submit payloads. Challenge false positives, "
-        "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
-        "Return each actual gap as `COVERAGE GAP: <description>`, or state REVIEW COMPLETE only when the ledger "
-        "shows every discovered page and input was tested for every requested check.\n"
-        "A resolved gap must be stated as `GAP RESOLVED: <description>`.\n"
-        + "\nUnresolved reviewer gaps:\n"
-        + wrapped_gaps
-        + "\nDeterministic work ledger:\n" + raw_ledger + "\nEvidence excerpt:\n" + wrapped_evidence
-    )
+    scanner_base = AgentBrowserScanner(target_url=LAB + "/", agent_jit_context=False)
+    scanner_base._harness = harness
+    baseline_prompt = scanner_base._build_work_task(rev_work, raw_texts)
 
-    jit_builder = AgentJitContextBuilder(harness)
-    jit_bundle = jit_builder.build_context()
-    jit_prompt = (
-        "Act as an adversarial reviewer. Do not submit payloads. Challenge false positives, "
-        "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
-        "Return each actual gap as `COVERAGE GAP: <description>`, or state REVIEW COMPLETE only when the ledger "
-        "shows every discovered page and input was tested for every requested check.\n"
-        "A resolved gap must be stated as `GAP RESOLVED: <description>`.\n\n"
-        + jit_bundle.formatted_context
-    )
+    scanner_jit = AgentBrowserScanner(target_url=LAB + "/", agent_jit_context=True)
+    scanner_jit._harness = harness
+    jit_prompt = scanner_jit._build_work_task(rev_work, raw_texts)
 
     prompt_chars_base = len(baseline_prompt)
     prompt_chars_jit = len(jit_prompt)
     prompt_toks_base = estimate_tokens(baseline_prompt)
-    prompt_toks_jit = jit_bundle.estimated_tokens
+    prompt_toks_jit = estimate_tokens(jit_prompt)
 
     return {
         "scenario": scenario["name"],

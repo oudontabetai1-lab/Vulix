@@ -7,16 +7,20 @@ are stored atomically as part of the harness checkpoint.
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
 from wscan.content_provenance import (
+    ContentSource,
     ContentType,
     wrap_untrusted_observation,
 )
 from wscan.request_logger import redact_text, redact_url
+
+logger = logging.getLogger(__name__)
 
 _MAX_PENDING_WORK = 5
 _MAX_HYPOTHESES = 5
@@ -48,6 +52,24 @@ def estimate_tokens(text: str) -> int:
     return max(1, math.ceil(len(text) / 4))
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value is None:
+        raise ValueError("int cannot be None")
+    try:
+        return int(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"invalid int value {value!r}: {exc}") from exc
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        raise ValueError("float cannot be None")
+    try:
+        return float(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"invalid float value {value!r}: {exc}") from exc
+
+
 @dataclass(frozen=True)
 class EpisodeNote:
     """1 episode の実行結果の要約ノート（checkpoint に原子保存）。"""
@@ -71,17 +93,26 @@ class EpisodeNote:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "EpisodeNote":
-        ev = data.get("evidence_ids", ())
-        return cls(
-            episode_id=str(data.get("episode_id", "")),
-            work_id=str(data.get("work_id", "")),
-            role=str(data.get("role", "")),
-            status=str(data.get("status", "")),
-            summary=str(data.get("summary", "")),
-            evidence_ids=tuple(str(x) for x in ev) if isinstance(ev, (list, tuple)) else (),
-            timestamp=float(data.get("timestamp", 0.0)),
-        )
+    def from_dict(cls, data: Mapping[str, Any]) -> "EpisodeNote | None":
+        if not isinstance(data, Mapping):
+            logger.warning("Discarding invalid episode note: expected mapping, got %s", type(data).__name__)
+            return None
+        try:
+            ev = data.get("evidence_ids", ())
+            if not isinstance(ev, (list, tuple)):
+                ev = ()
+            return cls(
+                episode_id=str(data.get("episode_id", "") or ""),
+                work_id=str(data.get("work_id", "") or ""),
+                role=str(data.get("role", "") or ""),
+                status=str(data.get("status", "") or ""),
+                summary=str(data.get("summary", "") or ""),
+                evidence_ids=tuple(str(x) for x in ev if x is not None),
+                timestamp=_safe_float(data.get("timestamp", 0.0)),
+            )
+        except Exception as exc:
+            logger.warning("Discarding corrupt episode note: %s (%r)", exc, data)
+            return None
 
 
 @dataclass(frozen=True)
@@ -113,20 +144,29 @@ class ResumeNote:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ResumeNote":
-        gaps = data.get("active_gaps", ())
-        return cls(
-            run_id=str(data.get("run_id", "")),
-            checkpoint_generation=int(data.get("checkpoint_generation", 0)),
-            consumed_steps=int(data.get("consumed_steps", 0)),
-            remaining_steps=int(data.get("remaining_steps", 0)),
-            completed_work_count=int(data.get("completed_work_count", 0)),
-            pending_work_count=int(data.get("pending_work_count", 0)),
-            confirmed_findings_count=int(data.get("confirmed_findings_count", 0)),
-            unverified_hypotheses_count=int(data.get("unverified_hypotheses_count", 0)),
-            active_gaps=tuple(str(x) for x in gaps) if isinstance(gaps, (list, tuple)) else (),
-            timestamp=float(data.get("timestamp", 0.0)),
-        )
+    def from_dict(cls, data: Mapping[str, Any]) -> "ResumeNote | None":
+        if not isinstance(data, Mapping):
+            logger.warning("Discarding invalid resume note: expected mapping, got %s", type(data).__name__)
+            return None
+        try:
+            gaps = data.get("active_gaps", ())
+            if not isinstance(gaps, (list, tuple)):
+                gaps = ()
+            return cls(
+                run_id=str(data.get("run_id", "") or ""),
+                checkpoint_generation=_safe_int(data.get("checkpoint_generation", 0)),
+                consumed_steps=_safe_int(data.get("consumed_steps", 0)),
+                remaining_steps=_safe_int(data.get("remaining_steps", 0)),
+                completed_work_count=_safe_int(data.get("completed_work_count", 0)),
+                pending_work_count=_safe_int(data.get("pending_work_count", 0)),
+                confirmed_findings_count=_safe_int(data.get("confirmed_findings_count", 0)),
+                unverified_hypotheses_count=_safe_int(data.get("unverified_hypotheses_count", 0)),
+                active_gaps=tuple(str(x) for x in gaps if x is not None),
+                timestamp=_safe_float(data.get("timestamp", 0.0)),
+            )
+        except Exception as exc:
+            logger.warning("Discarding corrupt resume note: %s (%r)", exc, data)
+            return None
 
 
 @dataclass
@@ -155,8 +195,22 @@ class AgentStructuredNotes:
     def from_dict(cls, data: Mapping[str, Any] | None) -> "AgentStructuredNotes":
         if not data or not isinstance(data, Mapping):
             return cls()
-        episodes = [EpisodeNote.from_dict(x) for x in data.get("episode_notes", []) if isinstance(x, Mapping)]
-        resumes = [ResumeNote.from_dict(x) for x in data.get("resume_notes", []) if isinstance(x, Mapping)]
+        episodes: list[EpisodeNote] = []
+        for x in data.get("episode_notes", []):
+            if isinstance(x, Mapping):
+                note = EpisodeNote.from_dict(x)
+                if note is not None:
+                    episodes.append(note)
+            else:
+                logger.warning("Discarding non-mapping episode note: %s", type(x).__name__)
+        resumes: list[ResumeNote] = []
+        for x in data.get("resume_notes", []):
+            if isinstance(x, Mapping):
+                note = ResumeNote.from_dict(x)
+                if note is not None:
+                    resumes.append(note)
+            else:
+                logger.warning("Discarding non-mapping resume note: %s", type(x).__name__)
         return cls(episode_notes=episodes, resume_notes=resumes)
 
 
@@ -190,7 +244,7 @@ class AgentJitContextBuilder:
 
     - 読み取り専用（Harness や State の内部状態を変更しない）
     - evidence ID と provenance を保持
-    - 対象サイト由来のテキストは wrap_untrusted_observation でラップ
+    - 対象サイト由来のテキストはすべて wrap_untrusted_observation でラップ
     - 秘密値は redact_text / secret_values で伏字化
     - 厳格な項目数上限と文字数上限を強制
     """
@@ -223,6 +277,29 @@ class AgentJitContextBuilder:
                 text = text.replace(s, "<redacted>")
         return redact_text(text)
 
+    def _wrap_untrusted(
+        self,
+        text: Any,
+        *,
+        source: str = ContentSource.HTTP.value,
+        origin: str = "",
+        content_type: str = ContentType.OBSERVATION.value,
+        correlation_id: str = "",
+        max_chars: int | None = None,
+    ) -> str:
+        """ビルダー側の単一チョークポイントとして untrusted テキストをラップする。"""
+        raw = self._redact_value(str(text or ""))
+        if max_chars is not None and len(raw) > max_chars:
+            raw = raw[:max_chars]
+        target_origin = origin or self.target_url or "http://target.test/"
+        return wrap_untrusted_observation(
+            raw,
+            source=source,
+            origin=target_origin,
+            content_type=content_type,
+            correlation_id=correlation_id,
+        ).format_tagged_block()
+
     def build_context(self) -> JitContextBundle:
         bundle = JitContextBundle()
         evidence_ids: list[str] = []
@@ -242,9 +319,18 @@ class AgentJitContextBuilder:
             )
         recent_episodes = structured_notes.episode_notes[-self.config.max_episode_notes:]
         for ep in recent_episodes:
-            safe_summary = self._redact_value(ep.summary)[:self.config.max_item_summary_chars]
             ev_str = f" [evidence: {', '.join(ep.evidence_ids)}]" if ep.evidence_ids else ""
-            notes_lines.append(f"- Episode {ep.episode_id} ({ep.role}): status={ep.status} - {safe_summary}{ev_str}")
+            wrapped_summary = self._wrap_untrusted(
+                ep.summary,
+                source=ContentSource.DOM.value,
+                origin=self.target_url,
+                content_type=ContentType.OBSERVATION.value,
+                correlation_id=ep.episode_id,
+                max_chars=self.config.max_item_summary_chars,
+            )
+            notes_lines.append(
+                f"- Episode {ep.episode_id} ({ep.role}): status={ep.status}{ev_str}\n  summary: {wrapped_summary}"
+            )
             evidence_ids.extend(ep.evidence_ids)
         bundle.notes_summary = "\n".join(notes_lines)
 
@@ -253,7 +339,6 @@ class AgentJitContextBuilder:
             w for w in getattr(self._state, "work_queue", [])
             if (w.status.value if hasattr(w.status, "value") else str(w.status)) not in _TERMINAL_WORK_STATUSES
         ]
-        # 現在の work に合致するものを優先
         curr_role = (
             getattr(self.current_work, "role", None).value
             if hasattr(getattr(self.current_work, "role", None), "value")
@@ -273,10 +358,18 @@ class AgentJitContextBuilder:
             w_role = w.role.value if hasattr(w.role, "value") else str(w.role)
             w_status = w.status.value if hasattr(w.status, "value") else str(w.status)
             w_ev = list(w.evidence_ids) if hasattr(w, "evidence_ids") else []
+            wrapped_target = self._wrap_untrusted(
+                w.target,
+                source=ContentSource.HTTP.value,
+                origin=w.target,
+                content_type=ContentType.OBSERVATION.value,
+                correlation_id=w.work_id,
+            )
             bundle.pending_work.append({
                 "work_id": w.work_id,
                 "role": w_role,
                 "target": redact_url(w.target),
+                "wrapped_target": wrapped_target,
                 "check_type": w.check_type or "-",
                 "status": w_status,
                 "attempts": w.attempts,
@@ -290,7 +383,6 @@ class AgentJitContextBuilder:
         def _hyp_priority(h):
             cid = str(h.get("candidate_id", ""))
             label = str(h.get("source_label", ""))
-            # 確証済みを優先、次に対象一致
             is_confirmed = 0 if "confirmed" in label else 1
             matches_target = 0 if curr_target and curr_target in str(h.get("url", "")) else 1
             return (is_confirmed, matches_target, cid)
@@ -301,27 +393,45 @@ class AgentJitContextBuilder:
             cid = str(hyp.get("candidate_id", ""))
             ev_list = [str(x) for x in hyp.get("evidence_ids", []) if str(x)]
             label = str(hyp.get("source_label", "agent_unverified"))
+            target_url = str(hyp.get("url", "") or self.target_url)
+            field_val = str(hyp.get("field_name", "-"))
+            wrapped_url = self._wrap_untrusted(
+                target_url,
+                source=ContentSource.HTTP.value,
+                origin=target_url,
+                content_type=ContentType.OBSERVATION.value,
+                correlation_id=cid,
+            )
+            wrapped_field = self._wrap_untrusted(
+                field_val,
+                source=ContentSource.DOM.value,
+                origin=target_url,
+                content_type=ContentType.OBSERVATION.value,
+                correlation_id=cid,
+                max_chars=self.config.max_item_summary_chars,
+            )
             hyp_entry = {
                 "candidate_id": cid,
-                "url": redact_url(str(hyp.get("url", ""))),
+                "url": redact_url(target_url),
+                "wrapped_url": wrapped_url,
                 "check_type": str(hyp.get("check_type", "-")),
-                "field_name": str(hyp.get("field_name", "-")),
+                "field_name": field_val,
+                "wrapped_field": wrapped_field,
                 "source_label": label,
                 "status": str(hyp.get("status", "proposed")),
                 "evidence_ids": ev_list,
             }
-            # 対象サイト由来の証拠テキスト（payload/evidence）がある場合は untrusted ラップ
             raw_obs = hyp.get("evidence") or hyp.get("payload") or ""
             if raw_obs:
-                safe_obs = self._redact_value(str(raw_obs))[:self.config.max_item_summary_chars]
-                wrapped = wrap_untrusted_observation(
-                    safe_obs,
-                    source="dom",
-                    origin=str(hyp.get("url", "") or self.target_url),
+                wrapped_evidence = self._wrap_untrusted(
+                    raw_obs,
+                    source=ContentSource.DOM.value,
+                    origin=target_url,
                     content_type=ContentType.EVIDENCE.value,
                     correlation_id=cid,
-                ).format_tagged_block()
-                hyp_entry["wrapped_evidence"] = wrapped
+                    max_chars=self.config.max_item_summary_chars,
+                )
+                hyp_entry["wrapped_evidence"] = wrapped_evidence
             bundle.hypotheses.append(hyp_entry)
             if cid:
                 evidence_ids.append(cid)
@@ -329,28 +439,46 @@ class AgentJitContextBuilder:
 
         # 4. 直近の確定結果（scanner_evidence）
         scanner_ev_raw = list(getattr(self._state, "scanner_evidence", []))
-        # 直近のものを優先
         selected_results = scanner_ev_raw[-self.config.max_recent_results:]
         for ev in reversed(selected_results):
             ev_id = str(ev.get("evidence_id", ""))
             corr_id = str(ev.get("correlation_id", ev_id))
+            target_url = str(ev.get("url", "") or self.target_url)
+            field_val = str(ev.get("field_name", "-"))
+            wrapped_url = self._wrap_untrusted(
+                target_url,
+                source=ContentSource.HTTP.value,
+                origin=target_url,
+                content_type=ContentType.OBSERVATION.value,
+                correlation_id=corr_id,
+            )
+            wrapped_field = self._wrap_untrusted(
+                field_val,
+                source=ContentSource.DOM.value,
+                origin=target_url,
+                content_type=ContentType.OBSERVATION.value,
+                correlation_id=corr_id,
+                max_chars=self.config.max_item_summary_chars,
+            )
             res_entry = {
                 "evidence_id": ev_id,
                 "check_type": str(ev.get("check_type", "-")),
-                "field_name": str(ev.get("field_name", "-")),
-                "url": redact_url(str(ev.get("url", ""))),
+                "field_name": field_val,
+                "url": redact_url(target_url),
+                "wrapped_url": wrapped_url,
+                "wrapped_field": wrapped_field,
                 "status": str(ev.get("status", "confirmed")),
             }
             raw_detail = ev.get("details") or ev.get("detail") or ""
             if raw_detail:
-                safe_detail = self._redact_value(str(raw_detail))[:self.config.max_item_summary_chars]
-                res_entry["wrapped_detail"] = wrap_untrusted_observation(
-                    safe_detail,
-                    source="http",
-                    origin=str(ev.get("url", "") or self.target_url),
+                res_entry["wrapped_detail"] = self._wrap_untrusted(
+                    raw_detail,
+                    source=ContentSource.HTTP.value,
+                    origin=target_url,
                     content_type=ContentType.EVIDENCE.value,
                     correlation_id=corr_id,
-                ).format_tagged_block()
+                    max_chars=self.config.max_item_summary_chars,
+                )
             bundle.recent_results.append(res_entry)
             if ev_id:
                 evidence_ids.append(ev_id)
@@ -393,9 +521,10 @@ class AgentJitContextBuilder:
 
         if bundle.pending_work:
             work_lines = [
-                f"- work_id: {w['work_id']} | role: {w['role']} | target: {w['target']} | "
-                f"check: {w['check_type']} | status: {w['status']} | attempts: {w['attempts']}"
+                f"- work_id: {w['work_id']} | role: {w['role']} | check: {w['check_type']} | "
+                f"status: {w['status']} | attempts: {w['attempts']}"
                 + (f" [evidence: {', '.join(w['evidence_ids'])}]" if w['evidence_ids'] else "")
+                + f"\n  target: {w['wrapped_target']}"
                 for w in bundle.pending_work
             ]
             sections.append(f"### Pending Work Ledger ({len(bundle.pending_work)})\n" + "\n".join(work_lines))
@@ -407,10 +536,12 @@ class AgentJitContextBuilder:
             for h in bundle.hypotheses:
                 line = (
                     f"- candidate_id: {h['candidate_id']} | check: {h['check_type']} | "
-                    f"field: {h['field_name']} | label: {h['source_label']} | status: {h['status']}"
+                    f"label: {h['source_label']} | status: {h['status']}\n"
+                    f"  url: {h['wrapped_url']}\n"
+                    f"  field: {h['wrapped_field']}"
                 )
                 if h.get("wrapped_evidence"):
-                    line += "\n  " + h["wrapped_evidence"]
+                    line += "\n  evidence: " + h["wrapped_evidence"]
                 hyp_lines.append(line)
             sections.append(f"### Hypotheses & Evidence ({len(bundle.hypotheses)})\n" + "\n".join(hyp_lines))
 
@@ -418,34 +549,47 @@ class AgentJitContextBuilder:
             res_lines = []
             for r in bundle.recent_results:
                 line = (
-                    f"- evidence_id: {r['evidence_id']} | check: {r['check_type']} | "
-                    f"field: {r['field_name']} | status: {r['status']}"
+                    f"- evidence_id: {r['evidence_id']} | check: {r['check_type']} | status: {r['status']}\n"
+                    f"  url: {r['wrapped_url']}\n"
+                    f"  field: {r['wrapped_field']}"
                 )
                 if r.get("wrapped_detail"):
-                    line += "\n  " + r["wrapped_detail"]
+                    line += "\n  detail: " + r["wrapped_detail"]
                 res_lines.append(line)
             sections.append(f"### Recent Confirmed Results ({len(bundle.recent_results)})\n" + "\n".join(res_lines))
 
         if bundle.coverage_gaps:
-            gap_lines = [f"- {g}" for g in bundle.coverage_gaps]
+            gap_lines = []
+            for idx, g in enumerate(bundle.coverage_gaps):
+                wg = self._wrap_untrusted(
+                    g,
+                    source=ContentSource.HTTP.value,
+                    origin=self.target_url,
+                    content_type=ContentType.OBSERVATION.value,
+                    correlation_id=f"gap-{idx}",
+                )
+                gap_lines.append(f"- gap:\n  {wg}")
             sections.append(f"### Active Coverage Gaps ({len(bundle.coverage_gaps)})\n" + "\n".join(gap_lines))
 
         full_text = "\n\n".join(sections)
-        # 上限文字数を厳格に遵守
+        # 上限文字数を厳格に遵守（閉じタグやマーカーの欠落を防止）
         if len(full_text) > self.config.max_total_chars:
             marker = "\n[...JIT context truncated]"
             closing_tag = "\n</untrusted_target_data>"
-            reserve = len(marker) + len(closing_tag) + 10
+            reserve = len(marker) + len(closing_tag) * 2 + 10
             cutoff = max(50, self.config.max_total_chars - reserve)
             truncated = full_text[:cutoff].rstrip()
+            # 開きタグの途中で切れた場合はタグの開始位置前まで戻す
+            last_lt = truncated.rfind("<")
+            last_gt = truncated.rfind(">")
+            if last_lt > last_gt:
+                truncated = truncated[:last_lt].rstrip()
             # 途中で切れた untrusted_target_data タグを閉じる
             open_tags = truncated.count("<untrusted_target_data")
             close_tags = truncated.count("</untrusted_target_data>")
             if open_tags > close_tags:
-                truncated += closing_tag
+                truncated += closing_tag * (open_tags - close_tags)
             truncated += marker
-            if len(truncated) > self.config.max_total_chars:
-                truncated = truncated[:self.config.max_total_chars]
             return truncated
         return full_text
 

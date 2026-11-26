@@ -1953,6 +1953,7 @@ class AgentBrowserScanner:
                         *self.extra_headers.values(),
                     ),
                     auth_secret_material=self._auth_secret_material(),
+                    agent_jit_context=self.agent_jit_context,
                 )
             except ValueError as exc:
                 result.error = str(exc)
@@ -2258,7 +2259,7 @@ class AgentBrowserScanner:
                         str(item) for item in (history.extracted_content() or [])
                     ) + "\n" + final
                     texts.append(episode_text)
-                    if self._harness and self.agent_jit_context:
+                    if self._harness and self.agent_jit_context and work.role != AgentRole.AUTHENTICATOR:
                         extracted = history.extracted_content() or []
                         summary_seed = final or (str(extracted[-1]) if extracted else "")
                         self._harness.record_episode_note(
