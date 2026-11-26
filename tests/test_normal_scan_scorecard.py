@@ -72,7 +72,7 @@ def test_checked_in_baseline_file_exists_and_loads():
     assert scorecard.safe_twin_precision["safe_total"] == 15
     assert scorecard.safe_twin_precision["fp_total"] == 0
     assert scorecard.safe_twin_precision["fpr"] == 0.0
-    assert scorecard.total_attempts == 4056
+    assert scorecard.total_attempts == 4048
     assert scorecard.ledger_integrity["valid"] is True
 
 
@@ -548,9 +548,10 @@ class _MockEngine:
 
 
 def test_reconcile_excludes_redirect_hop_no_mismatch():
-    """HTTP 3xx 追従による二次ホップは initial カウントから除外され、count_mismatch にならない。"""
+    """HTTP 3xx 追従による二次ホップは initial カウントから除外され、count_mismatch にならない（ケース 1: 追従する 3xx）。"""
     records = [
         {
+            "request_attempt_id": "prb_001",
             "attempt_id": "att_001",
             "parent_id": "",
             "rationale": "",
@@ -558,6 +559,7 @@ def test_reconcile_excludes_redirect_hop_no_mismatch():
             "request": {"url": "http://example.com/redirect?url=/target"},
         },
         {
+            "request_attempt_id": "prb_001",
             "attempt_id": "att_002",
             "parent_id": "att_001",
             "rationale": "redirect_hop_from:att_001",
@@ -569,7 +571,7 @@ def test_reconcile_excludes_redirect_hop_no_mismatch():
     scanner = _ReconcileTestScanner(engine)
     ip = InjectionPoint.for_url_param("GET", "http://example.com/redirect", "url")
 
-    # 1 回の probe 実行で 3xx リダイレクト追従（計 2 リクエスト）
+    # 1 回の probe 実行で 3xx リダイレクト追従（計 2 リクエスト、initial は 1 件）
     scanner._reconcile_probe_ledger_wave(
         ip,
         "standard",
@@ -578,67 +580,100 @@ def test_reconcile_excludes_redirect_hop_no_mismatch():
         findings_count=0,
     )
 
-    # redirect ホップが除外され manifest_count == 1 == executed_count となり mismatch は出ない
+    # redirect ホップが除外され initial_count == 1 == executed_count となり mismatch は出ない
     assert "probe_ledger_incomplete:test_check:standard:count_mismatch" not in engine.wave_errors
 
 
-def test_reconcile_detects_genuine_duplicate_probe_send_same_payload():
-    """同一 payload であっても本当の二重送信（複数回 dispatch）は除外されず count_mismatch が記録される。"""
+def test_reconcile_non_followed_3xx_no_mismatch():
+    """リダイレクトを追従しない 3xx 応答エンドポイントへの複数プローブ（ケース 2: 追従しない 3xx）。
+
+    各プローブは独立した probe_attempt_id を持ち、リダイレクトホップは発生しない。
+    先行応答が 3xx であっても後続プローブがホップと誤判定されず、全件が initial として正しく計上される。
+    """
     records = [
         {
+            "request_attempt_id": "prb_001",
             "attempt_id": "att_001",
             "parent_id": "",
             "rationale": "",
-            "payload_fingerprint": "fp_same",
-            "request": {"url": "http://example.com/search?q=test"},
+            "payload_fingerprint": "fp_1",
+            "request": {"url": "http://example.com/redirect?url=/p1"},
         },
         {
+            "request_attempt_id": "prb_002",
             "attempt_id": "att_002",
             "parent_id": "",
             "rationale": "",
-            "payload_fingerprint": "fp_same",
-            "request": {"url": "http://example.com/search?q=test"},
+            "payload_fingerprint": "fp_2",
+            "request": {"url": "http://example.com/redirect?url=/p2"},
         },
     ]
-    # 先行リクエスト att_001 の観測応答は 200 OK（3xx ではない）
-    events = {
-        "obs_001": {
-            "record_kind": "observation",
-            "request_attempt_id": "att_001",
-            "response": {"status": 200},
-        },
-        "obs_002": {
-            "record_kind": "observation",
-            "request_attempt_id": "att_002",
-            "response": {"status": 200},
-        },
-    }
-    engine = _MockEngine(records, events)
+    engine = _MockEngine(records)
     scanner = _ReconcileTestScanner(engine)
-    ip = InjectionPoint.for_url_param("GET", "http://example.com/search", "q")
+    ip = InjectionPoint.for_url_param("GET", "http://example.com/redirect", "url")
 
-    # executed_count=1 なのに 2 回送信されている
+    # 2 回の probe 送信（追従なし、各 302 応答）
     scanner._reconcile_probe_ledger_wave(
         ip,
         "standard",
-        planned_count=1,
-        executed_count=1,
+        planned_count=2,
+        executed_count=2,
         findings_count=0,
     )
 
-    # payload_fingerprint が同じでも、redirect ホップではないため 2 件とも initial として残る
+    # 2 件とも initial として計上され initial_count == 2 == executed_count
+    assert "probe_ledger_incomplete:test_check:standard:count_mismatch" not in engine.wave_errors
+
+
+def test_reconcile_detects_genuine_duplicate_send_within_same_attempt():
+    """同一 probe attempt 内で 2 回の initial 送信が行われた場合（ケース 3a: 本当の二重送信）。
+
+    同一 attempt_id / request_attempt_id でホップではないリクエストが複数ある場合、
+    仮に executed_count が 2 であっても duplicate として count_mismatch が記録される。
+    """
+    records = [
+        {
+            "request_attempt_id": "prb_001",
+            "attempt_id": "att_001",
+            "parent_id": "",
+            "rationale": "",
+            "payload_fingerprint": "fp_1",
+            "request": {"url": "http://example.com/login"},
+        },
+        {
+            "request_attempt_id": "prb_001",
+            "attempt_id": "att_002",
+            "parent_id": "",
+            "rationale": "",  # ホップではなく同一 attempt 内での二重送信
+            "payload_fingerprint": "fp_1",
+            "request": {"url": "http://example.com/login"},
+        },
+    ]
+    engine = _MockEngine(records)
+    scanner = _ReconcileTestScanner(engine)
+    ip = InjectionPoint.for_url_param("POST", "http://example.com/login", "user")
+
+    # executed_count=2, planned_count=2 であっても、同一 attempt 内に複数の initial があるため duplicate 検知
+    scanner._reconcile_probe_ledger_wave(
+        ip,
+        "standard",
+        planned_count=2,
+        executed_count=2,
+        findings_count=0,
+    )
+
     assert "probe_ledger_incomplete:test_check:standard:count_mismatch" in engine.wave_errors
 
 
 def test_reconcile_detects_genuine_duplicate_probe_send_on_redirect_endpoint():
-    """リダイレクトするエンドポイントであっても、probe が二重送信された場合は count_mismatch が記録される。"""
+    """リダイレクトするエンドポイントであっても、probe が複数回 dispatch された場合は count_mismatch（ケース 3b: 本当の二重送信）。"""
     records = [
         # 1 回目 dispatch (att_001 -> att_002 redirect hop)
-        {"attempt_id": "att_001", "parent_id": "", "rationale": "initial"},
-        {"attempt_id": "att_002", "parent_id": "att_001", "rationale": "redirect_hop_from:att_001"},
+        {"request_attempt_id": "prb_001", "attempt_id": "att_001", "parent_id": "", "rationale": "initial"},
+        {"request_attempt_id": "prb_001", "attempt_id": "att_002", "parent_id": "att_001", "rationale": "redirect_hop_from:att_001"},
         # 2 回目 dispatch（二重送信: att_003 -> att_004 redirect hop）
-        {"attempt_id": "att_003", "parent_id": "", "rationale": "initial"},
-        {"attempt_id": "att_004", "parent_id": "att_003", "rationale": "redirect_hop_from:att_003"},
+        {"request_attempt_id": "prb_002", "attempt_id": "att_003", "parent_id": "", "rationale": "initial"},
+        {"request_attempt_id": "prb_002", "attempt_id": "att_004", "parent_id": "att_003", "rationale": "redirect_hop_from:att_003"},
     ]
     engine = _MockEngine(records)
     scanner = _ReconcileTestScanner(engine)
@@ -654,6 +689,146 @@ def test_reconcile_detects_genuine_duplicate_probe_send_on_redirect_endpoint():
     )
 
     # 4 リクエスト中 2 リクエストが redirect ホップ、initial は 2 件 != executed_count(1)
+    assert "probe_ledger_incomplete:test_check:standard:count_mismatch" in engine.wave_errors
+
+
+def test_reconcile_distinct_payloads_in_sequence_on_3xx_endpoint():
+    """先行リクエストが 3xx を返すエンドポイントで、異なる payload が連続送信された場合（ケース 4: 異なる payload の並び）。
+
+    以前のヒューリスティック 3 では、先行 3xx 応答の直後のリクエストが誤って redirect hop と判定されていたが、
+    probe identity 相関により各プローブが正しく個別の initial として認識される。
+    """
+    records = [
+        # payload 1: 302 を返す
+        {
+            "request_attempt_id": "prb_001",
+            "attempt_id": "att_001",
+            "parent_id": "",
+            "rationale": "",
+            "payload_fingerprint": "fp_payload_1",
+            "request": {"url": "http://example.com/redirect?url=/a"},
+        },
+        # payload 2: 302 を返す
+        {
+            "request_attempt_id": "prb_002",
+            "attempt_id": "att_002",
+            "parent_id": "",
+            "rationale": "",
+            "payload_fingerprint": "fp_payload_2",
+            "request": {"url": "http://example.com/redirect?url=/b"},
+        },
+        # payload 3: 200 を返す
+        {
+            "request_attempt_id": "prb_003",
+            "attempt_id": "att_003",
+            "parent_id": "",
+            "rationale": "",
+            "payload_fingerprint": "fp_payload_3",
+            "request": {"url": "http://example.com/redirect?url=/c"},
+        },
+    ]
+    engine = _MockEngine(records)
+    scanner = _ReconcileTestScanner(engine)
+    ip = InjectionPoint.for_url_param("GET", "http://example.com/redirect", "url")
+
+    # executed_count = 3
+    scanner._reconcile_probe_ledger_wave(
+        ip,
+        "standard",
+        planned_count=3,
+        executed_count=3,
+        findings_count=0,
+    )
+
+    # 3 件とも initial として正しく判定され、count_mismatch は発生しない
+    assert "probe_ledger_incomplete:test_check:standard:count_mismatch" not in engine.wave_errors
+
+
+def test_reconcile_redirect_chain_multiple_hops_no_mismatch():
+    """リダイレクトチェーン（301 -> 302 -> 200）の複数ホップ除外（ケース 5: リダイレクトチェーン）。
+
+    1 つの probe attempt から複数段のリダイレクトが発生しても、初期送信のみが 1 件として計上される。
+    """
+    records = [
+        # initial request -> 301
+        {
+            "request_attempt_id": "prb_chain_01",
+            "attempt_id": "att_hop_0",
+            "parent_id": "",
+            "rationale": "",
+            "payload_fingerprint": "fp_chain",
+            "request": {"url": "http://example.com/step1"},
+        },
+        # 1st hop -> 302
+        {
+            "request_attempt_id": "prb_chain_01",
+            "attempt_id": "att_hop_1",
+            "parent_id": "att_hop_0",
+            "rationale": "redirect_hop_from:att_hop_0",
+            "payload_fingerprint": "fp_chain",
+            "request": {"url": "http://example.com/step2"},
+        },
+        # 2nd hop -> 200
+        {
+            "request_attempt_id": "prb_chain_01",
+            "attempt_id": "att_hop_2",
+            "parent_id": "att_hop_1",
+            "rationale": "redirect_hop_from:att_hop_1",
+            "payload_fingerprint": "fp_chain",
+            "request": {"url": "http://example.com/step3"},
+        },
+    ]
+    engine = _MockEngine(records)
+    scanner = _ReconcileTestScanner(engine)
+    ip = InjectionPoint.for_url_param("GET", "http://example.com/step1", "q")
+
+    scanner._reconcile_probe_ledger_wave(
+        ip,
+        "standard",
+        planned_count=1,
+        executed_count=1,
+        findings_count=0,
+    )
+
+    # 3 リクエスト中 2 件がホップ、initial は 1 件 == executed_count(1)
+    assert "probe_ledger_incomplete:test_check:standard:count_mismatch" not in engine.wave_errors
+
+
+def test_xss_early_break_with_finding_deduplication_no_mismatch():
+    """XSS スキャナで record_finding が重複により None を返しても、found_vuln により count_mismatch 判定されない。"""
+    records = [
+        {
+            "request_attempt_id": "prb_xss_01",
+            "attempt_id": "att_xss_01",
+            "parent_id": "",
+            "rationale": "",
+            "payload_fingerprint": "fp_xss_1",
+            "request": {"url": "http://example.com/search?q=payload1"},
+        },
+    ]
+    engine = _MockEngine(records)
+    scanner = _ReconcileTestScanner(engine)
+    ip = InjectionPoint.for_url_param("GET", "http://example.com/search", "q")
+
+    # planned=5, executed=1 で早期 break。findings リストは空だが found_vuln=True により findings_count=1 を渡す
+    scanner._reconcile_probe_ledger_wave(
+        ip,
+        "standard",
+        planned_count=5,
+        executed_count=1,
+        findings_count=1,
+    )
+    assert "probe_ledger_incomplete:test_check:standard:count_mismatch" not in engine.wave_errors
+
+    # 逆に findings_count=0（found_vuln=False）の場合は未完了不一致（count_mismatch）が検知される
+    engine.wave_errors.clear()
+    scanner._reconcile_probe_ledger_wave(
+        ip,
+        "standard",
+        planned_count=5,
+        executed_count=1,
+        findings_count=0,
+    )
     assert "probe_ledger_incomplete:test_check:standard:count_mismatch" in engine.wave_errors
 
 
@@ -700,11 +875,63 @@ async def test_httpx_redirect_hops_tagged_in_request_logger(tmp_path):
     assert second_req.get("parent_id") == first_req.get("attempt_id")
     assert str(second_req.get("rationale") or "").startswith("redirect_hop_from:")
 
-    # BaseScanner の判定ロジックで初回のみが抽出されることを確認
-    initial_reqs = [
-        r for r in req_events
-        if not BaseScanner._is_redirect_hop_request(r, req_events, logger.probe_ledger)
-    ]
-    assert len(initial_reqs) == 1
-    assert initial_reqs[0] is first_req
+    # BaseScanner の相関判定で initial は 1 件、duplicate なし
+    initial_count, has_dup = BaseScanner._reconcile_manifest_requests(req_events)
+    assert initial_count == 1
+    assert has_dup is False
+
+
+@pytest.mark.asyncio
+async def test_httpx_non_followed_redirect_probes_not_tagged_as_hops(tmp_path):
+    """HTTPX で follow_redirects=False の場合、連続するプローブが誤って hop 扱いされない実証。"""
+    import httpx
+    from wscan.request_logger import RequestLogger
+    from wscan.injection_point import InjectionPoint
+
+    def mock_handler(request):
+        return httpx.Response(302, headers={"Location": "http://testserver/other"})
+
+    transport = httpx.MockTransport(mock_handler)
+    logger = RequestLogger(tmp_path)
+    logger.enabled = True
+    ip = InjectionPoint.for_url_param("GET", "http://testserver/redir", "q")
+
+    with logger.probe_scope(ip, "test_check", role="attack", wave="standard") as ctx:
+        async with httpx.AsyncClient(
+            transport=transport,
+            event_hooks={
+                "request": [logger.log_httpx_submission],
+                "response": [logger.log_httpx_response],
+            },
+            follow_redirects=False,
+        ) as client:
+            resp1 = await client.get("http://testserver/redir?q=p1")
+            assert resp1.status_code == 302
+
+    with logger.probe_scope(ip, "test_check", role="attack", wave="standard") as ctx:
+        async with httpx.AsyncClient(
+            transport=transport,
+            event_hooks={
+                "request": [logger.log_httpx_submission],
+                "response": [logger.log_httpx_response],
+            },
+            follow_redirects=False,
+        ) as client:
+            resp2 = await client.get("http://testserver/redir?q=p2")
+            assert resp2.status_code == 302
+
+    events = list(logger.probe_ledger.events.values())
+    req_events = [e for e in events if e.get("record_kind") == "request"]
+    assert len(req_events) == 2
+
+    # 各プローブは独立しており parent_id も hop タグもなし
+    assert req_events[0].get("parent_id") == ""
+    assert not str(req_events[0].get("rationale") or "").startswith("redirect_hop")
+    assert req_events[1].get("parent_id") == ""
+    assert not str(req_events[1].get("rationale") or "").startswith("redirect_hop")
+
+    # 相関判定で 2 件とも initial、duplicate なし
+    initial_count, has_dup = BaseScanner._reconcile_manifest_requests(req_events)
+    assert initial_count == 2
+    assert has_dup is False
 

@@ -816,9 +816,11 @@ class BrowserManager:
         popup_header_intercept: bool = False,
         request_logger=None,
         mfa_solver=None,
+        navigation_retries: int = 2,
     ):
         self.headless = headless
         self.timeout = timeout * 1000  # ms
+        self.navigation_retries = max(0, int(navigation_retries))
         self.monitor = monitor
         self.auth_user = auth_user
         self.auth_pass = auth_pass
@@ -2029,12 +2031,14 @@ class BrowserManager:
         self,
         url: str,
         wait_until: str = "domcontentloaded",
-        retries: int = 2,
+        retries: Optional[int] = None,
         retry_delay: float = 0.75,
     ) -> bool:
         """Navigate to URL and return success."""
         self.last_navigation_error = ""
         self.last_navigation_status = None
+        if retries is None:
+            retries = getattr(self, "navigation_retries", 2)
         attempts = max(1, int(retries) + 1)
         try:
             self.network.clear()
@@ -4020,6 +4024,7 @@ class WorkerBrowser(BrowserManager):
         self.headless = real_browser.headless
         self.timeout = real_browser.timeout
         self.monitor = real_browser.monitor
+        self.navigation_retries = getattr(real_browser, "navigation_retries", 2)
         self.auth_user = real_browser.auth_user
         self.auth_pass = real_browser.auth_pass
         self.session_cookie_names = set(getattr(real_browser, "session_cookie_names", set()))

@@ -1527,6 +1527,7 @@ class ScanEngine:
             popup_header_intercept=self.popup_header_intercept,
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
+            navigation_retries=self.navigation_retries,
         )
         # ブラウザ初期化が成功したかを追跡する。init() 失敗（Chromium 不在等）でも finally で
         # partial report を出すため、browser 前提の scanner（csrf/session 等）を「実行できた」と
