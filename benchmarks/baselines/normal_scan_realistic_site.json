@@ -1,0 +1,284 @@
+{
+  "attempt_counts": {
+    "header_injection": 219,
+    "open_redirect": 32,
+    "path_traversal": 1203,
+    "sqli": 1325,
+    "ssti": 753,
+    "xss": 516
+  },
+  "fixture_id": "realistic_site",
+  "ground_truth_recall": {
+    "by_check": {
+      "header_injection": {
+        "expected": 1,
+        "matched": 1,
+        "recall": 1.0
+      },
+      "open_redirect": {
+        "expected": 1,
+        "matched": 1,
+        "recall": 1.0
+      },
+      "path_traversal": {
+        "expected": 1,
+        "matched": 1,
+        "recall": 1.0
+      },
+      "sqli": {
+        "expected": 2,
+        "matched": 2,
+        "recall": 1.0
+      },
+      "ssti": {
+        "expected": 1,
+        "matched": 1,
+        "recall": 1.0
+      },
+      "xss": {
+        "expected": 5,
+        "matched": 5,
+        "recall": 1.0
+      }
+    },
+    "expected_total": 11,
+    "matched_total": 11,
+    "missed": [],
+    "recall": 1.0
+  },
+  "known_inconsistencies": {
+    "count_mismatches": {
+      "probe_ledger_incomplete:ssti:standard:count_mismatch": {
+        "count": 1,
+        "reason": "BrowserManager.navigate retries page.goto on exception (default retries=2, up to 3 sends of the same probe). On /redirect the target either fails DNS (external host) or is a fragment-only redirect, so goto raises and the same probe is re-sent."
+      }
+    },
+    "duplicate_sends": {
+      "open_redirect": {
+        "count": 4,
+        "reason": "BrowserManager.navigate retries page.goto on exception (default retries=2, up to 3 sends of the same probe). On /redirect the target either fails DNS (external host) or is a fragment-only redirect, so goto raises and the same probe is re-sent."
+      },
+      "ssti": {
+        "count": 4,
+        "reason": "BrowserManager.navigate retries page.goto on exception (default retries=2, up to 3 sends of the same probe). On /redirect the target either fails DNS (external host) or is a fragment-only redirect, so goto raises and the same probe is re-sent."
+      }
+    }
+  },
+  "ledger_integrity": {
+    "count_mismatches": [
+      "probe_ledger_incomplete:ssti:standard:count_mismatch"
+    ],
+    "duplicate_sends": {
+      "open_redirect": 4,
+      "ssti": 4
+    },
+    "gaps": [],
+    "had_write_error": false,
+    "quarantined": false,
+    "unattributed_notes": [
+      "transport_error:header_injection:probe_not_delivered:/feedback|msg|form",
+      "transport_error:header_injection:probe_not_delivered:/feedback|msg|form",
+      "transport_error:header_injection:probe_not_delivered:/|q|form",
+      "transport_error:header_injection:probe_not_delivered:/search|q|form",
+      "transport_error:header_injection:probe_not_delivered:/|q|form",
+      "transport_error:header_injection:probe_not_delivered:/search|q|form",
+      "transport_error:header_injection:probe_not_delivered:/feedback|msg|form",
+      "transport_error:header_injection:probe_not_delivered:/search|q|form",
+      "transport_error:header_injection:probe_not_delivered:/|q|form",
+      "transport_error:header_injection:probe_not_delivered:/help|query|form",
+      "transport_error:header_injection:probe_not_delivered:/help|query|form",
+      "transport_error:header_injection:probe_not_delivered:/help|query|form",
+      "dialog_wedged_check_deferred:xss:http://127.0.0.1:49985/search?q=jacket:q",
+      "page_recreated_after_dialog_flood:fired=4,wedged=False",
+      "page_recreated_after_dialog_flood:fired=4,wedged=False",
+      "transport_error:header_injection:probe_not_delivered:/track|ref|form",
+      "transport_error:header_injection:probe_not_delivered:/track|ref|form",
+      "transport_error:header_injection:probe_not_delivered:/track|ref|form",
+      "transport_error:header_injection:probe_not_delivered:/comment|text|form",
+      "transport_error:header_injection:probe_not_delivered:/comment|text|form",
+      "transport_error:header_injection:probe_not_delivered:/comment|text|form",
+      "transport_error:header_injection:probe_not_delivered:/account/delete|item|form",
+      "transport_error:header_injection:probe_not_delivered:/account/delete|item|form",
+      "transport_error:header_injection:probe_not_delivered:/account/delete|item|form",
+      "transport_error:header_injection:probe_not_delivered:/notify|msg|form",
+      "transport_error:header_injection:probe_not_delivered:/notify|msg|form",
+      "transport_error:header_injection:probe_not_delivered:/notify|msg|form",
+      "transport_error:header_injection:probe_not_delivered:/support|q|form",
+      "transport_error:header_injection:probe_not_delivered:/support|q|form",
+      "transport_error:header_injection:probe_not_delivered:/support|q|form",
+      "transport_error:header_injection:probe_not_delivered:/dashboard|widget|form",
+      "transport_error:header_injection:probe_not_delivered:/dashboard|widget|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|a|form",
+      "transport_error:header_injection:probe_not_delivered:/dashboard|widget|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|b|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|b|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|b|form",
+      "transport_error:header_injection:probe_not_delivered:/linkcheck|dest|form",
+      "transport_error:header_injection:probe_not_delivered:/linkcheck|dest|form",
+      "transport_error:header_injection:probe_not_delivered:/linkcheck|dest|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|b|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|b|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|b|form",
+      "dialog_wedged_check_deferred:ssti:http://127.0.0.1:49985/reviews:comment",
+      "transport_error:header_injection:probe_not_delivered:/login|username|form",
+      "page_recreated_after_dialog_flood:fired=34,wedged=False",
+      "transport_error:header_injection:probe_not_delivered:/login|username|form",
+      "transport_error:header_injection:probe_not_delivered:/login|username|form",
+      "dialog_wedged_check_deferred:path_traversal:http://127.0.0.1:49985/reviews:comment",
+      "page_recreated_after_dialog_flood:fired=52,wedged=False",
+      "transport_error:header_injection:probe_not_delivered:/reviews|comment|form",
+      "transport_error:header_injection:probe_not_delivered:/reviews|comment|form",
+      "dialog_wedged_check_deferred:header_injection:http://127.0.0.1:49985/reviews:comment",
+      "page_recreated_after_dialog_flood:fired=10,wedged=False",
+      "page_recreated_after_dialog_flood:fired=100,wedged=False",
+      "transport_error:header_injection:probe_not_delivered:/search|q|form",
+      "transport_error:header_injection:probe_not_delivered:/search|q|form",
+      "transport_error:header_injection:probe_not_delivered:/search|q|form",
+      "transport_error:header_injection:probe_not_delivered:/login|password|form",
+      "transport_error:header_injection:probe_not_delivered:/login|password|form",
+      "transport_error:header_injection:probe_not_delivered:/login|password|form",
+      "transport_error:header_injection:probe_not_delivered:http://127.0.0.1:49985|q|form",
+      "transport_error:header_injection:probe_not_delivered:http://127.0.0.1:49985|q|form",
+      "transport_error:header_injection:probe_not_delivered:http://127.0.0.1:49985|q|form",
+      "transport_error:header_injection:probe_not_delivered:/track|ref|form",
+      "transport_error:header_injection:probe_not_delivered:/comment|text|form",
+      "transport_error:header_injection:probe_not_delivered:/track|ref|form",
+      "transport_error:header_injection:probe_not_delivered:/comment|text|form",
+      "transport_error:header_injection:probe_not_delivered:/comment|text|form",
+      "transport_error:header_injection:probe_not_delivered:/track|ref|form",
+      "transport_error:header_injection:probe_not_delivered:/help|query|form",
+      "transport_error:header_injection:probe_not_delivered:/help|query|form",
+      "transport_error:header_injection:probe_not_delivered:/help|query|form",
+      "transport_error:header_injection:probe_not_delivered:/account/delete|item|form",
+      "transport_error:header_injection:probe_not_delivered:/account/delete|item|form",
+      "transport_error:header_injection:probe_not_delivered:/account/delete|item|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|a|form",
+      "transport_error:header_injection:probe_not_delivered:/notify|msg|form",
+      "transport_error:header_injection:probe_not_delivered:/notify|msg|form",
+      "transport_error:header_injection:probe_not_delivered:/notify|msg|form",
+      "transport_error:header_injection:probe_not_delivered:/dashboard|widget|form",
+      "transport_error:header_injection:probe_not_delivered:/dashboard|widget|form",
+      "transport_error:header_injection:probe_not_delivered:/dashboard|widget|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|a|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|b|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|b|form",
+      "transport_error:header_injection:probe_not_delivered:/compare|b|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|b|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|b|form",
+      "transport_error:header_injection:probe_not_delivered:/compare/safe|b|form"
+    ],
+    "valid": false
+  },
+  "metadata": {
+    "concurrency": 4,
+    "depth": 2,
+    "fast_mode": true,
+    "field_budget_s": 0,
+    "fixture": "tests.fixtures.realistic_site",
+    "llm_provider": "none",
+    "max_payloads": 8,
+    "measured_by": "scripts/measure_normal_scan_baseline.py"
+  },
+  "mode": "normal",
+  "overall_status": "INCOMPLETE",
+  "probe_accounting": {
+    "header_injection": {
+      "blocked": 0,
+      "check": "header_injection",
+      "errors": 89,
+      "executed": 219,
+      "outcomes": {
+        "unexecutable": 89
+      },
+      "planned": 219,
+      "skipped": 0
+    },
+    "open_redirect": {
+      "blocked": 0,
+      "check": "open_redirect",
+      "errors": 0,
+      "executed": 32,
+      "outcomes": {},
+      "planned": 32,
+      "skipped": 0
+    },
+    "path_traversal": {
+      "blocked": 0,
+      "check": "path_traversal",
+      "errors": 0,
+      "executed": 1203,
+      "outcomes": {
+        "matched": 1,
+        "no_match": 1200
+      },
+      "planned": 1203,
+      "skipped": 0
+    },
+    "sqli": {
+      "blocked": 0,
+      "check": "sqli",
+      "errors": 2,
+      "executed": 1325,
+      "outcomes": {
+        "matched": 4,
+        "no_match": 1317,
+        "unexecutable": 2
+      },
+      "planned": 1325,
+      "skipped": 0
+    },
+    "ssti": {
+      "blocked": 0,
+      "check": "ssti",
+      "errors": 2,
+      "executed": 753,
+      "outcomes": {
+        "matched": 1,
+        "no_match": 698,
+        "transport_error": 2
+      },
+      "planned": 753,
+      "skipped": 0
+    },
+    "xss": {
+      "blocked": 0,
+      "check": "xss",
+      "errors": 0,
+      "executed": 516,
+      "outcomes": {
+        "matched": 30,
+        "no_match": 416,
+        "skipped": 24
+      },
+      "planned": 540,
+      "skipped": 24
+    }
+  },
+  "safe_twin_precision": {
+    "false_positives": [],
+    "fp_total": 0,
+    "fpr": 0.0,
+    "safe_total": 15,
+    "tn_total": 15
+  },
+  "schema_version": 1,
+  "target_checks": [
+    "header_injection",
+    "open_redirect",
+    "path_traversal",
+    "sqli",
+    "ssti",
+    "xss"
+  ],
+  "total_attempts": 4048,
+  "unmeasured_checks": []
+}

@@ -818,11 +818,50 @@ class BaseScanner(ABC):
             record_kind="request",
             injection_key=field_key,
         )
-        manifest_count = len(manifest_requests)
-        if manifest_count != executed_count:
+        initial_count, has_duplicate = self._reconcile_manifest_requests(manifest_requests)
+
+        if has_duplicate or initial_count != executed_count:
             self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:{wave}:count_mismatch")
         elif not findings_count and not stopped_early and executed_count != planned_count:
             self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:{wave}:count_mismatch")
+
+    @classmethod
+    def _reconcile_manifest_requests(cls, manifest_requests: list[dict]) -> tuple[int, bool]:
+        """manifest のリクエスト群から initial 送信件数と二重送信の有無を算出する。
+
+        - 各送信（redirect の hop を含む）に記録された probe の identity（request_attempt_id）で相関する。
+        - 照合は「1 つの attempt あたり、最初の送信は 1 件」で数える。
+        - redirect の hop は、同じ attempt の後続として扱い、initial カウントから除外する。
+        - 同じ attempt から最初の送信が 2 件以上出た場合は、二重送信（duplicate）として検知する。
+
+        Returns:
+            (initial_count, has_duplicate_send)
+        """
+        all_ids = {r.get("attempt_id") for r in manifest_requests if r.get("attempt_id")}
+
+        def _is_hop(r: dict) -> bool:
+            rationale = str(r.get("rationale") or "")
+            if rationale.startswith("redirect_hop"):
+                return True
+            parent_id = r.get("parent_id") or ""
+            return bool(parent_id and parent_id in all_ids)
+
+        attempts: dict[str, list[dict]] = {}
+        for r in manifest_requests:
+            key = r.get("request_attempt_id") or r.get("attempt_id") or ""
+            attempts.setdefault(key, []).append(r)
+
+        initial_count = 0
+        has_duplicate = False
+
+        for key, reqs in attempts.items():
+            initials = [r for r in reqs if not _is_hop(r)]
+            if len(initials) > 1:
+                # 同じ attempt から最初の送信が 2 件以上出た（同一 attempt での二重送信）
+                has_duplicate = True
+            initial_count += len(initials)
+
+        return initial_count, has_duplicate
 
     def _payload_fingerprint(self, ip: Optional["InjectionPoint"], payload: Any) -> str:
         """InjectionPoint と payload から probe ledger / attempt ledger 用の指紋を算出する。"""

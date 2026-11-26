@@ -20,6 +20,7 @@ import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -391,9 +392,12 @@ class RequestLogger:
             # Submission payloads have no known carrier or sent request yet.
             if payload is not None:
                 rationale = f"payload_sha256={sha256_hex(payload)}; bytes={body_length(payload)}; {rationale}"
+            attempt_id = self.probe_ledger.next_attempt_id()
+            if not request_attempt_id and record_kind == "request":
+                request_attempt_id = attempt_id
             record = ProbeAttemptRecord(
                 scan_id=self.probe_ledger.scan_id,
-                attempt_id=self.probe_ledger.next_attempt_id(), role=role, parent_id=parent_id,
+                attempt_id=attempt_id, role=role, parent_id=parent_id,
                 check=check, injection_key=redact_excerpt(field), actor=actor,
                 started_at=req.get("timestamp") or time.time(),
                 ended_at=resp.get("timestamp"), request=request, response=response,
@@ -445,6 +449,7 @@ class RequestLogger:
                     baseline_attempt_ids=(), control_attempt_ids=(), parent_id="", transport=None,
                     payload_fingerprint: str = ""):
         from wscan.probe_ledger import sha256_hex
+        probe_attempt_id = uuid.uuid4().hex
         context = dict(logger=self, requests=[], role=role, check=check, wave=wave, parent_id=parent_id,
                        transport=transport,
                        field=sha256_hex(json.dumps([ip.stable_key_parts(), ip.parameter_id,
@@ -452,7 +457,10 @@ class RequestLogger:
                        completion_unit=self.probe_ledger.current_unit(),
                        baseline_attempt_ids=tuple(baseline_attempt_ids),
                        control_attempt_ids=tuple(control_attempt_ids),
-                       payload_fingerprint=payload_fingerprint)
+                       payload_fingerprint=payload_fingerprint,
+                       probe_attempt_id=probe_attempt_id,
+                       initial_request_id=None,
+                       last_request_id=None)
         token = _CURRENT_PROBE.set(context)
         try:
             yield context
@@ -471,16 +479,31 @@ class RequestLogger:
         except Exception as exc:
             self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
 
-    def begin_request(self, context, request, transport):
-        attempt = self.scoped_probe(context, pair={"request": request}, transport=transport,
-                                    record_kind="request", parent_id=context.get("parent_id", ""))
+    def begin_request(self, context, request, transport, *, is_redirect_hop=False, parent_id=""):
+        req_attempt_id = context.get("initial_request_id") or ""
+        rationale = f"redirect_hop_from:{parent_id}" if is_redirect_hop and parent_id else ""
+        related = (parent_id,) if is_redirect_hop and parent_id else ()
+        attempt = self.scoped_probe(
+            context,
+            pair={"request": request},
+            transport=transport,
+            record_kind="request",
+            parent_id=parent_id if is_redirect_hop else context.get("parent_id", ""),
+            request_attempt_id=req_attempt_id,
+            rationale=rationale,
+            related_attempt_ids=related,
+        )
         if attempt:
             context["requests"].append(attempt)
+            context["last_request_id"] = attempt
+            if context.get("initial_request_id") is None and not is_redirect_hop:
+                context["initial_request_id"] = attempt
         return attempt
 
     def observe_request(self, context, attempt, pair, transport):
+        req_attempt_id = context.get("initial_request_id") or attempt or ""
         return self.scoped_probe(context, pair=pair, transport=transport, sent=True,
-                                 parent_id=attempt or "", request_attempt_id=attempt or "",
+                                 parent_id=attempt or "", request_attempt_id=req_attempt_id,
                                  record_kind="observation")
 
     async def log_httpx_submission(self, request) -> None:
@@ -503,9 +526,23 @@ class RequestLogger:
                     body = None
                 req = {"method": request.method, "url": str(request.url),
                        "headers": dict(request.headers), "post_data": body, "timestamp": time.time()}
-                attempt_id = self.begin_request(context, req, context.get("transport") or Transport.HTTPX)
+
+                # httpx は追従時に元 request の extensions を引き継ぐ。同じ probe の印が付いた
+                # request だけを hop とし、URL・順序・先行 3xx からは推測しない。
+                is_redirect_hop = (
+                    request.extensions.get("vulix_probe_attempt_id") == context.get("probe_attempt_id")
+                )
+                parent_id = (context.get("last_request_id") or "") if is_redirect_hop else ""
+
+                attempt_id = self.begin_request(
+                    context, req, context.get("transport") or Transport.HTTPX,
+                    is_redirect_hop=is_redirect_hop,
+                    parent_id=parent_id,
+                )
                 request.extensions["vulix_probe_context"] = (context, req)
                 request.extensions["vulix_probe_submission"] = (self, attempt_id)
+                if not is_redirect_hop:
+                    request.extensions["vulix_probe_attempt_id"] = context.get("probe_attempt_id")
                 return
             request.extensions.pop("vulix_probe_context", None)
             attempt_id = self.log_probe(
@@ -553,7 +590,12 @@ class RequestLogger:
         from wscan.probe_ledger import ProbeRole, Transport
         context = request.get("_probe_context")
         if context is not None and context["logger"] is self:
-            return self.begin_request(context, request, Transport.PLAYWRIGHT)
+            is_redirect_hop = bool(request.get("_redirected_from_req_id"))
+            parent_id = (context.get("last_request_id") or "") if is_redirect_hop else ""
+            return self.begin_request(
+                context, request, Transport.PLAYWRIGHT,
+                is_redirect_hop=is_redirect_hop, parent_id=parent_id,
+            )
         return self.log_probe(
             role=ProbeRole.DISCOVER, transport=Transport.PLAYWRIGHT, actor="transport_capture",
             pair={"request": request},

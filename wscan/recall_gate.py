@@ -278,6 +278,26 @@ def evaluate_detection_gate(
     regressed_cases: tuple[str, ...] = ()
     removed_cases: tuple[str, ...] = ()
 
+    from wscan.normal_scan_scorecard import NormalScanScorecard, evaluate_normal_scan_gate
+    if isinstance(current, NormalScanScorecard) or (
+        isinstance(current, Mapping) and current.get("mode") == "normal" and "ground_truth_recall" in current
+    ):
+        v = evaluate_normal_scan_gate(current, baseline=baseline, max_fp=max_fp, allow_vacuous=allow_vacuous)
+        gt_rec = current.ground_truth_recall if isinstance(current, NormalScanScorecard) else current.get("ground_truth_recall", {})
+        return DetectionGateVerdict(
+            passed=v.passed,
+            reasons=v.reasons,
+            recall=v.recall,
+            fpr=v.fpr,
+            expected_total=int(gt_rec.get("expected_total", 0)),
+            attempted_cases=v.total_attempts,
+            incomplete_cases=1 if not v.passed and any("incomplete" in r.lower() or "unmeasured" in r.lower() for r in v.reasons) else 0,
+            fn=len(gt_rec.get("missed", ())),
+            fp=len(v.false_positives),
+            regressed_cases=v.regressed_checks,
+            removed_cases=v.dropped_attempt_checks,
+        )
+
     if isinstance(current, RecallReport):
         expected_total = current.expected_total
         matched_total = current.matched_total
