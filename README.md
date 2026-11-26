@@ -580,6 +580,8 @@ python3 main.py triage URL [options]
 | 各 `--*-model` / `--llm-base-url` | config / provider 既定 | モデルと互換 URL |
 | `-o, --output FILE` | なし | JSON 保存先 |
 
+環境変数 `WSCAN_LAYA=1`（既定 OFF）が有効で `laya` パッケージ（`requirements-laya.txt`）が利用可能な場合、フィールドごとのリスク評価に Laya 決定モデルの推論結果（`score`・`choice`・`advisory_source="laya"`）を参考情報（shadow 出力）として表示・記録します。shadow 出力は表示と記録にのみ利用され、トリアージ判定やスキャン計画には一切干渉しません。未導入時や推論エラー時は従来の散文 LLM 分析を維持して完全フォールバック（fail-open）し、フォールバック理由を記録します。また外部 LLM 送信バイト数を計測・記録します（shadow 出力時は散文分析を維持するため送信量は削減されず、削減済みとは表示しません）。
+
 ### `serve` — ダッシュボード常駐
 
 | オプション | 既定 | 内容 |

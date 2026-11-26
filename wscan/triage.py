@@ -216,6 +216,24 @@ class FieldRisk:
     likely_vulns: list[str]      # ordered by confidence
     risk_level: str              # critical / high / medium / low
     payloads: dict[str, list[str]]  # check_type → payload list
+    # Laya shadow advisory (optional fields)
+    laya_score: Optional[float] = None
+    laya_choice: Optional[str] = None
+    advisory_source: Optional[str] = None
+    # Aliases
+    score: Optional[float] = None
+    choice: Optional[str] = None
+
+    def __post_init__(self):
+        if self.laya_score is None and self.score is not None:
+            self.laya_score = self.score
+        elif self.score is None and self.laya_score is not None:
+            self.score = self.laya_score
+
+        if self.laya_choice is None and self.choice is not None:
+            self.laya_choice = self.choice
+        elif self.choice is None and self.laya_choice is not None:
+            self.choice = self.laya_choice
 
 
 @dataclass
@@ -233,6 +251,11 @@ class TriageReport:
     field_risks: list[FieldRisk] = dc_field(default_factory=list)
     page_risks: list[PageRisk] = dc_field(default_factory=list)
     llm_insights: str = ""
+    # Laya shadow status and transmission accounting
+    laya_status: Optional[str] = None  # "available", "disabled", "unavailable", "error"
+    laya_fallback_reason: Optional[str] = None
+    llm_bytes_sent: int = 0
+    llm_bytes_sent_without_laya: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -246,6 +269,11 @@ class TriageReport:
                     "likely_vulns": r.likely_vulns,
                     "risk_level": r.risk_level,
                     "payloads": r.payloads,
+                    "laya_score": r.laya_score,
+                    "laya_choice": r.laya_choice,
+                    "score": r.score,
+                    "choice": r.choice,
+                    "advisory_source": r.advisory_source,
                 }
                 for r in self.field_risks
             ],
@@ -260,6 +288,10 @@ class TriageReport:
                 for r in self.page_risks
             ],
             "llm_insights": self.llm_insights,
+            "laya_status": self.laya_status,
+            "laya_fallback_reason": self.laya_fallback_reason,
+            "llm_bytes_sent": self.llm_bytes_sent,
+            "llm_bytes_sent_without_laya": self.llm_bytes_sent_without_laya,
         }
 
 
@@ -365,6 +397,90 @@ def analyse_headers(headers: dict) -> list[str]:
             issues.append(f"Tech disclosure: {th}: {h[th]}")
 
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Laya shadow assessment (pure boundary, non-interfering)
+# ---------------------------------------------------------------------------
+
+LAYA_TRIAGE_QUESTIONS = {
+    "score": {
+        "type": "score",
+        "instructions": "Rate exploitability risk of this input field from 0.0 to 1.0",
+    },
+    "choice": {
+        "type": "choice",
+        "options": [
+            "sqli", "xss", "ssti", "os", "nosql", "path_traversal",
+            "ssrf", "open_redirect", "csrf", "other",
+        ],
+        "instructions": "Select the most likely vulnerability check type for this field",
+    },
+}
+
+
+def apply_laya_shadow(report: TriageReport) -> TriageReport:
+    """Evaluate Laya shadow scores for field risks without altering triage verdicts.
+
+    If Laya is disabled, unavailable, or encounters an error, the report remains
+    in fail-open state with fallback reason recorded. Existing deterministic
+    verdicts and prose LLM insights are preserved.
+    """
+    from wscan import laya_client
+
+    if not laya_client.enabled():
+        report.laya_status = "disabled"
+        report.laya_fallback_reason = "Laya is disabled (WSCAN_LAYA is not enabled)"
+        return report
+
+    if not laya_client.available():
+        report.laya_status = "unavailable"
+        report.laya_fallback_reason = "Laya is enabled but package/dependencies are unavailable"
+        return report
+
+    had_error = False
+    for fr in report.field_risks:
+        state = {
+            "url": fr.url,
+            "field_name": fr.field_name,
+            "field_type": fr.field_type,
+            "form_action": fr.form_action,
+            "likely_vulns": list(fr.likely_vulns),
+        }
+        try:
+            res = laya_client.decide(state, LAYA_TRIAGE_QUESTIONS)
+        except Exception as exc:
+            had_error = True
+            report.laya_fallback_reason = f"Laya decide exception: {exc}"
+            continue
+
+        if res is None:
+            had_error = True
+            continue
+
+        answers = res.get("answers", {}) if isinstance(res, dict) else {}
+        score_ans = answers.get("score", {}) if isinstance(answers, dict) else {}
+        choice_ans = answers.get("choice", {}) if isinstance(answers, dict) else {}
+        score_val = score_ans.get("score") if isinstance(score_ans, dict) else None
+        choice_val = choice_ans.get("choice") if isinstance(choice_ans, dict) else None
+
+        if isinstance(score_val, (int, float)):
+            fr.laya_score = float(score_val)
+            fr.score = fr.laya_score
+        if choice_val is not None:
+            fr.laya_choice = str(choice_val)
+            fr.choice = fr.laya_choice
+        fr.advisory_source = "laya"
+
+    if had_error:
+        report.laya_status = "error"
+        if not report.laya_fallback_reason:
+            report.laya_fallback_reason = "Laya inference returned None or incomplete answers for one or more fields"
+    else:
+        report.laya_status = "available"
+        report.laya_fallback_reason = None
+
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -511,9 +627,15 @@ class TriageEngine:
 
             await browser.close()
 
+        # Apply Laya shadow evaluation if configured (shadow output only)
+        apply_laya_shadow(self.report)
+
         # Optional LLM analysis
         if self.llm_provider != "none":
             self.report.llm_insights = await self._llm_analyse()
+        else:
+            self.report.llm_bytes_sent = 0
+            self.report.llm_bytes_sent_without_laya = 0
 
         return self.report
 
@@ -572,6 +694,10 @@ class TriageEngine:
                 "Mention which specific fields to target first and why."
             )
 
+            prompt_bytes = len(prompt.encode("utf-8"))
+            self.report.llm_bytes_sent = prompt_bytes
+            self.report.llm_bytes_sent_without_laya = prompt_bytes
+
             from wscan.llm_client import complete_text
 
             with pg.use_role("triage"):
@@ -600,6 +726,10 @@ def render_triage_report(report: TriageReport, console: Console) -> None:
 
     # ── Field-level risks ──────────────────────────────────────────────
     if report.field_risks:
+        has_laya = any(
+            r.advisory_source == "laya" or r.laya_score is not None or r.laya_choice is not None
+            for r in report.field_risks
+        )
         tbl = Table(
             title="[bold]Field-Level Risk Assessment[/bold]",
             box=rbox.ROUNDED,
@@ -612,6 +742,8 @@ def render_triage_report(report: TriageReport, console: Console) -> None:
         tbl.add_column("Risk", max_width=8)
         tbl.add_column("Likely Vulns", max_width=28)
         tbl.add_column("Recommended Payloads (top 2)", max_width=50, overflow="fold")
+        if has_laya:
+            tbl.add_column("Laya Shadow", max_width=24, overflow="fold")
 
         for r in sorted(
             report.field_risks,
@@ -625,14 +757,23 @@ def render_triage_report(report: TriageReport, console: Console) -> None:
                     payload_lines.append(f"[{v}] {plist[0]}")
             payload_str = "\n".join(payload_lines)
 
-            tbl.add_row(
+            row = [
                 r.url,
                 r.field_name,
                 r.field_type,
                 _risk_badge(r.risk_level),
                 vuln_str,
                 payload_str,
-            )
+            ]
+            if has_laya:
+                if r.laya_score is not None or r.laya_choice is not None:
+                    sc = f"{r.laya_score:.2f}" if r.laya_score is not None else "-"
+                    ch = r.laya_choice or "-"
+                    row.append(f"{ch} ({sc})")
+                else:
+                    row.append("-")
+
+            tbl.add_row(*row)
         console.print(tbl)
 
     # ── Page-level issues ─────────────────────────────────────────────
@@ -661,6 +802,26 @@ def render_triage_report(report: TriageReport, console: Console) -> None:
             title="[bold magenta]AI Attack Strategy[/bold magenta]",
             border_style="magenta",
         ))
+
+    # ── Transmission & Laya status ───────────────────────────────────
+    if report.laya_status and report.laya_status != "disabled":
+        status_note = f"Laya status: {report.laya_status}"
+        if report.laya_fallback_reason:
+            status_note += f" ({report.laya_fallback_reason})"
+        console.print(f"[dim]{status_note}[/dim]")
+
+    if report.llm_bytes_sent > 0 or report.llm_bytes_sent_without_laya > 0:
+        reduction = report.llm_bytes_sent_without_laya - report.llm_bytes_sent
+        if reduction > 0:
+            console.print(
+                f"[dim]External LLM transmission: {report.llm_bytes_sent} bytes "
+                f"({reduction} bytes reduced)[/dim]"
+            )
+        else:
+            console.print(
+                f"[dim]External LLM transmission: {report.llm_bytes_sent} bytes "
+                f"(shadow mode: prose LLM analysis retained, no transmission reduction)[/dim]"
+            )
 
     # ── Suggested scan command ────────────────────────────────────────
     vuln_counts: dict[str, int] = defaultdict(int)
