@@ -408,6 +408,7 @@ class AgentRunState:
     # 秘密を入れない（無塩 SHA-256 だと artifact から低エントロピー password を辞書攻撃できる）。
     auth_salt: str = ""
     auth_fingerprint: str = ""
+    notes: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -415,6 +416,8 @@ class AgentRunState:
         data["phase"] = self.phase.value
         data["work_queue"] = [item.to_dict() for item in self.work_queue]
         data["schema_version"] = SCHEMA_VERSION
+        if not self.notes:
+            data.pop("notes", None)
         return data
 
     @classmethod
@@ -433,6 +436,13 @@ class AgentRunState:
         values["scanner_evidence"] = scanner_evidence if isinstance(scanner_evidence, list) else []
         events = values.get("events", [])
         values["events"] = events if isinstance(events, list) else []
+        raw_notes = values.get("notes")
+        if isinstance(raw_notes, dict) and raw_notes:
+            from wscan.agent_jit_context import AgentStructuredNotes
+            parsed_notes = AgentStructuredNotes.from_dict(raw_notes)
+            values["notes"] = parsed_notes.to_dict()
+        else:
+            values["notes"] = {}
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in values.items() if k in known})
 
@@ -661,11 +671,13 @@ class AgentHarness:
         repeat_threshold: int = 3,
         secret_values: Iterable[str] = (),
         auth_secret_material: str = "",
+        agent_jit_context: bool = False,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.spec = spec
         self.repeat_threshold = max(2, int(repeat_threshold))
+        self.agent_jit_context = bool(agent_jit_context)
         self.state_path = self.output_dir / STATE_FILENAME
         self.trace_path = self.output_dir / TRACE_FILENAME
         self.manifest_path = self.output_dir / MANIFEST_FILENAME
@@ -705,6 +717,8 @@ class AgentHarness:
             for item in self.state.work_queue:
                 if item.status == WorkStatus.RUNNING:
                     item.status = WorkStatus.PLANNED
+            if self.agent_jit_context:
+                self.reconstruct_resume_note(checkpoint=False)
         else:
             if self.state_path.exists() or self.trace_path.exists():
                 raise ValueError(
@@ -1054,6 +1068,74 @@ class AgentHarness:
                 return
         self.state.scanner_evidence.append(safe)
         self.checkpoint()
+
+    def record_episode_note(
+        self,
+        *,
+        episode_id: str,
+        work_id: str,
+        role: str,
+        status: str,
+        summary: str,
+        evidence_ids: Iterable[str] = (),
+    ) -> dict:
+        """episode の要約ノートを記録し、checkpoint に原子的保存する。"""
+        role_str = role.value if hasattr(role, "value") else str(role or "")
+        if not self.agent_jit_context or role_str.lower() == "authenticator":
+            return {}
+        from wscan.agent_jit_context import AgentStructuredNotes, EpisodeNote
+        notes = AgentStructuredNotes.from_dict(getattr(self.state, "notes", {}))
+        safe_summary = _redact_bounded(self._redact_runtime(str(summary or "")))[:200]
+        safe_ev = tuple(dict.fromkeys(
+            self._redact_runtime(str(e)) for e in evidence_ids if str(e)
+        ))
+        note = EpisodeNote(
+            episode_id=str(episode_id),
+            work_id=str(work_id),
+            role=role_str,
+            status=str(status),
+            summary=safe_summary,
+            evidence_ids=safe_ev,
+            timestamp=time.time(),
+        )
+        notes.add_episode_note(note)
+        self.state.notes = notes.to_dict()
+        self.checkpoint()
+        return note.to_dict()
+
+    def reconstruct_resume_note(self, *, checkpoint: bool = True) -> dict:
+        """checkpoint から再開する際に状態要約ノートを再構成し、原子的保存する。"""
+        if not self.agent_jit_context:
+            return {}
+        from wscan.agent_jit_context import AgentStructuredNotes, ResumeNote
+        notes = AgentStructuredNotes.from_dict(getattr(self.state, "notes", {}))
+        completed = sum(1 for w in self.state.work_queue if w.status in {WorkStatus.COMPLETE, WorkStatus.REPRODUCED})
+        pending = sum(1 for w in self.state.work_queue if w.status in {WorkStatus.PLANNED, WorkStatus.RUNNING, WorkStatus.TRANSIENT_FAILURE, WorkStatus.INCONCLUSIVE})
+        confirmed = sum(1 for h in self.state.hypotheses if h.get("deterministic_confirmed") or h.get("source_label") == "agent_deterministic_confirmed")
+        unverified = sum(1 for h in self.state.hypotheses if not h.get("deterministic_confirmed") and h.get("source_label") != "agent_deterministic_confirmed")
+        active_gaps = tuple(dict.fromkeys(self.state.coverage_gaps + self.state.reviewer_gaps))
+        note = ResumeNote(
+            run_id=self.state.run_id,
+            checkpoint_generation=self.state.checkpoint_generation,
+            consumed_steps=self.state.consumed_steps,
+            remaining_steps=self.remaining_steps,
+            completed_work_count=completed,
+            pending_work_count=pending,
+            confirmed_findings_count=confirmed,
+            unverified_hypotheses_count=unverified,
+            active_gaps=active_gaps[:5],
+            timestamp=time.time(),
+        )
+        notes.add_resume_note(note)
+        self.state.notes = notes.to_dict()
+        if checkpoint:
+            self.checkpoint()
+        return note.to_dict()
+
+    def get_structured_notes(self):
+        """現在の構造化ノートを返す。"""
+        from wscan.agent_jit_context import AgentStructuredNotes
+        return AgentStructuredNotes.from_dict(getattr(self.state, "notes", {}))
 
     def update_hypothesis(
         self,
@@ -1472,4 +1554,6 @@ class AgentHarness:
             "verification_results": VERIFICATION_RESULTS_FILENAME,
             "events": EVENTS_FILENAME,
         }
+        if self.agent_jit_context and self.state.notes:
+            payload["notes"] = dict(self.state.notes)
         return self._atomic_write_json(self.manifest_path, payload)

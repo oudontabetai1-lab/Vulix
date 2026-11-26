@@ -205,6 +205,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["spa_crawl"]               = bool(f.get("spa_crawl",        False))
     cfg["auto_spa_crawl"]          = bool(f.get("auto_spa_crawl",   True))
     cfg["interactive_crawl_review"] = bool(f.get("interactive_crawl_review", False))
+    cfg["agent_jit_context"]       = bool(f.get("agent_jit_context", False))
 
     cfg["learning_file"]           = str(le.get("file", "") or "")
 
@@ -2010,6 +2011,11 @@ Examples:
         help="Resume the exact Agent run in --output using its checkpoint and remaining budget",
     )
     agent.add_argument(
+        "--jit-context", "--agent-jit-context", dest="agent_jit_context", action="store_true",
+        default=_CFG.get("agent_jit_context", False),
+        help="Agent の JIT コンテキストと構造化ノートを有効化（最小の高signal証拠のみを上限付きで供給）",
+    )
+    agent.add_argument(
         "--port", type=int, default=_CFG.get("port", 8765),
         help=f"Monitoring dashboard port (default: {_CFG.get('port', 8765)})",
     )
@@ -2567,6 +2573,7 @@ async def run_agent(args):
             storage_state=getattr(args, "storage_state", "") or "",
             resume=getattr(args, "resume", False),
             proxy=getattr(args, "proxy", "") or "",
+            agent_jit_context=getattr(args, "agent_jit_context", _CFG.get("agent_jit_context", False)),
         )
         return await engine.run()
 
@@ -2609,6 +2616,7 @@ async def run_agent(args):
                 storage_state=getattr(args, "storage_state", "") or "",
                 resume=getattr(args, "resume", False),
                 proxy=getattr(args, "proxy", "") or "",
+                agent_jit_context=getattr(args, "agent_jit_context", _CFG.get("agent_jit_context", False)),
             )
             dashboard_url = get_dashboard_url(
                 args.port,
@@ -3667,6 +3675,7 @@ async def run_serve(args):
             "ctf_mode": _CFG.get("ctf_mode", False),
             "tls_verify": _CFG.get("tls_verify", False),
             "allow_state_changing_probes": _CFG.get("allow_state_changing_probes", False),
+            "agent_jit_context": _CFG.get("agent_jit_context", False),
         },
     }
     # /api/config/defaults はフォーム初期値として dashboard へ返るが、未認証 serve では
@@ -3817,6 +3826,7 @@ async def run_serve(args):
                     totp_secret=cfg.get("mfa_totp_secret", "") or cfg.get("totp_secret", "") or "",
                     storage_state=cfg.get("storage_state", "") or "",
                     proxy=cfg.get("proxy", "") or "",
+                    agent_jit_context=bool(cfg.get("agent_jit_context", _CFG.get("agent_jit_context", False))),
                 )
                 agent_run_result, scan_aborted = await _run_with_abort_monitor(
                     lambda: _run_with_time_window_monitor(
@@ -3936,6 +3946,7 @@ async def run_serve(args):
                     totp_secret=cfg.get("mfa_totp_secret", "") or cfg.get("totp_secret", "") or "",
                     storage_state=cfg.get("storage_state", "") or "",
                     proxy=cfg.get("proxy", "") or "",
+                    agent_jit_context=bool(cfg.get("agent_jit_context", _CFG.get("agent_jit_context", False))),
                 )
                 handoff, continue_to_phase2 = (
                     await _run_hybrid_recon_with_retries(

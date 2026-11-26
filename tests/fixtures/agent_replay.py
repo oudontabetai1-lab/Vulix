@@ -351,30 +351,50 @@ def _classify(findings, scenario) -> dict:
             "safe_twin_fp": fp, "unexpected_findings": unexpected}
 
 
-async def run_scenario(scenario: dict, out_dir: Path) -> dict:
+async def run_scenario(scenario: dict, out_dir: Path, *, jit_context: bool = False) -> dict:
     """1 シナリオを再生し、replay gate の入力（oracle の測定値）を返す。"""
     net = LabNet()
     agent = LabAgent(tokens=scenario.get("tokens", ()), extra_headers=scenario.get("extra_headers"))
     outputs, hypotheses, findings = [], [], []
     events = scenario["events"]
     interrupt = scenario.get("interrupt_after")
-    harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)))
+    harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), agent_jit_context=jit_context)
     tools = AgentScannerTools(agent, harness, engine_factory=lambda check, h: LabEngine(net, check, h, agent))
     done = await _replay_events(
         events[:interrupt] if interrupt else events,
         net=net, agent=agent, harness=harness, tools=tools, outputs=outputs, hypotheses=hypotheses,
     )
+    if jit_context:
+        for idx, w in enumerate(harness.state.work_queue):
+            harness.record_episode_note(
+                episode_id=f"ep-{idx}",
+                work_id=w.work_id,
+                role=w.role.value if hasattr(w.role, "value") else str(w.role),
+                status=w.status.value if hasattr(w.status, "value") else str(w.status),
+                summary=f"work item {w.work_id} status {w.status}",
+                evidence_ids=w.evidence_ids,
+            )
     sent_before_resume = len(net.probes)
     urls_before_resume = {p["url"].split("?")[0] for p in net.probes}
     if interrupt:
         # 中断（プロセス終了）→ 同じ出力先から resume。完了済み work は再送しない。
         findings.extend(tools.agent_findings())
-        harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), resume=True)
+        harness = AgentHarness(out_dir, _spec(scenario.get("max_steps", 60)), resume=True, agent_jit_context=jit_context)
         tools = AgentScannerTools(agent, harness, engine_factory=lambda check, h: LabEngine(net, check, h, agent))
         await _replay_events(
             events, net=net, agent=agent, harness=harness, tools=tools, outputs=outputs,
             hypotheses=hypotheses, start=done,
         )
+        if jit_context:
+            for idx, w in enumerate(harness.state.work_queue[len(harness.state.notes.get("episode_notes", [])):]):
+                harness.record_episode_note(
+                    episode_id=f"ep-resume-{idx}",
+                    work_id=w.work_id,
+                    role=w.role.value if hasattr(w.role, "value") else str(w.role),
+                    status=w.status.value if hasattr(w.status, "value") else str(w.status),
+                    summary=f"resumed work item {w.work_id} status {w.status}",
+                    evidence_ids=w.evidence_ids,
+                )
     findings.extend(tools.agent_findings())
     complete = harness.coverage_complete
     llm_success = scenario.get("llm_success", complete)
@@ -384,6 +404,30 @@ async def run_scenario(scenario: dict, out_dir: Path) -> dict:
         coverage_gaps=list(harness.state.coverage_gaps), incomplete_reason="",
     ))
     kept = {h.get("candidate_id") for h in harness.state.hypotheses}
+
+    # 本番の _build_work_task 経路を用いたプロンプト文字数・トークン数の計測
+    from wscan.llm_agent_browser import AgentBrowserScanner
+    from wscan.agent_harness import AgentRole, AgentWorkItem
+    from wscan.agent_jit_context import estimate_tokens
+    raw_texts = [json.dumps(ev, default=str) for ev in events]
+    rev_work = AgentWorkItem(
+        work_id="work-rev-replay",
+        role=AgentRole.ADVERSARIAL_REVIEWER,
+        target=LAB + "/",
+    )
+    scanner_base = AgentBrowserScanner(target_url=LAB + "/", agent_jit_context=False)
+    scanner_base._harness = harness
+    baseline_prompt = scanner_base._build_work_task(rev_work, raw_texts)
+
+    scanner_jit = AgentBrowserScanner(target_url=LAB + "/", agent_jit_context=True)
+    scanner_jit._harness = harness
+    jit_prompt = scanner_jit._build_work_task(rev_work, raw_texts)
+
+    prompt_chars_base = len(baseline_prompt)
+    prompt_chars_jit = len(jit_prompt)
+    prompt_toks_base = estimate_tokens(baseline_prompt)
+    prompt_toks_jit = estimate_tokens(jit_prompt)
+
     return {
         "scenario": scenario["name"],
         **_classify(findings, scenario),
@@ -403,6 +447,10 @@ async def run_scenario(scenario: dict, out_dir: Path) -> dict:
         ) if interrupt else None,
         "hypothesis_labels": {h.get("candidate_id"): h.get("source_label") for h in harness.state.hypotheses},
         "outputs": outputs,
+        "prompt_chars_baseline": prompt_chars_base,
+        "prompt_chars_jit": prompt_chars_jit,
+        "prompt_tokens_baseline": prompt_toks_base,
+        "prompt_tokens_jit": prompt_toks_jit,
     }
 
 

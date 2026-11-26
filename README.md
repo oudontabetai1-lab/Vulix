@@ -553,6 +553,7 @@ Agent / Hybrid 偵察はローカルのテキスト専用モデルでも DOM・�
 | `--header-file FILE` | 空 | JSON/YAML/1行1ヘッダ形式 |
 | `-o, --output DIR` | `output/agent_<timestamp>/` | 出力先 |
 | `--resume` | 無効 | `--output DIR` の checkpoint から、同一条件・残予算で再開 |
+| `--jit-context` | 無効 | Agent の JIT コンテキストと構造化ノートを有効化（`features.agent_jit_context`、既定: false） |
 | `--report-lang ja\|en` | `output.language` (既定 `ja`) | Agent HTML レポートの出力言語 |
 | `--port PORT` | `8765` | モニターポート |
 | `--no-monitor`, `--no-open-report` | 無効 | モニター/自動表示を無効化（モニター有効時は `/app#/monitor?scan=<scan_id>` を自動表示） |

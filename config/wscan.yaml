@@ -295,6 +295,9 @@ features:
   # スキャン中に外部 API へ製品名を送信する＝ネット非依存でなくなるため opt-in）。
   component_intel: false
 
+  # Agent の JIT コンテキストと構造化ノート（最小の高signal証拠のみを上限付きで供給、既定: false）
+  agent_jit_context: false
+
   # 以下は CLI フラグで制御する運用機能（設定ファイルでは管理しない）:
   #   --api-spec FILE            API ファースト検査（OpenAPI/Swagger/Postman 取り込み）
   #   --resume DIR / --no-checkpoint  再開可能スキャン（checkpoint.json）

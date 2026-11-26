@@ -173,6 +173,7 @@ class AgentEngine:
         proxy: str = "",
         llm_timeout_seconds: float = 30.0,
         agent_vision: str = "auto",
+        agent_jit_context: bool = False,
     ):
         self.url = url.rstrip("/")
         from .i18n import normalize_lang
@@ -187,6 +188,7 @@ class AgentEngine:
         self.auth_pass = auth_pass
         self.login_url = login_url
         self.agent_vision = agent_vision
+        self.agent_jit_context = bool(agent_jit_context)
         self.max_steps = max_steps
         self.open_report = open_report
         self.monitor = monitor
@@ -294,6 +296,7 @@ class AgentEngine:
             resume=self.resume,
             proxy=self.proxy,
             llm_timeout_seconds=self.llm_timeout_seconds,
+            agent_jit_context=self.agent_jit_context,
         )
 
         result: AgentScanResult = await scanner.run()
@@ -516,6 +519,7 @@ class AgentEngine:
             resume=self.resume,
             proxy=self.proxy,
             llm_timeout_seconds=self.llm_timeout_seconds,
+            agent_jit_context=self.agent_jit_context,
         )
 
         result = await scanner.run()
