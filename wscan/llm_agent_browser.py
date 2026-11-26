@@ -910,6 +910,7 @@ class AgentBrowserScanner:
         request_logger: Any = None,
         agent_vision: str = "auto",
         agent_jit_context: bool = False,
+        information_gain_shadow: bool = False,
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
         raw_target_url = str(target_url or "").strip()
@@ -922,6 +923,7 @@ class AgentBrowserScanner:
         self.target_url = _normalize_agent_url(target_url)
         self.agent_vision = agent_vision
         self.agent_jit_context = bool(agent_jit_context)
+        self.information_gain_shadow = bool(information_gain_shadow)
         decide_agent_vision(agent_vision)
         self.llm_provider = llm_provider
         self.llm_model = llm_model
@@ -1956,6 +1958,7 @@ class AgentBrowserScanner:
                     ),
                     auth_secret_material=self._auth_secret_material(),
                     agent_jit_context=self.agent_jit_context,
+                    information_gain_shadow=self.information_gain_shadow,
                 )
             except ValueError as exc:
                 result.error = str(exc)
