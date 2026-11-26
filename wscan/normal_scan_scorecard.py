@@ -105,6 +105,7 @@ class LedgerIntegrity:
     quarantined: bool = False
     count_mismatches: tuple[str, ...] = ()
     gaps: tuple[str, ...] = ()
+    planned_deficits: tuple[str, ...] = ()
     unattributed_notes: tuple[str, ...] = ()
     valid: bool = True
 
@@ -114,6 +115,7 @@ class LedgerIntegrity:
             "quarantined": self.quarantined,
             "count_mismatches": list(self.count_mismatches),
             "gaps": list(self.gaps),
+            "planned_deficits": list(self.planned_deficits),
             "unattributed_notes": list(self.unattributed_notes),
             "valid": self.valid,
         }
@@ -231,6 +233,7 @@ class NormalScanScorecard:
             "quarantined": bool(raw_integrity.get("quarantined", False)),
             "count_mismatches": tuple(raw_integrity.get("count_mismatches", ())),
             "gaps": tuple(raw_integrity.get("gaps", ())),
+            "planned_deficits": tuple(raw_integrity.get("planned_deficits", ())),
             "unattributed_notes": tuple(raw_integrity.get("unattributed_notes", ())),
             "valid": bool(raw_integrity.get("valid", True)),
         }
@@ -395,6 +398,7 @@ def build_normal_scan_scorecard(
         }
         attempt_counts[ch] = 0
 
+    planned_deficits: list[str] = []
     if ledger_records:
         for r in ledger_records:
             ch = str(r.get("check", "") if isinstance(r, Mapping) else getattr(r, "check", ""))
@@ -442,6 +446,16 @@ def build_normal_scan_scorecard(
             if entry["planned"] == 0:
                 entry["planned"] = exec_cnt + entry["skipped"] + entry["blocked"]
 
+            planned = entry.get("planned", 0)
+            executed = entry.get("executed", 0)
+            blocked = entry.get("blocked", 0)
+            skipped = entry.get("skipped", 0)
+            accounted = executed + blocked + skipped
+            if planned > accounted:
+                planned_deficits.append(
+                    f"{ch}: planned={planned} > accounted={accounted} (executed={executed}, blocked={blocked}, skipped={skipped})"
+                )
+
     total_attempts = sum(attempt_counts.values())
 
     # 5. Ledger integrity の検証
@@ -455,11 +469,23 @@ def build_normal_scan_scorecard(
         if isinstance(ledger_manifest, Mapping):
             had_write_error = bool(ledger_manifest.get("had_write_error", False))
             quarantined = bool(ledger_manifest.get("quarantined", False))
-            gaps = [str(e.get("error", "")) for e in ledger_manifest.get("write_errors", []) if e.get("outcome") == "gap"]
+            gaps = [
+                str(e.get("error", ""))
+                for e in ledger_manifest.get("write_errors", [])
+                if isinstance(e, Mapping) and e.get("outcome") == "gap"
+            ]
+            if not gaps and "gaps" in ledger_manifest:
+                gaps = [str(g) for g in ledger_manifest.get("gaps", [])]
         else:
             had_write_error = bool(getattr(ledger_manifest, "had_write_error", False))
             quarantined = bool(getattr(ledger_manifest, "quarantined", False))
             gaps = [str(g) for g in getattr(ledger_manifest, "gaps", [])]
+            if not gaps and hasattr(ledger_manifest, "write_errors"):
+                gaps = [
+                    str(e.get("error", ""))
+                    for e in getattr(ledger_manifest, "write_errors", [])
+                    if isinstance(e, Mapping) and e.get("outcome") == "gap"
+                ]
 
     if wave_errors:
         for err in wave_errors:
@@ -473,16 +499,16 @@ def build_normal_scan_scorecard(
             else:
                 unattributed_notes.append(err_str)
 
-    ledger_valid = not had_write_error and not quarantined and not count_mismatches
+    ledger_valid = not had_write_error and not quarantined and not count_mismatches and not gaps and not planned_deficits
 
-    # 6. 未計測 check の検出
+    # 6. 未計測 check の検出（試行数 0 の check は未計測。測れないものは None、green 扱いしない）
     unmeasured: list[str] = []
     for ch in effective_targets:
-        ch_exp = by_check_recall.get(ch, {}).get("expected", 0)
         ch_att = attempt_counts.get(ch, 0)
-        # ground truth に存在するか試行があるべき check で attempt も expected も 0
-        if ch_exp == 0 and ch_att == 0:
+        if ch_att == 0:
             unmeasured.append(ch)
+            if ch in by_check_recall:
+                by_check_recall[ch]["recall"] = None
 
     # 7. Overall status
     if not ledger_valid or unmeasured:
@@ -522,6 +548,7 @@ def build_normal_scan_scorecard(
             "quarantined": quarantined,
             "count_mismatches": tuple(count_mismatches),
             "gaps": tuple(gaps),
+            "planned_deficits": tuple(planned_deficits),
             "unattributed_notes": tuple(unattributed_notes),
             "valid": ledger_valid,
         },
@@ -536,6 +563,7 @@ def evaluate_normal_scan_gate(
     *,
     max_fp: int = 0,
     allow_vacuous: bool = False,
+    require_baseline: bool = True,
 ) -> NormalScanGateVerdict:
     """通常スキャンの検出非回帰ゲート判定純粋関数。
 
@@ -546,7 +574,7 @@ def evaluate_normal_scan_gate(
     3) False Positive（誤検知）: safe twin での検出（fp > max_fp）または baseline 比増加。
     4) Attempt 数の低下: baseline と比較して総 attempt 数または個別 check の attempt 数が低下
        （送るはずの payload が黙って減ること＝偽陰性）。
-    5) Probe ledger 不整合: 台帳 write_error、quarantine、または count_mismatch。
+    5) Probe ledger 不整合: 台帳 write_error、quarantine、count_mismatch、gap、または planned 欠落。
     """
     card = current if isinstance(current, NormalScanScorecard) else NormalScanScorecard.from_dict(current)
     base_card = (
@@ -560,6 +588,10 @@ def evaluate_normal_scan_gate(
     dropped_attempt_checks: list[str] = []
     ledger_violations: list[str] = []
 
+    # 0. Baseline 必須性の検証
+    if base_card is None and require_baseline:
+        reasons.append("Missing baseline scorecard: non-regression gate requires baseline comparison")
+
     # 1. 空虚合格・未計測の拒絶
     gt_recall = card.ground_truth_recall
     expected_total = gt_recall.get("expected_total", 0)
@@ -570,6 +602,9 @@ def evaluate_normal_scan_gate(
     fpr = safe_prec.get("fpr")
     fp_total = safe_prec.get("fp_total", 0)
 
+    if card.unmeasured_checks:
+        reasons.append(f"Unmeasured target checks present: {', '.join(card.unmeasured_checks)}")
+
     if not allow_vacuous:
         if expected_total == 0 or recall is None:
             reasons.append("Empty expected ground truth: recall is None (vacuous pass rejected)")
@@ -577,8 +612,6 @@ def evaluate_normal_scan_gate(
             reasons.append("Empty safe twin ground truth: fpr is None (safe endpoints not evaluated)")
         if card.total_attempts == 0:
             reasons.append("Zero probe attempts executed: total_attempts == 0")
-        if card.unmeasured_checks:
-            reasons.append(f"Unmeasured target checks present: {', '.join(card.unmeasured_checks)}")
 
     # 2. Ground truth recall の検証（見逃し0・非回帰）
     missed = gt_recall.get("missed", [])
@@ -632,18 +665,55 @@ def evaluate_normal_scan_gate(
                 )
                 dropped_attempt_checks.append(ch)
 
-    # 5. Probe ledger の整合性検証
+    # 5. Probe ledger の整合性検証（保存された valid フラグを鵜呑みにせず実値を直接検査）
     integrity = card.ledger_integrity
-    if not integrity.get("valid", True):
-        if integrity.get("had_write_error") or integrity.get("quarantined"):
-            reasons.append("Probe ledger write error or quarantine detected (evidence incomplete)")
-            ledger_violations.append("ledger_write_error_or_quarantined")
-        for cm in integrity.get("count_mismatches", ()):
-            reasons.append(f"Probe ledger count mismatch: {cm}")
-            ledger_violations.append(cm)
-        for g in integrity.get("gaps", ()):
-            reasons.append(f"Probe ledger gap: {g}")
-            ledger_violations.append(g)
+    had_write_err = bool(integrity.get("had_write_error", False))
+    is_quarantined = bool(integrity.get("quarantined", False))
+    count_mismatches = list(integrity.get("count_mismatches", ()))
+    gaps = list(integrity.get("gaps", ()))
+    planned_deficits = list(integrity.get("planned_deficits", ()))
+    stored_valid = integrity.get("valid")
+
+    if had_write_err or is_quarantined:
+        reasons.append("Probe ledger write error or quarantine detected (evidence incomplete)")
+        ledger_violations.append("ledger_write_error_or_quarantined")
+    for cm in count_mismatches:
+        reasons.append(f"Probe ledger count mismatch: {cm}")
+        ledger_violations.append(str(cm))
+    for g in gaps:
+        reasons.append(f"Probe ledger gap: {g}")
+        ledger_violations.append(str(g))
+    for pd in planned_deficits:
+        reasons.append(f"Probe ledger planned probes deficit: {pd}")
+        ledger_violations.append(str(pd))
+
+    # planned > accounted の欠落を probe_accounting から直接照合
+    for ch, acc in card.probe_accounting.items():
+        planned = acc.get("planned", 0)
+        executed = acc.get("executed", 0)
+        blocked = acc.get("blocked", 0)
+        skipped = acc.get("skipped", 0)
+        accounted = executed + blocked + skipped
+        if planned > accounted:
+            msg = f"Planned probes exceeded executed for check '{ch}': planned={planned} > accounted={accounted}"
+            reasons.append(msg)
+            ledger_violations.append(f"probe_loss:{ch}")
+
+    # valid フラグとの整合性検証
+    has_violations = bool(
+        had_write_err
+        or is_quarantined
+        or count_mismatches
+        or gaps
+        or planned_deficits
+        or any(v.startswith("probe_loss:") for v in ledger_violations)
+    )
+    if has_violations and stored_valid is True:
+        reasons.append("Probe ledger integrity corruption: violations present but valid flag is True")
+        ledger_violations.append("valid_flag_corruption")
+    elif not has_violations and stored_valid is False:
+        reasons.append("Probe ledger integrity inconsistency: no violations present but valid flag is False")
+        ledger_violations.append("valid_flag_inconsistency")
 
     passed = len(reasons) == 0
     return NormalScanGateVerdict(

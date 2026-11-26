@@ -471,9 +471,13 @@ class RequestLogger:
         except Exception as exc:
             self.probe_ledger.manifest.note_gap(f"probe_observation_error:{type(exc).__name__}")
 
-    def begin_request(self, context, request, transport):
+    def begin_request(self, context, request, transport, *, redirected_from=None):
+        parent_id = redirected_from or context.get("parent_id", "")
+        rationale = f"redirect_hop_from:{redirected_from}" if redirected_from else ""
+        related_attempt_ids = (redirected_from,) if redirected_from else ()
         attempt = self.scoped_probe(context, pair={"request": request}, transport=transport,
-                                    record_kind="request", parent_id=context.get("parent_id", ""))
+                                    record_kind="request", parent_id=parent_id,
+                                    rationale=rationale, related_attempt_ids=related_attempt_ids)
         if attempt:
             context["requests"].append(attempt)
         return attempt
@@ -503,7 +507,11 @@ class RequestLogger:
                     body = None
                 req = {"method": request.method, "url": str(request.url),
                        "headers": dict(request.headers), "post_data": body, "timestamp": time.time()}
-                attempt_id = self.begin_request(context, req, context.get("transport") or Transport.HTTPX)
+                redirected_from = context.pop("_pending_redirect_from", None)
+                attempt_id = self.begin_request(
+                    context, req, context.get("transport") or Transport.HTTPX,
+                    redirected_from=redirected_from,
+                )
                 request.extensions["vulix_probe_context"] = (context, req)
                 request.extensions["vulix_probe_submission"] = (self, attempt_id)
                 return
@@ -535,6 +543,8 @@ class RequestLogger:
                     "url": str(response.url), "headers": dict(response.headers), "timestamp": time.time()}},
                     context.get("transport") or Transport.HTTPX)
                 response.extensions["vulix_probe_observation"] = (self, observation_id)
+                if getattr(response, "is_redirect", False) or (300 <= response.status_code < 400):
+                    context["_pending_redirect_from"] = attempt_id
                 return
             observation_id = self.log_probe(
                 role=ProbeRole.DISCOVER, transport=Transport.HTTPX, actor="transport_capture",

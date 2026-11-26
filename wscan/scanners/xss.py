@@ -362,11 +362,13 @@ class XSSScanner(BaseScanner):
             await asyncio.sleep(0.2 * self.sleep_factor)
             return False
 
+        found_vuln = False
         for payload in payloads:
             if auth_lost[0]:
                 break
             executed_standard_count += 1
             if await _test_payload(payload):
+                found_vuln = True
                 break  # Found vulnerability, move to next field
 
         # ── probe ledger 整合性検証（第 2 スライス: xss standard sweep） ──
@@ -375,7 +377,7 @@ class XSSScanner(BaseScanner):
             "standard",
             planned_count=planned_standard_count,
             executed_count=executed_standard_count,
-            findings_count=len(findings),
+            findings_count=len(findings) if findings else (1 if found_vuln else 0),
             stopped_early=bool(auth_lost[0]),
         )
 

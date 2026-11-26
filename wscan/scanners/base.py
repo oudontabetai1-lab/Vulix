@@ -818,11 +818,49 @@ class BaseScanner(ABC):
             record_kind="request",
             injection_key=field_key,
         )
-        manifest_count = len(manifest_requests)
+        initial_requests = [
+            r for r in manifest_requests
+            if not self._is_redirect_hop_request(r, manifest_requests, ledger)
+        ]
+        manifest_count = len(initial_requests)
+
         if manifest_count != executed_count:
             self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:{wave}:count_mismatch")
         elif not findings_count and not stopped_early and executed_count != planned_count:
             self._record_scan_note(f"probe_ledger_incomplete:{self.CHECK_TYPE}:{wave}:count_mismatch")
+
+    @staticmethod
+    def _is_redirect_hop_request(record: dict, all_records: list[dict], ledger=None) -> bool:
+        """台帳リクエストが redirect による二次ホップかどうかを判定する（純粋判定）。
+
+        リダイレクト（HTTP 3xx 追従）によって生じた二次リクエストのみを除外し、
+        スキャナが同一 payload を複数回 dispatch した場合（本当の二重送信）は
+        initial として残るため count_mismatch が検知される。
+        """
+        rationale = str(record.get("rationale") or "")
+        if rationale.startswith("redirect_hop"):
+            return True
+        parent_id = record.get("parent_id") or ""
+        all_ids = {r.get("attempt_id") for r in all_records if r.get("attempt_id")}
+        if parent_id and parent_id in all_ids:
+            return True
+        # ledger 観測イベントから先行リクエストの 3xx 判定
+        if ledger is not None and hasattr(ledger, "events"):
+            try:
+                rec_idx = all_records.index(record) if record in all_records else -1
+                if rec_idx > 0:
+                    prev_attempt = all_records[rec_idx - 1].get("attempt_id")
+                    if prev_attempt:
+                        for ev in ledger.events.values():
+                            if (ev.get("record_kind") == "observation"
+                                    and (ev.get("request_attempt_id") == prev_attempt or ev.get("parent_id") == prev_attempt)):
+                                resp = ev.get("response") or {}
+                                status = resp.get("status") if isinstance(resp, dict) else getattr(resp, "status", None)
+                                if status is not None and (300 <= int(status) < 400):
+                                    return True
+            except Exception:
+                pass
+        return False
 
     def _payload_fingerprint(self, ip: Optional["InjectionPoint"], payload: Any) -> str:
         """InjectionPoint と payload から probe ledger / attempt ledger 用の指紋を算出する。"""

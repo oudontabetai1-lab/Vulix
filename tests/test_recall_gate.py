@@ -403,6 +403,6 @@ def test_evaluate_detection_gate_with_normal_scan_scorecard():
     assert verdict.recall == 1.0
     assert verdict.fpr == 0.0
     assert verdict.expected_total == 11
-    assert verdict.attempted_cases == 222
+    assert verdict.attempted_cases == 4056
 
 

@@ -337,12 +337,24 @@ class EndToEndRealisticScanTests(unittest.TestCase):
                     except Exception:
                         pass
 
+        logger = getattr(self.engine, "request_logger", None)
+        ledger = getattr(logger, "probe_ledger", None) if logger else None
+        manifest = getattr(ledger, "manifest", None) if ledger else None
+        if manifest is None:
+            manifest_path = Path(self._tmp.name) / "probe_attempts_manifest.json"
+            if manifest_path.is_file():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
         scorecard = build_normal_scan_scorecard(
             findings=self.findings,
             expected_findings=EXPECTED_FINDINGS,
             safe_endpoints=SAFE_ENDPOINTS,
             target_checks=CHECKS,
             ledger_records=records,
+            ledger_manifest=manifest,
             wave_errors=getattr(self.engine, "wave_errors", []),
         )
         baseline_path = Path(__file__).resolve().parents[1] / "benchmarks" / "baselines" / "normal_scan_realistic_site.json"
