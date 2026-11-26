@@ -1743,7 +1743,7 @@ def test_template_url_query_values_are_not_persisted_and_reobtained_on_send(tmp_
         assert "q=test" in called_url
 
         # 3. points, state, events, probe_attempts に secret_tok_123 が出現しない
-        all_text = " ".join(_all_persisted(tmp_path))
+        all_text = _all_persisted(tmp_path)
         assert "secret_tok_123" not in all_text
 
         # 4. 再開 (resume) の検証: メモリキャッシュを消して disk から再構築し、scanner.captured_templates から再取得して成功
@@ -1972,7 +1972,7 @@ def test_userinfo_credentials_never_appear_in_persisted_files(tmp_path):
         assert res["status"] == "completed"
 
         # 3. points, state, events, probe_attempts の全ファイル検査
-        all_text = " ".join(_all_persisted(tmp_path))
+        all_text = _all_persisted(tmp_path)
         assert secret_user not in all_text
         assert secret_pass not in all_text
         assert "SecretTok771" not in all_text
@@ -1983,3 +1983,114 @@ def test_userinfo_credentials_never_appear_in_persisted_files(tmp_path):
         assert sent_tmpl["url"] == raw_url
 
     asyncio.run(scenario())
+
+
+def test_probe_attempts_never_contain_header_body_query_or_userinfo_values(tmp_path):
+    """probe_attempts.jsonl の全文に、template のヘッダ・body・クエリ・userinfo の値が出ないこと。
+
+    送信 URL（取り直した live template の URL）を probe 記録へ書く退行を検出する。
+    """
+    values = {
+        "user": "ProbeUserinfoName41",
+        "pass": "ProbeUserinfoPass42",
+        "sig": "ProbeQuerySigValue43",
+        "tok": "ProbeQueryTokValue44",
+        "body": "ProbeBodyLeafValue45",
+        "hdr": "ProbeHeaderValue46",
+        "auth": "ProbeAuthHeaderValue47",
+    }
+
+    async def scenario():
+        engines = []
+
+        def factory(check, handoff):
+            engine = _FakeEngine(check, handoff)
+            engines.append(engine)
+            return engine
+
+        raw_url = (
+            f"https://{values['user']}:{values['pass']}@target.test/api/submit"
+            f"?sig={values['sig']}&access_token={values['tok']}"
+        )
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session-probe", "domain": "target.test"}])
+        tools = AgentScannerTools(scanner, _harness(tmp_path), engine_factory=factory)
+        tmpl = {
+            "url": raw_url,
+            "method": "POST",
+            "json_body": {"q": "x", "note": values["body"]},
+            "headers": {"X-Custom": values["hdr"], "Authorization": f"Basic {values['auth']}"},
+        }
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/submit", "/q", template_id="tmpl_probe")
+        point_id = tools.add_point(point, {"name": "/q", "template": tmpl})
+        work_id = tools.schedule_scanner(point_id, "sqli")["work_id"]
+        res = await tools.run_scanner_work(work_id)
+        assert res["status"] == "completed"
+        # 送信自体は取り直した実 URL を使っている（値は送信にだけ使われる）
+        assert engines[0].injection_templates["tmpl_probe"]["url"] == raw_url
+
+    asyncio.run(scenario())
+    ledger = (tmp_path / "probe_attempts.jsonl").read_text(encoding="utf-8")
+    assert ledger.strip(), "probe attempt must be recorded"
+    leaked = [name for name, value in values.items() if value in ledger]
+    assert not leaked, leaked
+
+
+def test_real_scan_engine_json_template_unrecoverable_on_resume_is_blocked_with_reason(tmp_path):
+    """本番の AgentBrowserScanner（取り直し元を持たない）と既定の ScanEngine 生成経路で、
+    resume 後に JSON template を取り直せないときは送らず BLOCKED とし、理由を記録する。"""
+    from wscan.llm_agent_browser import AgentBrowserScanner
+
+    def production_scanner():
+        scanner = AgentBrowserScanner(
+            target_url="https://target.test/",
+            target_urls=["https://target.test/"],
+            access_urls=["https://target.test/login"],
+            login_url="https://target.test/login",
+        )
+        # ブラウザだけ差し替える（認証済みセッション）。template の取り直し機能は本番のまま
+        scanner._active_session = _PageSession("https://target.test/app")
+
+        async def capture_cookies(_session):
+            return [{"name": "session", "value": "fresh-session-prod", "domain": "target.test"}]
+
+        scanner._capture_cookies = capture_cookies
+        return scanner
+
+    async def scenario():
+        tmpl = {"url": "https://target.test/api/items", "method": "POST", "json_body": {"q": "a", "sort_key": "asc"}}
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/items", "/q", template_id="tmpl_prod")
+        first = AgentScannerTools(production_scanner(), _harness(tmp_path))
+        point_id = first.add_point(point, {"name": "/q", "template": tmpl})
+        work_id = first.schedule_scanner(point_id, "sqli")["work_id"]
+
+        # 別プロセスの resume を模す: メモリ上の template は無く、本番 scanner にも取り直し元が無い
+        harness = _harness(tmp_path, resume=True)
+        resumed = AgentScannerTools(production_scanner(), harness)
+        built = []
+        default_factory = resumed.engine_factory  # 既定＝実 ScanEngine を生成する本番経路
+
+        def spy(check, handoff):
+            engine = default_factory(check, handoff)
+            built.append(engine)
+            return engine
+
+        resumed.engine_factory = spy
+        res = await resumed.run_scanner_work(work_id)
+        return res, harness, built, work_id
+
+    res, harness, built, work_id = asyncio.run(scenario())
+    reason = "live request template is unavailable in the current agent session"
+    assert res == {"status": "blocked", "reason": reason}
+    # 黙って送らない: ScanEngine を生成せず、probe は sent/completed として記録されない
+    assert built == []
+    ledger_path = tmp_path / "probe_attempts.jsonl"
+    ledger = ledger_path.read_text(encoding="utf-8") if ledger_path.exists() else ""
+    assert work_id not in ledger
+    # 誤って成功扱いにしない: work は BLOCKED で理由付き、dispatch event にも拒否理由が残る
+    work = next(item for item in harness.state.work_queue if item.work_id == work_id)
+    assert work.status == WorkStatus.BLOCKED
+    assert work.rejection_reason == reason
+    assert any(
+        ev.get("work_id") == work_id and ev.get("allowed") is False and ev.get("reason") == reason
+        for ev in harness.state.events
+    )
