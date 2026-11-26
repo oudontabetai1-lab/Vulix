@@ -1192,6 +1192,7 @@ def test_template_auth_headers_are_not_persisted_and_resume_uses_fresh_auth(tmp_
 
         scanner._capture_tokens = capture_tokens
         scanner._active_session = _PageSession("https://target.test/app")
+        scanner.captured_templates = {point_id: dict(template)}
         resumed = AgentScannerTools(scanner, _harness(tmp_path, resume=True), engine_factory=factory)
         work_id = resumed.schedule_scanner(point_id, "sqli")["work_id"]
         outputs = [await resumed.run_scanner_work(work_id), await resumed.list_scanner_capabilities()]
@@ -1638,6 +1639,7 @@ def test_real_scan_engine_bearer_origin_scoped_and_scope_enforced(tmp_path, monk
             blocked_engines.append(engine)
             return engine
 
+        scanner.captured_templates = {point_id: dict(template)}
         tools_disabled = AgentScannerTools(scanner, harness, engine_factory=disabled_factory)
         work_id2 = tools_disabled.schedule_scanner(point_id, "sqli")["work_id"]
         res2 = await tools_disabled.run_scanner_work(work_id2)
@@ -1750,7 +1752,7 @@ def test_template_url_query_values_are_not_persisted_and_reobtained_on_send(tmp_
         tools._live_templates.clear()
         tools_resumed = AgentScannerTools(scanner, harness, engine_factory=factory)
         # scanner の captured_templates に live template を設定
-        scanner.captured_templates[point_id] = template
+        scanner.captured_templates = {point_id: template}
         work_id2 = tools_resumed.schedule_scanner(point_id, "sqli")["work_id"]
         res2 = await tools_resumed.run_scanner_work(work_id2)
         assert res2["status"] == "completed"
@@ -2094,3 +2096,237 @@ def test_real_scan_engine_json_template_unrecoverable_on_resume_is_blocked_with_
         ev.get("work_id") == work_id and ev.get("allowed") is False and ev.get("reason") == reason
         for ev in harness.state.events
     )
+
+
+def test_add_point_does_not_expose_raw_template_on_scanner_object(tmp_path):
+    """add_point は秘密を含みうる生 template を scanner.captured_templates に書き込まず、_live_templates に一本化する。"""
+    async def scenario():
+        secret_hdr = "RawScannerLeakHeader991"
+        secret_body = "sk_live_RawScannerLeakKey992"
+        secret_query = "RawScannerLeakQuery993"
+        scanner = _AgentScanner([{"name": "session", "value": "c1", "domain": "target.test"}])
+        engines = []
+        tools = AgentScannerTools(
+            scanner,
+            _harness(tmp_path),
+            engine_factory=lambda *a: engines.append(_FakeEngine(*a)) or engines[-1],
+        )
+        raw_url = f"https://target.test/api/items?access_token={secret_query}"
+        tmpl = {
+            "url": raw_url,
+            "method": "POST",
+            "json_body": {"q": "hello", "api_key": secret_body},
+            "headers": {"X-Api-Key": secret_hdr, "Content-Type": "application/json"},
+        }
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/items", "/q", template_id="tmpl_r3")
+        point_id = tools.add_point(point, {"name": "/q", "template": tmpl})
+
+        # scanner 側に captured_templates 属性が勝手に生えていないこと
+        assert not hasattr(scanner, "captured_templates")
+        scanner_dump = json.dumps(scanner.__dict__, default=str)
+        for secret in (secret_hdr, secret_body, secret_query, "RawScannerLeak"):
+            assert secret not in scanner_dump
+
+        # scanner が既に captured_templates dict を持っていても add_point はそこへ複製しない
+        scanner.captured_templates = {}
+        point2 = InjectionPoint.for_json_body("POST", "https://target.test/api/items2", "/q", template_id="tmpl_r3_b")
+        tools.add_point(point2, {"name": "/q", "template": dict(tmpl, url="https://target.test/api/items2")})
+        assert scanner.captured_templates == {}
+
+        # 同一インスタンス内では tools._live_templates から正常に取り直して送信できる
+        work_id = tools.schedule_scanner(point_id, "sqli")["work_id"]
+        res = await tools.run_scanner_work(work_id)
+        assert res["status"] == "completed"
+        assert len(engines) == 1
+        assert engines[0].injection_templates["tmpl_r3"]["url"] == raw_url
+
+    asyncio.run(scenario())
+
+
+def test_reobtained_live_template_url_is_scope_checked_by_both_tool_and_engine(tmp_path):
+    """取り直した live_tmpl['url'] (target_send_url) が exclude_urls / access_urls / scope 外を指す場合、
+    _scope_reason と engine 側 scope guard の両方で送信前に SCOPE_BLOCKED にし、1 リクエストも送らない。"""
+    async def scenario():
+        # 1. AgentScannerTools._scope_reason 側でのブロック検証 (exclude_urls / access_urls / out-of-scope)
+        # _reobtain_live_template は _endpoint_base が一致する候補を選ぶため、同一 endpoint base 上で
+        # クエリ付きの exclude_urls や schedule 後の scope 変更によって live_tmpl['url'] が違反するケースを検証する。
+        cases = [
+            (
+                "https://target.test/api/search?mode=private_blocked&q=x",
+                {"exclude_urls": ["https://target.test/api/search?mode=private_*"]},
+                "excluded_url",
+            ),
+            (
+                "https://target.test/api/search?mode=1&q=x",
+                {"access_urls": ["https://target.test/api/search"]},
+                "access_only_url",
+            ),
+            (
+                "https://target.test/api/search?mode=1&q=x",
+                {"target_urls": ["https://target.test/other"]},
+                "scope_blocked",
+            ),
+        ]
+        for idx, (bad_live_url, scope_updates, expected_reason) in enumerate(cases):
+            case_dir = tmp_path / f"case_{idx}"
+            case_dir.mkdir()
+            harness = _harness(case_dir)
+            scanner = _AgentScanner([{"name": "session", "value": "c1", "domain": "target.test"}])
+            scanner.exclude_urls = ["https://target.test/private*", "https://target.test/api/search?mode=private_*"]
+            engines = []
+            tools = AgentScannerTools(
+                scanner,
+                harness,
+                engine_factory=lambda *a: engines.append(_FakeEngine(*a)) or engines[-1],
+            )
+            safe_init_tmpl = {
+                "url": "https://target.test/api/search?mode=public&q=1",
+                "method": "POST",
+                "json_body": {"q": "hello"},
+            }
+            point = InjectionPoint.for_json_body("POST", "https://target.test/api/search", "/q", template_id=f"tmpl_s_{idx}")
+            point_id = tools.add_point(point, {"name": "/q", "template": safe_init_tmpl})
+            sched = tools.schedule_scanner(point_id, "sqli")
+            assert sched["status"] == "planned"
+
+            # 送信直前に取り直される live_tmpl の URL が禁止対象を指す状態をシミュレート
+            for k, v in scope_updates.items():
+                setattr(scanner, k, v)
+            tools._live_templates[point_id] = dict(safe_init_tmpl, url=bad_live_url)
+            res = await tools.run_scanner_work(sched["work_id"])
+            assert res["status"] == "blocked"
+            assert res["reason"] == expected_reason
+            assert engines == []  # Engine すら起動せず 1 リクエストも送らない
+            work = next(w for w in harness.state.work_queue if w.work_id == sched["work_id"])
+            assert work.status == WorkStatus.SCOPE_BLOCKED
+            assert work.rejection_reason == expected_reason
+
+        # 2. Engine 側 scope guard でのブロック検証 (scanner 側は通るが engine 側の exclude_urls で target_send_url のみ拒否)
+        eng_dir = tmp_path / "eng_0"
+        eng_dir.mkdir()
+        harness = _harness(eng_dir)
+        scanner = _AgentScanner([{"name": "session", "value": "c1", "domain": "target.test"}])
+        created_engines = []
+
+        def factory(check, handoff):
+            eng = _FakeEngine(check, handoff)
+            # point.url (クエリ無し) と保存済み tmpl_url (mode=&q=) は通るが、
+            # 取り直した target_send_url (mode=eng_excluded&q=1) だけが engine 側で拒否される
+            eng.exclude_urls = ["https://target.test/api/search?mode=eng_excluded*"]
+            created_engines.append(eng)
+            return eng
+
+        tools = AgentScannerTools(scanner, harness, engine_factory=factory)
+        init_tmpl = {
+            "url": "https://target.test/api/search?mode=ok&q=1",
+            "method": "POST",
+            "json_body": {"q": "hello"},
+        }
+        point = InjectionPoint.for_json_body("POST", "https://target.test/api/search", "/q", template_id="tmpl_e_0")
+        point_id = tools.add_point(point, {"name": "/q", "template": init_tmpl})
+        work_id = tools.schedule_scanner(point_id, "sqli")["work_id"]
+        tools._live_templates[point_id] = dict(
+            init_tmpl,
+            url="https://target.test/api/search?mode=eng_excluded&q=1",
+        )
+
+        res = await tools.run_scanner_work(work_id)
+        assert res["status"] == "blocked"
+        assert res["reason"] == "engine scope policy rejected the injection point"
+        assert len(created_engines) == 1
+        assert created_engines[0].scanner.calls == []  # 1 リクエストも送信していない
+        work = next(w for w in harness.state.work_queue if w.work_id == work_id)
+        assert work.status == WorkStatus.SCOPE_BLOCKED
+
+    asyncio.run(scenario())
+
+
+def test_gitless_environment_fallback_head_id_confirms_and_detects_code_change(tmp_path, monkeypatch):
+    """.git が存在せず git rev-parse HEAD が失敗または空を返す環境でも、ファイルダイジェストの
+    フォールバックにより deterministic_confirmed と resume 時の binding 検証が成立し、
+    コード変更時には不一致を検知して inconclusive に格下げする。"""
+    import subprocess as _sp
+
+    def fail_git(*_args, **_kwargs):
+        raise _sp.CalledProcessError(128, ["git", "rev-parse", "HEAD"])
+
+    monkeypatch.setattr(_sp, "check_output", fail_git)
+
+    fake_src_dir = tmp_path / "src"
+    fake_src_dir.mkdir()
+    fake_tools_py = fake_src_dir / "agent_scanner_tools.py"
+    fake_harness_py = fake_src_dir / "agent_harness.py"
+    fake_tools_py.write_text("# tools v1\n", encoding="utf-8")
+    fake_harness_py.write_text("# harness v1\n", encoding="utf-8")
+
+    orig_fallback = AgentScannerTools._fallback_code_head_id
+    monkeypatch.setattr(
+        AgentScannerTools,
+        "_fallback_code_head_id",
+        staticmethod(lambda paths=None: orig_fallback((fake_tools_py, fake_harness_py))),
+    )
+
+    async def scenario():
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        scanner = _AgentScanner([{"name": "session", "value": "fresh-session", "domain": "target.test"}])
+        harness = _harness(state_dir)
+        finding = SimpleNamespace(
+            check_type="xss", severity="high", url="https://target.test/search?q=1",
+            field_name="q", payload="<script>alert(1)</script>", evidence="alert(1)",
+        )
+        engines = []
+        tools = AgentScannerTools(
+            scanner,
+            harness,
+            engine_factory=lambda check, handoff: engines.append(_FakeEngine(check, handoff, finding=finding)) or engines[-1],
+        )
+
+        head_id = tools._current_head_id()
+        assert head_id.startswith("tree:")
+        assert len(head_id) == len("tree:") + 40
+
+        point_id = tools.add_point(InjectionPoint.for_url_param("https://target.test/search?q=1", "q"))
+        candidate = {
+            "candidate_id": "gitless-cand-1",
+            "check_type": "xss",
+            "url": "https://target.test/search?q=1",
+            "field_name": "q",
+        }
+        candidate["injection_point_id"] = tools.register_hypothesis(candidate)
+        harness.note_hypotheses([candidate])
+
+        # 1. .git 無しでも confirmed になり、inconclusive に格下げされない
+        res = await tools.verify_hypothesis("gitless-cand-1")
+        assert res["status"] == "confirmed"
+        stored = harness.state.hypotheses[0]
+        assert stored["deterministic_confirmed"] is True
+        assert stored["source_label"] == "agent_deterministic_confirmed"
+
+        # 2. 同一コードでの resume: 再実行なしで confirmed が復元される
+        resumed_harness = _harness(state_dir, resume=True)
+        resumed_tools = AgentScannerTools(
+            scanner,
+            resumed_harness,
+            engine_factory=lambda *_: pytest.fail("valid fallback head_id must not re-run scanner"),
+        )
+        res_resume = await resumed_tools.verify_hypothesis("gitless-cand-1")
+        assert res_resume["status"] == "confirmed"
+
+        # 3. コード変更後の resume: head_id ダイジェストが変化し、binding 不一致を検知して格下げされる
+        fake_tools_py.write_text("# tools v2 (modified)\n", encoding="utf-8")
+        assert resumed_tools._current_head_id() != head_id
+        changed_harness = _harness(state_dir, resume=True)
+        changed_tools = AgentScannerTools(
+            scanner,
+            changed_harness,
+            engine_factory=lambda *_: pytest.fail("mismatched code head must suppress replay on completed work"),
+        )
+        res_changed = await changed_tools.verify_hypothesis("gitless-cand-1")
+        assert res_changed["status"] == "inconclusive"
+        assert "verification binding does not match" in res_changed["reason"]
+        downgraded = changed_harness.state.hypotheses[0]
+        assert downgraded["deterministic_confirmed"] is False
+        assert downgraded["source_label"] == "agent_unverified"
+
+    asyncio.run(scenario())

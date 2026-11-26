@@ -133,6 +133,15 @@ def _endpoint_base(url: str) -> str:
     return urlunsplit((parsed.scheme, safe_netloc, parsed.path, "", ""))
 
 
+def _strip_url_userinfo(url: str) -> str:
+    """scope 判定用に URL から userinfo だけを除き、scheme・host・port・path・query・fragment は保持する。"""
+    if not url or "@" not in url:
+        return str(url or "")
+    from urllib.parse import urlsplit, urlunsplit
+    parsed = urlsplit(str(url))
+    return urlunsplit((parsed.scheme, parsed.netloc.rpartition("@")[2], parsed.path, parsed.query, parsed.fragment))
+
+
 def _structure_hash(body=None, query_keys: list[str] | None = None, *, body_structure=None) -> str:
     """JSON body および URL クエリキー名の構造要約から決定論的ハッシュを生成する。値は含めない。"""
     summary: dict = {}
@@ -545,15 +554,6 @@ class AgentScannerTools:
             if not hasattr(self, "_live_templates"):
                 self._live_templates = {}
             self._live_templates[point_id] = dict(template)
-            if self.scanner is not None:
-                if not hasattr(self.scanner, "captured_templates") or not isinstance(self.scanner.captured_templates, dict):
-                    try:
-                        self.scanner.captured_templates = {}
-                    except Exception:
-                        pass
-                if isinstance(getattr(self.scanner, "captured_templates", None), dict):
-                    self.scanner.captured_templates[point_id] = dict(template)
-                    self.scanner.captured_templates[str(template.get("url") or point.url)] = dict(template)
 
         if current is None or current.get("resume_unavailable"):
             auth_scheme = ""
@@ -759,7 +759,7 @@ class AgentScannerTools:
             if not action_decision.allowed or action_decision.reason not in {"target_url", "target_url_no_frag", "target_url_no_query"}:
                 return "scope_blocked" if action_decision.reason != "excluded_url" else "excluded_url"
         if isinstance(template, dict) and template.get("url"):
-            tmpl_url = str(template["url"])
+            tmpl_url = _strip_url_userinfo(str(template["url"]))
             if _url_is_excluded(tmpl_url, engine_args.exclude_urls):
                 return "excluded_url"
             from wscan.runtime_scope_guard import _matches_scope_list
@@ -1084,6 +1084,22 @@ class AgentScannerTools:
                 self.harness.finish_work(work_id, WorkStatus.BLOCKED, rejection_reason=tmpl_reason)
                 return {"status": "blocked", "reason": tmpl_reason}
         target_send_url = str((live_tmpl or {}).get("url") or meta_tmpl.get("url") or point.url)
+        live_scope_reason = self._scope_reason(
+            point,
+            str(metadata.get("parameter_id", "")),
+            {"url": target_send_url},
+        )
+        if live_scope_reason:
+            self.harness.record_dispatch_event(
+                event_type="authorization_decision",
+                tool_name="run_scanner_work",
+                work_id=work_id,
+                correlation_id=corr_id,
+                allowed=False,
+                reason=live_scope_reason,
+            )
+            self.harness.finish_work(work_id, WorkStatus.SCOPE_BLOCKED, rejection_reason=live_scope_reason)
+            return {"status": "blocked", "reason": live_scope_reason}
         engine = None
         from wscan import url_scope
         secret_registry = getattr(url_scope, "_SECRET_VALUES", None)
@@ -1143,7 +1159,8 @@ class AgentScannerTools:
                 from wscan.engine import _store_synced_token
                 _store_synced_token(engine, target_send_url, {"Authorization": f"Bearer {bearer}"})
             from wscan.llm_agent_browser import security_probe_allowed
-            tmpl_url = (metadata.get("template") or {}).get("url") if isinstance(metadata.get("template"), dict) else ""
+            tmpl_url = _strip_url_userinfo((metadata.get("template") or {}).get("url") if isinstance(metadata.get("template"), dict) else "")
+            send_scope_url = _strip_url_userinfo(target_send_url)
             if (
                 not security_probe_allowed(
                     point.url, engine.target_urls, engine.exclude_urls,
@@ -1169,6 +1186,15 @@ class AgentScannerTools:
                     )
                     or not engine._is_attack_target_url(tmpl_url)
                     or engine._is_url_excluded(tmpl_url)
+                ))
+                or (send_scope_url and (
+                    not security_probe_allowed(
+                        send_scope_url, engine.target_urls, engine.exclude_urls,
+                        access_urls=engine.access_urls, field_name=metadata["parameter_id"],
+                        exclude_fields=engine.exclude_fields,
+                    )
+                    or not engine._is_attack_target_url(send_scope_url)
+                    or engine._is_url_excluded(send_scope_url)
                 ))
             ):
                 self.harness.record_dispatch_event(
@@ -1512,14 +1538,37 @@ class AgentScannerTools:
             rejection_reason=reason,
         )
 
+    @staticmethod
+    def _fallback_code_head_id(paths: tuple[Path, ...] | list[Path] | None = None) -> str:
+        """git メタデータが無い環境向けに、主要ソースファイルの内容から決定論的 ID を算出する。"""
+        base_dir = Path(__file__).resolve().parent
+        target_paths = paths if paths is not None else (
+            base_dir / "agent_scanner_tools.py",
+            base_dir / "agent_harness.py",
+        )
+        hasher = hashlib.sha256()
+        try:
+            for p in target_paths:
+                path = Path(p)
+                hasher.update(path.name.encode("utf-8"))
+                hasher.update(b"\0")
+                hasher.update(path.read_bytes())
+                hasher.update(b"\0")
+        except OSError:
+            return ""
+        return f"tree:{hasher.hexdigest()[:40]}"
+
     def _current_head_id(self) -> str:
         try:
-            return subprocess.check_output(
+            head = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1],
                 stderr=subprocess.DEVNULL, text=True, timeout=2,
             ).strip()
+            if head:
+                return head
         except (OSError, subprocess.SubprocessError):
-            return ""
+            pass
+        return self._fallback_code_head_id()
 
     @staticmethod
     def _checkpoint_claims_confirmation(hypothesis: dict) -> bool:

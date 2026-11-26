@@ -676,3 +676,54 @@ def test_agent_report_observability_redacts_secrets(tmp_path):
     assert obs["total"] == 2
     assert secret not in json.dumps(obs)
     assert obs["by_category"]["agent_notes_discarded"] == 1
+
+
+def test_select_priority_evidence_preserves_complete_finding_blocks_and_gaps_under_url_flood():
+    """後続に大量の単発 URL 行や完了主張があっても、先頭の finding ブロックと gap 宣言が
+    押し出されたりブロックの途中で断裂したりしないこと。"""
+    from wscan.agent_jit_context import select_priority_evidence
+
+    finding_1 = (
+        "WSCAN-NONCE:nonce111\n"
+        "VULNERABILITY FOUND:\n"
+        "Type: sqli\n"
+        "Severity: high\n"
+        "URL: http://target.test/search\n"
+        "Field: q\n"
+        "Payload: ' OR 1=1--\n"
+        "Evidence: SQL syntax error near 1=1"
+    )
+    finding_2 = (
+        "VULNERABILITY FOUND:\n"
+        "Type: xss\n"
+        "Severity: medium\n"
+        "URL: http://target.test/comment\n"
+        "Field: body\n"
+        "Payload: <script>alert(1)</script>\n"
+        "Evidence: unescaped script tag rendered"
+    )
+    gap_1 = "COVERAGE GAP: /admin/export parameter format untested"
+    gap_2 = "GAP RESOLVED: /login form tested"
+    url_flood = "\n".join(f"URL: http://target.test/crawl/item/{i}?page={i}" for i in range(200))
+    completion_flood = "\n".join(f"PROBE COMPLETE" for _ in range(50))
+
+    picked = select_priority_evidence([finding_1, gap_1, finding_2, gap_2, url_flood, completion_flood], max_chars=1200)
+    assert len(picked) <= 1200
+
+    # 先頭の finding ブロック 2 件の全行と gap 宣言 2 件が欠落・断裂せず完全に残っていること
+    for expected_block in (finding_1, finding_2, gap_1, gap_2):
+        assert expected_block in picked
+
+    # 残りの予算には新しい完了主張や単発 URL 行が入ること
+    assert "PROBE COMPLETE" in picked
+
+    # 予算が finding 1 件＋gap しか入らないサイズでも、finding ブロックが途中で断裂（Evidence 行だけ残る等）しないこと
+    tight_budget = len(finding_2) + len(gap_2) + 10
+    tight_picked = select_priority_evidence([finding_1, gap_1, finding_2, gap_2], max_chars=tight_budget)
+    assert len(tight_picked) <= tight_budget
+    assert finding_2 in tight_picked
+    assert gap_2 in tight_picked
+    # 収まらなかった finding_1 の一部（Evidence 行や Payload 行だけ）が切れて混入していないこと
+    for partial_line in finding_1.splitlines():
+        if partial_line != "VULNERABILITY FOUND:":
+            assert partial_line not in tight_picked
