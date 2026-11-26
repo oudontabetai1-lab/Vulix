@@ -65,36 +65,42 @@ def test_checked_in_baseline_file_exists_and_loads():
     assert isinstance(scorecard, NormalScanScorecard)
     assert scorecard.mode == "normal"
     assert scorecard.fixture_id == "realistic_site"
-    assert scorecard.overall_status == "COMPLETE"
     assert scorecard.ground_truth_recall["expected_total"] == 11
     assert scorecard.ground_truth_recall["matched_total"] == 11
     assert scorecard.ground_truth_recall["recall"] == 1.0
     assert scorecard.safe_twin_precision["safe_total"] == 15
     assert scorecard.safe_twin_precision["fp_total"] == 0
     assert scorecard.safe_twin_precision["fpr"] == 0.0
-    assert scorecard.total_attempts == 4048
-    assert scorecard.ledger_integrity["valid"] is True
+    assert scorecard.total_attempts == sum(scorecard.attempt_counts.values()) > 0
+    # 既知の不整合（navigate 再試行による同一 probe の再送）は理由付きで記録し、valid は偽のまま。
+    known = scorecard.known_inconsistencies
+    assert known, "known inconsistencies must be declared explicitly"
+    for kind in known.values():
+        for entry in kind.values():
+            assert entry["count"] > 0 and entry["reason"].strip()
+    assert scorecard.ledger_integrity["valid"] is False
+    assert scorecard.overall_status == "INCOMPLETE"
 
 
-def test_baseline_passes_detection_gate():
+def test_baseline_alone_is_not_silently_green():
+    """baseline の承認が無い単体照合では、既知の不整合も FAIL として表に出る。"""
     scorecard = load_normal_scorecard_file(_BASELINE_PATH)
-    # 基準スコアカード単体の整合性検証（require_baseline=False）
     verdict = evaluate_normal_scan_gate(scorecard, require_baseline=False)
-    assert verdict.passed is True
-    assert verdict.reasons == ()
+    assert verdict.passed is False
     assert verdict.recall == 1.0
     assert verdict.fpr == 0.0
-    assert "PASSED" in verdict.describe()
 
 
-def test_baseline_self_comparison_passes():
+def test_baseline_self_comparison_passes_with_warnings():
     scorecard = load_normal_scorecard_file(_BASELINE_PATH)
-    # 自己照合非回帰ゲート（require_baseline=True デフォルト）
+    # 自己照合非回帰ゲート（require_baseline=True デフォルト）。既知分は WARN として見える。
     verdict = evaluate_normal_scan_gate(scorecard, baseline=scorecard)
     assert verdict.passed is True
     assert verdict.reasons == ()
     assert verdict.regressed_checks == ()
     assert verdict.dropped_attempt_checks == ()
+    assert verdict.warnings
+    assert "WARN" in verdict.describe()
 
 
 # ── 2. 違反注入 1: Recall の低下（見逃し・偽陰性） ──────────────────────────
@@ -359,7 +365,7 @@ def test_gate_rejects_missing_baseline_by_default():
 
 
 def test_gate_allows_standalone_when_baseline_not_required():
-    base = load_normal_scorecard_file(_BASELINE_PATH)
+    base = _card_with_integrity()  # 不整合なしの scorecard
     verdict = evaluate_normal_scan_gate(base, require_baseline=False)
     assert verdict.passed is True
 
@@ -935,3 +941,255 @@ async def test_httpx_non_followed_redirect_probes_not_tagged_as_hops(tmp_path):
     assert initial_count == 2
     assert has_dup is False
 
+
+
+# ── 既知の不整合（baseline 承認）と再送の計上 ─────────────────────────────
+
+def _card_with_integrity(count_mismatches=(), duplicate_sends=None, known=None):
+    base = load_normal_scorecard_file(_BASELINE_PATH).to_dict()
+    base["ledger_integrity"]["count_mismatches"] = list(count_mismatches)
+    base["ledger_integrity"]["duplicate_sends"] = dict(duplicate_sends or {})
+    base["ledger_integrity"]["valid"] = not (count_mismatches or duplicate_sends)
+    base["known_inconsistencies"] = known or {}
+    return NormalScanScorecard.from_dict(base)
+
+
+_NOTE = "probe_ledger_incomplete:ssti:standard:count_mismatch"
+_KNOWN = {
+    "count_mismatches": {_NOTE: {"count": 1, "reason": "navigate retry"}},
+    "duplicate_sends": {"ssti": {"count": 2, "reason": "navigate retry"}},
+}
+
+
+def test_gate_warns_on_known_inconsistencies_at_baseline_level():
+    base = _card_with_integrity([_NOTE], {"ssti": 2}, _KNOWN)
+    cur = _card_with_integrity([_NOTE], {"ssti": 2})
+    verdict = evaluate_normal_scan_gate(cur, baseline=base)
+    assert verdict.passed is True, verdict.describe()
+    assert len(verdict.warnings) == 2
+
+
+@pytest.mark.parametrize("mismatches,dups", [
+    ([_NOTE, _NOTE], {"ssti": 2}),                     # 既知 mismatch の増加
+    ([_NOTE], {"ssti": 3}),                            # 既知の再送の増加
+    ([_NOTE, "probe_ledger_incomplete:sqli:standard:count_mismatch"], {"ssti": 2}),  # 新規 mismatch
+    ([_NOTE], {"ssti": 2, "xss": 1}),                  # 新規 check の再送
+])
+def test_gate_fails_on_increase_or_new_inconsistency(mismatches, dups):
+    base = _card_with_integrity([_NOTE], {"ssti": 2}, _KNOWN)
+    cur = _card_with_integrity(mismatches, dups)
+    verdict = evaluate_normal_scan_gate(cur, baseline=base)
+    assert verdict.passed is False
+
+
+def test_gate_ignores_known_entry_without_reason():
+    known = {"count_mismatches": {_NOTE: {"count": 1, "reason": ""}}}
+    base = _card_with_integrity([_NOTE], None, known)
+    verdict = evaluate_normal_scan_gate(_card_with_integrity([_NOTE]), baseline=base)
+    assert verdict.passed is False
+
+
+def test_gate_uses_baseline_known_list_not_current_one():
+    """現在の scorecard が自分で既知を宣言しても承認にはならない。"""
+    base = _card_with_integrity()
+    cur = _card_with_integrity([_NOTE], {"ssti": 2}, _KNOWN)
+    assert evaluate_normal_scan_gate(cur, baseline=base).passed is False
+
+
+def test_scorecard_counts_one_attempt_per_probe_identity():
+    """試行数は probe identity ごとに 1 件。hop は除外、同じ probe の再送は duplicate_sends へ。"""
+    def req(att, probe, rationale=""):
+        return {"check": "ssti", "role": "attack", "record_kind": "request",
+                "attempt_id": att, "request_attempt_id": probe, "rationale": rationale}
+    records = [
+        req("a1", "a1"), req("a2", "a1", "redirect_hop_from:a1"),   # 追従 hop
+        req("b1", "b1"), req("b2", "b1"), req("b3", "b1"),          # navigate 再試行で 3 送信
+        req("c1", ""),                                              # 旧形式（request_attempt_id 無し）
+    ]
+    card = build_normal_scan_scorecard(
+        findings=[], expected_findings=EXPECTED_FINDINGS, safe_endpoints=SAFE_ENDPOINTS,
+        target_checks=["ssti"], ledger_records=records,
+    )
+    assert card.attempt_counts["ssti"] == 3
+    assert card.ledger_integrity["duplicate_sends"] == {"ssti": 2}
+    assert card.ledger_integrity["valid"] is False
+    assert NormalScanScorecard.from_dict(card.to_dict()).ledger_integrity["duplicate_sends"] == {"ssti": 2}
+
+
+def test_measure_script_only_approves_documented_inconsistencies():
+    from scripts.measure_normal_scan_baseline import _attach_known_inconsistencies
+    card = _card_with_integrity(
+        [_NOTE, "probe_ledger_incomplete:sqli:standard:count_mismatch"], {"ssti": 4, "xss": 1})
+    known = _attach_known_inconsistencies(card).known_inconsistencies
+    assert set(known["count_mismatches"]) == {_NOTE}
+    assert set(known["duplicate_sends"]) == {"ssti"}
+    assert known["duplicate_sends"]["ssti"]["count"] == 4
+
+
+# ── 実際の RequestLogger と httpx での probe identity 相関 ─────────────────
+
+async def _httpx_sends(tmp_path, handler, urls_per_scope, follow):
+    import httpx
+    from wscan.injection_point import InjectionPoint
+    from wscan.request_logger import RequestLogger
+
+    logger = RequestLogger(tmp_path)
+    logger.enabled = True
+    ip = InjectionPoint.for_url_param("GET", "http://testserver/redir", "q")
+    transport = httpx.MockTransport(handler)
+    for urls in urls_per_scope:
+        with logger.probe_scope(ip, "test_check", role="attack", wave="standard"):
+            async with httpx.AsyncClient(
+                transport=transport, follow_redirects=follow,
+                event_hooks={"request": [logger.log_httpx_submission],
+                             "response": [logger.log_httpx_response]},
+            ) as client:
+                for u in urls:
+                    await client.get(u)
+    reqs = [e for e in logger.probe_ledger.events.values() if e.get("record_kind") == "request"]
+    return reqs, BaseScanner._reconcile_manifest_requests(reqs)
+
+
+def _always_302(request):
+    import httpx
+    return httpx.Response(302, headers={"Location": "http://testserver/other"})
+
+
+def _chain(request):
+    import httpx
+    nxt = {"/redir": "/step2", "/step2": "/step3"}.get(request.url.path)
+    if nxt:
+        return httpx.Response(302, headers={"Location": f"http://testserver{nxt}"})
+    return httpx.Response(200, text="ok")
+
+
+@pytest.mark.asyncio
+async def test_real_logger_non_followed_3xx_double_send_is_detected(tmp_path):
+    """追従しない 3xx で、同じ probe から同じ payload を 2 回送ると二重送信になる（隠れない）。"""
+    reqs, (initial, dup) = await _httpx_sends(
+        tmp_path, _always_302, [["http://testserver/redir?q=p", "http://testserver/redir?q=p"]], False)
+    assert len(reqs) == 2 and initial == 2 and dup is True
+
+
+@pytest.mark.asyncio
+async def test_real_logger_different_payloads_after_3xx_are_not_hops(tmp_path):
+    """3xx 応答の後に別 probe の別 payload が来ても hop にも二重送信にもならない（誤警報なし）。"""
+    reqs, (initial, dup) = await _httpx_sends(
+        tmp_path, _always_302, [["http://testserver/redir?q=p1"], ["http://testserver/redir?q=p2"]], False)
+    assert len(reqs) == 2 and initial == 2 and dup is False
+
+
+@pytest.mark.asyncio
+async def test_real_logger_followed_chain_counts_one_initial(tmp_path):
+    reqs, (initial, dup) = await _httpx_sends(
+        tmp_path, _chain, [["http://testserver/redir?q=p"]], True)
+    assert len(reqs) == 3 and initial == 1 and dup is False
+    assert all(str(r.get("rationale") or "").startswith("redirect_hop") for r in reqs[1:])
+
+
+@pytest.mark.asyncio
+async def test_real_logger_followed_3xx_double_send_is_detected(tmp_path):
+    """追従する 3xx でも、同じ probe から 2 回送れば二重送信。2 回目の hop も hop として除外される。"""
+    reqs, (initial, dup) = await _httpx_sends(
+        tmp_path, _chain, [["http://testserver/redir?q=p", "http://testserver/redir?q=p"]], True)
+    assert len(reqs) == 6 and initial == 2 and dup is True
+
+
+# ── xss: 重複で record_finding が None でも、発見による早期 break を照合に渡す ──
+
+@pytest.mark.asyncio
+async def test_xss_passes_found_vuln_to_reconciliation_when_finding_deduplicated(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from wscan.injection_point import InjectionPoint
+    from wscan.request_logger import RequestLogger
+    from wscan.scanners.xss import XSSScanner
+
+    scanner = object.__new__(XSSScanner)
+    scanner.engine = SimpleNamespace(login_url="", logged_in_marker="", max_payloads=10, sleep_factor=0.0,
+                                     wave_errors=[], request_logger=RequestLogger(tmp_path), checkpoint=None)
+    scanner.browser = SimpleNamespace(page=SimpleNamespace(url="http://example.com/t"), reset_dialog=lambda: None,
+                                      dialog_fired=False, dialog_message="", navigate=AsyncMock(),
+                                      get_page_source=AsyncMock(return_value=""))
+    scanner.monitor = None
+    scanner._should_route_to_api_get = lambda ip: False
+    scanner._field_budget_gate = lambda: False
+    scanner.may_scan_injection_point = lambda ip: True
+    scanner._response_body_for = lambda url: ""
+    scanner._baseline_handlers = AsyncMock(return_value=([], None, ""))
+    # 1 件目で反射を検出するが、record_finding は重複として None を返す
+    scanner._analyze_reflection = lambda *a: {"context": "html", "confidence": "likely", "snippet": "x"}
+    scanner.record_finding = AsyncMock(return_value=None)
+    scanner.log_payload_test = AsyncMock()
+    scanner._apply_ip = AsyncMock(return_value=("<b>x</b>", {"response": {"status": 200}}))
+    scanner._probe_decision = lambda *a, **k: None
+    scanner.get_payloads = AsyncMock(return_value=["<p1>", "<p2>", "<p3>"])
+    calls = []
+    scanner._reconcile_probe_ledger_wave = lambda ip, wave="standard", **kw: calls.append((wave, kw))
+
+    ip = InjectionPoint.for_form("http://example.com/t", "q", 0)
+    with patch.object(scanner, "evolved_payloads", AsyncMock(return_value=[])):
+        await scanner.scan_injection_point(ip, {})
+
+    standard = [kw for wave, kw in calls if wave == "standard"]
+    assert standard and standard[0]["executed_count"] == 1 and standard[0]["planned_count"] == 3
+    assert standard[0]["findings_count"] == 1
+
+
+# ── 送信挙動の不変（台帳の相関は記録だけで、送る数・順序・内容を変えない） ─────
+
+@pytest.mark.asyncio
+async def test_navigate_retry_sends_are_unchanged_by_default():
+    """navigate の既定再試行（retries=2 → 最大 3 送信）は従来どおり。engine 設定で変えない。"""
+    import inspect
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from wscan.browser import BrowserManager
+
+    assert inspect.signature(BrowserManager.navigate).parameters["retries"].default == 2
+    assert "navigation_retries" not in inspect.signature(BrowserManager.__init__).parameters
+
+    calls = []
+
+    async def goto(url, **kw):
+        calls.append(url)
+        raise RuntimeError("net::ERR_NAME_NOT_RESOLVED")
+
+    bm = object.__new__(BrowserManager)
+    bm.page = SimpleNamespace(goto=goto)
+    bm.network = SimpleNamespace(clear=lambda: None, probe_context=None)
+    bm.timeout = 1000
+    with patch("wscan.browser.asyncio.sleep"):
+        assert await bm.navigate("http://x/redirect?next=p") is False
+    assert calls == ["http://x/redirect?next=p"] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("follow", [True, False])
+async def test_ledger_hooks_do_not_change_httpx_transmissions(tmp_path, follow):
+    """台帳フックの有無で、transport に届く request の数・順序・URL・body が同一であること。"""
+    import httpx
+    from wscan.injection_point import InjectionPoint
+    from wscan.request_logger import RequestLogger
+
+    async def run(with_hooks):
+        seen = []
+
+        def handler(request):
+            seen.append((request.method, str(request.url), request.content))
+            return _chain(request)
+
+        logger = RequestLogger(tmp_path / str(with_hooks))
+        logger.enabled = True
+        ip = InjectionPoint.for_url_param("GET", "http://testserver/redir", "q")
+        hooks = ({"request": [logger.log_httpx_submission], "response": [logger.log_httpx_response]}
+                 if with_hooks else {})
+        for payload in ("p1", "p2"):
+            with logger.probe_scope(ip, "test_check", role="attack", wave="standard"):
+                async with httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                                             follow_redirects=follow, event_hooks=hooks) as client:
+                    await client.get(f"http://testserver/redir?q={payload}")
+                    await client.post("http://testserver/form", data={"q": payload})
+        return seen
+
+    assert await run(True) == await run(False)

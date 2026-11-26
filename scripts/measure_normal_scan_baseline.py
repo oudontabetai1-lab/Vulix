@@ -9,12 +9,15 @@ benchmarks/baselines/normal_scan_realistic_site.json.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import dataclasses
 import json
 import os
 import sys
 import tempfile
 import threading
+from unittest import mock
 from pathlib import Path
 
 # Add project root to path
@@ -30,6 +33,43 @@ from wscan.normal_scan_scorecard import (
     evaluate_normal_scan_gate,
     save_normal_scorecard_file,
 )
+
+
+# 既知の不整合（scanner が実際に計画と違う送信をしている＝通常層の確実性に関わる発見）。
+# この変更では送信を直さないため、理由を付けて baseline に記録し、ゲートは件数の増加・新規だけを FAIL にする。
+_NAVIGATE_RETRY_REASON = (
+    "BrowserManager.navigate retries page.goto on exception (default retries=2, up to 3 sends of the "
+    "same probe). On /redirect the target either fails DNS (external host) or is a fragment-only "
+    "redirect, so goto raises and the same probe is re-sent."
+)
+KNOWN_REASONS: dict[str, dict[str, str]] = {
+    "count_mismatches": {
+        "probe_ledger_incomplete:ssti:standard:count_mismatch": _NAVIGATE_RETRY_REASON,
+    },
+    "duplicate_sends": {
+        "ssti": _NAVIGATE_RETRY_REASON,
+        "open_redirect": _NAVIGATE_RETRY_REASON,
+    },
+}
+
+
+def _attach_known_inconsistencies(scorecard):
+    """実測した不整合のうち、理由が文書化されたものだけを既知として記録する（未知は承認しない）。"""
+    integrity = scorecard.ledger_integrity
+    mismatch_counts: dict[str, int] = {}
+    for note in integrity.get("count_mismatches", ()):
+        mismatch_counts[str(note)] = mismatch_counts.get(str(note), 0) + 1
+    measured = {
+        "count_mismatches": mismatch_counts,
+        "duplicate_sends": dict(integrity.get("duplicate_sends", {})),
+    }
+    known: dict[str, dict] = {}
+    for kind, counts in measured.items():
+        for key, n in sorted(counts.items()):
+            reason = KNOWN_REASONS.get(kind, {}).get(key)
+            if reason and n > 0:
+                known.setdefault(kind, {})[key] = {"count": int(n), "reason": reason}
+    return dataclasses.replace(scorecard, known_inconsistencies=known)
 
 
 def measure_baseline(output_path: Path | None = None) -> int:
@@ -48,7 +88,10 @@ def measure_baseline(output_path: Path | None = None) -> int:
     tmp_dir = tempfile.TemporaryDirectory()
     try:
         print("[measure] Starting measured scan...", flush=True)
-        engine = asyncio.run(_run_scan(port, tmp_dir.name))
+        # フィールド時間ボックスは負荷で打ち切り件数が揺れる（試行数が非決定的になる）ため、
+        # 計測では無効化して「計画どおり全送信」の試行数を baseline にする。
+        with mock.patch.dict(os.environ, {"WSCAN_FIELD_BUDGET": "0"}):
+            engine = asyncio.run(_run_scan(port, tmp_dir.name))
         print(f"[measure] Scan finished. Findings={len(engine.all_findings)} WaveErrors={len(engine.wave_errors)}", flush=True)
 
         ledger_path = Path(tmp_dir.name) / "probe_attempts.jsonl"
@@ -90,6 +133,7 @@ def measure_baseline(output_path: Path | None = None) -> int:
                 "max_payloads": 8,
                 "depth": 2,
                 "llm_provider": "none",
+                "field_budget_s": 0,
             },
         )
 
@@ -102,15 +146,16 @@ def measure_baseline(output_path: Path | None = None) -> int:
         for ch, cnt in sorted(scorecard.attempt_counts.items()):
             print(f"  check '{ch}': {cnt} attempts", flush=True)
 
-        save_normal_scorecard_file(scorecard, output_path)
-        print(f"[measure] Saved baseline scorecard to {output_path}", flush=True)
-
+        scorecard = _attach_known_inconsistencies(scorecard)
+        # 自己検証に通ってから保存する（失敗した計測で追跡中の baseline を上書きしない）
         verdict = evaluate_normal_scan_gate(scorecard, baseline=scorecard, require_baseline=True)
         print("\n" + verdict.describe(), flush=True)
         if not verdict.passed:
-            print("[measure] ERROR: Baseline failed self-validation!", file=sys.stderr)
+            print("[measure] ERROR: Baseline failed self-validation! (not saved)", file=sys.stderr)
             return 1
 
+        save_normal_scorecard_file(scorecard, output_path)
+        print(f"[measure] Saved baseline scorecard to {output_path}", flush=True)
         print("[measure] Baseline self-validation PASSED", flush=True)
         return 0
 
@@ -121,4 +166,7 @@ def measure_baseline(output_path: Path | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(measure_baseline())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=None,
+                        help="baseline JSON output path (default: the tracked baseline file)")
+    sys.exit(measure_baseline(parser.parse_args().output))

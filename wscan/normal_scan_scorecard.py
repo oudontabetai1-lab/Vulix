@@ -107,6 +107,7 @@ class LedgerIntegrity:
     gaps: tuple[str, ...] = ()
     planned_deficits: tuple[str, ...] = ()
     unattributed_notes: tuple[str, ...] = ()
+    duplicate_sends: dict[str, int] = field(default_factory=dict)
     valid: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,6 +118,7 @@ class LedgerIntegrity:
             "gaps": list(self.gaps),
             "planned_deficits": list(self.planned_deficits),
             "unattributed_notes": list(self.unattributed_notes),
+            "duplicate_sends": dict(self.duplicate_sends),
             "valid": self.valid,
         }
 
@@ -138,6 +140,9 @@ class NormalScanScorecard:
     ledger_integrity: dict[str, Any] = field(default_factory=dict)
     unmeasured_checks: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
+    # baseline 側で理由付きで承認した既知の不整合。
+    # {"count_mismatches": {note: {"count": n, "reason": str}}, "duplicate_sends": {check: {...}}}
+    known_inconsistencies: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -183,10 +188,12 @@ class NormalScanScorecard:
                 "count_mismatches": list(self.ledger_integrity.get("count_mismatches", ())),
                 "gaps": list(self.ledger_integrity.get("gaps", ())),
                 "unattributed_notes": list(self.ledger_integrity.get("unattributed_notes", ())),
+                "duplicate_sends": dict(self.ledger_integrity.get("duplicate_sends", {})),
                 "valid": self.ledger_integrity.get("valid", True),
             },
             "unmeasured_checks": list(self.unmeasured_checks),
             "metadata": dict(self.metadata),
+            "known_inconsistencies": json.loads(json.dumps(self.known_inconsistencies)),
         }
 
     @classmethod
@@ -235,6 +242,7 @@ class NormalScanScorecard:
             "gaps": tuple(raw_integrity.get("gaps", ())),
             "planned_deficits": tuple(raw_integrity.get("planned_deficits", ())),
             "unattributed_notes": tuple(raw_integrity.get("unattributed_notes", ())),
+            "duplicate_sends": {str(k): int(v) for k, v in raw_integrity.get("duplicate_sends", {}).items()},
             "valid": bool(raw_integrity.get("valid", True)),
         }
 
@@ -252,6 +260,7 @@ class NormalScanScorecard:
             ledger_integrity=ledger_integrity,
             unmeasured_checks=tuple(data.get("unmeasured_checks", ())),
             metadata=dict(data.get("metadata", {})),
+            known_inconsistencies=dict(data.get("known_inconsistencies", {})),
         )
 
 
@@ -269,6 +278,8 @@ class NormalScanGateVerdict:
     dropped_attempt_checks: tuple[str, ...] = ()
     false_positives: tuple[dict[str, Any], ...] = ()
     ledger_violations: tuple[str, ...] = ()
+    # baseline で承認済みの既知不整合（FAIL にはしないが黙って green にもしない）
+    warnings: tuple[str, ...] = ()
 
     def describe(self) -> str:
         status = "PASSED" if self.passed else "FAILED"
@@ -284,6 +295,10 @@ class NormalScanGateVerdict:
             lines.append("  Failure reasons:")
             for r in self.reasons:
                 lines.append(f"    - {r}")
+        if self.warnings:
+            lines.append("  Warnings (known inconsistencies in baseline):")
+            for w in self.warnings:
+                lines.append(f"    - WARN {w}")
         return "\n".join(lines)
 
 
@@ -399,6 +414,15 @@ def build_normal_scan_scorecard(
         attempt_counts[ch] = 0
 
     planned_deficits: list[str] = []
+    # 試行数は「probe の identity（request_attempt_id）ごとに 1 件」で数える。redirect の hop と、
+    # 同じ probe の再送（navigate 再試行など）は試行数に入れず、再送は duplicate_sends に分けて残す。
+    # 再送の有無はタイミングで揺れるため、試行数に混ぜると非回帰比較が不安定になる。
+    seen_probe_ids: dict[str, set[str]] = {}
+    duplicate_sends: dict[str, int] = {}
+
+    def _get(rec: Any, key: str) -> str:
+        return str((rec.get(key) if isinstance(rec, Mapping) else getattr(rec, key, "")) or "")
+
     if ledger_records:
         for r in ledger_records:
             ch = str(r.get("check", "") if isinstance(r, Mapping) else getattr(r, "check", ""))
@@ -421,6 +445,15 @@ def build_normal_scan_scorecard(
             # role が attack の試行を集計
             if role == "attack":
                 if record_kind == "request":
+                    if _get(r, "rationale").startswith("redirect_hop"):
+                        continue
+                    probe_id = _get(r, "request_attempt_id") or _get(r, "attempt_id")
+                    seen = seen_probe_ids.setdefault(ch, set())
+                    if probe_id and probe_id in seen:
+                        duplicate_sends[ch] = duplicate_sends.get(ch, 0) + 1
+                        continue
+                    if probe_id:
+                        seen.add(probe_id)
                     entry["executed"] += 1
                 elif record_kind in ("decision", "graphql_decision", "legacy"):
                     if not entry["executed"]:
@@ -499,7 +532,8 @@ def build_normal_scan_scorecard(
             else:
                 unattributed_notes.append(err_str)
 
-    ledger_valid = not had_write_error and not quarantined and not count_mismatches and not gaps and not planned_deficits
+    ledger_valid = (not had_write_error and not quarantined and not count_mismatches and not gaps
+                    and not planned_deficits and not duplicate_sends)
 
     # 6. 未計測 check の検出（試行数 0 の check は未計測。測れないものは None、green 扱いしない）
     unmeasured: list[str] = []
@@ -550,6 +584,7 @@ def build_normal_scan_scorecard(
             "gaps": tuple(gaps),
             "planned_deficits": tuple(planned_deficits),
             "unattributed_notes": tuple(unattributed_notes),
+            "duplicate_sends": dict(sorted(duplicate_sends.items())),
             "valid": ledger_valid,
         },
         unmeasured_checks=tuple(unmeasured),
@@ -574,7 +609,9 @@ def evaluate_normal_scan_gate(
     3) False Positive（誤検知）: safe twin での検出（fp > max_fp）または baseline 比増加。
     4) Attempt 数の低下: baseline と比較して総 attempt 数または個別 check の attempt 数が低下
        （送るはずの payload が黙って減ること＝偽陰性）。
-    5) Probe ledger 不整合: 台帳 write_error、quarantine、count_mismatch、gap、または planned 欠落。
+    5) Probe ledger 不整合: 台帳 write_error、quarantine、count_mismatch、同一 probe の再送、gap、
+       または planned 欠落。count_mismatch と再送は、baseline の known_inconsistencies に件数と理由が
+       あれば、その件数までは WARN（verdict.warnings）として残し、超過・新規は FAIL。
     """
     card = current if isinstance(current, NormalScanScorecard) else NormalScanScorecard.from_dict(current)
     base_card = (
@@ -677,9 +714,39 @@ def evaluate_normal_scan_gate(
     if had_write_err or is_quarantined:
         reasons.append("Probe ledger write error or quarantine detected (evidence incomplete)")
         ledger_violations.append("ledger_write_error_or_quarantined")
+    # 既知の不整合は baseline に件数と理由があるものだけ WARN。新規・増加は FAIL。
+    known = (base_card.known_inconsistencies if base_card is not None else {}) or {}
+    warnings: list[str] = []
+
+    def _known_allowance(kind: str, key: str) -> tuple[int, str]:
+        entry = (known.get(kind) or {}).get(key) or {}
+        reason = str(entry.get("reason", "") if isinstance(entry, Mapping) else "").strip()
+        # 理由の無い承認は承認として扱わない
+        return (int(entry.get("count", 0)) if reason else 0), reason
+
+    mismatch_counts: dict[str, int] = {}
     for cm in count_mismatches:
-        reasons.append(f"Probe ledger count mismatch: {cm}")
-        ledger_violations.append(str(cm))
+        mismatch_counts[str(cm)] = mismatch_counts.get(str(cm), 0) + 1
+    for note, n in sorted(mismatch_counts.items()):
+        allowed, why = _known_allowance("count_mismatches", note)
+        if n > allowed:
+            reasons.append(f"Probe ledger count mismatch: {note} x{n} (known in baseline: {allowed})")
+            ledger_violations.append(note)
+        else:
+            warnings.append(f"count_mismatch {note} x{n}: {why}")
+
+    for ch, n in sorted((integrity.get("duplicate_sends") or {}).items()):
+        n = int(n)
+        if n <= 0:
+            continue
+        allowed, why = _known_allowance("duplicate_sends", str(ch))
+        if n > allowed:
+            reasons.append(
+                f"Duplicate sends of the same probe for check '{ch}': {n} (known in baseline: {allowed})"
+            )
+            ledger_violations.append(f"duplicate_send:{ch}")
+        else:
+            warnings.append(f"duplicate_sends {ch} x{n}: {why}")
     for g in gaps:
         reasons.append(f"Probe ledger gap: {g}")
         ledger_violations.append(str(g))
@@ -706,6 +773,7 @@ def evaluate_normal_scan_gate(
         or count_mismatches
         or gaps
         or planned_deficits
+        or any(int(v) > 0 for v in (integrity.get("duplicate_sends") or {}).values())
         or any(v.startswith("probe_loss:") for v in ledger_violations)
     )
     if has_violations and stored_valid is True:
@@ -727,6 +795,7 @@ def evaluate_normal_scan_gate(
         dropped_attempt_checks=tuple(sorted(set(dropped_attempt_checks))),
         false_positives=tuple(safe_prec.get("false_positives", ())),
         ledger_violations=tuple(ledger_violations),
+        warnings=tuple(warnings),
     )
 
 

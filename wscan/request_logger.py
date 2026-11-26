@@ -488,7 +488,7 @@ class RequestLogger:
             pair={"request": request},
             transport=transport,
             record_kind="request",
-            parent_id=parent_id if is_redirect_hop else "",
+            parent_id=parent_id if is_redirect_hop else context.get("parent_id", ""),
             request_attempt_id=req_attempt_id,
             rationale=rationale,
             related_attempt_ids=related,
@@ -527,13 +527,12 @@ class RequestLogger:
                 req = {"method": request.method, "url": str(request.url),
                        "headers": dict(request.headers), "post_data": body, "timestamp": time.time()}
 
-                initial_req = request.extensions.get("vulix_probe_initial_req")
-                is_redirect_hop = bool(
-                    initial_req
-                    and initial_req == context.get("initial_request_id")
-                    and request.extensions.get("vulix_probe_attempt_id") == context.get("probe_attempt_id")
+                # httpx は追従時に元 request の extensions を引き継ぐ。同じ probe の印が付いた
+                # request だけを hop とし、URL・順序・先行 3xx からは推測しない。
+                is_redirect_hop = (
+                    request.extensions.get("vulix_probe_attempt_id") == context.get("probe_attempt_id")
                 )
-                parent_id = context.get("last_request_id") or initial_req if is_redirect_hop else ""
+                parent_id = (context.get("last_request_id") or "") if is_redirect_hop else ""
 
                 attempt_id = self.begin_request(
                     context, req, context.get("transport") or Transport.HTTPX,
@@ -543,7 +542,6 @@ class RequestLogger:
                 request.extensions["vulix_probe_context"] = (context, req)
                 request.extensions["vulix_probe_submission"] = (self, attempt_id)
                 if not is_redirect_hop:
-                    request.extensions["vulix_probe_initial_req"] = attempt_id
                     request.extensions["vulix_probe_attempt_id"] = context.get("probe_attempt_id")
                 return
             request.extensions.pop("vulix_probe_context", None)
@@ -593,7 +591,7 @@ class RequestLogger:
         context = request.get("_probe_context")
         if context is not None and context["logger"] is self:
             is_redirect_hop = bool(request.get("_redirected_from_req_id"))
-            parent_id = context.get("last_request_id") or "" if is_redirect_hop else ""
+            parent_id = (context.get("last_request_id") or "") if is_redirect_hop else ""
             return self.begin_request(
                 context, request, Transport.PLAYWRIGHT,
                 is_redirect_hop=is_redirect_hop, parent_id=parent_id,

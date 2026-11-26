@@ -32,6 +32,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from urllib.parse import urlparse
 
 import uvicorn
@@ -228,7 +229,10 @@ class EndToEndRealisticScanTests(unittest.TestCase):
         _wait_until_serving(cls._port)
 
         cls._tmp = tempfile.TemporaryDirectory()
-        engine = asyncio.run(_run_scan(cls._port, cls._tmp.name))
+        # 非回帰ゲートは試行数を baseline と比べるため、負荷で揺れるフィールド時間ボックスを無効化する
+        # （baseline の計測と同条件）。
+        with mock.patch.dict(os.environ, {"WSCAN_FIELD_BUDGET": "0"}):
+            engine = asyncio.run(_run_scan(cls._port, cls._tmp.name))
         cls.engine = engine
         cls.findings = list(engine.all_findings)
         cls.pages_crawled = len(getattr(engine, "page_graph", {}) or {})
