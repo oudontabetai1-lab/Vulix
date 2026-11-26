@@ -502,6 +502,7 @@
     'toggles.enable_waf_detection': 'ai',
     'toggles.enable_payload_learning': 'ai',
     'toggles.enable_llm_web_browsing': 'ai',
+    'toggles.agent_jit_context': 'ai',
     'agent_vision': 'ai',
     'agent_model': 'ai',
     'agent_ollama_url': 'ai',
@@ -553,6 +554,7 @@
     'llm_max_retries', 'toggles.use_planner', 'toggles.interactive_plan',
     'toggles.enable_ai_analysis', 'toggles.enable_waf_detection',
     'toggles.enable_payload_learning', 'toggles.enable_llm_web_browsing',
+    'toggles.agent_jit_context',
     'agent_ollama_url', 'agent_max_steps', 'hybrid_ollama_url', 'hybrid_max_steps',
 
     // Advanced tab advanced
@@ -932,6 +934,7 @@
 
     if (mode === 'agent') {
       const agentChecks = getChecks('agent');
+      const toggles = getToggles();
       return {
         url: url,
         agent_mode: true,
@@ -948,6 +951,7 @@
         auth_pass: getVal('agentAuthPass') || getVal('cfgAuthPass'),
         ...buildAuthHeaderFields(getVal),
         ...buildTimeWindowFields(getVal),
+        agent_jit_context: Boolean(toggles.agent_jit_context),
         headless: true,
         open_report: true,
       };
@@ -1005,6 +1009,7 @@
         enable_community_payloads: Boolean(toggles.community_payloads),
         enable_component_intel: Boolean(toggles.component_intel),
         enable_tls_scan: Boolean(toggles.tls_scan),
+        agent_jit_context: Boolean(toggles.agent_jit_context),
         max_payloads: parseIntOrDefault(getVal('cfgMaxPayloads'), 0),
         state_profile: getVal('cfgStateProfile') || 'unrestricted',
         allow_state_changing_probes: Boolean(toggles.allow_state_changing_probes),

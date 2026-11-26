@@ -94,7 +94,7 @@ def _run_node(script: str) -> dict:
 def test_every_declared_key_reachable_in_some_tab():
     """Verify that every key in FIELDS is reachable in one of the 5 tabs or top header."""
     declared_keys = {f["key"] for f in FIELDS}
-    assert len(declared_keys) == 101
+    assert len(declared_keys) == 102
 
     script = f"""
 const {{ TAB_DEFINITIONS, FIELD_TAB_MAP }} = require('./templates/ui/setup-module.js');
@@ -179,6 +179,7 @@ const cfgToggles = {{
   fast_mode: false,
   auto_register: false,
   tls_verify: false,
+  agent_jit_context: false,
 }};
 
 let cfgFlows = [];

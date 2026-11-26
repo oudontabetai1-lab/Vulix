@@ -351,7 +351,7 @@ def _classify(findings, scenario) -> dict:
             "safe_twin_fp": fp, "unexpected_findings": unexpected}
 
 
-async def run_scenario(scenario: dict, out_dir: Path) -> dict:
+async def run_scenario(scenario: dict, out_dir: Path, *, jit_context: bool = False) -> dict:
     """1 シナリオを再生し、replay gate の入力（oracle の測定値）を返す。"""
     net = LabNet()
     agent = LabAgent(tokens=scenario.get("tokens", ()), extra_headers=scenario.get("extra_headers"))
@@ -364,6 +364,16 @@ async def run_scenario(scenario: dict, out_dir: Path) -> dict:
         events[:interrupt] if interrupt else events,
         net=net, agent=agent, harness=harness, tools=tools, outputs=outputs, hypotheses=hypotheses,
     )
+    if jit_context:
+        for idx, w in enumerate(harness.state.work_queue):
+            harness.record_episode_note(
+                episode_id=f"ep-{idx}",
+                work_id=w.work_id,
+                role=w.role.value if hasattr(w.role, "value") else str(w.role),
+                status=w.status.value if hasattr(w.status, "value") else str(w.status),
+                summary=f"work item {w.work_id} status {w.status}",
+                evidence_ids=w.evidence_ids,
+            )
     sent_before_resume = len(net.probes)
     urls_before_resume = {p["url"].split("?")[0] for p in net.probes}
     if interrupt:
@@ -375,6 +385,16 @@ async def run_scenario(scenario: dict, out_dir: Path) -> dict:
             events, net=net, agent=agent, harness=harness, tools=tools, outputs=outputs,
             hypotheses=hypotheses, start=done,
         )
+        if jit_context:
+            for idx, w in enumerate(harness.state.work_queue[len(harness.state.notes.get("episode_notes", [])):]):
+                harness.record_episode_note(
+                    episode_id=f"ep-resume-{idx}",
+                    work_id=w.work_id,
+                    role=w.role.value if hasattr(w.role, "value") else str(w.role),
+                    status=w.status.value if hasattr(w.status, "value") else str(w.status),
+                    summary=f"resumed work item {w.work_id} status {w.status}",
+                    evidence_ids=w.evidence_ids,
+                )
     findings.extend(tools.agent_findings())
     complete = harness.coverage_complete
     llm_success = scenario.get("llm_success", complete)
@@ -384,6 +404,50 @@ async def run_scenario(scenario: dict, out_dir: Path) -> dict:
         coverage_gaps=list(harness.state.coverage_gaps), incomplete_reason="",
     ))
     kept = {h.get("candidate_id") for h in harness.state.hypotheses}
+
+    # プロンプト文字数・トークン数の計測（baseline vs JIT context）
+    from wscan.agent_jit_context import AgentJitContextBuilder, estimate_tokens
+    import re
+    from wscan.content_provenance import wrap_untrusted_observation, ContentType
+    raw_texts = [json.dumps(ev, default=str) for ev in events]
+    raw_evidence = re.sub(r"WSCAN-NONCE:[^\s]+", "WSCAN-CANDIDATE", "\n".join(raw_texts)[-12000:])
+    wrapped_evidence = wrap_untrusted_observation(
+        raw_evidence, source="http", origin=LAB + "/", content_type=ContentType.OBSERVATION.value,
+    ).format_tagged_block()
+    raw_ledger = "\n".join(
+        f"- {item.role.value if hasattr(item.role, 'value') else item.role} | {item.target} | {item.check_type or '-'} | {item.status.value if hasattr(item.status, 'value') else item.status}"
+        for item in harness.state.work_queue
+    )
+    wrapped_gaps = wrap_untrusted_observation(
+        "\n".join(harness.state.reviewer_gaps), source="http", origin=LAB + "/", content_type=ContentType.OBSERVATION.value,
+    ).format_tagged_block()
+    baseline_prompt = (
+        "Act as an adversarial reviewer. Do not submit payloads. Challenge false positives, "
+        "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
+        "Return each actual gap as `COVERAGE GAP: <description>`, or state REVIEW COMPLETE only when the ledger "
+        "shows every discovered page and input was tested for every requested check.\n"
+        "A resolved gap must be stated as `GAP RESOLVED: <description>`.\n"
+        + "\nUnresolved reviewer gaps:\n"
+        + wrapped_gaps
+        + "\nDeterministic work ledger:\n" + raw_ledger + "\nEvidence excerpt:\n" + wrapped_evidence
+    )
+
+    jit_builder = AgentJitContextBuilder(harness)
+    jit_bundle = jit_builder.build_context()
+    jit_prompt = (
+        "Act as an adversarial reviewer. Do not submit payloads. Challenge false positives, "
+        "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
+        "Return each actual gap as `COVERAGE GAP: <description>`, or state REVIEW COMPLETE only when the ledger "
+        "shows every discovered page and input was tested for every requested check.\n"
+        "A resolved gap must be stated as `GAP RESOLVED: <description>`.\n\n"
+        + jit_bundle.formatted_context
+    )
+
+    prompt_chars_base = len(baseline_prompt)
+    prompt_chars_jit = len(jit_prompt)
+    prompt_toks_base = estimate_tokens(baseline_prompt)
+    prompt_toks_jit = jit_bundle.estimated_tokens
+
     return {
         "scenario": scenario["name"],
         **_classify(findings, scenario),
@@ -403,6 +467,10 @@ async def run_scenario(scenario: dict, out_dir: Path) -> dict:
         ) if interrupt else None,
         "hypothesis_labels": {h.get("candidate_id"): h.get("source_label") for h in harness.state.hypotheses},
         "outputs": outputs,
+        "prompt_chars_baseline": prompt_chars_base,
+        "prompt_chars_jit": prompt_chars_jit,
+        "prompt_tokens_baseline": prompt_toks_base,
+        "prompt_tokens_jit": prompt_toks_jit,
     }
 
 

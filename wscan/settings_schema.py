@@ -244,6 +244,7 @@ FIELDS = (
     _field('toggles.ctf_mode', 'toggles.ctf_mode', False),
     _field('toggles.tls_verify', 'toggles.tls_verify', False),
     _field('toggles.allow_state_changing_probes', 'toggles.allow_state_changing_probes', False),
+    _field('toggles.agent_jit_context', 'Agent JIT コンテキスト', False, modes=ALL_MODES),
     _field("concurrency", "ブラウザ並列数", 1, constraints={"minimum": 0}),
     _field("max_payloads", "最大ペイロード数", 0, constraints={"minimum": 0}),
     _field("toggles.fast_mode", "高速モード", False),

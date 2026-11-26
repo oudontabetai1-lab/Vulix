@@ -909,6 +909,7 @@ class AgentBrowserScanner:
         llm_timeout_seconds: float = 30.0,
         request_logger: Any = None,
         agent_vision: str = "auto",
+        agent_jit_context: bool = False,
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
         raw_target_url = str(target_url or "").strip()
@@ -920,6 +921,7 @@ class AgentBrowserScanner:
         }
         self.target_url = _normalize_agent_url(target_url)
         self.agent_vision = agent_vision
+        self.agent_jit_context = bool(agent_jit_context)
         decide_agent_vision(agent_vision)
         self.llm_provider = llm_provider
         self.llm_model = llm_model
@@ -2256,6 +2258,17 @@ class AgentBrowserScanner:
                         str(item) for item in (history.extracted_content() or [])
                     ) + "\n" + final
                     texts.append(episode_text)
+                    if self._harness and self.agent_jit_context:
+                        extracted = history.extracted_content() or []
+                        summary_seed = final or (str(extracted[-1]) if extracted else "")
+                        self._harness.record_episode_note(
+                            episode_id=self._active_episode_id,
+                            work_id=work.work_id,
+                            role=work.role.value if hasattr(work.role, "value") else str(work.role),
+                            status=work.status.value if hasattr(work.status, "value") else str(work.status),
+                            summary=summary_seed[:200],
+                            evidence_ids=work.evidence_ids,
+                        )
                     episode_findings = []
                     if work.role in {AgentRole.EXPLORER, AgentRole.PROBE_SPECIALIST}:
                         episode_findings = _parse_findings_from_text(
@@ -2873,13 +2886,23 @@ class AgentBrowserScanner:
                 "Confirm the authenticated landing page, then output AUTH COMPLETE and stop. "
                 "Do not run security probes."
             )
+        jit_suffix = ""
+        if self.agent_jit_context and self._harness:
+            from wscan.agent_jit_context import AgentJitContextBuilder
+            builder = AgentJitContextBuilder(
+                self._harness,
+                current_work=work,
+                target_url=self.target_url,
+            )
+            jit_suffix = "\n\n" + builder.build_prompt_block()
+
         if work.role == AgentRole.EXPLORER:
             return self._build_recon_task() + (
                 "\nAct only as the Explorer. Enumerate navigation, forms, URL parameters, "
                 "and client-side routes. Do not claim coverage complete while any discovered "
                 "link or input remains unvisited. Output EXPLORATION COMPLETE only after the "
                 "reachable frontier is empty."
-            )
+            ) + jit_suffix
         if work.role == AgentRole.PROBE_SPECIALIST:
             target = self._work_target(work)
             return (
@@ -2889,7 +2912,7 @@ class AgentBrowserScanner:
                 "Report only directly observed hypotheses using the required nonce block. "
                 "Do not explore unrelated pages and do not test another vulnerability class. "
                 "Output PROBE COMPLETE only after every input on this page has a recorded result."
-            )
+            ) + jit_suffix
         if work.role == AgentRole.VERIFIER:
             candidate = self._candidate_for_work(work)
             candidate_json = json.dumps(
@@ -2915,6 +2938,22 @@ class AgentBrowserScanner:
                 "observable behavior reproduces; omission means inconclusive or rejected.\n"
                 "Output VERIFICATION COMPLETE after this candidate has a result.\n"
                 + wrapped_candidate
+            )
+        if self.agent_jit_context and self._harness:
+            from wscan.agent_jit_context import AgentJitContextBuilder
+            builder = AgentJitContextBuilder(
+                self._harness,
+                current_work=work,
+                target_url=self.target_url,
+            )
+            jit_block = builder.build_prompt_block()
+            return (
+                "Act as an adversarial reviewer. Do not submit payloads. Challenge false positives, "
+                "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
+                "Return each actual gap as `COVERAGE GAP: <description>`, or state REVIEW COMPLETE only when the ledger "
+                "shows every discovered page and input was tested for every requested check.\n"
+                "A resolved gap must be stated as `GAP RESOLVED: <description>`.\n\n"
+                + jit_block
             )
         evidence = re.sub(
             r"WSCAN-NONCE:[^\s]+", "WSCAN-CANDIDATE", "\n".join(prior_texts)[-12000:]
