@@ -176,13 +176,15 @@ class LDAPScanner(BaseScanner):
 
         # Obtain a baseline response first
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        fp_baseline = self._payload_fingerprint(ip, "normaluser")
         await self.log_payload_test(
-            field_name, "normaluser", "ldap_baseline", ip.url
+            field_name, "normaluser", "ldap_baseline", ip.url, payload_fingerprint=fp_baseline
         )
         try:
             # typed dispatch() 経由。legacy (source, pair) は state を問わずそのまま使う（非 SENT でも
             # source が非空のことがある。state で分岐して捨てず判定は従来どおり source/pair のみ）。
-            baseline_html = (await self.dispatch(ip, "normaluser")).source
+            baseline_result = await self.dispatch(ip, "normaluser", probe_role="baseline")
+            baseline_html, baseline_pair = baseline_result.source, baseline_result.pair
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
@@ -190,10 +192,21 @@ class LDAPScanner(BaseScanner):
                 )
             return []
 
+        bound = baseline_pair.get("_probe_evidence") if isinstance(baseline_pair, dict) else None
+        baseline_ids = (bound[1],) if bound and len(bound) > 1 and bound[1] else ()
+
+        planned_standard_count = len(_LDAP_PAYLOADS)
+        executed_standard_count = 0
+        auth_lost = [False]
+
         async def _test_payload(payload: str, check_label: str = self.CHECK_TYPE) -> bool:
-            await self.log_payload_test(field_name, payload, check_label, ip.url)
+            wave = "standard" if check_label == self.CHECK_TYPE else ("evolution" if check_label == "ldap_evolved" else "auxiliary")
+            fp = self._payload_fingerprint(ip, payload)
+            await self.log_payload_test(field_name, payload, check_label, ip.url, payload_fingerprint=fp)
             try:
-                result = await self.dispatch(ip, payload)
+                result = await self.dispatch(
+                    ip, payload, probe_role="attack", probe_wave=wave, baseline_attempt_ids=baseline_ids
+                )
                 html, pair = result.source, result.pair
             except Exception as exc:
                 if self.monitor:
@@ -201,10 +214,17 @@ class LDAPScanner(BaseScanner):
                         f"[warn] ldap: request failed on {ip.url} ({field_name}): {exc}"
                     )
                 return False
+            if isinstance(pair, dict) and pair.get("_authentication_lost"):
+                auth_lost[0] = True
 
             classified = self._classify(baseline_html, html, payload)
             if classified:
                 evidence_type, evidence, evidence_details = classified
+                self._probe_decision(
+                    pair, True, "ldap_payload_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale=evidence,
+                )
 
                 finding = await self.record_finding(
                     url=ip.url,
@@ -220,11 +240,30 @@ class LDAPScanner(BaseScanner):
                 )
                 findings.append(finding)
                 return True
+
+            self._probe_decision(
+                pair, False, "ldap_payload_oracle",
+                baseline_attempt_ids=baseline_ids,
+                rationale="no LDAP error or authentication bypass observed",
+            )
             return False
 
         for payload in _LDAP_PAYLOADS:
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
             if await _test_payload(payload):
                 break  # one confirmed finding per field
+
+        # ── probe ledger 整合性検証（ldap standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
 
         # evolution wave は legacy browser transport(is_url_param 前提)。json_body では
         # ip.legacy_is_url_param() が例外になり、かつ適用不能なので skip する（json は標準 payload のみ）。

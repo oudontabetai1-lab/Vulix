@@ -42,8 +42,16 @@ _NAVIGATE_RETRY_REASON = (
     "same probe). On /redirect the target either fails DNS (external host) or is a fragment-only "
     "redirect, so goto raises and the same probe is re-sent."
 )
+_FORM_CRLF_UNEXECUTABLE_REASON = (
+    "HeaderInjectionScanner includes raw CR/LF payloads in CRLF_PAYLOADS (3 of 6 payloads). "
+    "HTML form inputs strip or normalize raw newlines before native submission, so fill_and_submit_form "
+    "rejects delivery (targetValueSuccessful=False) and records outcome=unexecutable without sending an "
+    "HTTP request, leaving manifest request count lower than executed/planned count on form fields."
+)
 KNOWN_REASONS: dict[str, dict[str, str]] = {
     "count_mismatches": {
+        "probe_ledger_incomplete:header_injection:standard:count_mismatch": _FORM_CRLF_UNEXECUTABLE_REASON,
+        "probe_ledger_incomplete:open_redirect:standard:count_mismatch": _NAVIGATE_RETRY_REASON,
         "probe_ledger_incomplete:ssti:standard:count_mismatch": _NAVIGATE_RETRY_REASON,
     },
     "duplicate_sends": {
