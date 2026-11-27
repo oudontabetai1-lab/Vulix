@@ -195,12 +195,25 @@ class OpenRedirectScanner(BaseScanner):
                 f"Open redirect testing: {field_name} on {ip.url}"
             )
 
+        planned_standard_count = len(REDIRECT_PAYLOADS)
+        executed_standard_count = 0
+        auth_lost = [False]
+        stopped_by_deadline = [False]
+
         for payload in REDIRECT_PAYLOADS:
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
+            fp = self._payload_fingerprint(ip, payload)
             await self.log_payload_test(
-                field_name, payload, "open_redirect", ip.url
+                field_name, payload, "open_redirect", ip.url, payload_fingerprint=fp
             )
 
-            source, pair = await self._apply_ip(ip, payload)
+            source, pair = await self._apply_ip(
+                ip, payload, probe_role="attack", probe_wave="standard"
+            )
+            if isinstance(pair, dict) and pair.get("_authentication_lost"):
+                auth_lost[0] = True
             await asyncio.sleep(0.3 * self.sleep_factor)
             # transport/待機中に deadline を跨ぐと page.url は前 probe の canary のまま
             # ありうる。打切り後は stale browser 状態を evidence に使わない。
@@ -218,6 +231,10 @@ class OpenRedirectScanner(BaseScanner):
                         )
 
             if _redirected_to_canary(current_url, ip.url):
+                self._probe_decision(
+                    pair, True, "open_redirect_oracle",
+                    rationale=f"Open redirect confirmed: browser redirected to '{current_url}'",
+                )
                 finding = await self.record_finding(
                     url=ip.url,
                     field_name=field_name,
@@ -236,6 +253,10 @@ class OpenRedirectScanner(BaseScanner):
             # Check 2: Location header in the captured HTTP response points externally
             location = _location_header(pair)
             if _location_points_to_canary(pair, ip.url):
+                self._probe_decision(
+                    pair, True, "open_redirect_oracle",
+                    rationale=f"Open redirect via Location header: '{location}'",
+                )
                 finding = await self.record_finding(
                     url=ip.url,
                     field_name=field_name,
@@ -251,8 +272,24 @@ class OpenRedirectScanner(BaseScanner):
                 findings.append(finding)
                 break
 
+            self._probe_decision(
+                pair, False, "open_redirect_oracle",
+                rationale="no external redirect to canary host observed",
+            )
+
             if deadline_expired:
+                stopped_by_deadline[0] = True
                 break
+
+        # ── probe ledger 整合性検証（open_redirect standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0] or stopped_by_deadline[0]),
+        )
 
         return findings
 

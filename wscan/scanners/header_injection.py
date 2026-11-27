@@ -133,17 +133,33 @@ class HeaderInjectionScanner(BaseScanner):
                 f"Header injection testing: {field_name} on {ip.url}"
             )
 
+        planned_standard_count = len(CRLF_PAYLOADS)
+        executed_standard_count = 0
+        auth_lost = [False]
+
         for payload in CRLF_PAYLOADS:
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
+            fp = self._payload_fingerprint(ip, payload)
             await self.log_payload_test(
-                field_name, payload, "header_injection", ip.url
+                field_name, payload, "header_injection", ip.url, payload_fingerprint=fp
             )
 
-            source, pair = await self._apply_ip(ip, payload)
+            source, pair = await self._apply_ip(
+                ip, payload, probe_role="attack", probe_wave="standard"
+            )
+            if isinstance(pair, dict) and pair.get("_authentication_lost"):
+                auth_lost[0] = True
             await asyncio.sleep(0.2 * self.sleep_factor)
 
             # Confirmed: injected header name appears in the response headers
             detected, signal = _injected_header_detected(pair)
             if detected and signal == "marker_header":
+                self._probe_decision(
+                    pair, True, "header_injection_oracle",
+                    rationale=f"HTTP header injection confirmed: 'X-{_MARKER}' in response headers",
+                )
                 finding = await self.record_finding(
                     url=ip.url,
                     field_name=field_name,
@@ -161,6 +177,10 @@ class HeaderInjectionScanner(BaseScanner):
 
             # Secondary: injected Set-Cookie appeared in cookies (case-insensitive value check)
             if detected and signal == "set_cookie":
+                self._probe_decision(
+                    pair, True, "header_injection_oracle",
+                    rationale="HTTP header injection: attacker-controlled Set-Cookie in response",
+                )
                 finding = await self.record_finding(
                     url=ip.url,
                     field_name=field_name,
@@ -175,6 +195,21 @@ class HeaderInjectionScanner(BaseScanner):
                 )
                 findings.append(finding)
                 break
+
+            self._probe_decision(
+                pair, False, "header_injection_oracle",
+                rationale="no injected header or cookie observed in response headers",
+            )
+
+        # ── probe ledger 整合性検証（header_injection standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
 
         return findings
 

@@ -209,32 +209,63 @@ class SSRFScanner(BaseScanner):
 
         # Capture a clean baseline to avoid false-positives from pre-existing content
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        fp_baseline = self._payload_fingerprint(ip, "http://wscan-baseline-test.invalid/")
         await self.log_payload_test(
             field_name,
             "http://wscan-baseline-test.invalid/",
             "ssrf_baseline",
             ip.url,
+            payload_fingerprint=fp_baseline,
         )
-        baseline_source, _ = await self._apply_ip(
-            ip, "http://wscan-baseline-test.invalid/"
+        baseline_source, baseline_pair = await self._apply_ip(
+            ip, "http://wscan-baseline-test.invalid/", probe_role="baseline"
         )
+        bound = baseline_pair.get("_probe_evidence") if isinstance(baseline_pair, dict) else None
+        baseline_ids = (bound[1],) if bound and len(bound) > 1 and bound[1] else ()
+
+        planned_standard_count = len(_SSRF_PROBES)
+        executed_standard_count = 0
+        auth_lost = [False]
 
         for label, payload, pattern in _SSRF_PROBES:
-            await self.log_payload_test(field_name, payload, "ssrf", ip.url)
+            if auth_lost[0]:
+                break
+            executed_standard_count += 1
+            fp = self._payload_fingerprint(ip, payload)
+            await self.log_payload_test(field_name, payload, "ssrf", ip.url, payload_fingerprint=fp)
 
-            source, pair = await self._apply_ip(ip, payload)
+            source, pair = await self._apply_ip(
+                ip, payload, probe_role="attack", probe_wave="standard", baseline_attempt_ids=baseline_ids
+            )
+            if isinstance(pair, dict) and pair.get("_authentication_lost"):
+                auth_lost[0] = True
             await asyncio.sleep(0.3 * self.sleep_factor)
 
             if not source:
+                self._probe_decision(
+                    pair, False, "ssrf_payload_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale="empty response source",
+                )
                 continue
 
             # Skip if the pattern already appears in baseline (pre-existing content)
             if baseline_source and pattern.search(baseline_source):
+                self._probe_decision(
+                    pair, False, "ssrf_payload_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale=f"pattern for '{label}' pre-existed in baseline response",
+                )
                 continue
 
             # 反射されたプローブURLに由来するだけのマッチは確証しない
             match = self._confirmed_match(source, payload, pattern)
             if match:
+                self._probe_decision(
+                    pair, True, "ssrf_payload_oracle",
+                    baseline_attempt_ids=baseline_ids,
+                    rationale=f"SSRF confirmed ({label}): marker '{match.group(0)[:100]}'",
+                )
                 finding = await self.record_finding(
                     url=ip.url,
                     field_name=field_name,
@@ -255,6 +286,22 @@ class SSRFScanner(BaseScanner):
                 )
                 findings.append(finding)
                 break  # one confirmed finding per field is sufficient
+
+            self._probe_decision(
+                pair, False, "ssrf_payload_oracle",
+                baseline_attempt_ids=baseline_ids,
+                rationale=f"no confirmed SSRF marker for '{label}'",
+            )
+
+        # ── probe ledger 整合性検証（ssrf standard sweep） ──
+        self._reconcile_probe_ledger_wave(
+            ip,
+            "standard",
+            planned_count=planned_standard_count,
+            executed_count=executed_standard_count,
+            findings_count=len(findings),
+            stopped_early=bool(auth_lost[0]),
+        )
 
         return findings
 
