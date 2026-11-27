@@ -117,26 +117,79 @@ _PRIORITY_EVIDENCE_RE = re.compile(
     r"Evidence|COVERAGE GAP|GAP RESOLVED)|(?:\s*[^\S ])?[A-Z ]+ COMPLETE)\b",
     re.IGNORECASE,
 )
+_FINDING_START_RE = re.compile(
+    r"^\s*(?:WSCAN-NONCE|WSCAN-CANDIDATE|VULNERABILITY FOUND)\b",
+    re.IGNORECASE,
+)
+_VULN_FOUND_RE = re.compile(r"^\s*VULNERABILITY FOUND\b", re.IGNORECASE)
+_FINDING_FIELD_KEY_RE = re.compile(
+    r"^\s*(Type|Severity|URL|Field|Payload|Evidence)\b",
+    re.IGNORECASE,
+)
+_GAP_DECLARATION_RE = re.compile(
+    r"^\s*(?:COVERAGE GAP|GAP RESOLVED)\b",
+    re.IGNORECASE,
+)
 _MAX_REVIEWER_EVIDENCE_CHARS = 4000
 
 
 def select_priority_evidence(texts: Sequence[str], max_chars: int = _MAX_REVIEWER_EVIDENCE_CHARS) -> str:
     """prior episode の出力から reviewer 用の優先証跡だけを上限内で選ぶ（純粋関数）。
 
-    finding ブロック・gap 宣言・完了主張の行を新しい順に確保し、元の出現順で返す。
+    1) finding ブロック（WSCAN-NONCE / WSCAN-CANDIDATE / VULNERABILITY FOUND から始まる連続行の塊）と
+       gap 宣言（COVERAGE GAP / GAP RESOLVED）を塊単位で優先して予算（max_chars）に収め、
+       後半の雑多な単発 URL 行による押し出しやブロック途中の断裂を防ぐ。
+    2) 残りの予算でその他の優先行（単発の完了主張や単発フィールド行）を新しい順に詰める。
     通常ログ行は JIT の ledger で代替するため含めない（12k 末尾切り詰めで発見行を失わない）。
     """
+    if max_chars <= 0:
+        return ""
     lines = "\n".join(str(t or "") for t in texts).splitlines()
+    priority_chunks: list[list[int]] = []
+    other_chunks: list[list[int]] = []
+    idx = 0
+    n = len(lines)
+    while idx < n:
+        line = lines[idx]
+        if not _PRIORITY_EVIDENCE_RE.match(line):
+            idx += 1
+            continue
+        if _FINDING_START_RE.match(line):
+            block = [idx]
+            idx += 1
+            if not _VULN_FOUND_RE.match(line) and idx < n and _VULN_FOUND_RE.match(lines[idx]):
+                block.append(idx)
+                idx += 1
+            seen_fields: set[str] = set()
+            while idx < n:
+                m_field = _FINDING_FIELD_KEY_RE.match(lines[idx])
+                if not m_field:
+                    break
+                field_key = m_field.group(1).lower()
+                if field_key in seen_fields:
+                    break
+                seen_fields.add(field_key)
+                block.append(idx)
+                idx += 1
+            priority_chunks.append(block)
+            continue
+        if _GAP_DECLARATION_RE.match(line):
+            priority_chunks.append([idx])
+            idx += 1
+            continue
+        other_chunks.append([idx])
+        idx += 1
+
     chosen: list[int] = []
     used = 0
-    for idx in reversed(range(len(lines))):
-        if not _PRIORITY_EVIDENCE_RE.match(lines[idx]):
-            continue
-        cost = len(lines[idx]) + 1
-        if used + cost > max_chars:
-            continue
-        chosen.append(idx)
-        used += cost
+    for group in (priority_chunks, other_chunks):
+        for chunk in reversed(group):
+            chunk_chars = sum(len(lines[i]) for i in chunk) + (len(chunk) - 1)
+            sep = 1 if chosen else 0
+            if used + sep + chunk_chars > max_chars:
+                continue
+            chosen.extend(chunk)
+            used += sep + chunk_chars
     return "\n".join(lines[i] for i in sorted(chosen))
 
 
